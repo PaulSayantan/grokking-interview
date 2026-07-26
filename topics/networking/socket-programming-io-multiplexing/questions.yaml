@@ -12,8 +12,8 @@ questions:
     options:
       - "An integer file descriptor referring to the socket"
       - "A pointer to a kernel connection structure"
-      - "The chosen ephemeral port number"
-      - "A copy of the peer's IP address"
+      - "The ephemeral source port the kernel picked for it"
+      - "A copy of the remote peer's IP address bytes"
     answer: 0
     explanation: |
       `socket()` returns an integer file descriptor. Because it is an fd, the same
@@ -46,9 +46,9 @@ questions:
       structure before calling `bind()` or `connect()`?
     options:
       - "Host byte order (whatever the CPU uses)"
-      - "Little-endian always"
+      - "Little-endian order regardless of the CPU"
       - "Network byte order (big-endian)"
-      - "ASCII decimal string"
+      - "A decimal port number encoded as ASCII text"
     answer: 2
     explanation: |
       Addresses and ports in sockaddr are stored in network byte order (big-endian).
@@ -98,9 +98,9 @@ questions:
       How can a single server listening on TCP port 443 maintain thousands of
       simultaneous connections on that one port?
     options:
-      - "The kernel silently rotates the server port for each client"
-      - "TCP multiplexes them into a single stream demuxed by sequence number"
-      - "Each connection gets a unique destination port assigned during the handshake"
+      - "The kernel silently rotates the server's port to a fresh one for each client"
+      - "TCP multiplexes them all into a single stream demultiplexed by sequence number"
+      - "Each connection is handed a unique destination port assigned during its handshake"
       - "Each connection is identified by the full 4-tuple (src IP, src port, dst IP, dst port), so tuples stay distinct"
     answer: 3
     explanation: |
@@ -117,9 +117,9 @@ questions:
       its source port come from?
     options:
       - "The kernel auto-assigns an ephemeral port (typically 49152–65535)"
-      - "It is always port 0 until the server assigns one"
-      - "The client reuses the server's port number"
-      - "The connection fails; bind() is mandatory for clients"
+      - "It stays fixed at port 0 until the server assigns one back"
+      - "The client reuses the server's destination port number as its own"
+      - "The connection fails, because bind() is mandatory for clients"
     answer: 0
     explanation: |
       Clients normally skip bind(); the kernel auto-assigns an ephemeral source port from
@@ -171,9 +171,9 @@ questions:
       connectionless?
     options:
       - "To set a default peer for send/recv and receive asynchronous ICMP errors like port-unreachable"
-      - "To perform a 3-way handshake and guarantee delivery"
-      - "To enable in-order delivery of datagrams"
-      - "It is illegal to call connect() on a UDP socket"
+      - "To perform a 3-way handshake so datagrams are then delivered reliably"
+      - "To enable guaranteed in-order delivery of the datagrams that follow"
+      - "It is illegal to call connect() on a connectionless UDP socket"
     answer: 0
     explanation: |
       connect() on UDP sends no packets; it records a default peer so you can use
@@ -188,10 +188,10 @@ questions:
       On a default (blocking) TCP socket, what does `recv()` do when no data is
       currently available but the connection is still open?
     options:
-      - "Returns -1 with errno EAGAIN"
+      - "Returns -1 immediately and sets errno to EAGAIN"
       - "Blocks the calling thread until data arrives"
-      - "Returns 0 immediately"
-      - "Returns a random partial buffer"
+      - "Returns 0 at once to signal that no data is ready"
+      - "Returns a buffer of whatever stale bytes remain"
     answer: 1
     explanation: |
       A blocking recv() sleeps the calling thread until data arrives (or the peer closes).
@@ -206,10 +206,10 @@ questions:
       On a non-blocking TCP socket, `recv()` is called but no data is available. What is
       returned?
     options:
-      - "0, indicating end of stream"
+      - "0, indicating the peer reached end of stream"
       - "The number of bytes still buffered by the peer"
       - "-1 with errno set to EAGAIN/EWOULDBLOCK"
-      - "It blocks briefly then returns 0"
+      - "It blocks for a short grace period, then returns 0"
     answer: 2
     explanation: |
       A non-blocking recv() with no data returns -1 and sets errno to EAGAIN/EWOULDBLOCK
@@ -224,9 +224,9 @@ questions:
       A blocking `recv()` returns exactly 0. What does this indicate?
     options:
       - "The peer performed an orderly shutdown (sent FIN); end of stream"
-      - "The socket buffer is empty but the connection is fine"
-      - "A transient error; retry the call"
-      - "A zero-length keepalive probe was received"
+      - "The socket receive buffer is momentarily empty but the connection is fine"
+      - "A transient error occurred; you should simply retry the call"
+      - "A zero-length TCP keepalive probe was received and consumed"
     answer: 0
     explanation: |
       recv() == 0 means end of stream: the peer closed its send side (FIN received). It is
@@ -241,10 +241,10 @@ questions:
       A non-blocking `connect()` returns -1 with errno EINPROGRESS. How do you correctly
       detect that the handshake has completed successfully?
     options:
-      - "Call connect() again in a loop until it returns 0"
+      - "Call connect() repeatedly in a loop until it finally returns 0"
       - "Wait for the socket to become writable, then check SO_ERROR for success/failure"
-      - "Call accept() on the client socket"
-      - "Sleep for one RTT then assume success"
+      - "Call accept() on the client socket to reap the finished handshake"
+      - "Sleep for one round-trip time and then assume the connect succeeded"
     answer: 1
     explanation: |
       EINPROGRESS means the handshake is underway. You register the fd for writability in
@@ -259,10 +259,10 @@ questions:
       An application sends one 8 KB logical message over TCP. The receiver's first
       `recv()` returns only 1460 bytes. What is the correct interpretation?
     options:
-      - "The connection is corrupted and should be reset"
-      - "The sender must have called send() twice"
+      - "The connection is corrupted and must be reset before reading further"
+      - "The sender must have split the message into two separate send() calls"
       - "TCP is a byte stream with no message boundaries; loop and re-read until the full message is assembled"
-      - "The receive buffer size must be increased or data will be lost"
+      - "The receive buffer size must be increased or the extra data will be lost"
     answer: 2
     explanation: |
       TCP delivers a byte stream, not messages. A single send can arrive as multiple recv
@@ -276,9 +276,9 @@ questions:
     question: |
       `send(fd, buf, 4096, 0)` returns 1500. What is the correct next step?
     options:
-      - "Treat it as an error and close the socket"
-      - "Assume the peer received 1500 bytes and stop"
-      - "Resend all 4096 bytes from the beginning"
+      - "Treat the short count as a fatal error and close the socket"
+      - "Assume the peer already received 1500 bytes and stop sending"
+      - "Resend the entire 4096-byte buffer again from the beginning"
       - "Loop and send the remaining 2596 bytes starting at the returned offset"
     answer: 3
     explanation: |
@@ -331,9 +331,9 @@ questions:
       What is the primary purpose of `SO_REUSEPORT` (as distinct from SO_REUSEADDR)?
     options:
       - "It allows multiple sockets to bind the same IP:port so the kernel load-balances incoming connections across them"
-      - "It lets bind() rebind a port stuck in TIME_WAIT"
-      - "It disables Nagle's algorithm for that port"
-      - "It reserves the port so no other process can ever use it"
+      - "It lets a bind() reuse a local port still stuck in TIME_WAIT from a previous run, skipping the 2×MSL wait"
+      - "It disables Nagle's algorithm on every socket using that port so small writes flush without any coalescing delay"
+      - "It exclusively reserves the port for the calling process so no other process on the host may ever bind it"
     answer: 0
     explanation: |
       SO_REUSEPORT allows several distinct sockets (e.g. one per worker process/core) to
@@ -348,10 +348,10 @@ questions:
     question: |
       Setting `TCP_NODELAY` on a socket does what?
     options:
-      - "Increases the socket send buffer size"
+      - "Enlarges the socket's send buffer so it can queue more outbound bytes"
       - "Disables Nagle's algorithm so small writes are sent immediately"
-      - "Enables TCP keepalive probes"
-      - "Turns off delayed ACKs on the receiver"
+      - "Enables periodic TCP keepalive probes on idle connections"
+      - "Turns off the receiver's delayed-ACK timer for that socket"
     answer: 1
     explanation: |
       TCP_NODELAY disables Nagle's algorithm, which otherwise coalesces small writes
@@ -366,9 +366,9 @@ questions:
       An RPC client sees ~40 ms latency spikes on small requests over a healthy LAN with
       sub-millisecond RTT. Which combination is the most likely culprit?
     options:
-      - "SYN flood on the server"
-      - "Edge-triggered epoll missing readiness events"
-      - "An undersized listen backlog"
+      - "A SYN flood saturating the server's half-open connection queue"
+      - "Edge-triggered epoll missing readiness events from an undrained socket"
+      - "An undersized listen backlog forcing repeated connection retransmits"
       - "Nagle's algorithm interacting with the peer's delayed ACK, stalling small writes"
     answer: 3
     explanation: |
@@ -385,9 +385,9 @@ questions:
       What problem is `SO_KEEPALIVE` designed to detect?
     options:
       - "A silently dead peer on an idle connection that never sent a FIN (half-open)"
-      - "Excessive small packets flooding the network"
-      - "A full listen backlog under burst traffic"
-      - "Byte-order mistakes in the sockaddr"
+      - "Excessive small packets flooding the network and starving throughput"
+      - "A full listen backlog overflowing under sudden burst traffic"
+      - "Byte-order mistakes in the sockaddr port and address fields"
     answer: 0
     explanation: |
       SO_KEEPALIVE sends periodic probes on idle TCP connections to detect a peer that
@@ -402,10 +402,10 @@ questions:
       On a long-distance, high-latency link, TCP throughput is capped well below the
       available bandwidth. Which socket-level setting most directly influences this?
     options:
-      - "TCP_NODELAY, by removing Nagle delays"
+      - "TCP_NODELAY, by removing the small-write Nagle delays on the connection"
       - "SO_RCVBUF, because the receive buffer caps the receive window versus the bandwidth-delay product"
-      - "SO_REUSEADDR, by allowing more connections"
-      - "SO_LINGER, by flushing data faster on close"
+      - "SO_REUSEADDR, by allowing the port to be rebound for additional connections"
+      - "SO_LINGER, by controlling how long close() lingers to flush queued outbound data"
     answer: 1
     explanation: |
       Throughput is limited by window / RTT. A receive buffer (SO_RCVBUF) smaller than the
@@ -420,10 +420,10 @@ questions:
       Setting `SO_LINGER` with a timeout of 0 and then calling `close()` causes what TCP
       behavior?
     options:
-      - "A graceful FIN-based shutdown after flushing all data"
-      - "The close() call to block for exactly 2×MSL"
+      - "A graceful FIN-based shutdown that first flushes all queued outbound data"
+      - "The close() call to block the caller for exactly one 2×MSL interval"
       - "An abortive close sending a RST, discarding unsent data and skipping TIME_WAIT"
-      - "The connection to switch to UDP"
+      - "The connection to silently downgrade from TCP to UDP framing"
     answer: 2
     explanation: |
       SO_LINGER with a zero timeout makes close() send an abortive RST rather than a
@@ -439,9 +439,9 @@ questions:
       modern Linux?
     options:
       - "The number of fully established connections waiting to be accept()ed"
-      - "The maximum number of bytes buffered per connection"
-      - "The number of threads the server may spawn"
-      - "The TCP receive window size"
+      - "The maximum number of payload bytes the kernel will buffer per accepted connection"
+      - "The number of worker threads the server is permitted to spawn to handle accepts"
+      - "The advertised TCP receive window size applied to every accepted connection"
     answer: 0
     explanation: |
       backlog bounds the accept queue of completed (established) connections awaiting
@@ -490,9 +490,9 @@ questions:
     question: |
       What does the "C10K problem" refer to?
     options:
-      - "Compressing 10,000 packets into one frame"
-      - "Limiting a process to 10,000 file descriptors"
-      - "A 10-kilobyte maximum TCP segment size"
+      - "Compressing 10,000 small packets into a single Ethernet frame for efficiency"
+      - "A hard kernel limit of 10,000 open file descriptors per process"
+      - "A fixed 10-kilobyte maximum TCP segment size negotiated at handshake"
       - "Handling 10,000 concurrent connections efficiently on a single server"
     answer: 3
     explanation: |
@@ -507,10 +507,10 @@ questions:
     question: |
       Why does a pure thread-per-connection model struggle at 10,000 connections?
     options:
-      - "TCP connections themselves consume gigabytes of kernel memory each"
-      - "The 4-tuple space is exhausted at 10,000 connections"
+      - "TCP connections themselves each consume gigabytes of pinned kernel memory"
+      - "The connection 4-tuple space is exhausted once you reach 10,000 connections"
       - "Per-thread stacks and context-switch/scheduling overhead grow with connection count"
-      - "select() cannot be called from more than one thread"
+      - "select() may not be called from more than one thread, forcing serialization"
     answer: 2
     explanation: |
       TCP connections are cheap; the coordination model is the problem. Each thread needs a
@@ -525,9 +525,9 @@ questions:
       Beyond thread cost, which property of `select`/`poll` makes them poor for the C10K
       problem specifically?
     options:
-      - "They only work with UDP sockets"
-      - "They require one thread per fd"
-      - "They cannot be used with non-blocking sockets"
+      - "They only work with connectionless UDP sockets, never with TCP streams"
+      - "They require a dedicated OS thread for each monitored file descriptor"
+      - "They cannot be combined with non-blocking sockets set via O_NONBLOCK"
       - "They are O(n) per call, rescanning all monitored fds each wakeup even if few are ready"
     answer: 3
     explanation: |
@@ -560,10 +560,10 @@ questions:
     question: |
       What is the main practical advantage of `poll()` over `select()`?
     options:
-      - "poll() is O(1) regardless of fd count"
+      - "poll() runs in O(1) time regardless of how many fds are being monitored"
       - "poll() takes an array of pollfd structs, so it has no FD_SETSIZE limit and separates input events from returned events"
-      - "poll() keeps its interest set in the kernel across calls"
-      - "poll() supports edge-triggered notification"
+      - "poll() keeps its interest set registered inside the kernel across successive calls"
+      - "poll() natively supports edge-triggered notification for fewer wakeups"
     answer: 1
     explanation: |
       poll() uses a pollfd array (no FD_SETSIZE cap) with separate `events`/`revents`
@@ -578,9 +578,9 @@ questions:
       Why does `epoll` scale to hundreds of thousands of connections where `poll` does
       not?
     options:
-      - "epoll uses UDP internally for speed"
-      - "epoll compresses the fd set before scanning it"
-      - "epoll runs each fd on its own kernel thread"
+      - "epoll uses a UDP-based control channel internally to speed up notifications"
+      - "epoll compresses the monitored fd set with run-length encoding before scanning it"
+      - "epoll schedules each registered fd onto its own dedicated kernel worker thread"
       - "epoll keeps the interest set in the kernel (registered once via epoll_ctl) and epoll_wait returns only the ready fds — O(ready) not O(total)"
     answer: 3
     explanation: |
@@ -597,9 +597,9 @@ questions:
       general than epoll?
     options:
       - "BSD/macOS; a single kevent interface reports socket readiness plus timers, signals, and file/process events"
-      - "Windows only; it integrates with the registry"
-      - "Linux only; it replaces epoll entirely"
-      - "All POSIX systems; it is another name for poll"
+      - "Windows only; it integrates directly with I/O completion ports and the registry"
+      - "Linux only; it is a newer syscall that fully replaces and deprecates epoll"
+      - "All POSIX systems uniformly; it is simply another standardized name for poll()"
     answer: 0
     explanation: |
       kqueue is the BSD/macOS equivalent of epoll and is more general: the kevent interface
@@ -613,10 +613,10 @@ questions:
     question: |
       Why must code using `select()` typically rebuild its fd_sets before every call?
     options:
-      - "Because select() closes the sockets after each call"
+      - "Because select() closes and reopens every monitored socket after each call"
       - "Because select() modifies the fd_sets in place to indicate which fds are ready"
-      - "Because FD_SETSIZE changes at runtime"
-      - "Because the kernel randomizes the fd numbers"
+      - "Because the value of FD_SETSIZE is recomputed and changes at runtime"
+      - "Because the kernel reshuffles and randomizes the fd numbers between calls"
     answer: 1
     explanation: |
       select() overwrites the passed fd_sets in place with only the ready fds, destroying
@@ -631,10 +631,10 @@ questions:
       In level-triggered (LT) mode, if data is readable and you read only part of it,
       what does the next `epoll_wait()` report for that fd?
     options:
-      - "Nothing, until new data arrives"
-      - "An error indicating an incomplete read"
+      - "Nothing further, until additional new data arrives from the peer"
+      - "An error condition indicating the previous read was left incomplete"
       - "The fd as still ready, because the readable condition still holds"
-      - "The fd as writable instead of readable"
+      - "The fd as writable instead of readable on the next wakeup"
     answer: 2
     explanation: |
       Level-triggered mode reports readiness as long as the condition holds. If unread data
@@ -650,9 +650,9 @@ questions:
       returns EAGAIN?
     options:
       - "Because ET notifies only on a state transition; unread data yields no further notification and the connection stalls"
-      - "To reset the TCP window"
-      - "Because ET automatically closes the fd otherwise"
-      - "To force the peer to send an ACK"
+      - "To force the kernel to reset the TCP receive window back to its advertised maximum value after each individual read"
+      - "Because edge-triggered mode automatically closes the file descriptor if any unread bytes remain after the handler returns"
+      - "To force the peer to send an immediate ACK so the sender's congestion window can continue growing without stalling"
     answer: 0
     explanation: |
       ET fires once per new edge (e.g. empty → data). If you don't drain the fd fully, the
@@ -667,10 +667,10 @@ questions:
     question: |
       Why does edge-triggered mode effectively require non-blocking sockets?
     options:
-      - "Edge-triggered mode disables the kernel receive buffer"
+      - "Because edge-triggered mode disables the kernel socket receive buffer, so every byte must be read the instant it arrives"
       - "Because the drain loop's final recv (when the buffer is empty) would block on a blocking socket instead of returning EAGAIN"
-      - "Because ET only works with UDP"
-      - "Because blocking sockets cannot be registered with epoll_ctl"
+      - "Because edge-triggered notification is only ever implemented for connectionless UDP datagram sockets, never for TCP streams"
+      - "Because blocking sockets are rejected by epoll_ctl with EPERM and therefore cannot be placed in an edge-triggered interest set"
     answer: 1
     explanation: |
       ET requires draining to EAGAIN. On a blocking socket the last recv (after the buffer
@@ -685,10 +685,10 @@ questions:
       What is the main performance benefit of edge-triggered over level-triggered
       notification under high load?
     options:
-      - "It guarantees in-order packet delivery"
-      - "It automatically increases the socket buffer"
+      - "It guarantees strictly in-order packet delivery even when the underlying network reorders segments in flight"
+      - "It automatically grows the socket receive buffer under load so recv() never has to be called in a loop"
       - "It generates fewer wakeups and syscalls because it fires only on transitions"
-      - "It removes the need for non-blocking sockets"
+      - "It removes the need for non-blocking sockets by letting recv() drain the buffer in a single guaranteed read"
     answer: 2
     explanation: |
       ET fires only on state transitions, so a busy fd produces fewer redundant wakeups and
@@ -703,9 +703,9 @@ questions:
       In a single-threaded event-loop server, what is the danger of a handler that makes a
       blocking database call or does heavy CPU work?
     options:
-      - "It only slows down that one connection"
-      - "It causes the listening socket to close"
-      - "It automatically spawns a new thread"
+      - "It only slows down that one connection while every other client on the loop keeps being serviced normally"
+      - "It causes the kernel to silently close the listening socket, so no new connections can be accepted afterward"
+      - "It automatically spawns a fresh worker thread to run the handler, so the main loop keeps going untouched"
       - "It stalls the entire event loop, blocking every other connection on that thread"
     answer: 3
     explanation: |
@@ -721,10 +721,10 @@ questions:
       For a mostly-idle chat service holding 200,000 long-lived connections, which
       architecture is generally the better fit?
     options:
-      - "Thread-per-connection, one OS thread per client"
-      - "A new process forked per message"
+      - "Thread-per-connection, dedicating one blocking OS thread to each of the 200,000 idle clients"
+      - "A new process forked per inbound message, torn down again once the reply has been sent"
       - "An event loop (reactor) over epoll/kqueue with a few threads multiplexing all connections"
-      - "Pure busy-polling of every socket in a tight loop"
+      - "Pure busy-polling that spins through all 200,000 sockets in a tight loop calling recv on each"
     answer: 2
     explanation: |
       High-connection, I/O-bound, mostly-idle workloads are the sweet spot for event loops:
@@ -738,9 +738,9 @@ questions:
     question: |
       What is the primary programming-model advantage of the thread-per-connection model?
     options:
-      - "It scales to millions of connections with no memory cost"
-      - "It requires no operating-system threads"
-      - "It never context-switches"
+      - "It scales to millions of concurrent connections with essentially zero per-thread memory cost"
+      - "It requires no operating-system threads at all, running every handler on a single shared stack"
+      - "It never context-switches, so the CPU scheduler overhead stays flat as connections grow"
       - "Each handler is straight-line blocking code that is easy to write and debug"
     answer: 3
     explanation: |
@@ -757,9 +757,9 @@ questions:
       connections without 100,000 OS threads?
     options:
       - "They park a blocked logical thread and use an epoll/kqueue-backed poller to resume it when its fd is ready, multiplexing many logical threads onto few OS threads"
-      - "They open one UDP socket shared by all connections"
-      - "They disable the OS scheduler entirely"
-      - "They convert every socket to non-blocking select() with FD_SETSIZE raised"
+      - "They funnel all 100,000 connections through a single shared UDP socket that the runtime demultiplexes internally by peer address"
+      - "They disable the operating-system scheduler entirely and let the language runtime drive the CPU cores directly"
+      - "They convert every socket to a non-blocking select() loop with FD_SETSIZE raised to 100,000 at compile time"
     answer: 0
     explanation: |
       These runtimes let you write blocking-style code, but under the hood a blocked
@@ -774,10 +774,10 @@ questions:
       What distinguishes the Proactor (completion-based) model from the Reactor
       (readiness-based) model?
     options:
-      - "Proactor waits for an fd to be 'ready' and then the application does the read"
+      - "Proactor waits for an fd to be reported 'ready' and then has the application perform the actual read itself"
       - "In Proactor you submit an operation and the OS performs the I/O into your buffer, notifying you when it is complete"
-      - "Proactor only works with select(), Reactor only with epoll"
-      - "Proactor is limited to UDP; Reactor to TCP"
+      - "Proactor is built only on top of select(), while Reactor is built only on top of the newer epoll interface"
+      - "Proactor is restricted to connectionless UDP datagrams, whereas Reactor works exclusively with TCP byte streams"
     answer: 1
     explanation: |
       Reactor (epoll/kqueue) reports readiness and you then perform the non-blocking I/O.
@@ -793,9 +793,9 @@ questions:
       Why is `epoll` ineffective for asynchronous access to regular disk files, motivating
       APIs like `io_uring`?
     options:
-      - "Regular files cannot be given a file descriptor"
-      - "The kernel forbids registering files with epoll_ctl"
-      - "epoll only accepts UDP sockets"
+      - "Regular disk files cannot be assigned a file descriptor, so there is nothing for epoll_ctl to register"
+      - "The kernel outright forbids adding a regular-file descriptor to an epoll interest set, returning EPERM"
+      - "epoll accepts only connectionless UDP socket descriptors and rejects everything backed by the page cache"
       - "Regular files are always reported as ready, so readiness notification provides no useful signal for disk I/O"
     answer: 3
     explanation: |
@@ -812,9 +812,9 @@ questions:
       For a TCP socket, calling `close()` on the connected fd normally triggers what?
     options:
       - "Connection teardown beginning with a FIN"
-      - "An immediate RST on the connection"
-      - "A new 3-way handshake"
-      - "Nothing until the peer also calls close()"
+      - "An immediate RST that abortively resets the connection and discards any queued outbound data"
+      - "A fresh 3-way SYN handshake to renegotiate the connection parameters before releasing it"
+      - "Nothing at all on the wire until the remote peer independently calls close() on its own end first"
     answer: 0
     explanation: |
       close() releases the fd and, for TCP, initiates graceful teardown by sending a FIN
@@ -830,10 +830,10 @@ questions:
       one server IP:port and starts failing to make new connections. What is the most
       likely limit being hit?
     options:
-      - "The server's SO_KEEPALIVE interval"
+      - "The server's SO_KEEPALIVE probe interval firing and tearing down the client's freshly opened connections"
       - "Exhaustion of the client's ~28K ephemeral source ports for that (src IP, dst IP:port), worsened by TIME_WAIT accumulation"
-      - "The TCP maximum segment size"
-      - "FD_SETSIZE on the server's epoll"
+      - "The TCP maximum segment size being too small to carry the load-test request payloads in one packet"
+      - "FD_SETSIZE on the server's epoll interest set capping the number of descriptors it can watch at once"
     answer: 1
     explanation: |
       With a fixed source IP and a fixed destination IP:port, only the ephemeral source
@@ -849,10 +849,10 @@ questions:
       Unlike a TCP server, a UDP server typically serves all of its peers through how many
       sockets?
     options:
-      - "One socket per peer, obtained from accept()"
-      - "Two sockets: one for reading and one for writing"
+      - "One socket per peer, each obtained from a separate accept() call as datagrams arrive"
+      - "Two sockets per peer: a read-only socket for recvfrom() and a write-only socket for sendto()"
       - "A single bound socket that receives datagrams from all peers via recvfrom()"
-      - "One socket per source port range"
+      - "One socket per source-port range, with the kernel sharding incoming datagrams across them"
     answer: 2
     explanation: |
       UDP has no per-connection fd. A single bound socket receives datagrams from every
@@ -868,9 +868,9 @@ questions:
       polling) a poor design?
     options:
       - "It burns CPU spinning while the socket has no data; the correct pattern pairs non-blocking sockets with a readiness API that sleeps until an fd is ready"
-      - "It violates the TCP specification"
-      - "recv() is not allowed on non-blocking sockets"
-      - "It causes the socket to switch to blocking mode"
+      - "It violates the TCP specification, which forbids issuing more than one recv() per round-trip time on a stream socket"
+      - "recv() is not permitted on non-blocking sockets and immediately fails with ENOTSUP on the second consecutive call"
+      - "It silently causes the socket to revert to blocking mode, so the loop then stalls the whole thread anyway"
     answer: 0
     explanation: |
       Spinning on a non-blocking recv() wastes CPU returning EAGAIN. The efficient pattern
@@ -884,10 +884,10 @@ questions:
     question: |
       Which structure is used to hold an IPv4 address and port for `bind()`/`connect()`?
     options:
-      - "sockaddr_in6"
+      - "sockaddr_in6, which carries a 128-bit IPv6 address, port, flow label, and scope id"
       - "sockaddr_in"
-      - "sockaddr_un"
-      - "in6_addr"
+      - "sockaddr_un, which holds a filesystem pathname for an AF_UNIX local domain socket"
+      - "in6_addr, the bare 128-bit IPv6 address structure with no port or address-family field"
     answer: 1
     explanation: |
       sockaddr_in holds an AF_INET (IPv4) address family, port, and 32-bit address.
@@ -903,10 +903,10 @@ questions:
       listening socket, and you observe uneven load and wakeup contention. Which technique
       most directly addresses this?
     options:
-      - "Set TCP_NODELAY on the listening socket"
-      - "Increase FD_SETSIZE"
+      - "Set TCP_NODELAY on the listening socket so completed handshakes are handed to accept() without buffering delay"
+      - "Increase FD_SETSIZE and recompile so each worker can track more descriptors in its select() fd_set"
       - "Give each worker its own socket bound to the same port with SO_REUSEPORT so the kernel load-balances accepts"
-      - "Switch all sockets to blocking mode"
+      - "Switch all eight workers' sockets to blocking mode so the kernel serializes their accept() calls fairly"
     answer: 2
     explanation: |
       SO_REUSEPORT lets each worker bind its own socket to the same IP:port; the kernel
@@ -920,9 +920,9 @@ questions:
     question: |
       What is the intended workflow when using a readiness API like epoll or kqueue?
     options:
-      - "Block in recv() on each socket in turn"
-      - "Let the kernel copy data directly and notify on completion"
-      - "Poll every fd with recv() regardless of readiness"
+      - "Block in a plain recv() on each registered socket in turn, one fd at a time in a fixed rotation"
+      - "Submit each operation and let the kernel copy the data directly into your buffer, notifying you on completion"
+      - "Poll every registered fd with a non-blocking recv() each iteration regardless of what readiness the API reported"
       - "Wait for the API to report which fds are ready, then perform non-blocking I/O only on those fds"
     answer: 3
     explanation: |
@@ -937,10 +937,10 @@ questions:
     question: |
       Which statement about a UDP server is correct?
     options:
-      - "It must call listen() and accept() before receiving data"
-      - "It performs a 3-way handshake per datagram"
+      - "It must call listen() to mark the socket passive and accept() to dequeue a peer before any datagram can be read"
+      - "It performs a miniature 3-way SYN handshake for every individual datagram before delivering the payload"
       - "It does not call listen() or accept(); after bind() it uses recvfrom()"
-      - "It uses SOCK_STREAM sockets"
+      - "It uses SOCK_STREAM sockets and relies on the kernel to frame each datagram back into discrete messages"
     answer: 2
     explanation: |
       UDP is connectionless, so there is nothing to listen for or accept. A UDP server does
@@ -954,9 +954,9 @@ questions:
     question: |
       Which statement best contrasts level-triggered and edge-triggered modes?
     options:
-      - "LT only works on UDP, ET only on TCP"
-      - "ET reports readiness while the condition persists; LT reports once per transition"
-      - "Both require busy-polling to detect readiness"
+      - "Level-triggered mode works only on connectionless UDP sockets, while edge-triggered works only on TCP streams"
+      - "ET reports readiness continuously while the condition persists, whereas LT reports it just once per state transition"
+      - "Both modes require the application to busy-poll each fd in a tight loop to actually detect that it has become ready"
       - "LT reports readiness while the condition persists (forgiving); ET reports once per transition (fewer wakeups but you must fully drain the fd)"
     answer: 3
     explanation: |
@@ -972,9 +972,9 @@ questions:
       The "C10M" evolution of the C10K problem pushes toward which kinds of techniques?
     options:
       - "Kernel-bypass user-space networking (e.g. DPDK) and SO_REUSEPORT sharding across cores"
-      - "Reverting to one thread per connection"
-      - "Using select() with a larger FD_SETSIZE"
-      - "Switching all traffic to UDP"
+      - "Reverting to a simple one-thread-per-connection model with a blocking accept loop"
+      - "Using select() with FD_SETSIZE recompiled to a far larger per-process ceiling"
+      - "Switching all connection traffic to UDP to shed TCP's per-socket state"
     answer: 0
     explanation: |
       C10M (10 million connections) goes beyond epoll to kernel-bypass/user-space
@@ -990,10 +990,10 @@ questions:
       `close(fd)` on it, yet the peer's `recv` never returns 0 (no FIN arrives). Why, and
       what call would have sent the FIN regardless?
     options:
-      - "close() always sends FIN; the peer must be buggy — retry with a second close()"
+      - "close() always transmits a FIN on the very first call regardless of any other references, so the peer must be buggy — the fix is simply to retry the teardown with a second close() on the parent's fd"
       - "close() only decrements the open file description's refcount, so the FIN is deferred until the child also closes; shutdown(fd, SHUT_WR) sends FIN immediately regardless of refcount"
-      - "The FIN was sent but the kernel dropped it; setting SO_LINGER would resend it"
-      - "fork() converts the socket to UDP, which has no FIN; only close() on the child matters"
+      - "The FIN was actually sent on the wire but the kernel's retransmit queue silently dropped it under load; setting SO_LINGER with a nonzero timeout would have forced the stack to resend it reliably"
+      - "fork() quietly converts an inherited stream socket into a UDP datagram socket, which carries no FIN at all, so only the child's eventual close() has any effect on teardown"
     answer: 1
     explanation: |
       close() decrements the reference count on the underlying open file description; TCP
@@ -1009,9 +1009,9 @@ questions:
       You want a zero-downtime deploy where in-flight responses are not truncated. What is
       the correct per-connection drain sequence?
     options:
-      - "close() every socket immediately, then start the new process"
-      - "Set SO_LINGER to 0 and close(), forcing a fast RST on each connection"
-      - "shutdown(SHUT_RD) on each socket, then exit"
+      - "close() every socket immediately the moment the deploy starts, then launch the new process and let the peers re-establish any connections they still need"
+      - "Set SO_LINGER to 0 and close(), forcing a fast abortive RST on each connection so the old process exits without waiting on any in-flight bytes"
+      - "shutdown(SHUT_RD) on each socket to stop reading, then exit the process and rely on the kernel to flush whatever remains in the send buffers"
       - "Stop accepting, shutdown(fd, SHUT_WR) to send FIN, keep recv-ing until recv returns 0, then close()"
     answer: 3
     explanation: |
@@ -1029,9 +1029,9 @@ questions:
       until it hits the fd limit. What does this indicate?
     options:
       - "Your application received the peer's FIN (recv == 0) but never called close()/shutdown() on those fds"
-      - "Your side is actively closing many connections; this is normal and self-clearing"
-      - "A SYN flood is filling the accept queue"
-      - "The peer is refusing to send its final ACK, a network problem"
+      - "Your side is actively closing many connections, so these are the expected transient states of a normal active close and they drain on their own within a 2×MSL timer"
+      - "A SYN flood is filling the incomplete-handshake SYN queue, and CLOSE_WAIT is how the kernel parks those half-open embryonic connections until they are validated"
+      - "The peer is refusing to send its final ACK to your FIN, a network-side problem that leaves your sockets pinned in CLOSE_WAIT until the route recovers"
     answer: 0
     explanation: |
       CLOSE_WAIT means the peer sent FIN but your application never responded by closing
@@ -1046,10 +1046,10 @@ questions:
     question: |
       Which end of a TCP connection enters `TIME_WAIT`, and what is its primary purpose?
     options:
-      - "The passive listener; it reserves the port for the next accept()"
+      - "The passive listener that received the first FIN; it holds the state to reserve the local port so the next accept() on that listener can reuse it cleanly"
       - "Whichever end sends the first FIN (the active closer); it absorbs delayed duplicate segments and lets the final ACK be retransmitted"
-      - "Both ends simultaneously; it synchronizes their sequence numbers"
-      - "The end with the larger receive window; it throttles the connection rate"
+      - "Both ends enter it simultaneously as the connection tears down; the paired timers synchronize their final sequence numbers before the 4-tuple is released"
+      - "The end that advertised the larger receive window; it lingers in the state to throttle the connection's closing rate and drain any queued congestion-window data"
     answer: 1
     explanation: |
       The active closer (sender of the first FIN) enters TIME_WAIT for ~2×MSL. It ensures
@@ -1065,10 +1065,10 @@ questions:
       instance. Under load you see all eight wake per incoming connection, seven getting
       EAGAIN on accept(). Which epoll flag directly addresses this?
     options:
-      - "EPOLLRDHUP on the listening fd"
-      - "EPOLLONESHOT on each worker's registration"
+      - "EPOLLRDHUP on the listening fd, so the kernel reports peer half-close and coalesces the redundant accept wakeups into one"
+      - "EPOLLONESHOT on each worker's registration, so the listener fires just once per worker and the other seven are permanently disarmed"
       - "EPOLLEXCLUSIVE, added with EPOLL_CTL_ADD, so the kernel wakes only a subset of waiters"
-      - "EPOLLET, converting the listener to edge-triggered"
+      - "EPOLLET, converting the listener to edge-triggered so a single connection edge wakes exactly one of the eight blocked workers"
     answer: 2
     explanation: |
       This is the epoll-level thundering herd (many epoll instances on one shared listener).
@@ -1082,10 +1082,10 @@ questions:
     question: |
       Which statement about `EPOLLEXCLUSIVE` is correct?
     options:
-      - "It can be freely toggled on and off with EPOLL_CTL_MOD"
+      - "It can be freely toggled on and off at runtime with EPOLL_CTL_MOD, letting a worker opt in or out of exclusive wakeups between epoll_wait cycles"
       - "It is only valid with EPOLL_CTL_ADD; calling EPOLL_CTL_MOD on an EPOLLEXCLUSIVE fd fails with EINVAL, and only EPOLLIN/OUT/WAKEUP/ET may accompany it"
-      - "It replaces SO_REUSEPORT and works on separate per-worker sockets"
-      - "It guarantees exactly one waiter wakes with strict round-robin fairness"
+      - "It is a drop-in replacement for SO_REUSEPORT that operates on separate per-worker sockets, sharding accepts across cores via a kernel 4-tuple hash"
+      - "It guarantees that exactly one waiter wakes per event, chosen by a strict round-robin rotation across all registered epoll instances for fairness"
     answer: 1
     explanation: |
       EPOLLEXCLUSIVE may only be set at EPOLL_CTL_ADD time; EPOLL_CTL_MOD returns EINVAL,
@@ -1102,9 +1102,9 @@ questions:
       is its effect and what must you do after handling an event?
     options:
       - "It disables the fd after one event so only one thread processes it at a time; you must re-arm it with EPOLL_CTL_MOD when done"
-      - "It fires the event exactly once ever; the fd must be closed afterward"
-      - "It converts the fd to level-triggered; nothing further is needed"
-      - "It delivers the event to all threads at once; you must lock the fd"
+      - "It fires the fd's event exactly once for the whole lifetime of the connection; after that single delivery the descriptor is spent and must be closed"
+      - "It permanently converts the fd from edge-triggered to level-triggered mode after the first event, so no re-arming or further bookkeeping is needed"
+      - "It broadcasts the same event to all worker threads simultaneously, so you must take an explicit per-fd lock to keep them from racing on the connection"
     answer: 0
     explanation: |
       EPOLLONESHOT disables further events for the fd after one is delivered, guaranteeing
@@ -1120,10 +1120,10 @@ questions:
       FIN via shutdown(SHUT_WR)) while you may still be writing. Which mechanism is designed
       for this?
     options:
-      - "SO_KEEPALIVE probes"
+      - "SO_KEEPALIVE probes, whose idle-connection heartbeats surface a peer's SHUT_WR half-close as soon as the next probe interval elapses"
       - "EPOLLRDHUP, which fires on peer half-close so you notice it without waiting for a failed recv"
-      - "EPOLLONESHOT re-arming"
-      - "Polling SO_ERROR on every write"
+      - "EPOLLONESHOT re-arming, which redelivers the read edge on every EPOLL_CTL_MOD and thereby exposes the peer's FIN to your handler"
+      - "Polling SO_ERROR via getsockopt on every write, since a peer half-close latches a pending error there that the next write can read back"
     answer: 1
     explanation: |
       EPOLLRDHUP (Linux 2.6.17+) reports that the peer shut down its write side / sent FIN,
@@ -1138,10 +1138,10 @@ questions:
       A candidate proposes "add EPOLLEXCLUSIVE" to fix a herd where each worker has its own
       separate socket bound to the same port via SO_REUSEPORT. Why is this misguided?
     options:
-      - "EPOLLEXCLUSIVE only works on UDP sockets"
+      - "EPOLLEXCLUSIVE is implemented only for connectionless UDP datagram sockets, so it can never be attached to the TCP listeners a SO_REUSEPORT group uses"
       - "SO_REUSEPORT already gives each worker a distinct socket with no shared wait queue, so there is no herd on a shared fd for EPOLLEXCLUSIVE to fix"
-      - "EPOLLEXCLUSIVE disables SO_REUSEPORT load balancing"
-      - "SO_REUSEPORT requires level-triggered mode, which is incompatible with EPOLLEXCLUSIVE"
+      - "EPOLLEXCLUSIVE, once set on any socket in the group, disables the kernel's SO_REUSEPORT load balancing and funnels every accept back to a single worker"
+      - "SO_REUSEPORT can only be used with level-triggered epoll registrations, and that mode is fundamentally incompatible with the EPOLLEXCLUSIVE flag"
     answer: 1
     explanation: |
       EPOLLEXCLUSIVE fixes a herd on a *shared* listening fd watched by multiple epoll
@@ -1157,10 +1157,10 @@ questions:
       Why is `accept4(fd, ..., SOCK_NONBLOCK | SOCK_CLOEXEC)` preferred over `accept()`
       followed by `fcntl()` to set the same flags?
     options:
-      - "accept4 is faster because it skips the TCP handshake"
-      - "fcntl cannot set SOCK_NONBLOCK on accepted sockets at all"
+      - "accept4 is faster because it dequeues the connection before the TCP handshake finishes, skipping the final ACK wait that plain accept() blocks on"
+      - "fcntl() is unable to set the non-blocking flag on a freshly accepted socket at all, so accept4 is the only way to obtain a non-blocking connection fd"
       - "accept() plus fcntl() leaves a race window in which a concurrent fork()+exec() can leak the new socket into a child; accept4 sets both flags atomically"
-      - "accept4 returns the listening fd, avoiding an extra descriptor"
+      - "accept4 hands back the original listening fd instead of a new one, avoiding the extra descriptor that plain accept() would otherwise allocate per client"
     answer: 2
     explanation: |
       Plain accept() returns a blocking fd without close-on-exec; setting the flags after
@@ -1176,10 +1176,10 @@ questions:
       You `EPOLL_CTL_ADD` an fd, then `dup()` it. You later `close()` the original fd but
       epoll keeps reporting events for the connection. Why?
     options:
-      - "epoll caches events for 2×MSL after close()"
+      - "epoll caches a copy of each fd's pending events for 2×MSL after close(), replaying them until that TIME_WAIT-style grace interval expires"
       - "An fd is removed from the interest set only when all fds referring to the same open file description are closed; the dup keeps it registered — you must EPOLL_CTL_DEL explicitly"
-      - "dup() automatically re-adds the fd with level-triggered mode"
-      - "close() on a duplicated fd is a no-op until the process exits"
+      - "dup() automatically re-adds the duplicated fd to the same epoll interest set, forcing it back into level-triggered mode in the process"
+      - "close() on a duplicated fd is treated as a no-op by the kernel and is deferred entirely until the owning process exits or calls exec()"
     answer: 1
     explanation: |
       epoll tracks the underlying open file description. It drops the registration only when
@@ -1195,10 +1195,10 @@ questions:
       event #13. Later in the same batch, event #47 references the same fd number and you
       operate on the wrong connection. What is the root cause and a robust fix?
     options:
-      - "epoll_wait returned corrupted data; call it again to refresh"
+      - "epoll_wait handed back a partially corrupted event array; the fix is to discard the batch and call epoll_wait again to refresh the ready list with clean data"
       - "The fd number was reused by a new connection after you closed it mid-batch; track a per-fd generation/validity marker or defer closes until the batch is fully processed"
-      - "The kernel should never reuse fd numbers; this is a kernel bug"
-      - "Edge-triggered mode caused a duplicate event; switch to level-triggered"
+      - "The kernel is required never to recycle a file-descriptor number while any pending epoll event references it, so a repeated fd number here is a genuine kernel bug"
+      - "Edge-triggered mode emitted a spurious duplicate event for the same connection; switching the interest set to level-triggered mode makes the stale second event disappear"
     answer: 1
     explanation: |
       Closing an fd mid-batch frees its integer, which the kernel can immediately reassign
@@ -1214,10 +1214,10 @@ questions:
       A server uses `TCP_CORK` around a header write plus a `sendfile()` body. It also has
       `TCP_NODELAY` set. What is the interaction?
     options:
-      - "TCP_NODELAY overrides TCP_CORK, so corking has no effect"
-      - "The two options are mutually exclusive and setsockopt returns EINVAL"
+      - "TCP_NODELAY always takes precedence over TCP_CORK, so the cork is silently ignored and the header flushes as its own tiny segment ahead of the body"
+      - "The two options are mutually exclusive, so setsockopt() rejects the second one with EINVAL once the first has been set on the socket"
       - "While TCP_CORK is set it overrides TCP_NODELAY, coalescing the header and body into full segments; toggling TCP_NODELAY while corked forces a one-time flush"
-      - "Both must be set for sendfile() to function at all"
+      - "Both TCP_CORK and TCP_NODELAY must be enabled together before sendfile() will transfer any bytes from the file to the socket at all"
     answer: 2
     explanation: |
       TCP_CORK holds partial segments (up to ~200 ms) so header+body coalesce into
@@ -1233,9 +1233,9 @@ questions:
       resets on its own.
     options:
       - "Nagle withholds a new small segment until the prior one is ACKed, while the peer's delayed-ACK withholds that ACK (~40 ms) hoping to piggyback — a mutual wait; TCP_QUICKACK disables delayed ACK but is non-permanent and must be re-set"
-      - "The receiver drops small packets, forcing 40 ms retransmit timers; SO_RCVBUF fixes it permanently"
-      - "The 40 ms is the SYN retransmit timer; TCP_DEFER_ACCEPT resets it once"
-      - "Delayed ACK doubles every RTT via slow start; TCP_NODELAY on the receiver is the only fix"
+      - "The receiver silently discards the small segments, forcing a fixed 40 ms retransmission timer on the sender; enlarging SO_RCVBUF removes the drops and fixes the stall permanently"
+      - "The 40 ms delay is the initial SYN retransmit timer firing during the handshake; enabling TCP_DEFER_ACCEPT on the listener resets that timer exactly once per connection"
+      - "Delayed ACK causes the congestion window to double each RTT during slow start, and setting TCP_NODELAY on the receiving side is the only knob that suppresses the growth"
     answer: 0
     explanation: |
       Nagle (RFC 896) holds a new small segment until the previous unacked one is ACKed; the
@@ -1251,9 +1251,9 @@ questions:
       What does `TCP_FASTOPEN` (RFC 7413) enable, and what is its key caveat?
     options:
       - "It carries application data in the SYN using a Fast Open cookie so data can be delivered before the handshake completes; the caveat is SYN data can be replayed, so only idempotent requests are safe"
-      - "It compresses the handshake into a single packet with no downside"
-      - "It removes the need for a listening socket entirely"
-      - "It encrypts the SYN, replacing TLS for the first byte"
+      - "It compresses the entire three-way handshake into a single round-trip packet with no security or reliability downside whatsoever for any workload"
+      - "It removes the need for a listening socket entirely, letting the kernel accept and route incoming connections straight to the process without bind()/listen()"
+      - "It transparently encrypts the SYN and its payload, replacing the TLS handshake so the very first application byte is already confidential on the wire"
     answer: 0
     explanation: |
       TCP Fast Open lets a client include data in the SYN using a server-issued cookie,
@@ -1268,10 +1268,10 @@ questions:
     question: |
       What does `TCP_DEFER_ACCEPT` change about when `accept()` returns?
     options:
-      - "accept() returns as soon as the SYN arrives, before the handshake finishes"
-      - "accept() blocks until the accept queue is full"
+      - "accept() returns the moment the initial SYN arrives, handing the server a connection fd before the three-way handshake has actually completed"
+      - "accept() blocks the calling thread until the listener's accept queue has filled to its backlog limit, then returns all the queued connections in one batch"
       - "accept() returns only once the client has sent data, not merely completed the handshake — saving a wakeup for request/response servers whose first read then has data waiting"
-      - "accept() returns one fd per SYN cookie issued"
+      - "accept() returns exactly one connection fd for every SYN cookie the kernel issued during the last SYN-flood mitigation window"
     answer: 2
     explanation: |
       TCP_DEFER_ACCEPT delays the accept()-visible completion until the client sends its
@@ -1286,9 +1286,9 @@ questions:
       You need to detect a dead peer within seconds on a connection that is actively trying
       to send, faster than the 2-hour keepalive default. Which option is the direct answer?
     options:
-      - "Lower SO_RCVBUF to force faster timeouts"
-      - "TCP_NODELAY, which forces immediate error reporting"
-      - "SO_LINGER with a short timeout"
+      - "Lower SO_RCVBUF sharply so the shrunken receive window forces the stack to time out and abort a stalled connection within a few seconds"
+      - "TCP_NODELAY, which by disabling Nagle's buffering makes the stack surface an unreachable-peer error on the very next unacknowledged send"
+      - "SO_LINGER configured with a short nonzero timeout, so close() blocks only briefly and then reports the dead peer via an error return"
       - "TCP_USER_TIMEOUT, which bounds how long unacknowledged data may sit before TCP fails the connection with ETIMEDOUT (and also modifies keepalive tolerance)"
     answer: 3
     explanation: |
@@ -1304,10 +1304,10 @@ questions:
     question: |
       In `io_uring`, what does `SQPOLL` mode achieve?
     options:
-      - "It polls each socket individually like select()"
-      - "It disables the completion queue to save memory"
+      - "It makes io_uring rescan and poll every registered socket individually like select() on each submission to find which fds are ready"
+      - "It disables the completion queue ring to save memory, so results are read back synchronously from each submission entry instead"
       - "A dedicated kernel thread polls the submission queue, so submitting work needs zero syscalls in steady state"
-      - "It converts io_uring into a readiness (Reactor) interface"
+      - "It converts io_uring from completion-based into a readiness-based Reactor interface that only signals when an fd is ready to read"
     answer: 2
     explanation: |
       io_uring uses shared submission (SQ) and completion (CQ) rings. In SQPOLL mode a kernel
@@ -1321,9 +1321,9 @@ questions:
     question: |
       Which statement about `io_uring` is accurate?
     options:
-      - "It is a readiness API like epoll and cannot do file I/O"
-      - "It requires one ring per file descriptor"
-      - "It only works with UDP sockets"
+      - "It is a readiness-notification API like epoll that only signals when a descriptor is ready, and like epoll it cannot perform regular-file I/O because files always report ready"
+      - "It requires a separate submission and completion ring pair to be allocated for every single file descriptor, so a busy server must maintain thousands of independent rings at once"
+      - "It works exclusively with connectionless UDP datagram sockets and cannot be used for TCP stream connections or for any form of regular-file or pipe I/O"
       - "It is completion-based, supports multishot accept/recv and registered buffers, works for regular-file I/O, and is disabled by default in some hardened environments due to kernel CVEs"
     answer: 3
     explanation: |
@@ -1340,10 +1340,10 @@ questions:
       With `MSG_ZEROCOPY` on `send()`, why is completion notification delivered
       asynchronously via the error queue (`MSG_ERRQUEUE`), and when is it worthwhile?
     options:
-      - "Because the kernel copies the data twice and reports the second copy; worthwhile for tiny buffers"
-      - "Because zero-copy disables ACKs, which arrive on the error queue"
+      - "Because the kernel actually copies the data twice and posts the second redundant copy to the error queue as a checksum; it is worthwhile mainly for very tiny sub-page buffers"
+      - "Because zero-copy send disables normal TCP acknowledgements and the resulting ACKs are instead redirected onto the socket's error queue for the application to reap manually"
       - "Because the kernel pins the user pages and transmits directly from them, so they must stay stable until the NIC is done; worthwhile mainly for large buffers where the saved copy outweighs pinning/tracking overhead"
-      - "Because it converts the socket to UDP, whose errors use the error queue"
+      - "Because MSG_ZEROCOPY silently converts the stream socket to UDP datagram mode, and UDP surfaces all of its delivery errors asynchronously through the error queue"
     answer: 2
     explanation: |
       Zero-copy send pins user pages and DMAs from them, so the buffer cannot be reused until
@@ -1359,10 +1359,10 @@ questions:
       user space. Which call does this, and what generalizes it for socket-to-socket
       proxying?
     options:
-      - "read()+write() in a loop; splice() generalizes it"
-      - "mmap()+send(); sendmsg() generalizes it"
+      - "A plain read()+write() loop through a user-space buffer; splice() merely generalizes that same copy-through-user-space pattern to arbitrary descriptor pairs"
+      - "mmap() the file then send() the mapping, which avoids the read copy; sendmsg() with multiple iovecs generalizes it to socket-to-socket forwarding"
       - "sendfile() copies file→socket entirely in-kernel; splice() moves bytes between two fds via a kernel pipe, useful for socket→socket proxying"
-      - "recvfrom()+sendto(); writev() generalizes it"
+      - "recvfrom()+sendto() bouncing each chunk through user space; writev() generalizes it by gathering the chunks into one vectored socket-to-socket write"
     answer: 2
     explanation: |
       sendfile() transfers file→socket inside the kernel with no user-space buffer. splice()
@@ -1377,9 +1377,9 @@ questions:
       A privilege-separated design must hand an already-accepted TCP connection from one
       process to another on the same host. Which mechanism does this?
     options:
-      - "Serialize the socket's 4-tuple and re-connect() in the other process"
-      - "Share the fd number through shared memory"
-      - "Use SO_REUSEPORT so both processes see the same connection"
+      - "Serialize the connection's established 4-tuple to the other process and have it call connect() with the same local and remote addresses to re-attach"
+      - "Copy the integer fd number into a shared-memory segment both processes map, so the second process can read/write the same socket through that number"
+      - "Bind both processes to the same port with SO_REUSEPORT so the kernel routes the already-accepted connection's packets to whichever process reads next"
       - "Pass the open file descriptor as SCM_RIGHTS ancillary data over a Unix domain socket via sendmsg()/recvmsg()"
     answer: 3
     explanation: |
@@ -1395,9 +1395,9 @@ questions:
     question: |
       Which capability is unique to Unix domain sockets (versus TCP over loopback)?
     options:
-      - "Congestion control across processes"
-      - "A 3-way handshake with sequence numbers"
-      - "Automatic TLS between processes"
+      - "Per-connection congestion control that throttles the byte rate between the two communicating processes as if they were remote peers on a lossy WAN"
+      - "A full 3-way SYN handshake with initial sequence-number negotiation and window scaling exchanged between the two local processes before data flows"
+      - "Automatic transparent TLS encryption of the byte stream between the two processes, negotiated by the kernel without any application-level library"
       - "Peer authentication via SO_PEERCRED/SCM_CREDENTIALS (kernel-verified PID/UID) and fd passing, plus SOCK_SEQPACKET for reliable message-boundary-preserving streams"
     answer: 3
     explanation: |
@@ -1413,10 +1413,10 @@ questions:
       A worker in a `SO_REUSEPORT` group calls `close()` on its socket to exit. Some
       in-flight client connections are reset. Why, and how do you avoid it?
     options:
-      - "SO_REUSEPORT never loses connections; the resets are unrelated"
-      - "The kernel migrates the connections automatically; the resets are a client bug"
+      - "SO_REUSEPORT groups never lose in-flight connections on close(), so the observed resets must be coming from an unrelated firewall or client-side timeout"
+      - "The kernel automatically migrates a closing socket's queued connections to the surviving group members, so the resets can only be a bug in the client's retry logic"
       - "Connections already committed to that socket's accept/SYN queue are dropped when it closes; the worker must stop accepting but drain its queue before closing"
-      - "close() on a REUSEPORT socket sends RST to the whole group; use shutdown() instead"
+      - "close() on any REUSEPORT socket broadcasts an RST to every connection in the whole group, so you must always tear workers down with shutdown() rather than close()"
     answer: 2
     explanation: |
       The kernel commits an incoming connection to a specific socket in the group (by 4-tuple
@@ -1432,9 +1432,9 @@ questions:
       To improve cache/NUMA locality you want each connection handled by the worker running
       on the same CPU as the NIC RX queue that received it. Which facilities enable this?
     options:
-      - "Only the default 4-tuple hash; locality cannot be controlled"
-      - "TCP_NODELAY plus SO_RCVBUF tuning"
-      - "EPOLLEXCLUSIVE with CPU affinity flags"
+      - "Only the kernel's fixed default 4-tuple hash is available for REUSEPORT selection, so which worker handles a connection cannot be steered toward the RX-queue CPU at all"
+      - "Setting TCP_NODELAY to disable Nagle plus enlarging SO_RCVBUF on each worker socket, which together bias the kernel toward delivering connections to the nearest CPU"
+      - "Registering the shared listener with EPOLLEXCLUSIVE together with per-worker CPU-affinity flags, which makes the kernel wake only the worker pinned to the NIC's CPU"
       - "SO_ATTACH_REUSEPORT_CBPF/EBPF (or BPF_PROG_TYPE_SK_REUSEPORT) to steer selection, combined with SO_INCOMING_CPU to pin to the RX-queue CPU"
     answer: 3
     explanation: |
@@ -1451,10 +1451,10 @@ questions:
       abruptly. The handler does a plain `write()`/`send()` to the socket. What is the cause
       and fix?
     options:
-      - "The socket ran out of buffer; enlarge SO_SNDBUF"
-      - "The connection reset corrupted the stack; enable ASLR"
+      - "The kernel send buffer overflowed on the disconnect and silently aborted the process; enlarging SO_SNDBUF so writes never fill the buffer removes the crash"
+      - "The peer's connection reset corrupted the process's memory through the socket buffer; enabling ASLR hardens the address space and stops the crashes"
       - "Writing to a socket whose peer sent FIN/RST raises SIGPIPE, whose default action kills the process; pass MSG_NOSIGNAL (or ignore SIGPIPE / set SO_NOSIGPIPE) so send returns -1/EPIPE instead"
-      - "recv returned 0 and the loop divided by zero"
+      - "The abrupt disconnect made recv return 0 and a later length calculation divided by that zero, so guarding the divisor before the write is the fix"
     answer: 2
     explanation: |
       send()/write() to a socket whose peer has closed generates SIGPIPE, which by default
@@ -1470,10 +1470,10 @@ questions:
       Why send a message header and body with a single `writev()`/`sendmsg()` scatter-gather
       call instead of two separate writes?
     options:
-      - "It encrypts the header automatically"
-      - "It guarantees the peer reads header and body as two datagrams"
+      - "It transparently encrypts the header buffer while leaving the body in clear text, so a single call gives you authenticated framing without a TLS library"
+      - "It guarantees the receiving peer will read the header and the body back as exactly two distinct datagrams with a preserved boundary between them on a TCP stream"
       - "It emits header and body in one syscall from separate buffers, avoiding an extra concatenation copy and the tiny-header-then-body pattern that can trigger Nagle stalls; sendmsg also carries ancillary data (cmsg)"
-      - "It disables partial writes entirely"
+      - "It disables partial writes entirely, so writev() is guaranteed to either transfer every byte of both buffers atomically or return -1 without sending anything"
     answer: 2
     explanation: |
       Vectored I/O gathers multiple buffers into one syscall, so you avoid copying to
@@ -1488,9 +1488,9 @@ questions:
     question: |
       In an edge-triggered server, which practice about `EPOLLOUT` and fairness is correct?
     options:
-      - "Register EPOLLOUT permanently so writes are always ready"
-      - "Never register EPOLLOUT; writes never block under ET"
-      - "Keep reading one hot fd until EAGAIN before touching any other fd, always"
+      - "Register EPOLLOUT permanently on every connection so a socket is always reported writable and you can send at any time without checking readiness"
+      - "Never register EPOLLOUT at all, because under edge-triggered mode writes to a connected socket can never block or return EAGAIN and so never need a writable edge"
+      - "Always keep reading one hot fd until it returns EAGAIN before touching any other descriptor, since fully draining the busiest connection first maximizes overall throughput"
       - "Register EPOLLOUT only after a write returns EAGAIN, drain the send buffer on the writable edge, then deregister EPOLLOUT; and cap per-fd reads with a round-robin ready list to avoid starving other fds"
     answer: 3
     explanation: |
@@ -1506,10 +1506,10 @@ questions:
     question: |
       Which pair of statements about `kqueue` (versus epoll) is correct?
     options:
-      - "kqueue needs a separate registration syscall like epoll_ctl; EV_CLEAR means level-triggered"
-      - "kqueue only reports socket readiness and needs timerfd/signalfd like epoll"
+      - "kqueue needs a separate registration syscall analogous to epoll_ctl before you can wait, and its EV_CLEAR flag selects level-triggered delivery just like epoll's default mode"
+      - "kqueue can only report socket read/write readiness, so for timers and signals you still need auxiliary timerfd/signalfd-style descriptors exactly as on Linux"
       - "A single kevent() call passes both a changelist and an eventlist (modify and wait in one syscall); EV_CLEAR gives edge-triggered semantics and filters like EVFILT_TIMER/SIGNAL/VNODE unify timers, signals and file events"
-      - "kqueue is Linux-only and identical to epoll_wait"
+      - "kqueue is a Linux-only syscall whose semantics are byte-for-byte identical to epoll_wait, so code written against one ports to the other without any change"
     answer: 2
     explanation: |
       kevent() takes a changelist and eventlist together, so registration and waiting happen
@@ -1526,10 +1526,10 @@ questions:
       low. `ss -lnt` shows the listener's Recv-Q at its Send-Q (backlog) limit and
       `nstat` reports rising `TcpExtListenOverflows`. What is happening?
     options:
-      - "Ephemeral port exhaustion on the server"
-      - "A SYN flood is exhausting the SYN queue only"
+      - "Ephemeral source-port exhaustion on the server's listening side, so the kernel runs out of 4-tuples and refuses the completed handshakes with a reset"
+      - "A SYN flood is filling only the incomplete-handshake SYN queue, so half-open embryonic connections are dropped before the final ACK arrives"
       - "The accept queue is overflowing — the app is accepting too slowly or the backlog/somaxconn is too small — so completed connections are dropped and clients retransmit"
-      - "TCP_NODELAY is missing, adding 40 ms per connection"
+      - "TCP_NODELAY is missing on the listener, so Nagle's algorithm adds a fixed ~40 ms buffering delay to every new connection before it can be accepted"
     answer: 2
     explanation: |
       Recv-Q hitting the backlog on a listening socket plus ListenOverflows/ListenDrops
@@ -1565,9 +1565,9 @@ questions:
       Why can `epoll` scale to ~1M connections while `select` struggles past ~10K, stated
       precisely?
     options:
-      - "select uses UDP internally; epoll uses TCP"
-      - "epoll runs each connection on a separate kernel thread"
-      - "select cannot use non-blocking sockets, forcing one thread per fd"
+      - "select is implemented over an internal UDP control channel while epoll rides on TCP, and that transport difference is what lets epoll carry far more descriptors"
+      - "epoll transparently schedules each registered connection onto its own dedicated kernel worker thread, so the kernel parallelizes the fd scanning that select does serially"
+      - "select is fundamentally incompatible with non-blocking O_NONBLOCK sockets, so it is forced into a one-thread-per-fd model that epoll's non-blocking support avoids"
       - "select is capped by FD_SETSIZE (~1024), rescans all fds O(n), and rebuilds the fd_sets each call; epoll keeps a kernel-resident interest set and returns only ready fds (O(ready))"
     answer: 3
     explanation: |
@@ -1584,10 +1584,10 @@ questions:
       On a current mainstream Linux kernel (5.4+), what is the default value of
       `net.core.somaxconn` that caps the accept queue?
     options:
-      - "128, unchanged since the 1990s"
-      - "1024, matching FD_SETSIZE"
+      - "128, the historical value left completely unchanged since the 1990s across every modern kernel release"
+      - "1024, deliberately set to match the FD_SETSIZE limit that select() imposes on monitored descriptors"
       - "4096, raised from the old 128 default in Linux 5.4"
-      - "65535, equal to the max port number"
+      - "65535, chosen to equal the maximum possible TCP port number so the queue can never be the bottleneck"
     answer: 2
     explanation: |
       net.core.somaxconn defaulted to 128 for decades but was raised to 4096 in Linux 5.4
@@ -1602,9 +1602,9 @@ questions:
       After a non-blocking `connect()` returns EINPROGRESS, the socket becomes both readable
       and writable at once in your event loop. How do you tell success from failure?
     options:
-      - "Readable-and-writable always means success; proceed"
-      - "Call connect() again; a second EINPROGRESS confirms success"
-      - "Readable means failure and writable means success, unconditionally"
+      - "A socket becoming both readable and writable is the kernel's unambiguous signal of a completed handshake, so you may simply proceed to send and receive"
+      - "Call connect() a second time on the same fd; getting another EINPROGRESS on that retry confirms the original handshake has now finished successfully"
+      - "Interpret the two conditions directly: a readable edge always means the connect failed and a writable edge always means it succeeded, with no further check needed"
       - "Check SO_ERROR via getsockopt (or a getpeername that fails): 0 means connected, a non-zero errno like ECONNREFUSED means the connect failed — writable-with-error can look identical to writable-with-data"
     answer: 3
     explanation: |
