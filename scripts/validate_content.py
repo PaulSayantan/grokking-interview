@@ -106,11 +106,13 @@ def validate_file(path: Path, seen_ids: dict[str, Path]) -> list[str]:
                 errors.append(f"{loc}: answer '{ans}' out of range for {len(options)} options")
             # MCQ integrity invariants: no blank options, no duplicate options
             # (a repeated option is either a typo or makes two answers "correct").
+            # Compare CASE-SENSITIVELY: options that differ only by case are legitimately
+            # distinct (e.g. a question about naming conventions with `Foo` vs `foo`).
             norm = [str(o).strip() for o in options]
             if any(o == "" for o in norm):
                 errors.append(f"{loc}: has a blank/empty option")
-            lowered = [o.lower() for o in norm if o != ""]
-            if len(set(lowered)) != len(lowered):
+            nonblank = [o for o in norm if o != ""]
+            if len(set(nonblank)) != len(nonblank):
                 errors.append(f"{loc}: has duplicate options")
         else:
             errors.append(f"{loc}: 'options' must be a list")
