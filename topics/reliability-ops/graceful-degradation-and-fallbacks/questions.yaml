@@ -8,9 +8,11 @@ questions:
   tags: [graceful-degradation, definition]
   question: |
     What best describes graceful degradation?
-  options: [Automatically restarting a crashed process until it stays up, Rolling back a deployment when
-      error rates rise, 'Continuing to provide reduced-but-useful functionality when parts of the system
-      fail, instead of a full outage', Encrypting data at rest so a breach exposes nothing]
+  options: [Automatically restarting a crashed process with a supervisor until it stays up and passes
+      its health checks, Rolling back a deployment to the previous known-good version whenever error rates
+      climb past a set threshold, 'Continuing to provide reduced-but-useful functionality when parts of
+      the system fail, instead of a full outage', Encrypting data at rest with rotating keys so that any
+      breach of the storage layer exposes nothing useful]
   answer: 2
   explanation: |
     Graceful degradation converts a hard binary failure ("the page is down") into a
@@ -23,8 +25,9 @@ questions:
   question: |
     In resilience engineering, a "fallback" is best defined as:
   options: [A predetermined alternative result returned when the primary path fails, A second copy of
-      a service in another availability zone, A queue that buffers writes during an outage, The act of
-      retrying a failed request with backoff]
+      a service running in another availability zone for redundancy, A durable queue that buffers writes
+      during an outage until the backend recovers, The act of retrying a failed request with exponential
+      backoff and jitter]
   answer: 0
   explanation: |
     A fallback answers "what do we return instead?" when a call throws, times out, or a
@@ -38,9 +41,10 @@ questions:
     A product page depends on a critical pricing path and an optional recommendations
     service. The recommendations service goes down. What is the graceful-degradation
     response?
-  options: [Return a 503 error page for the whole product page, Retry the recommendations call indefinitely
-      until it succeeds, Fail the request so a load balancer can route elsewhere, 'Hide the recommendations
-      widget and render the rest of the page, keeping purchase working']
+  options: [Return a 503 error page for the whole product page until recommendations recover, Retry the
+      recommendations call indefinitely until it succeeds while holding the response, Fail the request
+      with a 500 so a load balancer can route it to another instance, 'Hide the recommendations widget
+      and render the rest of the page, keeping purchase working']
   answer: 3
   explanation: |
     Degradation happens per feature, keyed to that feature's dependency health. The
@@ -53,9 +57,11 @@ questions:
   question: |
     Which architectural property is a prerequisite for graceful degradation to actually
     work when an optional dependency becomes slow?
-  options: [A globally distributed CDN, 'Failure isolation: the optional call is wrapped in a timeout/circuit
-      breaker so its slowness can''t block the parent request', Strong consistency across all replicas,
-    A single shared thread pool for all downstream calls]
+  options: [A globally distributed CDN that caches the optional response at edge locations near every
+      user, 'Failure isolation: the optional call is wrapped in a timeout/circuit breaker so its slowness
+      can''t block the parent request', Strong consistency across all replicas so that every read observes
+      the most recently committed write, A single shared thread pool serving all downstream calls so resources
+      are pooled and used efficiently]
   answer: 1
   explanation: |
     Without isolation (timeout + circuit breaker, ideally a bulkhead), a slow optional
@@ -69,8 +75,9 @@ questions:
     What distinguishes failover from graceful degradation?
   options: [Failover replaces the failed component with a healthy equivalent so the user sees no change;
       degradation accepts a reduced experience, Failover accepts a reduced experience; degradation replaces
-      the failed component with a healthy equivalent, They are two names for the same mechanism, Failover
-      only applies to databases; degradation only applies to caches]
+      the failed component with a healthy equivalent, 'They are two names for the same mechanism, differing
+      only in the vocabulary each engineering team happens to use', Failover only applies to relational
+      databases; degradation only applies to in-memory caches and CDNs]
   answer: 0
   explanation: |
     Failover swaps in an equivalent healthy component (a replica, another AZ) so the
@@ -83,9 +90,10 @@ questions:
   question: |
     Why should the terminal (last-resort) fallback in a chain avoid performing network
     I/O?
-  options: [Network I/O is always slower than disk I/O, Because caches cannot be reached over the network,
-    So the fallback is guaranteed to succeed and provides a reliable floor that can't itself hang or fail,
-    To reduce the number of open TCP connections for cost reasons]
+  options: [Network I/O is always slower than local disk I/O and so misses the parent request's latency
+      budget, Because caches and secondary stores can never be reached reliably over a saturated network
+      link, So the fallback is guaranteed to succeed and provides a reliable floor that can't itself hang
+      or fail, To reduce the number of open TCP connections the service holds and keep egress costs down]
   answer: 2
   explanation: |
     If the last resort can itself hang or fail (a network call), you have no floor. A
@@ -98,9 +106,10 @@ questions:
   question: |
     A fallback chain tries primary, then secondary, then tertiary, each with a 2-second
     timeout. What is the main risk this design introduces?
-  options: [The chain will return stale data even on the primary, 'The chain can consume up to ~6 seconds,
-      blowing the parent request''s latency budget', The chain guarantees exactly-once semantics, The
-      chain reduces total network calls to one]
+  options: [The chain will return stale cached data even when the primary path is fully healthy, 'The
+      chain can consume up to ~6 seconds, blowing the parent request''s latency budget', The chain silently
+      guarantees exactly-once delivery semantics across all three tiers, The chain collapses the three
+      tiers into a single deduplicated network call]
   answer: 1
   explanation: |
     Chaining timeouts is additive: three 2-second timeouts can produce a 6-second
@@ -113,9 +122,10 @@ questions:
   question: |
     Why is a "secondary provider" fallback that shares the same database, network path,
     and auth service as the primary considered weak protection?
-  options: [It costs twice as much to operate, It violates strong consistency, Secondary providers are
-      always slower than caches, 'It will experience correlated failure — the shared dependency takes
-      out both at once, so the fallback provides no real protection']
+  options: [It costs roughly twice as much to operate because you run two full provider stacks, It violates
+      strong consistency between the two providers and can return divergent answers, Secondary providers
+      are always measurably slower than serving from a local in-memory cache, 'It will experience correlated
+      failure — the shared dependency takes out both at once, so the fallback provides no real protection']
   answer: 3
   explanation: |
     A fallback must be independent of the primary. If they share infrastructure (DB,
@@ -128,9 +138,11 @@ questions:
   question: |
     When a write operation's primary path fails, why is blindly returning a fabricated
     success fallback dangerous, and what is preferred?
-  options: [It's fine; fallbacks work identically for reads and writes, It doubles write latency; prefer
-      returning an error immediately with no buffering, It breaks caching; prefer disabling the cache,
-    It can corrupt state or lose data; prefer queue-and-retry (durably buffer the write and apply it later)]
+  options: ['It''s fine; fallbacks work identically for reads and writes with no correctness difference',
+    It merely doubles write latency; prefer returning an error immediately to the caller with no buffering
+      at all, It breaks the read-through cache; prefer disabling the cache layer for the duration of the
+      write, It can corrupt state or lose data; prefer queue-and-retry (durably buffer the write and apply
+      it later)]
   answer: 3
   explanation: |
     Fallbacks belong on reads. Silently substituting a value on a write can corrupt
@@ -143,9 +155,11 @@ questions:
   question: |
     Search relevance has quietly gotten worse, but the error rate is a flat 0%. The most
     likely explanation is:
-  options: [A memory leak in the search index, A silent fallback (e.g. to popularity ranking) is masking
-      an outage of the ranking service — success stays 100% while answer quality collapses, The load balancer
-      is dropping 40% of requests, DNS resolution is intermittently failing]
+  options: [A slow memory leak in the search index process is gradually corrupting stored postings, A
+      silent fallback (e.g. to popularity ranking) is masking an outage of the ranking service — success
+      stays 100% while answer quality collapses, The load balancer is silently dropping roughly 40% of
+      incoming search requests, DNS resolution for the ranking service is intermittently timing out under
+      load]
   answer: 1
   explanation: |
     This is the classic silent-quality-loss risk: a fallback keeps the success rate at
@@ -158,8 +172,9 @@ questions:
   question: |
     What single metric most directly protects you against a fallback silently masking an
     ongoing dependency outage?
-  options: [End-user HTTP error rate, CPU utilization on the app tier, The fallback activation rate (how
-      often the fallback fires), Total requests per second]
+  options: [End-user HTTP error rate measured at the edge load balancer, CPU utilization averaged across
+      the whole app tier fleet, The fallback activation rate (how often the fallback fires), Total requests
+      per second arriving at the service front door]
   answer: 2
   explanation: |
     Because fallbacks keep user-facing errors near zero, you must treat fallback
@@ -173,8 +188,9 @@ questions:
     A cache-miss fallback is defined as "on miss, call the origin service." During an
     origin slowdown, why can this make the incident worse?
   options: ['It amplifies load — the fallback itself calls the already-struggling origin, and a fleet-wide
-      fallback becomes a thundering herd', It returns stale data that users dislike, It violates fail-closed
-      semantics, It increases the cache hit ratio unexpectedly]
+      fallback becomes a thundering herd', It returns stale data that users dislike and quietly erodes
+      the freshness guarantee, It violates fail-closed semantics and lets unauthorized reads slip through,
+    It unexpectedly increases the cache hit ratio and skews the capacity model]
   answer: 0
   explanation: |
     A fallback that itself makes a call can increase load on the struggling system,
@@ -187,9 +203,11 @@ questions:
   question: |
     Why are fallbacks described as "effectively broken until proven otherwise," and what
     practice addresses this?
-  options: [They are written in a different language; rewrite them, 'They are cold, rarely-exercised code
-      paths prone to latent bugs, stale credentials, and stale data; exercise them with chaos/fault injection',
-    They consume too much memory; profile them, They are always slower than the primary; benchmark them]
+  options: [They are usually written in a different language than the primary path; rewrite them to match,
+    'They are cold, rarely-exercised code paths prone to latent bugs, stale credentials, and stale data;
+      exercise them with chaos/fault injection', They consume far too much heap memory when triggered;
+      profile and tune them, They are always measurably slower than the primary; benchmark and optimize
+      them]
   answer: 1
   explanation: |
     Fallbacks are cold code paths that rarely run in normal operation, so they
@@ -201,10 +219,11 @@ questions:
   tags: [static-stability, aws, definition]
   question: |
     What does static stability (AWS Well-Architected) mean?
-  options: [Keeping data structures immutable to avoid race conditions, Serving only static HTML from
-      a CDN, Pinning software versions so deployments never change behavior, A system keeps operating
-      on its last-known-good state without needing the failed dependency (or the control plane) to be
-      available]
+  options: [Keeping all shared data structures immutable so concurrent threads never hit a race condition,
+    Serving only pre-rendered static HTML pages from a CDN so nothing is computed at request time, Pinning
+      every software version so deployments never change runtime behavior across the fleet, A system keeps
+      operating on its last-known-good state without needing the failed dependency (or the control plane)
+      to be available]
   answer: 3
   explanation: |
     Static stability means the system's steady-state behavior does not depend on making
@@ -218,9 +237,10 @@ questions:
     AWS recommends NOT relying on auto-scaling to add capacity during an availability-zone
     failure. What is the static-stability reasoning?
   options: [Scaling is a control-plane action that may itself be impaired during the event; pre-provision
-      enough capacity so recovery doesn't depend on the control plane, Auto-scaling is too slow to be
-      useful under any circumstances, Auto-scaling always launches instances in the failed AZ, New instances
-      cost more than reserved instances]
+      enough capacity so recovery doesn't depend on the control plane, 'Auto-scaling is far too slow to
+      be useful under any circumstances, so it should never be relied on', Auto-scaling always launches
+      the replacement instances back into the very AZ that just failed, Newly launched on-demand instances
+      cost noticeably more per hour than reserved instances]
   answer: 0
   explanation: |
     Control planes (which change configuration — launch instances) are more
@@ -234,10 +254,11 @@ questions:
   question: |
     In the data-plane vs control-plane distinction that underpins static stability, which
     statement is correct?
-  options: [Control planes serve traffic using existing config; data planes change configuration, 'Both
-      planes are equally reliable, so the distinction is cosmetic', Data planes use existing config to
-      serve traffic and are simpler/more available; control planes change config and are more failure-prone,
-    The data plane is always the bottleneck during outages]
+  options: [Control planes serve traffic using existing config while data planes are the ones that change
+      configuration on demand, 'Both planes are engineered to be equally reliable, so the distinction between
+      them is purely cosmetic', Data planes use existing config to serve traffic and are simpler/more available;
+      control planes change config and are more failure-prone, The data plane is essentially always the
+      bottleneck that saturates first during any large-scale outage]
   answer: 2
   explanation: |
     Data planes use existing state to serve traffic (simpler, more available); control
@@ -250,9 +271,10 @@ questions:
   question: |
     What is the primary trade-off of a statically stable multi-AZ failover design that
     keeps ~2x capacity warm?
-  options: ['Lower latency, at the cost of weaker consistency', It eliminates the need for any monitoring,
-    'Higher cost, in exchange for removing the control plane from the critical recovery path', It requires
-      eventual consistency across regions]
+  options: ['Lower request latency, at the cost of weaker consistency guarantees between the two zones',
+    It eliminates the need for any health monitoring because the warm capacity is inherently self-healing,
+    'Higher cost, in exchange for removing the control plane from the critical recovery path', It forces
+      you to adopt eventual consistency across regions to keep the warm capacity in sync]
   answer: 2
   explanation: |
     Pre-provisioning surviving-AZ capacity is more expensive, but it means failover never
@@ -278,9 +300,7 @@ questions:
   question: |
     The authorization service becomes unreachable. Which fail direction is correct and
     why?
-  options: ['Fail-open, because availability is always the top priority', 'Fail-open, because auth checks
-      are non-critical enrichment', It doesn't matter as long as you log the failure, 'Fail-closed, because
-      allowing access on failure is a security breach while a blocked user is recoverable']
+  options: ['Fail-open, since availability is the priority and a blocked login hurts more than a wrong allow', 'Fail-open, since auth checks are non-critical enrichment you can skip when the service is down', 'It does not matter which way you fail as long as you log it and retry the auth call later', 'Fail-closed, because allowing access on failure is a security breach while a blocked user is recoverable']
   answer: 3
   explanation: |
     Security/authz should fail closed: a wrong "allow" is an irreversible breach, whereas
@@ -293,10 +313,7 @@ questions:
   question: |
     The backing store for a rate limiter goes down. Why is this fail-direction decision
     genuinely contested, and what is a common middle-ground?
-  options: [It isn't contested — always fail-closed, 'Fail-open risks flooding a fragile backend, fail-closed
-      risks a total outage from the limiter being down; a middle ground is local fail-open with a conservative
-      static local limit', It isn't contested — always fail-open with no limit, Rate limiters never have
-      backing stores]
+  options: ['It is not genuinely contested — the answer is always to fail-closed, because exposing the backend to unlimited unmetered traffic is strictly worse than blocking every caller', 'Fail-open risks flooding a fragile backend, fail-closed risks a total outage from the limiter being down; a middle ground is local fail-open with a conservative static local limit', 'It is not genuinely contested — the answer is always to fail-open with no limit at all, because added request latency for real users outweighs any risk of overloading the backend', 'Rate limiters are designed to be fully stateless and never depend on a backing store, so this particular failure mode simply cannot arise in any correctly implemented design']
   answer: 1
   explanation: |
     Fail-open on a limiter risks a flood hitting an already-fragile backend; fail-closed
@@ -310,9 +327,7 @@ questions:
   question: |
     A geo-IP enrichment call (used only to pre-fill a country dropdown) times out. Which
     fail direction fits, and why?
-  options: ['Fail-open: it''s a non-critical enrichment, so degrade gracefully rather than error the request',
-    'Fail-closed: block the request until enrichment succeeds', 'Fail-closed: any timeout indicates a
-      security risk', Retry synchronously until it returns]
+  options: ['Fail-open: it''s a non-critical enrichment, so degrade gracefully rather than error the request', 'Fail-closed: block the whole request until the enrichment call finally succeeds or the user retries', 'Fail-closed: any dependency timeout signals a potential security risk and must halt the request', 'Retry the enrichment call synchronously in a tight loop until it eventually returns a country value']
   answer: 0
   explanation: |
     Non-critical, presentation, and enrichment paths should fail open — degrade the
@@ -325,9 +340,7 @@ questions:
   question: |
     Why do experienced engineers describe the behavior ("allow on failure" vs "deny on
     failure") instead of only using the labels "fail-safe" / "fail-secure"?
-  options: [Because the labels are copyrighted, Because the labels only apply to hardware, Because those
-      terms are overloaded and mean opposite things across domains (e.g. physical door locks vs software
-      auth), Because fail-open is always the safe default]
+  options: ['Because the terms "fail-safe" and "fail-secure" are trademarked and cannot be used in engineering docs', 'Because "fail-safe" and "fail-secure" are defined only for physical hardware and have no software meaning', 'Because those terms are overloaded and mean opposite things across domains (e.g. physical door locks vs software auth)', 'Because fail-open is universally the safe default, so the labels add nothing beyond stating the behavior']
   answer: 2
   explanation: |
     "Fail-safe" and "fail-secure" are overloaded and can mean opposite things in
@@ -340,9 +353,7 @@ questions:
   question: |
     A building's electronically controlled egress door loses power. For life-safety, what
     is the correct fail direction, and how does it contrast with a firewall?
-  options: ['Fail-closed (locked), same as a firewall', 'Fail-open (unlocked) so people can exit — the
-      opposite of a firewall, which fails closed to avoid exposing everything', 'Fail-open, and a firewall
-      also fails open', It should stay in its last state indefinitely]
+  options: ['Fail-closed (locked) so intruders cannot enter, exactly the same direction a firewall fails', 'Fail-open (unlocked) so people can exit — the opposite of a firewall, which fails closed to avoid exposing everything', 'Fail-open (unlocked), and a firewall should also fail open so traffic keeps flowing during a fault', 'It should freeze and hold its last commanded lock state indefinitely until power is manually restored']
   answer: 1
   explanation: |
     Life-safety egress fails open (unlocks) so people can exit during a power failure —
@@ -354,8 +365,7 @@ questions:
   tags: [fail-open, fail-closed, principle]
   question: |
     What is the underlying principle that decides fail-open vs fail-closed?
-  options: [Always minimize latency, Always maximize availability regardless of consequences, Choose whichever
-      is easier to implement, Weigh the cost of a false allow against the cost of a false deny]
+  options: ['Always minimize request latency, choosing whichever direction returns to the caller fastest', 'Always maximize availability regardless of consequences to safety, money, or correctness', 'Choose whichever direction is easier to implement and less code to maintain in the client', 'Weigh the cost of a false allow against the cost of a false deny']
   answer: 3
   explanation: |
     The choice is a risk trade-off between the cost of a false allow and the cost of a
@@ -367,9 +377,7 @@ questions:
   tags: [brownout, definition, load]
   question: |
     A "brownout" in a service (borrowing the electrical-grid term) refers to:
-  options: [A complete power loss to the data center, A rolling restart of all instances, A DNS misconfiguration
-      that browns out one region, 'Intentional, graduated degradation triggered by load — shedding optional
-      work to protect the core as demand rises']
+  options: ['A complete, unplanned loss of electrical power to the entire data center and all of its racks', 'A rolling restart of every instance in the fleet, one at a time, to pick up a config change', 'A DNS misconfiguration that accidentally takes one whole region offline for a period of time', 'Intentional, graduated degradation triggered by load — shedding optional work to protect the core as demand rises']
   answer: 3
   explanation: |
     A brownout is graduated degradation keyed to load (not to a dependency being down) —
@@ -381,9 +389,7 @@ questions:
   tags: [brownout, load-shedding, comparison]
   question: |
     How do brownout and load shedding differ?
-  options: [They are identical techniques, Load shedding rejects whole requests to cap total work; brownout
-      makes each accepted request cheaper by dropping optional parts, Brownout rejects requests; load
-      shedding makes requests cheaper, Load shedding only applies to writes; brownout only to reads]
+  options: ['They are identical techniques with two names, differing only in which team happens to use them', 'Load shedding rejects whole requests to cap total work; brownout makes each accepted request cheaper by dropping optional parts', 'Brownout rejects whole requests to cap work; load shedding makes each accepted request cheaper instead', 'Load shedding applies only to write traffic while brownout applies only to read traffic in a service']
   answer: 1
   explanation: |
     Shedding rejects whole requests (429/503) to cap total work; brownout serves accepted
@@ -396,9 +402,7 @@ questions:
   question: |
     Why should a brownout controller use separate enter/exit thresholds (or a cooldown)
     between "full" and "degraded" modes?
-  options: [To reduce memory usage, To guarantee exactly-once request handling, To provide hysteresis
-      so the system doesn't oscillate (flap) between modes as load hovers near the boundary, To make the
-      thresholds easier to configure]
+  options: ['To reduce the memory footprint of the controller by storing only one threshold value in RAM', 'To guarantee exactly-once request handling as the service transitions between full and degraded modes', 'To provide hysteresis so the system doesn''t oscillate (flap) between modes as load hovers near the boundary', 'To make the thresholds easier for operators to configure by giving them two numbers instead of one']
   answer: 2
   explanation: |
     Hysteresis (distinct enter/exit thresholds or a cooldown) prevents flapping — rapid
@@ -411,9 +415,7 @@ questions:
   question: |
     Which brownout lever most directly protects a strained primary database while keeping
     the site usable?
-  options: ['Switch to read-only mode: reject writes, keep serving reads', Increase image resolution to
-      reduce round trips, Disable the cache to get fresher data, Enable ML-based personalization to distribute
-      load]
+  options: ['Switch to read-only mode: reject writes, keep serving reads', 'Increase served image resolution so pages need fewer round trips to the strained primary', 'Disable the caching layer entirely to guarantee every read returns the freshest data', 'Enable ML-based personalization on every request to spread load evenly across the database']
   answer: 0
   explanation: |
     Read-only mode rejects writes (the load that most stresses a primary) while continuing
@@ -426,9 +428,7 @@ questions:
   question: |
     Your service is overloaded and p99 latency is spiking. What is the strongest combined
     response?
-  options: [Add more servers and wait — nothing else is needed, 'Shed the lowest-priority incoming requests
-      AND brownout survivors (drop optional features, go read-only)', Increase all timeouts so slow calls
-      have time to finish, Retry every failed request aggressively to push work through]
+  options: ['Add more servers and simply wait for the new capacity to absorb the spike — nothing else is needed', 'Shed the lowest-priority incoming requests AND brownout survivors (drop optional features, go read-only)', 'Increase every timeout across the service so the slow in-flight calls are given time to finish', 'Retry every failed request aggressively with no backoff so the queued work is pushed through faster']
   answer: 1
   explanation: |
     Combine both mechanisms: shed the lowest-value requests to cap work and brownout the
@@ -442,9 +442,7 @@ questions:
   question: |
     Why is classifying features into criticality tiers (critical / important / optional) a
     prerequisite for graceful degradation?
-  options: [It reduces the number of microservices needed, It automatically generates circuit breakers,
-    It is required for horizontal scaling, 'Degradation only works if you''ve decided in advance what
-      is core and what is optional, so you know what to keep versus shed']
+  options: ['It reduces the number of microservices you need to deploy by merging optional features into one', 'It automatically generates the circuit breakers and timeouts for each classified dependency', 'It is a hard requirement for horizontal scaling, since tiers determine how replicas are sharded', 'Degradation only works if you''ve decided in advance what is core and what is optional, so you know what to keep versus shed']
   answer: 3
   explanation: |
     You can only degrade gracefully if you know which features are core (keep at all
@@ -456,9 +454,7 @@ questions:
   tags: [criticality-tiers, timeouts]
   question: |
     What timeout policy fits an optional (T3) widget like "recommendations" on a page?
-  options: [A tight timeout (e.g. 100-200 ms) so it gives up fast rather than dragging the whole page's
-      latency, A generous timeout equal to the page's total budget so it has the best chance to load,
-    'No timeout, relying on the circuit breaker alone', The same timeout as the critical checkout call]
+  options: ['A tight timeout (e.g. 100-200 ms) so it gives up fast rather than dragging the whole page''s latency', 'A generous timeout equal to the page''s total budget so it has the best chance to load', 'No timeout at all, relying entirely on the circuit breaker to eventually cut off the slow call', 'The same timeout as the critical checkout call, so all page dependencies are treated uniformly']
   answer: 0
   explanation: |
     Less-critical calls should have tighter timeouts so an optional widget gives up fast
@@ -471,9 +467,7 @@ questions:
   question: |
     Why give an optional (T3) dependency its own thread pool / bulkhead separate from the
     critical path?
-  options: [To increase overall throughput of the T3 call, Because T3 calls require a different protocol,
-    So a slow T3 call can't exhaust the resources needed for critical (T1) work, To make T3 calls faster
-      than T1 calls]
+  options: ['To increase the overall throughput of the T3 call by giving it a larger dedicated pool of threads', 'Because optional T3 calls require a different network protocol than the critical path uses', 'So a slow T3 call can''t exhaust the resources needed for critical (T1) work', 'To make optional T3 calls complete faster than the critical T1 calls that share the request']
   answer: 2
   explanation: |
     A bulkhead isolates the optional dependency's resources so its slowness can consume
@@ -485,9 +479,7 @@ questions:
   tags: [criticality-tiers, slo]
   question: |
     How should SLOs relate to criticality tiers for degradation?
-  options: [Every feature gets the same strict SLO, Optional features should get the strictest SLOs to
-      catch degradation, 'Define SLOs on the core experience; optional features can have looser or no
-      SLOs, keeping the error budget focused on what matters', SLOs are unrelated to degradation design]
+  options: ['Every feature, critical or optional, must be held to the same strict uniform SLO across the service', 'Optional features should carry the strictest SLOs of all so their degradation is caught the earliest', 'Define SLOs on the core experience; optional features can have looser or no SLOs, keeping the error budget focused on what matters', 'SLOs are entirely unrelated to degradation design and should be set independently of tiers']
   answer: 2
   explanation: |
     Anchor SLOs to the core experience so the error budget reflects what users truly
@@ -500,9 +492,7 @@ questions:
   question: |
     A checkout request cannot succeed without the authorization service (a T1/critical
     dependency). When authorization is unavailable, the correct behavior is to:
-  options: [Fail the request with a typed error and page on-call — you cannot degrade a request that is
-      meaningless without this dependency, Return a fabricated success and reconcile later, Hide the checkout
-      button silently, Serve a cached authorization decision from an hour ago]
+  options: ['Fail the request with a typed error and page on-call — you cannot degrade a request that is meaningless without this dependency', 'Return a fabricated success to the user now and reconcile the real authorization decision later', 'Silently hide the checkout button so the user never notices the authorization service is down', 'Serve a cached authorization decision captured about an hour ago and treat it as still valid']
   answer: 0
   explanation: |
     A critical dependency has no meaningful degraded mode: return a controlled typed
@@ -514,10 +504,7 @@ questions:
   tags: [circuit-breaker, fallback, integration]
   question: |
     How do circuit breakers and fallbacks divide responsibility?
-  options: [They are the same pattern with different names, The fallback opens and closes the circuit;
-      the breaker returns the alternative value, 'Circuit breakers only apply to writes, fallbacks only
-      to reads', The circuit breaker decides whether to call the failing dependency; the fallback decides
-      what to return when the call is skipped or fails]
+  options: ['They are the same pattern under two different names, so choosing between them is only a style preference', 'The fallback opens and closes the circuit while the breaker supplies the alternative value to return', 'Circuit breakers apply only to write paths while fallbacks apply only to read paths in a service', 'The circuit breaker decides whether to call the failing dependency; the fallback decides what to return when the call is skipped or fails']
   answer: 3
   explanation: |
     The circuit breaker governs whether the call happens (open = skip the failing
@@ -531,8 +518,7 @@ questions:
   question: |
     Serving reads from a cache holding last-known-good data while the database is down is
     an example of:
-  options: [A retry with exponential backoff, Static stability — steady-state serving that doesn't depend
-      on the failed component, A blue-green deployment, A leader-election protocol]
+  options: ['A retry with exponential backoff and jitter that keeps re-attempting the failed database call', 'Static stability — steady-state serving that doesn''t depend on the failed component', 'A blue-green deployment that shifts read traffic to a freshly promoted standby database', 'A leader-election protocol that promotes a replica to primary when the database goes down']
   answer: 1
   explanation: |
     This is the canonical static-stability example: the cache holds last-known-good state
@@ -545,8 +531,9 @@ questions:
   question: |
     Besides fallback rate, which additional metric best reveals that a "serve stale
     cache" fallback is hiding a long-running outage?
-  options: [The staleness age of served data (how old the last-known-good value is), Average object size
-      in the cache, Number of cache keys evicted per second, TCP retransmission rate]
+  options: [The staleness age of served data (how old the last-known-good value is), The average object
+      size stored in the cache measured in kilobytes per entry, The number of cache keys evicted per second
+      under sustained memory pressure, The TCP retransmission rate on connections to the origin server]
   answer: 0
   explanation: |
     A staleness-age metric shows the served data getting progressively older during an
@@ -558,9 +545,11 @@ questions:
   tags: [degradation, examples]
   question: |
     Which of the following is a graceful-degradation behavior rather than a full outage?
-  options: [Returning HTTP 500 for every request when one dependency is slow, Crashing the process so
-      a supervisor restarts it, Showing a generic non-personalized homepage when the personalization service
-      is unavailable, Blocking all traffic until every dependency is healthy]
+  options: [Returning an HTTP 500 error for every incoming request whenever a single downstream dependency
+      is running slow, Crashing the whole process on the first error so a supervisor restarts it and clears
+      the bad state, Showing a generic non-personalized homepage when the personalization service
+      is unavailable, Blocking all incoming traffic at the front door until every downstream dependency
+      reports fully healthy]
   answer: 2
   explanation: |
     Substituting a cheaper computation (generic homepage instead of personalized) is a
@@ -573,9 +562,10 @@ questions:
   question: |
     In a well-ordered fallback chain for a read, the sequence from first attempt to last
     resort should generally be:
-  options: ['Static default, then cache, then live primary', 'Live primary, then cache (stale), then static
-      default (no I/O)', 'Cache, then static default, then live primary', 'Static default only, to guarantee
-      speed']
+  options: ['Static default first (so it is instant), then the cache, then the live primary as a last resort',
+    'Live primary, then cache (stale), then static
+      default (no I/O)', 'Cache first, then the static default, then finally the live primary once the others miss',
+    'Static default only, on every read, to guarantee the fastest possible constant response time']
   answer: 1
   explanation: |
     Try the highest-quality source first (live primary), then a lower-quality but
@@ -587,8 +577,10 @@ questions:
   tags: [brownout, observability, control]
   question: |
     What operational property should a brownout mechanism have?
-  options: [It should be invisible to operators so it can't be tampered with, It should only be changeable
-      via a full redeploy, It should trigger randomly to test resilience, 'It should be observable (operators
+  options: [It should be invisible to operators so that nobody can accidentally tamper with the active
+      degradation level during an incident, It should only be changeable via a full redeploy so every level
+      change is captured in the deployment audit trail, It should trigger at random intervals so the degraded
+      path is continuously exercised for resilience, 'It should be observable (operators
       see which level is active) and reversible (they can force or clear it), typically via feature flags']
   answer: 3
   explanation: |
@@ -602,8 +594,10 @@ questions:
   question: |
     The feature-flag service is unreachable at startup. What is the safest degradation
     behavior for flag evaluation?
-  options: [Enable all flags so no feature is accidentally disabled, Block startup until the flag service
-      returns, Randomize each flag to sample behavior, Fail to last-known / safe defaults — serve cached
+  options: [Enable every flag by default so that no in-flight feature is accidentally left disabled while
+      the flag service recovers, Block application startup entirely until the flag service comes back and
+      returns a complete ruleset, Randomize each flag value on boot to sample which configuration performs
+      best under the current load, Fail to last-known / safe defaults — serve cached
       flags and default new or risky features off]
   answer: 3
   explanation: |
@@ -617,10 +611,11 @@ questions:
   question: |
     Which scenario is the clearest example of a fallback making an incident worse or
     longer, rather than better?
-  options: [A fallback returns a static default in 1 ms and emits a metric that fires an alert, A fallback
+  options: [A fallback returns a static default in about 1 ms and emits a metric that immediately fires
+      a paging alert to on-call, A fallback
       masks a dependency outage for hours by serving ever-staler data while dashboards look normal, A
-      fallback switches to a fully independent secondary provider that is monitored, A fallback hides
-      an optional widget and logs a counter]
+      fallback switches to a fully independent secondary provider that is monitored and alarmed on activation,
+    A fallback hides an optional widget and increments a counter that operators watch on a dashboard]
   answer: 1
   explanation: |
     The dangerous case is a fallback that masks an outage: user-facing metrics look
@@ -632,9 +627,12 @@ questions:
   tags: [degradation, correctness, boundaries]
   question: |
     For which kind of path is graceful degradation generally SAFE, versus dangerous?
-  options: [Safe for state-changing payment paths; dangerous for presentation, Safe for both equally,
-    Safe for presentation (e.g. hide a widget); dangerous for correctness-critical paths (e.g. skipping
-      a fraud check), 'Dangerous for both equally, so it should never be used']
+  options: ['Safe for state-changing payment paths but dangerous for presentation, since money flows tolerate
+      a skipped step better than a hidden widget does', 'Safe for both presentation and correctness-critical
+      paths equally, because degradation never alters the semantics of a request', Safe for presentation
+      (e.g. hide a widget); dangerous for correctness-critical paths (e.g. skipping
+      a fraud check), 'Dangerous for both presentation and correctness paths equally, so graceful degradation
+      should never be used in a production system']
   answer: 2
   explanation: |
     Degrading is safe for presentation (hide a widget, drop a field) but dangerous for
@@ -648,8 +646,9 @@ questions:
     A "dynamically stable" design (scale on demand during failures) is cheaper than a
     statically stable one. What is the core bet it makes that often fails?
   options: [That the control plane and spare capacity are available exactly when the system is already
-      unhealthy, That the network will be faster during an incident, That users will tolerate higher latency,
-    That the cache will always be warm]
+      unhealthy, That the network will somehow be faster and less congested during an active incident than
+      in steady state, That end users will happily tolerate substantially higher latency for the duration
+      of the failure, That the cache will always remain fully warm and pre-populated straight through the outage]
   answer: 0
   explanation: |
     Dynamic stability bets that scaling (a control-plane action) and capacity are
@@ -665,7 +664,8 @@ questions:
   options: [Route the secondary through the same VPC endpoint and auth service as the primary for consistency,
     'Ensure the secondary is genuinely independent (separate provider, network path, and credentials)
       so it survives a primary-side correlated failure', Make the secondary share the primary's connection
-      pool to save resources, Only enable the secondary during scheduled maintenance windows]
+      pool and thread pool so the two gateways use resources efficiently, Only enable the secondary during
+      scheduled maintenance windows so it never competes with the primary for live traffic]
   answer: 1
   explanation: |
     A fallback provides protection only if it's independent of the primary. Sharing
@@ -677,8 +677,10 @@ questions:
   tags: [degradation, fallback, distinction]
   question: |
     How should you distinguish "graceful degradation" from "a fallback" in an interview?
-  options: [They are interchangeable terms, A fallback is the strategy; degradation is a single line of
-      code, Degradation applies only to hardware; fallbacks only to software, Degradation is the system-level
+  options: [They are fully interchangeable terms that senior engineers use to mean exactly the same thing,
+    A fallback is the overarching system-level strategy while degradation is just a single line of error-handling
+      code, Degradation applies only to physical hardware failures while fallbacks apply only to software
+      call failures, Degradation is the system-level
       strategy (reduced functionality vs outage); a fallback is a specific mechanism (an alternative value)
       used to implement it]
   answer: 3
@@ -692,9 +694,10 @@ questions:
   tags: [brownout, prioritization, criticality]
   question: |
     When applying a brownout, in what order should work be shed?
-  options: ['Least valuable work first, protecting revenue/safety-critical paths last', 'Randomly, to
-      distribute the impact fairly', 'Most valuable work first, since it''s the most expensive to run',
-    Alphabetically by feature name]
+  options: ['Least valuable work first, protecting revenue/safety-critical paths last', 'In a randomized
+      order, so that the impact of shedding is distributed fairly across all features', 'Most valuable work
+      first, since the revenue-critical paths are the most expensive to keep running',
+    'Alphabetically by feature name, so the shedding order is deterministic and easy to reason about']
   answer: 0
   explanation: |
     Brownout prioritizes by criticality: shed the least valuable work first and protect
@@ -707,9 +710,11 @@ questions:
   question: |
     What practice best ensures a degraded mode actually works before a real incident forces
     it?
-  options: [Reading the code carefully during design review, Increasing unit-test coverage of the happy
-      path, Feature flags to force each degraded mode plus chaos experiments that kill T2/T3 dependencies
-      in production to prove the core survives, Adding more retries to the primary path]
+  options: [Reading through the degraded-mode code carefully line by line during the design review meeting,
+    Increasing unit-test coverage of the happy path until every primary-path branch is exercised, Feature
+      flags to force each degraded mode plus chaos experiments that kill T2/T3 dependencies
+      in production to prove the core survives, Adding more retries with backoff around the primary path
+      so it is far less likely to ever fail]
   answer: 2
   explanation: |
     Degraded modes are cold paths; you prove them by forcing each mode (flags) and by
@@ -737,8 +742,10 @@ questions:
     When is returning a controlled error ("fail") the RIGHT choice over returning a
     substituted fallback value?
   options: ['When a wrong or stale answer is worse than no answer (e.g. showing an incorrect account balance),
-      so failing cleanly is safer', Never — a fallback value is always preferable to an error, Only when
-      the primary is slow but healthy, Only for optional presentation widgets]
+      so failing cleanly is safer', Never — a substituted fallback value is always strictly preferable to
+      surfacing an error to the caller under any circumstance, 'Only when the primary is slow but still
+      healthy, so that failing fast frees up the blocked request thread', 'Only for optional presentation
+      widgets, where a missing value has no real user-facing consequence']
   answer: 0
   explanation: |
     A controlled error is correct when a fabricated or stale value would be actively
@@ -753,9 +760,10 @@ questions:
     tends to collapse during incidents. Which structural property best names what is
     missing, and what fixes it?
   options: ['It exhibits bimodal behavior (a second, costlier mode that only appears under stress); constant
-      work or static stability eliminate the second mode', It has a memory leak; add more RAM, It lacks
-      horizontal scaling; add autoscaling triggered at 1.5x, It has too few retries; retry failed calls
-      more aggressively]
+      work or static stability eliminate the second mode', It has a slow memory leak that only manifests
+      under load; provision the fleet with more RAM per host, It lacks
+      horizontal scaling; add autoscaling triggered automatically once load crosses the 1.5x mark, It performs
+      too few retries under stress; retry failed downstream calls more aggressively to push the work through]
   answer: 0
   explanation: |
     A system with a distinct, more-expensive failure mode is bimodal — and that mode
@@ -770,9 +778,11 @@ questions:
     Amazon Route 53 health checking pushes its entire fixed-size health table to the data
     plane on a fixed cadence regardless of how many checks changed. What failure mode does
     this "constant work" design specifically prevent?
-  options: [It prevents DNS records from ever becoming stale, It prevents a control-plane load spike during
+  options: [It prevents DNS records from ever becoming stale by refreshing every entry on a fixed cadence,
+    It prevents a control-plane load spike during
       a mass-failure event, because the work done is identical whether 0 or 10000 checks flip, It eliminates
-      the need for health checks entirely, It guarantees strong consistency across all resolvers]
+      the need for periodic health checks entirely by keeping the full table permanently in memory, It guarantees
+      strong read-after-write consistency across every recursive resolver worldwide]
   answer: 1
   explanation: |
     A delta-based push is cheap normally but generates a work avalanche exactly when many
@@ -785,9 +795,11 @@ questions:
   tags: [constant-work, tradeoff]
   question: |
     What is the fundamental trade-off the constant-work pattern accepts?
-  options: [It sacrifices correctness for availability, It requires eventual consistency, It pays a higher
+  options: [It deliberately sacrifices correctness in order to buy higher availability during large-scale
+      failures, It forces the whole system to relax to eventual consistency because every entry is reprocessed
+      each cycle, It pays a higher
       steady-state cost (always doing worst-case work) in exchange for eliminating a failure mode and its
-      cold code path, It only works for read-only systems]
+      cold code path, It only works for purely read-only systems and cannot be applied to any write path]
   answer: 2
   explanation: |
     Constant work means the worst case is the normal case: you continuously pay the
@@ -800,8 +812,10 @@ questions:
   question: |
     An interviewer says: "AWS's Builders' Library tells you to avoid fallback, but you just
     designed a fallback chain — reconcile that." What is the strongest reconciliation?
-  options: ['Fallbacks are always wrong; remove the chain and return errors', 'AWS is mistaken; fallbacks
-      are strictly better than failing', 'The article applies only to databases and not to caches', 'Prefer
+  options: ['Fallbacks are always wrong in distributed systems, so remove the entire chain and simply return
+      a typed error whenever the primary fails', 'AWS is mistaken on this point; a fallback of any kind is
+      strictly better than failing, so the article can safely be ignored', 'The Builders'' Library guidance
+      applies only to databases and not to CDN or in-memory caches, so a cache chain is exempt', 'Prefer
       designs that don''t need fallback (improve the primary, fail fast, move risk off the critical path);
       if a fallback is unavoidable, make it hot, tested, and independent so it isn''t a cold untested path']
   answer: 3
@@ -817,10 +831,11 @@ questions:
   question: |
     Per "Avoiding fallback in distributed systems," why do fallbacks so often fail exactly
     when they are finally invoked?
-  options: ['They are cold, rarely-exercised code paths that accumulate stale credentials, drifted schemas,
-      untested capacity, and latent bugs — and only run under the worst conditions', They are always written
-      in a slower language than the primary, They consume more memory than the primary path, They are legally
-      required to be disabled during incidents]
+  options:
+    - 'They are cold, rarely-exercised code paths that accumulate stale credentials, drifted schemas, untested capacity, and latent bugs — and only run under the worst conditions'
+    - 'They are always written in a slower interpreted language than the primary path, so the added runtime overhead alone makes them miss the latency budget'
+    - 'They consume far more heap memory than the primary path because the fallback library eagerly buffers the entire result set before returning'
+    - 'They are legally required to be disabled during declared incidents under most cloud compliance frameworks, so they simply never execute'
   answer: 0
   explanation: |
     A fallback runs only after the primary has already failed — under chaotic conditions,
@@ -863,9 +878,9 @@ questions:
     How do stale-while-revalidate and stale-if-error differ?
   options: ['stale-while-revalidate serves stale immediately and refreshes in the background (a latency
       optimization for expired-but-usable content); stale-if-error serves stale only when the origin errors
-      (a failure fallback)', They are aliases for the same behavior, 'stale-while-revalidate applies only
-      to POST; stale-if-error only to GET', 'stale-if-error forbids stale content; stale-while-revalidate
-      requires it']
+      (a failure fallback)', They are exact aliases for one behavior that every modern CDN collapses into
+      a single directive at config-parse time, 'stale-while-revalidate applies only
+      to POST responses while stale-if-error is restricted to GET responses by the caching spec', 'stale-if-error strictly forbids serving any stale content, whereas stale-while-revalidate mandates that stale content always be served first']
   answer: 0
   explanation: |
     stale-while-revalidate is about latency: serve the expired copy now, refresh async for
@@ -880,9 +895,9 @@ questions:
     Cache-Control directive is appropriate, and what is its consequence when the origin is
     unreachable?
   options: ['must-revalidate — it forbids serving stale and returns a 504 when the origin can''t be reached,
-      removing serve-stale by design', 'stale-if-error — it will keep serving the last-known-good value',
+      removing serve-stale by design', 'stale-if-error — it keeps serving the last-known-good value and treats an unreachable origin as a signal to extend freshness',
     'max-age=0 — it disables caching entirely so there is nothing stale to serve', 'immutable — it pins
-      the resource forever']
+      the resource in every cache forever so the origin is never contacted again after the first fetch']
   answer: 0
   explanation: |
     must-revalidate forbids reuse of stale content once fresh lifetime expires; if the
@@ -896,10 +911,11 @@ questions:
   question: |
     You add negative caching (caching 404/NXDOMAIN/empty results) to protect a struggling
     origin from a miss storm. What is the critical tuning consideration?
-  options: [Make the negative TTL very long so the origin is protected for hours, Never cache negative
-      results — it always causes stale data, 'Keep negative TTLs short, because a long negative TTL pins
-      a transient failure and keeps serving it after the origin recovers', Cache negatives only for authenticated
-      users]
+  options:
+    - 'Make the negative TTL as long as the positive TTL so the origin stays shielded for hours during any incident'
+    - 'Never cache negative results at all — buffering a 404 or NXDOMAIN always leaks stale data to the next requester'
+    - 'Keep negative TTLs short, because a long negative TTL pins a transient failure and keeps serving it after the origin recovers'
+    - 'Cache negative results only for authenticated users, since anonymous traffic is what drives the miss storm'
   answer: 2
   explanation: |
     Negative caching stops repeated misses/errors from hammering the origin, but a long
@@ -911,9 +927,11 @@ questions:
   tags: [feature-flags, kill-switch, distinction]
   question: |
     What best distinguishes a kill switch from a feature flag as degradation controls?
-  options: [A kill switch requires a redeploy; a feature flag does not, They are identical, A feature flag
-      can only turn features on and never off, 'A kill switch is a coarse instant off-switch for a whole
-      feature/dependency flipped without a deploy; a feature flag is finer-grained and often gradual (percentage/segment)']
+  options:
+    - 'A kill switch requires a full redeploy to take effect while a feature flag is evaluated live, making it strictly slower to activate mid-incident'
+    - 'They are identical controls that differ only in the name each engineering team gives the same underlying config toggle'
+    - 'A feature flag can only ever turn a feature on and never off, so you always need a separate kill switch to disable anything'
+    - 'A kill switch is a coarse instant off-switch for a whole feature/dependency flipped without a deploy; a feature flag is finer-grained and often gradual (percentage/segment)'
   answer: 3
   explanation: |
     A kill switch is the blunt, instant "turn this whole thing off now" control (no
@@ -928,8 +946,10 @@ questions:
     flag service on every request?
   options: ['It adds a new network dependency (and failure mode) to the critical path of every request
       — the opposite of resilience; flags should evaluate against a locally cached ruleset', It increases
-      cloud egress costs, It makes flags impossible to audit, Flag services cannot handle GET requests
-      at scale]
+      cloud egress costs so much that the per-request billing for the flag lookups dwarfs the compute cost
+      of serving the actual request, It makes flag changes impossible to audit because per-request lookups
+      are never written to the change-history log, Flag services are architecturally unable to serve GET
+      lookups at production request scale and only support batched writes]
   answer: 0
   explanation: |
     Putting a per-request network call to the flag service on the hot path means the flag
@@ -941,10 +961,11 @@ questions:
   tags: [feature-flags, safe-default, fail-safe]
   question: |
     When the feature-flag system is unreachable, which set of behaviors is safest?
-  options: [Default all flags on so nothing is accidentally disabled, and re-fetch synchronously on every
-      request, Block request processing until flags can be fetched, 'Serve cached last-known-good flag
-      values, default new/risky features off, and evaluate locally', Randomize flag values to sample which
-      configuration performs best]
+  options:
+    - 'Default all flags on so nothing is accidentally disabled, and re-fetch the ruleset each request'
+    - 'Block all request processing entirely until a complete fresh ruleset can be fetched again'
+    - 'Serve cached last-known-good flag values, default new/risky features off, and evaluate locally'
+    - 'Randomize each flag value on evaluation to sample which configuration performs best under load'
   answer: 2
   explanation: |
     Flags must fail to a safe last-known-good default: use cached values, default
@@ -973,8 +994,10 @@ questions:
   question: |
     A CRITICAL_PLUS user request makes a 4-hop chain of RPCs. By default, what happens to
     criticality along the chain?
-  options: [Each hop resets to the default CRITICAL and must be re-tagged manually, Criticality only applies
-      to the first hop and is dropped afterward, Criticality is randomly reassigned at each hop for fairness,
+  options: [Each hop resets to the default CRITICAL value and must be explicitly re-tagged by hand at every
+      RPC boundary or the priority is silently lost, Criticality applies only to the very first hop and is
+      stripped from the request metadata before any downstream call is made, Criticality is randomly reassigned
+      at each hop so that no single tier can monopolize the shared downstream capacity,
     'Criticality propagates automatically — downstream calls inherit the caller''s criticality, so load-shedding
       at hop 4 respects the priority set at hop 1']
   answer: 3
@@ -989,9 +1012,11 @@ questions:
   question: |
     Search-as-you-type suggestions are highly sheddable (dropping a keystroke's suggestions
     is harmless) yet a 300 ms suggestion is useless. What principle does this illustrate?
-  options: ['Criticality and latency-sensitivity are orthogonal axes — a feature can be highly sheddable
-      and highly latency-critical at the same time', Sheddable features never need low latency, Latency-critical
-      features must always be CRITICAL_PLUS, Search should never be sheddable]
+  options:
+    - 'Criticality and latency-sensitivity are orthogonal axes — a feature can be highly sheddable and highly latency-critical at the same time'
+    - 'A feature safe to shed can by definition never have a tight latency requirement, so all sheddable work is latency-insensitive'
+    - 'Any feature with a strict latency requirement must always be tagged CRITICAL_PLUS so the scheduler protects it first'
+    - 'Search-as-you-type must never be classified as sheddable, because dropping any single keystroke breaks the whole query'
   answer: 0
   explanation: |
     "Can I drop it?" (criticality) and "must it be fast?" (latency-sensitivity) are
@@ -1004,10 +1029,11 @@ questions:
   question: |
     An entitlements service times out and its client falls back to returning an empty list.
     Users are suddenly logged out en masse. What went wrong and how is it prevented?
-  options: [The cache TTL was too long; shorten it, The timeout was too short; raise it to 30 seconds,
-    'The empty-list default was read downstream as "revoke all entitlements"; use a conservative/inert
-      default and tag the response as degraded so downstream distinguishes "known-empty" from "we don''t
-      know"', The service needs more replicas; add capacity]
+  options:
+    - 'The entitlement cache TTL was far too long; shortening it to a few seconds would have refreshed the list before the logout'
+    - 'The client-side timeout was too aggressive; raising it to a full 30 seconds would let the slow call complete and skip the fallback'
+    - 'The empty-list default was read downstream as "revoke all entitlements"; use a conservative/inert default and tag the response as degraded so downstream distinguishes "known-empty" from "we don''t know"'
+    - 'The entitlements service was simply under-provisioned; adding more replicas behind the load balancer would have stopped the timeouts'
   answer: 2
   explanation: |
     A fallback default is a semantic decision: an empty list can be interpreted as "the
@@ -1020,9 +1046,11 @@ questions:
   tags: [default-value-trap, price, inventory]
   question: |
     Why is a default value of 0 a dangerous fallback for a price or a stock-quantity field?
-  options: [Zero uses more storage than other integers, Zero always fails JSON serialization, 'A default
-      price of 0 can trigger free checkout and a default quantity of 0 can flip items to "out of stock"
-      — zero is rarely an inert value for money or inventory', Zero is fine; any numeric default is safe]
+  options:
+    - 'Zero occupies more storage bytes than other small integers, inflating the row size of every price and inventory record'
+    - 'The value zero always fails JSON serialization and is silently dropped from the response body before it reaches the client'
+    - 'A default price of 0 can trigger free checkout and a default quantity of 0 can flip items to "out of stock" — zero is rarely an inert value for money or inventory'
+    - 'Zero is a perfectly inert default here; any numeric fallback value is safe as long as the field type is an integer'
   answer: 2
   explanation: |
     Substituted defaults are interpreted downstream. Price 0 can enable a free checkout;
@@ -1035,9 +1063,12 @@ questions:
   question: |
     What is the key benefit of tagging a fallback response as "degraded/stale" rather than
     returning a bare substituted value?
-  options: [It makes the response smaller on the wire, 'It lets downstream code distinguish "known-empty"
+  options: [It makes the response measurably smaller on the wire because the degraded marker lets the serializer
+      omit the empty data fields entirely, 'It lets downstream code distinguish "known-empty"
       (confirmed no data) from "we don''t know" (fallback), so it can refuse destructive actions on guessed
-      values', It automatically retries the primary, It encrypts the payload]
+      values', It causes the client library to automatically retry the primary path in the background until
+      a fresh non-degraded value is obtained, It transparently encrypts the fallback payload so that stale
+      or guessed values cannot be read by downstream services]
   answer: 1
   explanation: |
     The whole game is distinguishing absence of data from data confirming absence. An
@@ -1050,9 +1081,8 @@ questions:
   question: |
     For static stability across 3 Availability Zones with 50% overprovisioning, at roughly
     what fraction of load-tested capacity does each AZ normally run, and why that number?
-  options: ['~90%, to minimize idle cost', '~66% (2/3), so that if one AZ is lost its share pushes the
-      two survivors to ~100% with no control-plane scaling', '~50%, so half the fleet is idle', '~33%,
-      to survive losing two AZs simultaneously']
+  options: ['~90% of tested capacity, to minimize idle cost, relying on fast autoscaling to cover the gap if an AZ is lost', '~66% (2/3), so that if one AZ is lost its share pushes the
+      two survivors to ~100% with no control-plane scaling', '~50% of tested capacity, so that exactly half the fleet sits idle and can absorb any single-AZ loss', '~33% of tested capacity, sized so the fleet keeps serving even if two of the three AZs fail at once']
   answer: 1
   explanation: |
     Three AZs with 50% overprovision means each runs at ~2/3 of its tested capacity.
@@ -1067,8 +1097,8 @@ questions:
     an impaired AZ. Compared with a zone-local design, what is the reliability implication?
   options: ['Regional calls give a (2/3)^N chance of dodging the bad AZ (already 4/9 at N=2), degrading
       as N grows; a zone-local design stays at 2/3 regardless of N — the argument for AZ-affinity', 'Regional
-      and zonal designs are mathematically identical', 'Zonal calls give (2/3)^N; regional calls stay at
-      2/3', 'More regional hops always improve availability by spreading load']
+      and zonal designs are mathematically identical because each individual call has the same 2/3 chance of avoiding the impaired AZ either way', 'Zonal calls degrade as (2/3)^N with each added hop while regional calls hold steady at
+      2/3 regardless of N', 'Adding more regional hops always improves overall availability because the extra calls spread load evenly across all three AZs']
   answer: 0
   explanation: |
     Each regional hop independently risks the impaired AZ, so surviving all N hops is
@@ -1081,10 +1111,11 @@ questions:
   tags: [static-stability, active-standby, failover]
   question: |
     What makes an active-standby failover "statically stable"?
-  options: [It launches a fresh replacement instance just in time when the primary fails, It relies on
-      autoscaling to create the standby during the incident, 'You fail over to a pre-existing warm standby
-      (or elect a leader from members that already exist) — the failover is a data-plane flip, not a control-plane
-      build-out', It requires strong consistency between primary and standby]
+  options:
+    - 'It launches a fresh replacement instance just in time the moment the primary fails, so no capacity sits idle waiting'
+    - 'It relies on the autoscaling control plane to provision and boot the standby during the incident to keep steady-state cost low'
+    - 'You fail over to a pre-existing warm standby (or elect a leader from members that already exist) — the failover is a data-plane flip, not a control-plane build-out'
+    - 'It requires strong synchronous consistency between primary and standby so that no write is ever lost during the failover flip'
   answer: 2
   explanation: |
     Static stability means recovery is already provisioned. You fail over to a standby that
@@ -1098,9 +1129,12 @@ questions:
   question: |
     Why must a circuit breaker's half-open state limit the number of trial requests it lets
     through?
-  options: [To reduce logging volume, To comply with HTTP/2 stream limits, 'So a just-recovering dependency
+  options: ['To reduce the volume of log lines the breaker emits, since each trial request writes a debug
+      entry that would otherwise flood the logging pipeline', 'To comply with the HTTP/2 maximum-concurrent-streams
+      limit of 100 per connection, which would otherwise reject the extra trial requests outright', 'So a just-recovering dependency
       is not flooded the instant it comes back, which would trip the breaker straight open again (recovery
-      oscillation)', Because half-open state cannot handle more than one thread]
+      oscillation)', 'Because the half-open state is implemented as a single-threaded state machine that can
+      track only one in-flight probe request at a time']
   answer: 2
   explanation: |
     Half-open probes recovery with only a few trial calls. Without that cap, the full load
@@ -1113,8 +1147,10 @@ questions:
   question: |
     A circuit breaker protecting a write path is open. What is the correct write-side
     analogue of a fallback?
-  options: [Return a fabricated success so the caller proceeds, Silently drop the write to shed load, Convert
-      the write into a read of the last value, 'Record the write to a durable journal/outbox while the
+  options: ['Return a fabricated success response immediately so the caller proceeds as if the write had committed,
+      then quietly discard it once the breaker closes', 'Silently drop the write to shed load, trusting the
+      client''s own retry logic to eventually resubmit it after the breaker closes', 'Convert the write into
+      a read of the last committed value and return that to the caller so the request still completes', 'Record the write to a durable journal/outbox while the
       breaker is open and replay it on recovery, preserving the state change']
   answer: 3
   explanation: |
@@ -1128,10 +1164,11 @@ questions:
   question: |
     A downstream dependency returns HTTP 503 with a Retry-After header. What does
     "accelerated circuit breaking" do with this?
-  options: [Ignore the header and keep sending at full rate until the error-count threshold is hit, Retry
-      immediately without any delay, 'Trip the breaker immediately rather than waiting for the normal error-count
-      threshold, and honour Retry-After as the open duration', Treat 503 as a success since the server
-      responded]
+  options: ['Ignore the Retry-After header entirely and keep sending requests at full rate until the normal
+      rolling error-count threshold is finally reached', 'Retry the failed request immediately with no delay
+      at all, assuming the server has already recovered by the time the response arrives', 'Trip the breaker immediately rather than waiting for the normal error-count
+      threshold, and honour Retry-After as the open duration', 'Treat the 503 as a successful response since
+      the server actually replied, and reset the rolling error counter back to zero']
   answer: 2
   explanation: |
     An explicit overload signal (429/503 with Retry-After) is a definitive "back off now."
@@ -1144,8 +1181,11 @@ questions:
   question: |
     Treating fallback activation as an SLI, why do you alert on it crossing a LOW threshold
     (e.g. baseline 0.1% to a few percent) rather than a high one?
-  options: [Because high thresholds are harder to configure, Because low thresholds reduce alert volume,
-    Because fallback rate can never exceed a few percent, 'Because fallbacks keep end-user errors near
+  options: ['Because high thresholds are far harder to configure correctly, and picking the wrong high value
+      would suppress the alert during the exact incident it exists to catch', 'Because low thresholds reduce
+      overall alert volume by firing less often than high ones, keeping on-call pager noise down during routine
+      dependency blips', 'Because the fallback rate can never exceed a few percent by design, so a high threshold
+      would be mathematically impossible for the alarm to ever cross', 'Because fallbacks keep end-user errors near
       zero, so a small rise in fallback rate is often the only early signal that a dependency is degraded
       — the sensitivity is the point']
   answer: 3
@@ -1160,10 +1200,13 @@ questions:
   question: |
     Why is "cache-staleness age" a distinct alarm from "fallback activation rate" when a
     serve-stale fallback is active?
-  options: [They always move together, so one alarm suffices, 'The fallback rate can be flat while the
+  options: ['They always move together in lockstep, so a single combined alarm on either signal is enough
+      and a second one only adds redundant pages', 'The fallback rate can be flat while the
       age of the served data climbs unbounded during a prolonged outage — staleness age catches a long
-      outage that a steady fallback rate hides', Staleness age only matters for writes, Fallback rate is
-      a subset of staleness age]
+      outage that a steady fallback rate hides', 'Staleness age only matters for write paths, where an old
+      value can overwrite fresher data; on a read-only serve-stale fallback the age is irrelevant', 'Fallback
+      rate is simply a derived subset of staleness age, computed by bucketing the age metric, so alarming
+      on age alone already covers it']
   answer: 1
   explanation: |
     A steady serve-stale fallback keeps the fallback rate flat, but the data it serves gets
@@ -1176,9 +1219,12 @@ questions:
   question: |
     "The code path you never use is the code path that doesn't work." Which practice most
     directly keeps the load-shedding / degraded code path warm in normal operation?
-  options: [Adding more unit tests for the happy path, 'Deliberately running a small subset of servers
+  options: ['Adding more unit tests for the happy path so every branch of the primary code is covered long
+      before the load-shedding logic is ever reached', 'Deliberately running a small subset of servers
       near their overload/shedding threshold continuously, so the degraded path executes in steady state',
-    Increasing the primary path's timeout, Disabling the degraded path until an incident requires it]
+    'Increasing the primary path''s timeout so requests wait longer before shedding, giving the healthy code
+      path more time to finish under load', 'Disabling the degraded path entirely in normal operation and
+      enabling it via a flag only once an incident forces load-shedding to kick in']
   answer: 1
   explanation: |
     Keeping a few hosts near the shedding threshold in normal times exercises the degraded
@@ -1191,9 +1237,11 @@ questions:
   question: |
     In the open state, what is the most resilient behavior for a circuit breaker fronting a
     read that has a cached value available?
-  options: [Always throw an exception so every caller handles the failure itself, Queue the read and block
-      until the breaker closes, 'Directly return the cached/default value without attempting the dependency
-      at all, protecting both caller and callee', Send one probe request per caller to check the dependency]
+  options: ['Always throw an exception immediately so that every individual caller is forced to handle the
+      failure and supply its own fallback logic', 'Queue the read request and block the calling thread until
+      the breaker transitions back to closed and the dependency is confirmed healthy', 'Directly return the cached/default value without attempting the dependency
+      at all, protecting both caller and callee', 'Send one probe request per caller through to the dependency
+      to check whether it has recovered before returning a cached value']
   answer: 2
   explanation: |
     An open breaker need not throw — it can return a cached or default value immediately
@@ -1206,10 +1254,12 @@ questions:
   question: |
     Which of these best describes making a fallback "hot" so the avoid-fallback objection no
     longer applies?
-  options: [Keeping the fallback code in a faster programming language, 'Exercising the fallback continuously
+  options: ['Keeping the fallback code written in a faster, lower-level programming language than the primary
+      so it can never miss the latency budget when it is finally invoked', 'Exercising the fallback continuously
       in production (e.g. always serving from an always-populated cache) so it is not a cold, rarely-run
-      path', Running the fallback only during scheduled maintenance windows, Documenting the fallback thoroughly
-      in a runbook]
+      path', 'Running the fallback only during scheduled weekly maintenance windows so it gets exercised on
+      a fixed cadence away from live production traffic', 'Documenting the fallback path thoroughly in an on-call
+      runbook so responders know exactly how to trigger it by hand during an incident']
   answer: 1
   explanation: |
     A "hot" fallback runs as part of steady-state operation rather than only after the
