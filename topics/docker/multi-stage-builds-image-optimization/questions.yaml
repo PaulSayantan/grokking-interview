@@ -10,9 +10,9 @@ questions:
     What is the core idea of a multi-stage Docker build?
   options:
   - Use several FROM stages so heavy build tooling stays in a throwaway stage and only artifacts are copied into a lean final image
-  - Build the application on multiple machines in parallel
-  - Split one image into multiple tags for different environments
-  - Run each RUN instruction in its own container for isolation
+  - Distribute the application build across multiple physical machines in parallel so each FROM stage compiles on a separate host
+  - Split a single built image into multiple tags so each deployment environment (dev, staging, prod) pulls its own variant
+  - Run each RUN instruction inside its own isolated container so a failure in one command cannot affect the others
   answer: 0
   explanation: |
     A multi-stage build uses multiple FROM instructions. Compilers, source, and build
@@ -29,9 +29,9 @@ questions:
     image size matter?"
   options:
   - Slower pulls/deploys (autoscaling, cold starts) and a larger attack surface
-  - Prettier layer diagrams and easier tagging
-  - More build cache and faster compilation
-  - Better multi-arch support and smaller registries only
+  - Prettier layer dependency diagrams in the CLI and noticeably easier tag management
+  - More reusable build-cache entries and measurably faster source compilation on rebuilds
+  - Better multi-architecture manifest support and fundamentally smaller registries only
   answer: 0
   explanation: |
     The two answers interviewers want are deploy/pull speed (every node downloads and
@@ -47,10 +47,10 @@ questions:
     In a Dockerfile with three FROM stages, which stage produces the image that gets
     published?
   options:
-  - The first stage
-  - The largest stage
+  - The first stage, since it defines the base image the whole build inherits from
+  - Whichever stage produces the largest filesystem, because Docker publishes the fullest one
   - The last (final) stage
-  - All stages are published as separate tags
+  - Every stage is published as a separate tag suffixed with its stage name or index
   answer: 2
   explanation: |
     Only the last stage becomes the resulting image. Earlier stages are intermediate;
@@ -65,9 +65,9 @@ questions:
     Which statement about state carried between multi-stage build stages is TRUE?
   options:
   - Each FROM starts a fresh filesystem; nothing carries over except what you COPY --from
-  - Environment variables and installed packages persist automatically into the next stage
-  - WORKDIR set in one stage applies to all later stages
-  - The final stage inherits all files from every previous stage by default
+  - Environment variables and installed packages persist automatically into the next stage through Docker's shared build layer
+  - A WORKDIR set in one stage applies to every later stage, since directory context is global to the Dockerfile
+  - The final stage inherits all files from every previous stage by default unless you explicitly exclude them
   answer: 0
   explanation: |
     Every FROM begins an independent stage with its own base and filesystem. ENV, WORKDIR,
@@ -82,10 +82,10 @@ questions:
     Why should you name stages with `AS <name>` instead of relying on numeric indexes in
     `COPY --from`?
   options:
-  - Named stages build faster
-  - Numeric indexes are deprecated and rejected by BuildKit
+  - Named stages compile faster because BuildKit prioritizes resolving them first
+  - Numeric indexes were deprecated in Docker 20.10 and are now rejected outright by BuildKit
   - Naming keeps COPY --from references stable even if stages are reordered later
-  - Named stages are automatically cached longer
+  - Named stages are retained in the build cache for a longer time-to-live than indexed ones
   answer: 2
   explanation: |
     Stages default to zero-based indexes (--from=0). That is fragile: reorder the stages and
@@ -100,9 +100,9 @@ questions:
     What does `docker build --target builder -t app:dev .` do?
   options:
   - Stops the build at the stage named `builder` and tags that as the image
-  - Builds only the layers that changed since the last build
-  - Targets a specific CPU architecture named "builder"
-  - Deletes the builder stage after the build completes
+  - Builds only the individual layers that changed since the previous build of this Dockerfile
+  - Targets the specific CPU architecture registered under the platform alias "builder"
+  - Runs the builder stage and then deletes it from the cache once the build completes
   answer: 0
   explanation: |
     --target stops the build at the named stage rather than building to the final stage.
@@ -118,9 +118,9 @@ questions:
     only on `builder`, and there is an unrelated `lint` stage. What happens to `lint`?
   options:
   - It is skipped, because BuildKit only builds stages the target depends on
-  - It is built first because all stages always run
-  - It causes the build to fail because it is unreferenced
-  - It is built in parallel and its output merged into final
+  - It is built first because BuildKit always runs every stage in declaration order regardless of the target
+  - It causes the build to fail with an error because BuildKit rejects any stage that is left unreferenced
+  - It is built in parallel and its filesystem output is automatically merged into the final stage
   answer: 0
   explanation: |
     BuildKit only builds the stages the target actually depends on, so unreferenced stages
@@ -135,9 +135,9 @@ questions:
     What does `COPY --from=nginx:1.27 /etc/nginx/nginx.conf /nginx.conf` do?
   options:
   - Copies a file directly out of the external nginx:1.27 image's filesystem into the current stage
-  - Runs the nginx image as a sidecar during build
-  - Fails, because --from can only reference stages defined in this Dockerfile
-  - Imports nginx's ENTRYPOINT and ENV into the current stage
+  - Starts the nginx:1.27 image as a sidecar container during the build and reads the file over a shared volume
+  - Fails at parse time, because the --from flag can only reference build stages defined earlier in this same Dockerfile
+  - Imports nginx's ENTRYPOINT, ENV, and exposed ports into the current stage along with the copied file
   answer: 0
   explanation: |
     COPY --from can reference an external image (by name/tag/digest), not just your own
@@ -152,10 +152,10 @@ questions:
     Which of these is a BUILD-time dependency that should stay in the builder stage, not
     the runtime image?
   options:
-  - The compiled application binary
-  - CA certificates the app needs for HTTPS
+  - The compiled application binary that the container actually executes at runtime
+  - The CA certificates the running app needs to validate outbound HTTPS connections
   - The Go compiler / npm / Maven used to produce the artifact
-  - The JRE needed to run a JAR
+  - The JRE the container loads at startup to execute the packaged JAR
   answer: 2
   explanation: |
     Compilers and package managers (Go compiler, npm, Maven) are needed to produce the
@@ -171,9 +171,9 @@ questions:
     `RUN rm -rf node_modules/.cache src`. Why is the image still large?
   options:
   - Because deleting files in a later layer doesn't remove them from earlier layers; the bytes remain behind a whiteout
-  - Because npm always reinstalls at runtime
-  - Because the CMD instruction re-adds the files
-  - Because rm -rf doesn't work inside containers
+  - Because npm always reinstalls the full node_modules tree again the first time the container runs
+  - Because the CMD instruction silently re-adds the deleted source and cache files at build time
+  - Because rm -rf is a no-op inside a container's overlay filesystem and never frees anything
   answer: 0
   explanation: |
     Layers are additive. Files added in an earlier RUN and deleted in a later RUN still
@@ -188,9 +188,9 @@ questions:
     What distinguishes a distroless image from a typical Linux base image?
   options:
   - It contains the app and its runtime deps but no shell and no package manager
-  - It contains no application code, only the OS
-  - It runs without a Linux kernel
-  - It can only be built with BuildKit
+  - It contains no application code at all, shipping only a full standard OS userland
+  - It runs entirely without a Linux kernel by embedding its own lightweight micro-kernel
+  - It can only be built with BuildKit and refuses to build under the legacy image builder
   answer: 0
   explanation: |
     Distroless images (e.g. gcr.io/distroless/*) include your app and its runtime
@@ -206,9 +206,9 @@ questions:
     `ENTRYPOINT ["/app"]` rather than shell form `ENTRYPOINT /app`?
   options:
   - There is no /bin/sh in a distroless image to interpret the shell-form string
-  - Exec form is faster to parse
-  - Shell form is deprecated in all Dockerfiles
-  - Vector form automatically drops privileges
+  - Exec form is parsed measurably faster by the Docker daemon at container start
+  - Shell form was deprecated across all Dockerfiles starting with the 1.13 file syntax
+  - Vector form automatically drops root privileges and runs the process as an unprivileged user
   answer: 0
   explanation: |
     Shell form wraps the command in /bin/sh -c "...". Distroless images have no shell, so
@@ -224,9 +224,9 @@ questions:
     "no such file". What is the recommended way to get a shell for debugging?
   options:
   - Use the distroless `:debug` tag (adds a busybox shell) or an ephemeral debug container
-  - "Rebuild from ubuntu \u2014 distroless can't be debugged"
-  - Install bash at runtime with apt
-  - Add USER root and retry
+  - "Permanently rebuild the service from an ubuntu base, because distroless images can never be debugged in any way"
+  - Install bash into the running container at runtime with `apt-get install bash` and then re-exec into it
+  - Add `USER root` to the final stage and retry the exec, since the missing shell is really a permissions error
   answer: 0
   explanation: |
     Distroless images intentionally have no shell. The supported approaches are the
@@ -243,9 +243,9 @@ questions:
     `alpine` base image?
   options:
   - Alpine uses musl libc instead of glibc, so glibc-linked binaries and some prebuilt wheels may break or must recompile
-  - Alpine has no package manager
-  - Alpine images are larger than debian
-  - Alpine cannot run as non-root
+  - Alpine ships without any package manager, so you cannot install additional runtime libraries at all
+  - Alpine images are actually larger than the equivalent debian images once fully populated
+  - Alpine containers cannot be configured to run as a non-root user for security hardening
   answer: 0
   explanation: |
     Alpine is tiny but uses musl libc, not glibc. Binaries compiled against glibc may fail
@@ -261,9 +261,9 @@ questions:
     What is the `scratch` base image?
   options:
   - A completely empty image with no files at all
-  - A minimal Alpine variant with only busybox
-  - Docker's default base when none is specified
-  - A scratchpad layer used only during build
+  - A minimal Alpine-derived variant that ships only the busybox multi-call binary
+  - Docker's implicit default base image used automatically when no FROM is specified
+  - A temporary scratchpad layer that exists only during the build and is discarded afterward
   answer: 0
   explanation: |
     scratch is the empty base image — zero bytes, no files. It's ideal for a fully static
@@ -279,9 +279,9 @@ questions:
     What is the fix?
   options:
   - Copy the CA certificate bundle (ca-certificates.crt) into the scratch image
-  - Set GODEBUG=x509ignore=1
-  - Switch ENTRYPOINT to shell form
-  - Add EXPOSE 443
+  - Set the runtime environment variable GODEBUG=x509ignore=1 to skip chain verification safely
+  - Switch the ENTRYPOINT to shell form so /bin/sh can load the system trust store on startup
+  - Add an EXPOSE 443 instruction so the TLS port is registered and certificate checks succeed
   answer: 0
   explanation: |
     scratch has no CA certificates, so TLS verification of remote servers fails. Copy
@@ -296,10 +296,10 @@ questions:
     A binary copied into a `scratch` image exits immediately with "no such file or
     directory" even though the file clearly exists. What is the usual cause?
   options:
-  - The image is corrupted
-  - scratch requires a shell to launch binaries
+  - The image layers are corrupted and must be rebuilt and re-pushed from a clean context
+  - The scratch base requires a shell present to launch any binary as its process
   - "The binary is dynamically linked and its loader/libc is missing from scratch \u2014\ \ it isn't fully static"
-  - The ENTRYPOINT path is wrong
+  - The ENTRYPOINT path is wrong and points to a directory rather than the executable file
   answer: 2
   explanation: |
     That confusing error usually means the binary is dynamically linked but the dynamic
@@ -314,9 +314,9 @@ questions:
     Which RUN block correctly avoids leaving the apt package cache in the image?
   options:
   - RUN apt-get update; RUN apt-get install -y curl; RUN rm -rf /var/lib/apt/lists/*
-  - RUN apt-get install curl then docker system prune
+  - RUN apt-get install -y curl, then run docker system prune after the build to reclaim the cache
   - RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-  - RUN apt-get install -y curl (cache is cleaned automatically)
+  - RUN apt-get install -y curl on its own, since apt clears its package lists automatically on exit
   answer: 2
   explanation: |
     The cleanup must happen in the SAME RUN (same layer) that populated the cache,
@@ -349,9 +349,9 @@ questions:
     What is the primary purpose of a `.dockerignore` file?
   options:
   - To list files Docker should delete from the running container
-  - To specify which layers to cache
+  - To tell Docker which image layers it should cache and reuse
   - To exclude files/dirs from the build context sent to the builder
-  - To mark files as secrets
+  - To flag specific files as build secrets Docker will encrypt
   answer: 2
   explanation: |
     .dockerignore (syntax like .gitignore) excludes paths from the build context. This
@@ -366,10 +366,10 @@ questions:
     Why is excluding `.env` and `*.pem` in `.dockerignore` a security measure and not just
     cleanup?
   options:
-  - They slow the build significantly
-  - Docker refuses to build if they are present
+  - They noticeably slow the build because Docker must hash and re-upload each file
+  - Docker outright refuses to build the image whenever such files are in the context
   - A secret copied into any layer (e.g. via COPY . .) is recoverable from the image even if "deleted" later
-  - They break the layer cache
+  - Their presence in the build context invalidates and busts the layer cache
   answer: 2
   explanation: |
     If a secret is pulled into the context and copied into a layer, it persists in that
@@ -385,10 +385,10 @@ questions:
     Two services use the same distroless/java base. How does layer content-addressing help
     the fleet?
   options:
-  - It merges the two services into one image
-  - It disables the build cache
+  - It transparently merges the two services into one combined image at push time
+  - It disables the layer build cache so every rebuild starts completely from scratch
   - Nodes and the registry store the shared base layers once, and a node that already has them skips downloading them on pull
-  - It forces both images to the same total size
+  - It rewrites both images so they end up padded to exactly the same total size on disk
   answer: 2
   explanation: |
     Layers are content-addressed and shared: identical base layers are stored once per node
@@ -403,10 +403,10 @@ questions:
     To maximize build-cache reuse, how should you order copying dependency manifests vs
     source code in a Dockerfile?
   options:
-  - Copy source first, then manifests, then install
-  - Copy everything in one COPY . . to minimize layers
+  - Copy the volatile source first, then the manifests, then run the dependency install
+  - Copy everything in a single COPY . . so the build produces the fewest possible layers
   - Copy dependency manifests and install deps first, then copy the frequently-changing source
-  - Order doesn't affect caching
+  - Instruction order has no effect on cache reuse since Docker hashes the whole context
   answer: 2
   explanation: |
     Order instructions least- to most-frequently-changing. Copying package.json/go.mod and
@@ -421,10 +421,10 @@ questions:
   question: |
     What is the downside of using `--squash` to flatten an image into a single layer?
   options:
-  - It increases the number of CVEs
-  - It removes the ENTRYPOINT
+  - It rescans the merged layer and injects additional CVEs into the image metadata
+  - It silently strips the ENTRYPOINT, forcing you to redeclare it after squashing
   - It destroys cross-image layer sharing, so the flattened blob can't be deduplicated with other images
-  - It only works on Windows containers
+  - It is supported only for Windows container images and errors out on Linux ones
   answer: 2
   explanation: |
     Squashing collapses layers into one blob. That blob can't share layers with other
@@ -439,9 +439,9 @@ questions:
     Which command shows you each layer of an image with the instruction that created it
     and its size — useful for finding what's bloating the image?
   options:
-  - docker inspect --layers
-  - docker stats <image>
-  - docker layers ls
+  - docker inspect --layers, which prints each layer with its instruction and size
+  - docker stats <image>, which reports the per-layer disk usage of a built image
+  - docker layers ls, which lists every committed layer alongside its creating step
   - docker history <image>
   answer: 3
   explanation: |
@@ -457,9 +457,9 @@ questions:
     How can you keep a package cache to speed up rebuilds WITHOUT baking that cache into
     the final image?
   options:
-  - Run docker system prune after each build
-  - Add the cache dir to .dockerignore
-  - Use --squash
+  - Run docker system prune after each build to sweep the cache out of the image
+  - Add the cache directory to .dockerignore so it is stripped from the final layers
+  - Use --squash to flatten the cache layer out of the finished image
   - "Use a BuildKit cache mount: RUN --mount=type=cache,target=/root/.cache ..."
   answer: 3
   explanation: |
@@ -475,9 +475,9 @@ questions:
     In a Node multi-stage build, what's the standard way to keep devDependencies out of the
     runtime image?
   options:
-  - Delete node_modules in the final CMD
-  - Use npm install --force in the final stage
-  - devDependencies are never installed by npm ci
+  - Delete the node_modules directory from within the container's final CMD at startup
+  - Run npm install --force in the final stage so devDependencies get pruned automatically
+  - devDependencies are never installed by npm ci, so no extra step is ever required
   - Build with all deps in the builder stage, then in the final stage run `npm ci --omit=dev` or copy only production node_modules and built output
   answer: 3
   explanation: |
@@ -492,9 +492,9 @@ questions:
   question: |
     Beyond small size, what is the key security benefit of a distroless image?
   options:
-  - It encrypts the filesystem
-  - It runs the app in a VM
-  - It blocks all outbound network traffic
+  - It transparently encrypts the container's root filesystem while the app runs
+  - It runs the application inside a lightweight micro-VM isolated from the host kernel
+  - It blocks all outbound network traffic by default unless a port is explicitly opened
   - No shell/package manager/curl means an attacker with code execution has almost no tools to pivot with, and there are far fewer CVEs
   answer: 3
   explanation: |
@@ -509,9 +509,9 @@ questions:
   question: |
     Why can't you put a `RUN apt-get install ...` instruction in a distroless FINAL stage?
   options:
-  - RUN is only allowed in the first stage
-  - apt is blocked by seccomp
-  - RUN requires a WORKDIR
+  - The RUN instruction is only permitted in the very first stage of a Dockerfile
+  - apt is blocked by the default seccomp profile that distroless images enforce
+  - RUN cannot execute until a WORKDIR has first been declared in that stage
   - "There is no shell or package manager in distroless, so RUN (which needs /bin/sh)\ \ and apt can't execute \u2014 you can only COPY into it"
   answer: 3
   explanation: |
@@ -527,10 +527,10 @@ questions:
     A team wants smaller images but their app is glibc-linked and occasionally needs apt
     during build. Which base is the safest middle ground?
   options:
-  - scratch
-  - alpine
+  - scratch, since an empty base sidesteps every libc concern
+  - alpine, because musl handles glibc binaries with a shim
   - a *-slim (e.g. debian:slim) variant
-  - the full ubuntu image
+  - the full ubuntu image, to guarantee every apt package is present
   answer: 2
   explanation: |
     -slim variants keep real Debian/glibc and apt but strip docs and extras, so they're much
@@ -545,9 +545,9 @@ questions:
     On a `scratch` image, `USER appuser` fails to start the container. Why, and what's the
     fix?
   options:
-  - scratch disables the USER instruction; use --user at runtime only
-  - USER must come before FROM
-  - You must chmod the binary first
+  - scratch disables the USER instruction entirely; you may only set --user at runtime
+  - The USER instruction has to be declared before the FROM line to take effect
+  - You must chmod the application binary executable before any USER can own it
   - scratch has no /etc/passwd to resolve the username; use a numeric UID like USER 65532
   answer: 3
   explanation: |
@@ -563,9 +563,9 @@ questions:
     How can multi-stage builds run your test suite without shipping test tooling to
     production?
   options:
-  - Tests can't be run during a build
-  - Put tests in the final CMD
-  - Use --squash to remove tests
+  - Tests can never be executed during an image build, only after the container starts
+  - Put the test command in the final image's CMD so it runs on every container launch
+  - Use --squash to flatten away the test tooling after the suite has finished running
   - Add a test stage (FROM builder) that runs the tests; if it fails the build fails, but that stage is never in the final image
   answer: 3
   explanation: |
@@ -580,9 +580,9 @@ questions:
   question: |
     Which of the following is NOT a direct benefit of smaller images?
   options:
-  - Faster pulls and deploys
-  - Smaller attack surface
-  - Lower storage and transfer cost
+  - Faster image pulls and quicker rollouts across the fleet
+  - A smaller attack surface with fewer bundled binaries to exploit
+  - Lower registry storage and cross-network transfer cost
   - Higher application request throughput at runtime
   answer: 3
   explanation: |
@@ -633,9 +633,9 @@ questions:
     Beyond .dockerignore, what Dockerfile practice reduces cache busting and avoids
     shipping surprises?
   options:
-  - Always use COPY . . at the top of the Dockerfile
-  - Use ADD instead of COPY everywhere
-  - Put all COPY instructions in the final stage
+  - Always place a single COPY . . at the very top so every later step is cached
+  - Use ADD instead of COPY everywhere to benefit from its built-in change detection
+  - Consolidate all COPY instructions into the final stage to keep earlier layers stable
   - Copy specific paths explicitly (e.g. COPY package.json ./ then COPY src ./src) instead of a blanket COPY . .
   answer: 3
   explanation: |
@@ -650,9 +650,9 @@ questions:
   question: |
     Why can collapsing everything into a single giant RUN instruction be counterproductive?
   options:
-  - Docker rejects RUN blocks over a size limit
-  - Single RUN layers can't be shared between images
-  - It disables multi-stage builds
+  - Docker rejects any single RUN block whose inline script exceeds the 4 KB instruction size limit
+  - A layer produced by one giant RUN is flagged non-cacheable, so BuildKit refuses to reuse it later
+  - It silently disables multi-stage builds by collapsing every named stage into the final one
   - "It hurts build-cache granularity \u2014 any change forces the whole expensive layer\ \ to rebuild"
   answer: 3
   explanation: |
@@ -669,10 +669,10 @@ questions:
     Your distroless image needs a container health check but has no curl/wget. What's a
     valid approach?
   options:
-  - Install curl at runtime
+  - Have the container run apt-get install curl on first startup so the HEALTHCHECK command can shell out to it
   - Use a small static healthcheck binary copied in, or let an external checker (e.g. a K8s httpGet probe) hit the app's endpoint
-  - Health checks are impossible without a shell
-  - Switch ENTRYPOINT to shell form so HEALTHCHECK works
+  - Health checks are simply impossible on distroless because HEALTHCHECK requires a shell that the image lacks
+  - Switch the ENTRYPOINT to shell form, which re-enables the /bin/sh that HEALTHCHECK needs to invoke curl
   answer: 1
   explanation: |
     With no shell or HTTP client, a curl/wget-based HEALTHCHECK won't run. Options are a
@@ -704,10 +704,10 @@ questions:
     A teammate says "our published image is 900 MB, but I'll just run `docker system prune`
     to fix it." Why is this wrong?
   options:
-  - prune only works on running containers
+  - prune only operates on currently running containers, so it cannot touch a stopped or already-pushed image at all
   - The bloat is baked into the image's layers; prune only cleans dangling/unused local artifacts, not a published image's size
-  - prune deletes the ENTRYPOINT
-  - prune requires BuildKit
+  - prune strips the image's ENTRYPOINT and CMD metadata as a side effect, which is why the team avoids running it in CI
+  - prune requires BuildKit to be enabled first, and without it the command silently skips the largest committed layers
   answer: 1
   explanation: |
     docker system prune reclaims local disk by removing dangling images, stopped
@@ -723,10 +723,10 @@ questions:
     What's the optimal final-stage base for a compiled Java application produced by a Maven
     builder stage?
   options:
-  - The full maven image
-  - A JDK image so it can recompile at runtime
+  - The full maven image, so the same toolchain that built the JAR is available for hot rebuilds in production
+  - A full JDK image, so the JVM can recompile the application's sources on demand at runtime
   - A JRE-only image (or distroless/java) containing just the runtime plus the JAR
-  - scratch, since JARs are static
+  - scratch, since a compiled JAR is a self-contained static artifact needing no external runtime
   answer: 2
   explanation: |
     The JAR only needs a Java runtime to execute, not the full JDK or Maven. A JRE-slim or
@@ -740,10 +740,10 @@ questions:
   question: |
     What does the distroless `:nonroot` tag give you?
   options:
-  - A shell that runs as non-root
+  - A minimal busybox shell that has been pre-configured to launch as a non-root user
   - An image configured to run as a non-root user by default for tighter security
-  - Root access removed from the host
-  - Automatic seccomp profiles
+  - A guarantee that root access is stripped from the underlying host as well as the container
+  - An automatically applied restrictive seccomp profile that blocks privileged syscalls by default
   answer: 1
   explanation: |
     The :nonroot variant runs the container as a non-root user by default, reducing the
@@ -759,10 +759,10 @@ questions:
     From an image-optimization standpoint, why does choosing distroless also help with
     vulnerability scanning (covered in image-scanning-supply-chain)?
   options:
-  - Distroless images can't be scanned
+  - Distroless images ship no package manifest, so scanners like Trivy simply cannot analyze them
   - Far fewer OS packages means far fewer package CVEs, improving scanner signal-to-noise
-  - Scanners skip distroless images entirely
-  - Distroless disables CVE reporting
+  - Scanners are hard-coded to skip any distroless-tagged image, so it never appears in reports
+  - Distroless images set a metadata flag that disables CVE reporting for the whole image tree
   answer: 1
   explanation: |
     A distroless image contains only the app and runtime deps, so scanners like Trivy/Grype
@@ -778,10 +778,10 @@ questions:
     A Go app's single-stage image is 900 MB; after a multi-stage build with a scratch final
     stage it's ~12 MB. What accounts for almost all of the reduction?
   options:
-  - Compression of the source code
+  - Aggressive gzip compression of the application source code before it is copied in
   - "Dropping the Go compiler, source, and module cache \u2014 none of which are needed\ \ to run the compiled binary"
-  - Removing the application binary
-  - Using a faster registry
+  - Removing the compiled application binary itself, which is regenerated on first container start
+  - Pushing the final image to a faster registry that stores layers more densely on disk
   answer: 1
   explanation: |
     The 900 MB was mostly the golang build image (compiler, standard library sources, module
@@ -795,10 +795,10 @@ questions:
   question: |
     What does the `dive` tool help you find that `docker images` cannot?
   options:
-  - The registry the image was pushed to
+  - The registry hostname and repository path the image was originally pushed to
   - Per-layer file contents and wasted space (e.g. files added then deleted, duplicated across layers) with an efficiency score
-  - The number of running containers
-  - The image's network configuration
+  - The number of containers currently running from that image across the host
+  - The image's default bridge network and its published port mappings
   answer: 1
   explanation: |
     docker images only shows total size. dive is an interactive explorer of each layer's
@@ -813,10 +813,10 @@ questions:
     What's a clean way to keep pip build headers and caches out of a Python runtime image
     in a multi-stage build?
   options:
-  - Run pip install in the final CMD
+  - Put pip install into the final image's CMD so dependencies are fetched when the container starts
   - Install into a venv (or --user) in the builder, copy the site-packages to the runtime stage, and use pip install --no-cache-dir
-  - Use scratch and copy the Python interpreter binary only
-  - Delete /usr/lib/python in a later layer
+  - Use a scratch base and copy in only the standalone Python interpreter binary, dropping site-packages
+  - Install everything, then delete /usr/lib/python in a later RUN layer to reclaim the space
   answer: 1
   explanation: |
     Install dependencies (compiling wheels with build headers if needed) in the builder,
@@ -832,10 +832,10 @@ questions:
     When people say "smaller images deploy faster," what most directly determines the pull
     time on a node that already has the base image cached?
   options:
-  - The total logical size of the image
+  - The total logical size of the image as reported by docker images
   - The size of the layers the node does NOT already have (the delta it must transfer)
-  - The number of tags in the registry
-  - The image's creation timestamp
+  - The number of tags the repository has accumulated in the registry
+  - The image's creation timestamp recorded in its config metadata
   answer: 1
   explanation: |
     A node only pulls layers it lacks. If the base layers are already cached, deploy speed
@@ -868,10 +868,10 @@ questions:
     A C++ service is dynamically linked against glibc and libstdc++. Which distroless
     variant is appropriate for its runtime stage?
   options:
-  - distroless/static
+  - distroless/static, since its bundled musl shim can satisfy the glibc and libstdc++ symbols
   - distroless/cc (includes the C/C++ runtime libraries)
-  - scratch
-  - distroless/java
+  - scratch, because a C++ binary embeds its own copy of glibc and libstdc++ at link time
+  - distroless/java, whose JVM runtime layer also ships the native C/C++ shared libraries
   answer: 1
   explanation: |
     distroless/static is only for fully static binaries. A glibc/libstdc++ dynamically
@@ -885,10 +885,10 @@ questions:
   question: |
     Is it valid to write `FROM builder AS test` where `builder` is an earlier named stage?
   options:
-  - No, FROM can only reference external images
+  - No, FROM can only reference external images pulled from a registry, never an earlier stage
   - Yes, a stage can use another named stage as its base, inheriting its filesystem
-  - Only if BuildKit is disabled
-  - Only for the final stage
+  - Only if BuildKit is disabled, since the legacy builder alone permits stage-on-stage inheritance
+  - Only for the final stage, which is the one place FROM is allowed to point at a prior stage
   answer: 1
   explanation: |
     A FROM can reference a previously named stage, creating a new stage that starts from
@@ -903,10 +903,10 @@ questions:
     From a security angle, why does minimizing what's in the image complement container
     hardening (rootless, cap-drop, read-only rootfs from docker-security)?
   options:
-  - It replaces the need for any runtime hardening
+  - It fully replaces the need for any runtime hardening, since an empty image has nothing left to protect
   - Fewer binaries/tools in the image means fewer exploitation primitives if an attacker gets in, reducing what hardening has to contain
-  - It encrypts the container at rest
-  - It prevents all privilege escalation automatically
+  - It encrypts the container's root filesystem at rest so a stolen layer blob can't be read
+  - It automatically prevents all privilege escalation by refusing any setuid binary in the image
   answer: 1
   explanation: |
     A minimal image (distroless/scratch, no shell/tools) reduces the attack surface and the
@@ -922,10 +922,10 @@ questions:
     In the layered/overlay filesystem, what is the mechanism by which a file "deleted" in an
     upper layer still consumes space in a lower layer?
   options:
-  - The file is compressed but kept in the same layer
+  - The file is transparently gzip-compressed in place but otherwise kept within the same lower layer
   - A whiteout marker in the upper layer hides the lower-layer file, but the lower layer's bytes remain
-  - Docker moves the file to a hidden volume
-  - The deletion is deferred until runtime
+  - Docker relocates the deleted file into a hidden anonymous volume that still counts against image size
+  - The deletion is deferred until container runtime, so the bytes only leave once the image actually runs
   answer: 1
   explanation: |
     Overlay-style layers are additive. Removing a file records a whiteout entry in the upper

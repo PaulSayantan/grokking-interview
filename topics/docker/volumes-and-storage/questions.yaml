@@ -10,10 +10,10 @@ questions:
       You run a container, write a file to it, then run `docker rm` on the
       container. What happens to that file?
     options:
-      - "It persists on the host under /var/lib/docker/volumes"
+      - "It persists on the host under /var/lib/docker/volumes for later reuse"
       - "It is lost — it lived in the container's writable layer, which is deleted on rm"
-      - "It is committed back into the image automatically"
-      - "It moves to an anonymous volume that survives removal"
+      - "It is committed back into the image's top layer automatically on removal"
+      - "It moves to an anonymous volume that Docker keeps after removal"
     answer: 1
     explanation: |
       Files written to a path not covered by a mount go to the container's ephemeral
@@ -28,10 +28,10 @@ questions:
       A teammate says "stopping a container loses its data." For a container with
       no volumes, when is the writable-layer data actually lost?
     options:
-      - "On docker stop"
-      - "On docker pause"
+      - "On docker stop, which discards the writable layer immediately"
+      - "On docker pause, when the frozen process's memory is flushed"
       - "Only on docker rm (removal), not on stop"
-      - "Whenever the host reboots"
+      - "Whenever the host reboots and the daemon restarts the container"
     answer: 2
     explanation: |
       `docker stop` keeps the writable layer — `docker start` brings the same data back.
@@ -64,10 +64,10 @@ questions:
       When a containerized process modifies one byte of a large file that exists only
       in a lower read-only image layer, what does the copy-on-write storage driver do?
     options:
-      - "Modifies the file in place in the shared image layer"
+      - "Modifies the file in place in the shared read-only image layer directly"
       - "Copies the entire file up into the writable layer, then applies the change there"
-      - "Redirects the write to /dev/null and warns"
-      - "Automatically stores the change in a volume"
+      - "Redirects the write to /dev/null and logs a copy-on-write warning to the daemon"
+      - "Automatically stores the changed file in a newly created anonymous volume"
     answer: 1
     explanation: |
       Union/overlay filesystems are copy-on-write: modifying a file from a lower layer
@@ -82,10 +82,10 @@ questions:
       Why is running a write-heavy database on the container's writable layer a bad
       idea? Choose the most complete answer.
     options:
-      - "Only because the data is lost on docker rm"
-      - "Only because union filesystems are slow for random writes"
+      - "Only because the data is lost on docker rm; performance is otherwise identical"
+      - "Only because union filesystems are slow for random writes; durability is unaffected"
       - "Both: data is destroyed on rm AND copy-on-write/union-fs overhead hurts random-write/fsync performance"
-      - "It isn't a problem; the writable layer is optimized for databases"
+      - "It isn't a problem; the writable layer is specially tuned and optimized for databases"
     answer: 2
     explanation: |
       Two independent reasons: durability (the writable layer dies with the container)
@@ -101,8 +101,8 @@ questions:
     options:
       - "A volume bypasses the storage driver and writes directly to the host filesystem"
       - "A volume always routes through the union/overlay copy-on-write layer"
-      - "A volume compresses all writes before storing them"
-      - "There is no difference; both use the same code path"
+      - "A volume compresses and deduplicates all writes before storing them on disk"
+      - "There is no difference; both use the same copy-on-write code path internally"
     answer: 0
     explanation: |
       Volume I/O bypasses the storage driver's union/CoW machinery and goes directly to
@@ -153,8 +153,8 @@ questions:
     options:
       - "Storing a production database's data files"
       - "Mounting your local source-code directory into a dev container for live reload"
-      - "Persisting data that must follow a container across hosts"
-      - "Keeping secrets in RAM only"
+      - "Persisting data that must follow a container as it migrates across hosts"
+      - "Keeping short-lived secrets in host RAM only, never touching any disk"
     answer: 1
     explanation: |
       Bind mounts map an arbitrary host path in, so they shine when a human needs to
@@ -170,9 +170,9 @@ questions:
       file /srv/appconfig.yml does not exist. What happens with the `-v` syntax?
     options:
       - "Docker creates /srv/appconfig.yml as an empty directory and bind-mounts it"
-      - "Docker errors out because the source is missing"
-      - "Docker creates an empty file at that path"
-      - "Docker falls back to a named volume"
+      - "Docker errors out and refuses to start because the source path is missing"
+      - "Docker creates an empty zero-byte file at that path and mounts it in"
+      - "Docker falls back to provisioning a named volume with a generated name"
     answer: 0
     explanation: |
       With `-v`, a missing bind-mount source is auto-created as a directory. So you get
@@ -188,10 +188,10 @@ questions:
       `--mount type=bind,src=./empty,dst=/app/public` where ./empty is empty. What does
       the container see at /app/public?
     options:
-      - "The image's files merged with the empty host dir"
-      - "The image's original files, because bind mounts copy them in"
+      - "The image's files merged on top of the empty host directory's contents"
+      - "The image's original files, because bind mounts seed-copy them in on first use"
       - "An empty directory — the bind mount obscures the image's existing files"
-      - "An error, because the target already has files"
+      - "An error at startup, because the mount target directory already has files"
     answer: 2
     explanation: |
       Bind mounts obscure (hide) whatever was in the container directory for as long as
@@ -222,10 +222,10 @@ questions:
     question: |
       What is a good use case for a tmpfs mount?
     options:
-      - "Long-term storage of a database's data directory"
-      - "Sharing files between two running containers"
+      - "Long-term durable storage of a production database's data directory"
+      - "Sharing files concurrently between two running containers on the same host"
       - "Holding sensitive data (e.g. secrets) that should never be written to disk"
-      - "Seeding a container with default files from the image"
+      - "Seeding a container with the image's default files on first startup"
     answer: 2
     explanation: |
       tmpfs is ideal for sensitive or high-volume non-persistent data you don't want on
@@ -240,10 +240,10 @@ questions:
       In `--mount type=tmpfs,dst=/cache,tmpfs-size=64m`, what does `tmpfs-size` control,
       and what is its default if omitted?
     options:
-      - "Disk quota; default 1 GB"
+      - "On-disk quota for the mount's backing file; default 1 GB per mount"
       - "Memory size limit for the mount; default 50% of host RAM"
-      - "Number of inodes; default unlimited"
-      - "Swap size; default equals host RAM"
+      - "Maximum number of inodes the mount may allocate; default unlimited"
+      - "Swap-file size reserved for the mount; default equals total host RAM"
     answer: 1
     explanation: |
       tmpfs-size caps the amount of memory the tmpfs may use (in bytes/units). If not
@@ -328,8 +328,8 @@ questions:
     options:
       - "Volumes can never be deleted once created"
       - "A container (even a stopped one) still references the volume"
-      - "The volume is empty"
-      - "You must stop the Docker daemon first"
+      - "The volume is empty and thus has nothing left to delete"
+      - "You must first stop the Docker daemon before removing it"
     answer: 1
     explanation: |
       `docker volume rm` refuses to delete a volume that is still referenced by any
@@ -344,10 +344,10 @@ questions:
       For a BIND mount whose source path does not exist, how do `-v` and `--mount`
       differ by default?
     options:
-      - "Both create the missing path automatically"
-      - "Both error out"
+      - "Both create the missing path automatically as an empty directory"
+      - "Both error out and refuse to start the container"
       - "-v auto-creates the path as a directory; --mount errors unless bind-create-src is set"
-      - "--mount auto-creates it; -v errors"
+      - "--mount auto-creates the path as a directory; -v errors out"
     answer: 2
     explanation: |
       `-v` silently creates a missing bind-mount source as a directory (a common
@@ -362,9 +362,9 @@ questions:
       Which capability REQUIRES the `--mount` syntax and cannot be expressed with the
       bare `-v` form?
     options:
-      - "Mounting a named volume at a path"
-      - "Making a mount read-only"
-      - "Mounting the current working directory"
+      - "Mounting a named volume at a target path in the container"
+      - "Making a mount read-only, which the bare -v form cannot express"
+      - "Mounting the current working directory as a bind source"
       - "Passing volume-driver options (e.g. NFS opts) or mounting a volume subpath"
     answer: 3
     explanation: |
@@ -381,8 +381,8 @@ questions:
       or a bind mount?
     options:
       - "A source containing a slash (/) is a bind mount; a bare name is a named volume"
-      - "It always treats it as a bind mount"
-      - "It always treats it as a named volume"
+      - "It always treats foo:/data as a host bind mount"
+      - "It always treats foo:/data as a Docker-managed named volume"
       - "It depends on whether the target directory exists"
     answer: 0
     explanation: |
@@ -399,7 +399,7 @@ questions:
       specifying a mount for that path. What is created?
     options:
       - "Nothing; the instruction is ignored at runtime"
-      - "A named volume called mysql"
+      - "A named volume automatically called mysql"
       - "A fresh anonymous volume for that path, per container"
       - "A bind mount to the host's /var/lib/mysql"
     answer: 2
@@ -415,7 +415,7 @@ questions:
     question: |
       What most distinguishes a named volume from an anonymous volume?
     options:
-      - "Anonymous volumes are stored in RAM"
+      - "Anonymous volumes are stored in RAM and lost on reboot"
       - "Named volumes have a human-chosen name; anonymous ones get a random ID and are hard to identify later"
       - "Named volumes cannot be shared between containers"
       - "Anonymous volumes bypass copy-on-write while named ones don't"
@@ -452,9 +452,9 @@ questions:
       default files in the image). What is in the volume after the container starts?
     options:
       - "The image's default files, copied into the volume on first mount"
-      - "It stays empty; the image files are obscured"
-      - "An error, because the target is non-empty"
-      - "Only a .keep placeholder file"
+      - "It stays empty; the volume obscures and hides the image's files"
+      - "An error at startup, because the mount target is non-empty"
+      - "Only a single .keep placeholder file that Docker writes in"
     answer: 0
     explanation: |
       When an empty volume is mounted over a non-empty image directory, Docker copies the
@@ -468,10 +468,10 @@ questions:
     question: |
       The first-mount copy of image files into a volume happens under which condition?
     options:
-      - "Every time the container starts, overwriting the volume"
+      - "Every time the container starts, overwriting the volume's data"
       - "Only when the volume is empty at mount time"
-      - "Only for bind mounts"
-      - "Only when volume-nocopy is set"
+      - "Only for bind mounts, never for named or anonymous volumes"
+      - "Only when the volume-nocopy option is explicitly set"
     answer: 1
     explanation: |
       The seed-from-image copy occurs only when the volume is empty. If the volume
@@ -486,10 +486,10 @@ questions:
       A developer adds `-v ./html:/usr/share/nginx/html` (bind mount) expecting to keep
       nginx's default page, but the page 404s. Why?
     options:
-      - "Bind mounts copy the image files, but only after a restart"
-      - "nginx requires a named volume to serve files"
+      - "Bind mounts copy the image files, but only after a container restart"
+      - "nginx can only serve files from a named volume, never a bind mount"
       - "The bind mount obscured the image's default files; bind mounts do not seed from the image"
-      - "The volume-nocopy option was implicitly set"
+      - "The volume-nocopy option was implicitly set on the bind mount"
     answer: 2
     explanation: |
       Only volumes seed themselves from the image directory. A bind mount obscures the
@@ -520,10 +520,10 @@ questions:
       Can the same volume be mounted read-write into one container and read-only into
       another at the same time?
     options:
-      - "No; a volume's mode is fixed at creation"
+      - "No; a volume's read/write mode is fixed at creation time"
       - "Yes; the read-only/read-write mode is per-mount, not per-volume"
-      - "Only if the volume uses the NFS driver"
-      - "Only in Docker Compose, not with docker run"
+      - "Only if the volume is backed by the NFS volume driver"
+      - "Only in Docker Compose, never with a plain docker run"
     answer: 1
     explanation: |
       Read-only vs read-write is a property of each mount, so one container can mount a
@@ -537,9 +537,9 @@ questions:
       Which pattern pairs well with read-only mounts to harden a container?
     options:
       - "A read-only root filesystem (--read-only), where only explicit volumes/tmpfs are writable"
-      - "Running with --privileged"
-      - "Disabling all volumes"
-      - "Mounting the Docker socket into the container"
+      - "Running the container with the --privileged flag for full host access"
+      - "Disabling all volumes so the container has no writable mounts at all"
+      - "Mounting the host's Docker socket into the container for control"
     answer: 0
     explanation: |
       Read-only mounts complement `--read-only` on the root filesystem: the rootfs is
@@ -553,9 +553,9 @@ questions:
     question: |
       What is the standard way for two running containers to share the same files?
     options:
-      - "Use docker cp repeatedly between them"
-      - "Use tmpfs in both containers"
-      - "Commit one container and rebuild the other"
+      - "Use docker cp to copy files repeatedly back and forth between them"
+      - "Mount a separate tmpfs in each of the two containers"
+      - "Commit one container to an image and rebuild the other from it"
       - "Mount the same named volume into both containers"
     answer: 3
     explanation: |
@@ -570,10 +570,10 @@ questions:
       Two containers mount the same volume. What does Docker guarantee about concurrent
       writes?
     options:
-      - "Docker serializes writes to prevent corruption"
+      - "Docker serializes all writes with an internal lock to prevent corruption"
       - "Docker provides shared access but NOT write safety; the apps must coordinate"
-      - "Only one container can ever write; the other is forced read-only"
-      - "Writes are automatically merged with last-writer-wins"
+      - "Only one container can ever write; the other is automatically forced read-only"
+      - "Writes are automatically merged by the daemon using last-writer-wins"
     answer: 1
     explanation: |
       Docker only provides concurrent access, not concurrency control. Applications must
@@ -587,10 +587,10 @@ questions:
     question: |
       What does `docker run --rm --volumes-from writer -v "$(pwd)":/backup busybox tar cvf /backup/data.tar /data` do?
     options:
-      - "Creates a new volume named writer"
-      - "Deletes the writer container's volumes after archiving"
+      - "Creates a new named volume called writer from the busybox image"
+      - "Deletes the writer container's volumes immediately after archiving them"
       - "Attaches all of the 'writer' container's mounts into a throwaway container to back them up via tar"
-      - "Converts the writer's bind mounts into named volumes"
+      - "Converts the writer container's bind mounts into managed named volumes"
     answer: 2
     explanation: |
       `--volumes-from` copies all mounts of the source container into the new one, so a
@@ -605,9 +605,9 @@ questions:
       A container runs as non-root USER 1001 and gets "permission denied" writing to its
       bind-mounted data directory. What is the most likely cause?
     options:
-      - "Bind mounts are always read-only"
-      - "Docker requires root for all bind mounts"
-      - "The volume driver rejected the write"
+      - "Bind mounts are always mounted read-only for non-root container users"
+      - "Docker requires the container to run as root for any bind mount to work"
+      - "The local volume driver rejected the write because of a quota limit"
       - "The host directory is owned by a different UID than the container process (bind mounts don't remap ownership)"
     answer: 3
     explanation: |
@@ -623,10 +623,10 @@ questions:
       Why does a non-root container often write fine to a fresh NAMED volume but fail on
       a bind mount at the same path?
     options:
-      - "Named volumes are always world-writable"
+      - "Named volumes are always created world-writable with mode 0777"
       - "On first mount of an empty volume, Docker initializes the volume's ownership/perms to match the image directory; bind mounts keep host ownership"
-      - "Bind mounts run as root, volumes as the container user"
-      - "Named volumes ignore the USER instruction"
+      - "Bind mounts always run as root while volumes run as the container user"
+      - "Named volumes silently ignore the image's USER instruction entirely"
     answer: 1
     explanation: |
       When an empty named volume is first mounted, Docker sets its ownership/permissions
@@ -642,9 +642,9 @@ questions:
       like they're owned by an unexpected UID on the host?
     options:
       - "Container UIDs are remapped to a different host UID range, shifting on-disk ownership"
-      - "Docker randomizes file ownership for security"
-      - "Rootless Docker disables all volume writes"
-      - "User namespaces only affect networking, not files"
+      - "Docker deliberately randomizes each mounted file's owner UID for security"
+      - "Rootless Docker blocks all writes to mounted volumes, allowing only reads"
+      - "User namespaces remap only network and process IDs, never file ownership"
     answer: 0
     explanation: |
       User-namespace remapping (and rootless mode) maps container UID/GIDs to a distinct
@@ -658,10 +658,10 @@ questions:
     question: |
       What do volume drivers (beyond the default `local`) enable?
     options:
-      - "Storing volumes inside the image"
-      - "Encrypting the container's writable layer"
+      - "Storing volume data inside the image so it ships with the image"
+      - "Encrypting the container's writable copy-on-write layer at rest"
       - "Placing a volume on network/remote storage such as NFS or cloud storage"
-      - "Automatically converting bind mounts to volumes"
+      - "Automatically converting host bind mounts into managed named volumes"
     answer: 2
     explanation: |
       Volume drivers/plugins let a volume live on remote or networked storage (NFS,
@@ -675,10 +675,10 @@ questions:
     question: |
       Given: `docker volume create --driver local --opt type=nfs --opt o=addr=10.0.0.5,rw --opt device=:/exports/appdata nfs-data`. What is this doing?
     options:
-      - "Creating a tmpfs volume in RAM"
+      - "Creating an in-memory tmpfs volume in host RAM, cleared on stop"
       - "Creating a volume backed by an NFS export using the local driver's mount options"
-      - "Bind-mounting a host NFS client directory"
-      - "Creating an anonymous volume"
+      - "Bind-mounting a directory the host has already NFS-mounted itself"
+      - "Creating a plain anonymous local volume with a random hex ID"
     answer: 1
     explanation: |
       The built-in local driver can mount network filesystems via mount options: type=nfs
@@ -693,9 +693,9 @@ questions:
       In Docker Compose, what does `docker compose down` (without flags) do to named
       volumes declared under the top-level `volumes:` key?
     options:
-      - "Deletes them along with the containers"
-      - "Converts them to bind mounts"
-      - "Marks them external"
+      - "Deletes them along with the project's containers and networks"
+      - "Converts them into host bind mounts under the project directory"
+      - "Marks them external so a later up will not recreate them"
       - "Keeps them; you must pass -v/--volumes to delete them"
     answer: 3
     explanation: |
@@ -710,10 +710,10 @@ questions:
     question: |
       In a Compose file, what does declaring a volume with `external: true` mean?
     options:
-      - "The volume is stored outside /var/lib/docker on purpose"
-      - "The volume is exposed to the public internet"
+      - "The volume is stored outside /var/lib/docker on a separate mount on purpose"
+      - "The volume is published to the public internet for remote clients to reach"
       - "Compose references a volume created outside this project and won't create or delete it"
-      - "The volume uses an external (non-local) driver by default"
+      - "The volume uses an external (non-local) storage driver such as NFS by default"
     answer: 2
     explanation: |
       `external: true` tells Compose the volume already exists (created elsewhere), so
@@ -728,9 +728,9 @@ questions:
       In the Compose service `volumes:` list, what is `./initdb:/docker-entrypoint-initdb.d:ro`?
     options:
       - "A read-only bind mount of the host ./initdb directory into the container"
-      - "A named volume mounted read-only"
-      - "A tmpfs mount"
-      - "An anonymous volume with nocopy"
+      - "A named volume called initdb mounted read-only at the target path"
+      - "An in-memory tmpfs mount seeded from the ./initdb host directory"
+      - "An anonymous volume created with the volume-nocopy option set"
     answer: 0
     explanation: |
       A source that is a relative/absolute path (./initdb) is a bind mount; `:ro` makes
@@ -745,10 +745,10 @@ questions:
       What is the portable pattern to back up a Docker volume named db-data to a local
       tar file?
     options:
-      - "Copy /var/lib/docker/volumes/db-data/_data with scp from another machine"
+      - "Copy /var/lib/docker/volumes/db-data/_data directly with scp from another machine"
       - "Run a throwaway container that mounts the volume plus a bind mount and tars the data"
-      - "docker volume export db-data > db-data.tar"
-      - "docker commit the volume into an image"
+      - "Run docker volume export db-data > db-data.tar to stream the volume out"
+      - "Run docker commit on the volume to snapshot its contents into an image"
     answer: 1
     explanation: |
       Because a volume is just a directory Docker manages, the portable backup is a
@@ -762,10 +762,10 @@ questions:
     question: |
       Why is `tar`-ing a live database's volume directly a risky backup strategy?
     options:
-      - "tar cannot handle files larger than 2 GB"
-      - "Volumes cannot be read while mounted"
+      - "tar silently truncates any single file larger than the 2 GB legacy limit"
+      - "A volume cannot be read by another container while it is already mounted"
       - "You may capture an inconsistent on-disk state; quiesce the DB or use its own dump tool"
-      - "It corrupts the image layers"
+      - "Reading the volume rewrites and corrupts the image's lower read-only layers"
     answer: 2
     explanation: |
       A running database may have in-flight writes and buffered state, so a raw tar can
@@ -780,9 +780,9 @@ questions:
       For a production PostgreSQL container, which storage choice is most appropriate for
       its data directory?
     options:
-      - "The container writable layer"
-      - "A tmpfs mount"
-      - "A read-only bind mount"
+      - "The container's ephemeral copy-on-write writable layer"
+      - "A tmpfs mount held entirely in host memory"
+      - "A read-only bind mount of a host data directory"
       - "A named volume (or a networked volume / managed DB)"
     answer: 3
     explanation: |
@@ -799,9 +799,9 @@ questions:
       `RUN echo seed > /data/seed.txt`. Why might /data/seed.txt be missing at runtime?
     options:
       - "Once VOLUME declares /data, writes to it in later build steps are discarded"
-      - "RUN cannot write to any directory"
-      - "echo output is buffered and lost"
-      - "The file is created but hidden by the storage driver"
+      - "RUN instructions are forbidden from writing to any directory during a build"
+      - "The echo output is buffered by the shell and lost before the layer commits"
+      - "The file is created but permanently hidden by the overlay storage driver"
     answer: 0
     explanation: |
       After a VOLUME instruction freezes a path, changes made to that path by subsequent
@@ -816,9 +816,9 @@ questions:
       On Docker Desktop (Mac/Windows), why do named volumes generally outperform bind
       mounts to the host for I/O-heavy workloads?
     options:
-      - "Bind mounts are disabled on Docker Desktop"
-      - "Volumes are cached in the GPU"
-      - "Bind mounts always run read-only there"
+      - "Bind mounts to the host are disabled entirely on Docker Desktop"
+      - "Volume data is cached in the GPU's video memory for faster reads"
+      - "Bind mounts are always forced read-only on Docker Desktop hosts"
       - "Volumes live inside the Linux VM, avoiding the host<->VM filesystem sharing overhead of bind mounts"
     answer: 3
     explanation: |
@@ -835,8 +835,8 @@ questions:
     options:
       - "--mount type=bind,src=app-data,dst=/data,readonly"
       - "--mount type=volume,src=app-data,dst=/data,readonly"
-      - "--mount type=tmpfs,dst=/data,readonly"
-      - "--mount volume=app-data,path=/data,ro=true"
+      - "--mount type=tmpfs,dst=/data,readonly,tmpfs-size=64m"
+      - "--mount volume=app-data,path=/data,ro=true,driver=local"
     answer: 1
     explanation: |
       `app-data` is a bare name, so it is a named volume: type=volume, src=app-data,
@@ -851,10 +851,10 @@ questions:
       You want a mounted named volume to start EMPTY even though the image dir has files.
       Which option achieves this?
     options:
-      - "readonly"
-      - "bind-create-src"
+      - "readonly, which mounts the volume without write access"
+      - "bind-create-src, which auto-creates a missing bind source path"
       - "volume-nocopy (e.g. -v name:/path:nocopy)"
-      - "tmpfs-mode"
+      - "tmpfs-mode, which sets the octal permission bits on a tmpfs mount"
     answer: 2
     explanation: |
       volume-nocopy disables the default first-mount copy of image directory contents
@@ -869,9 +869,9 @@ questions:
       Which command mounts an in-memory scratch space at /run using the shorthand flag?
     options:
       - "docker run --tmpfs /run myapp"
-      - "docker run --volume tmpfs:/run myapp"
-      - "docker run --mount type=volume,dst=/run myapp"
-      - "docker run --ram /run myapp"
+      - "docker run --volume tmpfs:/run myapp to name an in-memory volume"
+      - "docker run --mount type=volume,dst=/run myapp for a RAM-backed volume"
+      - "docker run --ram /run myapp to allocate a memory-only mount"
     answer: 0
     explanation: |
       `--tmpfs /run` is the shorthand for an in-memory tmpfs mount. The explicit
