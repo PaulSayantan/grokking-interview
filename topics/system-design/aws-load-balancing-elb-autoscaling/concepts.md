@@ -218,11 +218,12 @@ Distinctive properties:
 - Works as the entry point for **AWS PrivateLink** (VPC endpoint services).
 
 **Limits/defaults worth knowing:**
-- **Idle timeout**: NLB TCP flows have long been **fixed at 350 s** and — unlike the
-  ALB idle timeout — are generally **not tunable**; UDP has no connection concept. The
-  standard fix for long-lived-but-idle flows is therefore **client-side TCP keep-alive**
-  (keep packets flowing so the flow never goes idle for 350 s), *not* raising a timeout.
-  (Verify against current NLB docs before quoting a hard number in an interview.)
+- **Idle timeout**: TCP flows **default to 350 s** and — as of a Nov 2023 update — are
+  now **configurable (60–6000 s)** on the load balancer; the **TLS listener** timeout is
+  a **fixed 350 s** and UDP flows use a **fixed 120 s** (UDP has no connection concept).
+  A robust fix for long-lived-but-idle flows is still **client-side TCP keep-alive**
+  (keep packets flowing so the flow never goes idle), used alongside — not instead of —
+  a raised timeout. (Verify current NLB docs before quoting a hard number in an interview.)
 - **Cross-zone load balancing is OFF by default** and, when enabled, incurs
   **inter-AZ data transfer charges** (this is the opposite of ALB, and a classic
   gotcha). See the cross-zone section.
@@ -238,10 +239,11 @@ Distinctive properties:
 > answers: (1) an NLB **can now have its own security group** (since Aug 2023) — the
 > old "NLBs can't have security groups" line is no longer true; (2) there is **no QUIC
 > or HTTP/3 listener** on any ELB — HTTP/3 termination lives at **CloudFront**, and an
-> NLB only carries QUIC as opaque UDP; (3) the NLB TCP **idle timeout is 350 s and
-> effectively fixed** — the fix for long idle flows is **client TCP keep-alive**, not
-> a bigger timeout. Repeating "NLB has no SG / NLB supports QUIC / raise the NLB idle
-> timeout" all read as out-of-date.
+> NLB only carries QUIC as opaque UDP; (3) the NLB TCP **idle timeout defaults to 350 s
+> but is now tunable (60–6000 s since Nov 2023)** — while the TLS-listener timeout stays
+> fixed at 350 s — and **client TCP keep-alive** remains the robust guard for long idle
+> flows. Repeating "NLB has no SG / NLB supports QUIC / the NLB TCP idle timeout can't be
+> changed" all read as out-of-date.
 
 **Trade-offs.** Pick NLB for: non-HTTP protocols, latency-critical paths, static/
 Elastic IP requirements, source-IP-dependent apps, extreme connection scale, and
@@ -741,6 +743,10 @@ speed and the traffic shape.
   status.
 - AWS docs — Product comparison for Elastic Load Balancing (ALB vs NLB vs GWLB vs CLB
   feature matrix).
+- AWS docs — Network Load Balancers, "Connection idle timeout": TCP flows default to
+  **350 s** and are configurable **60–6000 s** (raised from the former fixed value in
+  Nov 2023); TLS-listener timeout is a fixed **350 s**; UDP flow timeout is a fixed
+  **120 s**. NLB security-group support launched **Aug 10 2023** (AWS What's New).
 - AWS docs — Amazon EC2 Auto Scaling User Guide: scaling policies (target tracking,
   step, simple, scheduled, predictive), cooldowns and warm-up, warm pools, lifecycle
   hooks, health checks and grace period. "How predictive scaling works" states the

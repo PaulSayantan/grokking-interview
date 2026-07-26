@@ -184,7 +184,7 @@ limits drift):**
 | OUs per org | **2,000** |
 | Roots per org | **1** (only ever one) |
 | OU nesting depth | **5 levels** under the root |
-| SCPs per org | order of **~1,000** (verify live); max **10 attached per entity**; policy-document size **10,240 chars** incl. whitespace |
+| SCPs per org | **10,000** (verify live); max **10 attached per entity**; policy-document size **10,240 chars** (console strips whitespace) |
 | RCPs | **2,000** per org; max **5 per entity** |
 | `CreateAccount` rate | **~0.1 req/s (burst 3)**; only **5** concurrent creations; invites capped **20 / 24h** |
 | Per-service org ceilings | Control Tower **10,000**, IAM Identity Center **7,000**, GuardDuty/Security Hub/Macie/Inspector **~10,000**, Detective **1,200**, Audit Manager **250** |
@@ -777,7 +777,10 @@ enforcement layer that makes patterns 5 and 6 *safe*):
   (single-tenant orchestrator, soft vs hard multi-tenancy, sole-tenant nodes,
   Fargate/Firecracker, IRSA vs EKS Pod Identity).
 - **AWS Organizations / Amazon VPC / Amazon DynamoDB / API Gateway Service Quotas**
-  (current documented limits — re-verify against live Service Quotas).
+  (current documented limits — re-verify against live Service Quotas). Organizations
+  quotas: <https://docs.aws.amazon.com/organizations/latest/userguide/orgs_reference_limits.html>
+  (SCPs: 10,000 per org, max 10 attached per entity, 10,240-char document; RCPs: 2,000
+  per org, max 5 per entity).
 - **Nagarro (Shantanu Sharma) — "Architectural Design Patterns for AWS
   multi-tenancy"** (the six-pattern framing).
 - **re:Invent SaaS talks** (ARC/SVS/SAS tracks) on tenant isolation and SaaS on
