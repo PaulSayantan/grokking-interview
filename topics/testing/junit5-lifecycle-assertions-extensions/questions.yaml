@@ -29,7 +29,7 @@ questions:
       - "It provides fluent, AssertJ-style assertions for old tests"
       - "It runs existing JUnit 3 and JUnit 4 tests on the JUnit Platform"
       - "It is the new programming model for writing JUnit 5 tests"
-      - "It launches tests from IDEs and build tools"
+      - "It launches tests from IDEs, Maven Surefire, and Gradle build tools"
     answer: 1
     explanation: |
       JUnit Vintage is a TestEngine that runs JUnit 3/4 tests on the Platform, letting teams
@@ -45,9 +45,9 @@ questions:
       directly?
     options:
       - "So that any framework (Jupiter, Vintage, Spock, Cucumber) can plug in and be run by the same launcher, IDEs, and build tools"
-      - "To make Jupiter tests run faster by skipping reflection"
-      - "Because Jupiter cannot run without Vintage present"
-      - "To force every test class to declare a single @RunWith runner"
+      - "To make Jupiter tests run faster by skipping reflection and precompiling each engine's test methods into cached stubs"
+      - "Because the Jupiter engine cannot bootstrap or run unless the Vintage engine is also registered on the classpath first"
+      - "To force every test class to declare exactly one @RunWith runner so the Platform can locate its single entry point"
     answer: 0
     explanation: |
       The TestEngine SPI is a contract: multiple engines (Jupiter, Vintage, Spock, Kotest,
@@ -61,10 +61,10 @@ questions:
     question: |
       In a Maven/Gradle build, how are the Jupiter API and Jupiter engine typically scoped?
     options:
-      - "Both are compile-scope dependencies"
+      - "Both are compile-scope dependencies because test code links directly against the engine's execution classes"
       - "The API is a compile dependency; the engine is a runtime dependency discovered by the Platform"
-      - "Both are runtime-scope dependencies"
-      - "Neither is needed because the Platform bundles Jupiter"
+      - "Both are runtime-scope dependencies since annotations are resolved reflectively at execution time only"
+      - "Neither is needed because the Platform launcher already bundles the full Jupiter API and engine internally"
     answer: 1
     explanation: |
       Test code compiles against junit-jupiter-api (compile), while junit-jupiter-engine is
@@ -111,10 +111,10 @@ questions:
     question: |
       Under the default test instance lifecycle, why must @BeforeAll methods be static?
     options:
-      - "Because JUnit runs them on a background thread"
-      - "Because static methods run faster"
+      - "Because JUnit runs class-level setup on a dedicated background thread that cannot touch instance members safely"
+      - "Because static methods are JIT-compiled ahead of time and therefore run measurably faster than instance methods"
       - "Because a new test instance is created per test method, so there is no single instance to bind a class-level callback to"
-      - "Because non-static methods cannot access fields"
+      - "Because non-static methods are forbidden by the JVM from reading or writing any of the test class's fields"
     answer: 2
     explanation: |
       With PER_METHOD (default), Jupiter creates a fresh instance per @Test, so a
@@ -129,8 +129,8 @@ questions:
       A test subclass and its superclass both define @BeforeEach and @AfterEach methods. In
       what order do they run?
     options:
-      - "Only the subclass methods run; superclass methods are overridden"
-      - "Order is undefined and may vary per run"
+      - "Only the subclass methods run; inherited superclass callbacks are treated as overridden and silently skipped"
+      - "Order is undefined and may vary per run because Jupiter walks the class hierarchy in hash-map iteration order"
       - "Superclass @BeforeEach first, then subclass; subclass @AfterEach first, then superclass"
       - "Subclass @BeforeEach first, then superclass; superclass @AfterEach first, then subclass"
     answer: 2
@@ -146,10 +146,10 @@ questions:
     question: |
       A test's @BeforeEach method throws an exception. What happens?
     options:
-      - "The @Test runs anyway; the exception is logged"
+      - "The @Test runs anyway; the exception is merely logged as a warning and does not fail the test"
       - "The @Test is skipped, but the matching @AfterEach (and AfterEachCallbacks) still run"
-      - "The @Test is skipped and no cleanup runs"
-      - "The entire class is aborted immediately"
+      - "The @Test is skipped and no @AfterEach or cleanup callbacks run at all for that method"
+      - "The entire test class is aborted immediately and its remaining test methods are all marked as failed"
     answer: 1
     explanation: |
       A failing @BeforeEach skips the test body, but Jupiter still runs the corresponding
@@ -165,9 +165,9 @@ questions:
       seems to run. What is the most likely cause?
     options:
       - "private lifecycle methods are not discovered by Jupiter; make it package-private or protected"
-      - "@BeforeEach only works on methods named exactly setUp"
-      - "@BeforeEach must return boolean"
-      - "You must also add @Test to the method"
+      - "@BeforeEach only works on methods named exactly setUp, matching JUnit 3's naming convention"
+      - "@BeforeEach must return a boolean flag so Jupiter can decide whether to proceed with the test"
+      - "You must also add @Test to the method so the engine registers it during class discovery"
     answer: 0
     explanation: |
       Jupiter does not discover private lifecycle/test methods. Lifecycle methods must be
@@ -198,10 +198,10 @@ questions:
     question: |
       What does annotating a test class with @TestInstance(Lifecycle.PER_CLASS) allow?
     options:
-      - "It disables @BeforeEach entirely"
+      - "It disables @BeforeEach entirely and routes all per-test setup through @BeforeAll instead"
       - "It creates one instance for the class, so @BeforeAll/@AfterAll may be non-static and instance fields are shared across tests"
-      - "It runs each test in parallel"
-      - "It resets all static fields between tests"
+      - "It runs each test method in parallel on its own thread from a shared executor pool"
+      - "It resets all static fields back to their declared defaults between every test method"
     answer: 1
     explanation: |
       PER_CLASS uses a single instance for the whole class, which permits non-static
@@ -218,9 +218,9 @@ questions:
       is the root cause?
     options:
       - "PER_CLASS shares one instance, so mutable field state leaks between tests, reintroducing order-dependent coupling"
-      - "PER_CLASS runs tests on multiple threads by default"
-      - "PER_CLASS disables @AfterEach so cleanup never happens"
-      - "PER_CLASS randomizes method order, which is always wrong"
+      - "PER_CLASS runs the test methods on multiple threads by default, so the List is mutated concurrently"
+      - "PER_CLASS silently disables @AfterEach callbacks, so the List is never cleared after each test"
+      - "PER_CLASS deliberately randomizes method execution order on every run, which is always incorrect"
     answer: 0
     explanation: |
       With one shared instance, mutable fields carry over between tests. Because Jupiter does
@@ -234,9 +234,9 @@ questions:
     question: |
       What does @DisplayName do?
     options:
-      - "It marks a test to run first"
-      - "It disables the test"
-      - "It tags the test for filtering in CI"
+      - "It marks a test to run first, ahead of the other methods in declaration order"
+      - "It disables the test, excluding it from the run just like JUnit 4's @Ignore did"
+      - "It tags the test with a label so CI can include or exclude it via tag expressions"
       - "It gives a test or class a human-readable name (with spaces/punctuation) in reports and IDEs"
     answer: 3
     explanation: |
@@ -268,10 +268,10 @@ questions:
       Your CI needs to run only fast tests on every push and slow ones nightly. Which JUnit
       5 feature best supports this?
     options:
-      - "@DisplayName on each test"
+      - "@DisplayName on each test, using the label text as a Surefire include pattern"
       - "@Tag with tag-based include/exclude filters in Surefire/Gradle"
-      - "@Disabled on slow tests"
-      - "@Nested grouping"
+      - "@Disabled on slow tests during pushes, toggled back on by a nightly system property"
+      - "@Nested grouping of slow tests so CI can target the inner class by name"
     answer: 1
     explanation: |
       @Tag labels tests (e.g. @Tag("slow")) and build tools filter with include/exclude tag
@@ -286,9 +286,9 @@ questions:
       In a class with @Nested inner classes, how do outer and inner @BeforeEach methods
       relate for a test inside the inner class?
     options:
-      - "Only the inner @BeforeEach runs"
+      - "Only the inner @BeforeEach runs; the enclosing class's setup is skipped for nested tests"
       - "The inner @BeforeEach runs before the outer @BeforeEach"
-      - "They run in random order"
+      - "They run in random order, since Jupiter gives no guarantee across enclosing levels"
       - "The outer @BeforeEach runs before the inner @BeforeEach"
     answer: 3
     explanation: |
@@ -302,10 +302,10 @@ questions:
     question: |
       What does assertThrows return?
     options:
-      - "A boolean indicating whether the exception was thrown"
+      - "A boolean indicating whether the expected exception was actually thrown by the executable"
       - "The thrown exception instance, so you can assert on its message or cause"
-      - "void"
-      - "The stack trace as a String"
+      - "void, because it only verifies the throw and leaves nothing for you to inspect afterward"
+      - "The exception's full stack trace rendered as a String for logging or message assertions"
     answer: 1
     explanation: |
       assertThrows asserts that the executable throws the expected type AND returns the
@@ -319,10 +319,10 @@ questions:
     question: |
       Why use assertAll(...) instead of several separate assertEquals calls?
     options:
-      - "It runs the assertions on separate threads"
-      - "It automatically retries failed assertions"
+      - "It runs each grouped assertion on its own worker thread so they can execute concurrently for speed"
+      - "It automatically retries each failed assertion a few times before finally marking the whole group as failed"
       - "It evaluates all grouped assertions and reports every failure together, instead of stopping at the first"
-      - "It disables the test if any assertion fails"
+      - "It disables the remaining tests in the class as soon as any grouped assertion inside the block fails"
     answer: 2
     explanation: |
       assertAll executes every grouped executable and aggregates failures into a
@@ -337,9 +337,9 @@ questions:
       A test uses assertTimeoutPreemptively with a Spring @Transactional method and the
       rollback stops working. Why?
     options:
-      - "Preemptive timeouts disable transactions globally"
-      - "The timeout value is too short"
-      - "Spring transactions are incompatible with all JUnit 5 assertions"
+      - "Preemptive timeouts switch Spring's transaction manager into a global read-only mode that quietly disables every rollback"
+      - "The configured timeout value is far too short, so the transaction is force-committed the instant the limit elapses"
+      - "Spring's @Transactional support is fundamentally incompatible with every JUnit 5 assertion method, not just timeout-based ones"
       - "assertTimeoutPreemptively runs the code in a separate thread, so thread-bound state (transaction, ThreadLocal, security context) does not propagate"
     answer: 3
     explanation: |
@@ -355,9 +355,9 @@ questions:
     question: |
       How does assertTimeout (non-preemptive) behave when the executable exceeds the limit?
     options:
-      - "It interrupts the executable immediately at the limit"
-      - "It retries the executable until it is fast enough"
-      - "It skips the test"
+      - "It interrupts the running executable the moment the configured time limit elapses and reports a timeout"
+      - "It retries the executable repeatedly until one of the runs finally finishes under the configured limit"
+      - "It aborts and skips the test entirely, reporting it as skipped rather than failed, once the limit is hit"
       - "It runs the executable in the calling thread, waits for it to finish, then fails if it took too long"
     answer: 3
     explanation: |
@@ -373,9 +373,9 @@ questions:
       In JUnit 5's assertEquals, where does the optional failure message go?
     options:
       - "It is the last argument (and may be a Supplier<String> for lazy evaluation)"
-      - "It is the first argument, as in JUnit 4"
-      - "Messages are not supported"
-      - "It must be passed via a separate assertMessage call"
+      - "It is the first argument, exactly as in JUnit 4's assertEquals signature"
+      - "Custom failure messages are no longer supported by Jupiter's assertions"
+      - "It must be supplied through a separate assertMessage() helper call"
     answer: 0
     explanation: |
       Jupiter moved the message to the LAST parameter (JUnit 4 put it first). It can be a
@@ -389,10 +389,10 @@ questions:
     question: |
       When asserting equality of two double values in JUnit 5, what should you provide?
     options:
-      - "Nothing extra; == comparison is exact and reliable for doubles"
-      - "A Comparator instance"
+      - "Nothing extra; the == comparison of doubles is exact and perfectly reliable across all platforms"
+      - "A Comparator<Double> instance so Jupiter can decide how close is close enough for the values"
       - "A delta/tolerance, e.g. assertEquals(0.3, a + b, 1e-9)"
-      - "A @Timeout annotation"
+      - "A @Timeout annotation so the floating-point comparison is retried until it settles within tolerance"
     answer: 2
     explanation: |
       Floating-point arithmetic is imprecise, so assertEquals for doubles takes a delta
@@ -406,9 +406,9 @@ questions:
     question: |
       What is the difference between assertThrows and assertThrowsExactly?
     options:
-      - "assertThrows only works for RuntimeExceptions"
-      - "assertThrowsExactly does not return the exception"
-      - "There is no difference; they are aliases"
+      - "assertThrows only works for unchecked RuntimeExceptions, while assertThrowsExactly handles checked ones"
+      - "assertThrowsExactly verifies the throw but returns void, so you cannot inspect the caught exception afterward"
+      - "There is no real difference; the two methods are exact aliases kept only for source compatibility"
       - "assertThrows accepts the expected type OR any subclass; assertThrowsExactly requires the exact class"
     answer: 3
     explanation: |
@@ -458,9 +458,9 @@ questions:
     question: |
       Why is assertThat(list).contains(x) generally preferred over assertTrue(list.contains(x))?
     options:
-      - "It runs faster"
-      - "assertTrue is deprecated in JUnit 5"
-      - "assertTrue cannot take a boolean"
+      - "It runs measurably faster because AssertJ short-circuits the collection scan on the first match"
+      - "assertTrue was deprecated in JUnit 5 and is scheduled for removal, so contains is the only supported option"
+      - "assertTrue cannot accept the boolean returned by list.contains(x) and must be wrapped in a matcher"
       - "It produces a descriptive failure message naming the element and printing the actual list, whereas assertTrue only reports 'expected true but was false'"
     answer: 3
     explanation: |
@@ -475,9 +475,9 @@ questions:
     question: |
       Which statement about Hamcrest vs AssertJ is accurate?
     options:
-      - "Hamcrest is part of JUnit 5's core Assertions class"
-      - "AssertJ and Hamcrest cannot be used in the same project"
-      - "AssertJ requires JUnit Vintage"
+      - "Hamcrest ships as part of JUnit 5's core Assertions class, so no extra dependency is ever needed"
+      - "AssertJ and Hamcrest cannot coexist in the same project because their assertThat imports collide at compile time"
+      - "AssertJ depends on the JUnit Vintage engine being on the classpath before its matchers will resolve"
       - "Hamcrest uses Matcher objects (e.g. assertThat(actual, is(equalTo(x)))) and is used by Spring MockMvc's jsonPath matchers; AssertJ uses a more discoverable fluent chain"
     answer: 3
     explanation: |
@@ -509,9 +509,9 @@ questions:
     question: |
       What is the conceptual difference between a failed assumption and a failed assertion?
     options:
-      - "They are identical; both fail the test"
-      - "A failed assertion skips the test; a failed assumption fails it"
-      - "Assumptions only work in @BeforeEach"
+      - "They are functionally identical; both mark the test red and count as a genuine failure"
+      - "A failed assertion aborts and skips the test, while a failed assumption reports it as a hard failure"
+      - "Assumptions may only be called inside @BeforeEach methods, never within the test body itself"
       - "A failed assumption means the test is not applicable (skipped); a failed assertion means the code under test is wrong (failed)"
     answer: 3
     explanation: |
@@ -527,9 +527,9 @@ questions:
       A test starts with assumeTrue(databaseAvailable()). In CI the database is never
       started, so the test shows green every build. What is the danger?
     options:
-      - "The assumption makes the test run twice"
-      - "The assumption converts failures into passes for other tests"
-      - "assumeTrue is not allowed in CI"
+      - "The assumption causes the test method to be executed twice, doubling its runtime on every build"
+      - "The assumption globally converts subsequent assertion failures in other tests into passing results"
+      - "assumeTrue is disallowed in CI environments and will throw a configuration error at launch time"
       - "The test is silently skipped, so it appears green while testing nothing — masking regressions"
     answer: 3
     explanation: |
@@ -544,9 +544,9 @@ questions:
     question: |
       How does assumingThat(condition, executable) differ from assumeTrue(condition)?
     options:
-      - "assumingThat aborts the whole test if the condition is false"
-      - "assumingThat is an assertion, not an assumption"
-      - "There is no difference"
+      - "assumingThat aborts the entire test method the moment its condition evaluates to false"
+      - "assumingThat is really an assertion in disguise and fails the test when the condition is false"
+      - "There is no difference; assumingThat is just an overload of assumeTrue with the same semantics"
       - "assumingThat runs the executable only when the condition is true, but the rest of the test runs regardless of the condition"
     answer: 3
     explanation: |
@@ -579,9 +579,9 @@ questions:
       Which annotation runs a test only when an environment variable matches a regex?
     options:
       - "@EnabledIfEnvironmentVariable(named=\"ENV\", matches=\"CI\")"
-      - "@EnabledOnOs(LINUX)"
-      - "@EnabledOnJre(JAVA_17)"
-      - "@Tag(\"ci\")"
+      - "@EnabledOnOs(value = {LINUX, MAC}, disabledReason = \"POSIX-only\")"
+      - "@EnabledOnJre(value = JAVA_17, disabledReason = \"needs records\")"
+      - "@Tag(\"ci\") paired with a Surefire groups include filter"
     answer: 0
     explanation: |
       @EnabledIfEnvironmentVariable gates on an environment variable's value via regex.
@@ -596,9 +596,9 @@ questions:
       Why might a conditional annotation like @EnabledOnOs(MAC) be preferable to
       assumeTrue(isMac()) at the top of a test?
     options:
-      - "Conditions run faster at runtime"
-      - "assumeTrue is deprecated"
-      - "Conditions can be applied only to @Nested classes"
+      - "Conditional annotations execute faster at runtime because they bypass Jupiter's assumption machinery"
+      - "assumeTrue has been deprecated since JUnit 5.7 and is slated for removal in a future release"
+      - "Conditional annotations can be applied only to @Nested inner classes, never to top-level test classes"
       - "The condition is declarative, self-documents in reports as disabled-with-reason, and is evaluated before the test instance is even created"
     answer: 3
     explanation: |
@@ -630,9 +630,9 @@ questions:
     question: |
       What key limitation of JUnit 4's @RunWith does the JUnit 5 extension model remove?
     options:
-      - "You could not write assertions in JUnit 4"
-      - "JUnit 4 could not run in IDEs"
-      - "JUnit 4 had no lifecycle callbacks"
+      - "JUnit 4 shipped no assertion methods at all, so every project had to pull in AssertJ or Hamcrest before a single value could be verified"
+      - "JUnit 4 tests could not be launched from IDEs like IntelliJ or Eclipse and had to be executed exclusively through the Maven command line"
+      - "JUnit 4 offered no lifecycle hooks whatsoever, leaving no supported way to run shared setup or teardown around individual test methods"
       - "A class could have only one @RunWith runner, so you could not combine (say) Spring and Mockito runners; extensions are composable and stackable"
     answer: 3
     explanation: |
@@ -665,10 +665,10 @@ questions:
     question: |
       For a single test method, which sequence correctly orders these steps?
     options:
-      - "@Test -> BeforeEachCallback -> @BeforeEach -> @AfterEach -> AfterEachCallback"
+      - "@Test -> BeforeEachCallback -> @BeforeEach -> BeforeTestExecutionCallback -> @AfterEach -> AfterTestExecutionCallback -> AfterEachCallback"
       - "BeforeEachCallback -> @BeforeEach -> BeforeTestExecutionCallback -> @Test -> AfterTestExecutionCallback -> @AfterEach -> AfterEachCallback"
-      - "@BeforeEach -> BeforeEachCallback -> @Test -> AfterEachCallback -> @AfterEach"
-      - "BeforeTestExecutionCallback -> BeforeEachCallback -> @Test -> @AfterEach -> AfterTestExecutionCallback"
+      - "@BeforeEach -> BeforeEachCallback -> BeforeTestExecutionCallback -> @Test -> AfterEachCallback -> AfterTestExecutionCallback -> @AfterEach"
+      - "BeforeTestExecutionCallback -> BeforeEachCallback -> @BeforeEach -> @Test -> @AfterEach -> AfterEachCallback -> AfterTestExecutionCallback"
     answer: 1
     explanation: |
       The onion order is: BeforeEachCallback, then user @BeforeEach, then
@@ -684,10 +684,10 @@ questions:
       An extension needs to pass a start timestamp from beforeTestExecution to
       afterTestExecution. What is the recommended mechanism?
     options:
-      - "A static field on the extension class"
-      - "An instance field on the extension"
+      - "A static field on the extension class, which Jupiter automatically clears between tests so the timestamp never leaks"
+      - "An instance field on the extension, since Jupiter guarantees a brand-new extension instance is created for every single test method"
       - "The ExtensionContext.Store, keyed by a Namespace"
-      - "A ThreadLocal in the test class"
+      - "A ThreadLocal declared in the test class, which the extension reads back reflectively during the after-execution callback"
     answer: 2
     explanation: |
       Because a single extension instance may be shared across many tests (and callbacks),
@@ -701,9 +701,9 @@ questions:
     question: |
       What is the main advantage of @RegisterExtension over @ExtendWith?
     options:
-      - "It runs the extension faster"
-      - "It is the only way to register Spring's extension"
-      - "It works only on static methods"
+      - "It runs the extension measurably faster because field-registered extensions skip Jupiter's reflective class-instantiation step"
+      - "It is the only supported way to register Spring's SpringExtension, since @ExtendWith rejects any Spring-provided extension class"
+      - "It works only when applied to static methods, whereas @ExtendWith is restricted to instance methods and constructors"
       - "It lets you register a pre-built, configured extension INSTANCE (e.g. via a builder), which @ExtendWith cannot because it only takes a class"
     answer: 3
     explanation: |
@@ -719,10 +719,10 @@ questions:
       A @RegisterExtension field is declared non-static. Which callbacks will it participate
       in?
     options:
-      - "Class-level callbacks only (BeforeAllCallback/AfterAllCallback)"
-      - "Both class-level and instance-level callbacks"
+      - "Class-level callbacks only (BeforeAllCallback/AfterAllCallback), because Jupiter promotes non-static fields to the class scope automatically"
+      - "Both class-level and instance-level callbacks, since Jupiter evaluates every @RegisterExtension field at both the per-class and per-method phases"
       - "Instance-level callbacks only (BeforeEachCallback/AfterEachCallback), not class-level ones"
-      - "None; @RegisterExtension fields must be static"
+      - "None whatsoever; a non-static @RegisterExtension field is silently ignored by Jupiter and never participates in any callback phase"
     answer: 2
     explanation: |
       A non-static @RegisterExtension field participates only in instance-level (per-test)
@@ -737,10 +737,10 @@ questions:
       You need to register a WireMock server extension configured to use a dynamic port.
       Which registration approach fits and why?
     options:
-      - "@ExtendWith(WireMockExtension.class), because it auto-configures the port"
-      - "Automatic ServiceLoader registration, because ports must be global"
+      - "@ExtendWith(WireMockExtension.class), because passing the class lets Jupiter read the dynamic-port setting from a wiremock.properties file"
+      - "Automatic ServiceLoader registration through META-INF/services, because a WireMock port must be shared globally across every test class"
       - "@RegisterExtension on a field built with a builder, because you must configure the port/options on the instance"
-      - "@Rule, because WireMock only supports JUnit 4"
+      - "The JUnit 4 @Rule mechanism, because WireMock's dynamic-port support was never ported to the JUnit 5 extension model"
     answer: 2
     explanation: |
       Configuring the extension (dynamic port, options) requires creating the instance
@@ -755,9 +755,9 @@ questions:
       What is the recommended first step to migrate a large JUnit 4 suite to JUnit 5
       incrementally?
     options:
-      - "Delete all JUnit 4 tests and rewrite them at once"
-      - "Switch the whole project to TestNG first"
-      - "Disable all JUnit 4 tests until migration completes"
+      - "Delete every existing JUnit 4 test in one commit and rewrite the entire suite against Jupiter before running anything again"
+      - "Migrate the whole project to TestNG first, then convert the TestNG suite over to JUnit 5 once it is stable"
+      - "Mark all JUnit 4 tests with @Disabled and leave them switched off until the full Jupiter rewrite is completed"
       - "Add the junit-vintage-engine so existing JUnit 3/4 tests keep running on the Platform while you migrate test-by-test"
     answer: 3
     explanation: |
@@ -773,9 +773,9 @@ questions:
       During a JUnit 4 to 5 migration, why is the assertEquals message-argument change a
       dangerous silent bug?
     options:
-      - "Because assertEquals was removed in JUnit 5"
-      - "Because JUnit 5 requires a delta on every assertEquals"
-      - "Because messages are no longer supported"
+      - "Because assertEquals was removed entirely from Jupiter, so every JUnit 4 call site fails to compile and must be swapped for assertThat"
+      - "Because JUnit 5 now demands an explicit delta tolerance argument on every assertEquals call, even when comparing plain integers or strings"
+      - "Because custom failure messages are no longer supported by Jupiter's assertions, silently dropping the diagnostic text from JUnit 4 tests"
       - "Because the message moved from the FIRST argument (JUnit 4) to the LAST (JUnit 5); if the old message is assignment-compatible the code still compiles but compares the wrong values"
     answer: 3
     explanation: |
