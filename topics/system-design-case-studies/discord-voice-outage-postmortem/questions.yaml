@@ -1,0 +1,170 @@
+topic: "Discord: How a Routine Scale-Up Cascaded Into a 3-Hour Voice Outage"
+domain: system-design-case-studies
+topic_slug: discord-voice-outage-postmortem
+version: 1
+questions:
+  - id: discord-voice-outage-postmortem-001
+    difficulty: beginner
+    tags: [trigger, kubernetes, root-cause]
+    question: |
+      What routine action triggered the 3/25/26 Discord voice outage?
+    options:
+      - "A bad code deploy that crashed the voice gateway"
+      - "A distributed denial-of-service attack that overwhelmed the SFU media servers"
+      - "A vertical-scaling config change that made Kubernetes terminate pods"
+      - "An expired TLS certificate on the sessions cluster"
+    answer: 2
+    explanation: |
+      The trigger was a routine vertical-scaling config change (more CPU/memory,
+      fewer pods). To shrink the pod count, Kubernetes terminated 50% of the pods in
+      the first zone it rolled out to — and a grace-period race meant they were killed
+      before draining.
+    ref: "concepts.md#what-went-wrong-a-make-the-servers-bigger-change-killed-17-of-sessions"
+  - id: discord-voice-outage-postmortem-002
+    difficulty: advanced
+    tags: [sessions, blast-radius, zones]
+    question: |
+      The change terminated 50% of the pods in the FIRST zone it hit, yet only ~17%
+      of all Discord sessions dropped. Why not 50%?
+    options:
+      - "17%, because sessions are balanced across three zones and only one zone's pods (half of ~1/3) were hit"
+      - "50%, because half of every pod in the entire fleet was terminated at once"
+      - "A third, because one whole zone of three was completely drained"
+      - "None dropped, since Kubernetes always drains pods gracefully before terminating them"
+    answer: 0
+    explanation: |
+      Sessions are balanced across three zones, so each zone holds ~1/3. The rollout
+      reached only the first zone, where 50% of pods were killed — half of one-third,
+      ≈17% of all sessions. A 50%-of-fleet cut would have needed all three zones hit.
+    ref: "concepts.md#what-went-wrong-a-make-the-servers-bigger-change-killed-17-of-sessions"
+  - id: discord-voice-outage-postmortem-003
+    difficulty: advanced
+    tags: [beam, genserver, selective-receive, bottleneck]
+    question: |
+      What was the core bottleneck that made the reconnect flood catastrophic?
+    options:
+      - "ScyllaDB ran out of disk during the write spike"
+      - "The SFU media servers rejected all new streams"
+      - "etcd lost quorum across all three zones and stopped serving any reads or writes entirely"
+      - "A single-GenServer supervisor whose selective receive scanned a huge mailbox"
+    answer: 3
+    explanation: |
+      Outbound connections went through Holster's gun pool behind single-GenServer
+      supervisors. Each used a selective receive that scans the whole mailbox; with a
+      ~100k queue that added ~1ms per spawn, so a mailbox growing toward 1M could
+      never catch up.
+    ref: "concepts.md#the-cascade-link-by-link"
+  - id: discord-voice-outage-postmortem-004
+    difficulty: intermediate
+    tags: [selective-receive, latency, numbers]
+    question: |
+      Discord's testing found that a selective receive on a supervisor with a ~100k
+      mailbox queue added roughly how much to process spawn time?
+    options:
+      - "About 1 second per spawn"
+      - "About 1 millisecond per spawn"
+      - "About 100 milliseconds per spawn"
+      - "About 1 microsecond per spawn"
+    answer: 1
+    explanation: |
+      The postmortem states the selective receive on a ~100k-message mailbox adds
+      ~1ms to process spawn time. Because scan cost grows with queue length, this
+      compounds into a death spiral as the mailbox grows toward 1M.
+    ref: "concepts.md#the-cascade-link-by-link"
+  - id: discord-voice-outage-postmortem-005
+    difficulty: advanced
+    tags: [etcd, service-discovery, hash-ring, ttl]
+    question: |
+      Why did instances start dropping off the hash ring during the incident?
+    options:
+      - "Operators manually removed them to reduce load on the cluster"
+      - "The load balancer deliberately evicted the slowest nodes"
+      - "The jammed process stopped refreshing etcd, so nodes expired after their 60s TTL"
+      - "A network partition split the cluster across the three availability zones and severed etcd"
+    answer: 2
+    explanation: |
+      The same jammed single-threaded process also handled etcd service-discovery
+      refreshes. With it stuck, refreshes stopped and instances dropped off the hash
+      ring once their 60-second TTL expired — feeding still more reconnect churn.
+    ref: "concepts.md#the-cascade-link-by-link"
+  - id: discord-voice-outage-postmortem-006
+    difficulty: advanced
+    tags: [recovery, thundering-herd, cold-start]
+    question: |
+      Why did restarting stuck nodes give only brief recovery before failing again?
+    options:
+      - "The restarts corrupted the etcd key-value store each time"
+      - "An empty, healthy-looking node drew the whole reconnect backlog and re-overloaded"
+      - "Kubernetes kept re-applying the original bad scale-down config to every restarted node"
+      - "The SFU instances refused connections from restarted nodes"
+    answer: 1
+    explanation: |
+      This is a cold-start thundering herd: a freshly restarted, empty node looks
+      healthy, so the load balancer steers the entire reconnect backlog at it, and it
+      instantly re-enters the overload it was restarted to escape.
+    ref: "concepts.md#why-recovery-was-so-hard-the-cold-start-thundering-herd"
+  - id: discord-voice-outage-postmortem-007
+    difficulty: intermediate
+    tags: [rate-limit, gotcha, guild]
+    question: |
+      Why was the initial guild-level rate limit described as "especially ineffective"?
+    options:
+      - "It throttled only coordinator syncers while child syncers spawned unbounded"
+      - "It was applied to the wrong zone entirely"
+      - "It rate-limited database reads while the reconnect flood was composed entirely of writes"
+      - "It was disabled by the earlier config change"
+    answer: 0
+    explanation: |
+      The guild limit capped only the spawning of the coordinator syncer while
+      allowing unbounded spawning of child syncers — so it throttled the wrong thing
+      and let the real flood through.
+    ref: "concepts.md#why-recovery-was-so-hard-the-cold-start-thundering-herd"
+  - id: discord-voice-outage-postmortem-008
+    difficulty: intermediate
+    tags: [recovery, capacity, terraform]
+    question: |
+      Besides retuning rate limits, how did Discord add capacity during recovery?
+    options:
+      - "They failed all traffic over to a standby region"
+      - "They manually provisioned 15 new instances, halving per-instance syncer count"
+      - "They enabled an autoscaler to grow the cluster automatically"
+      - "They temporarily migrated all active voice sessions onto the ScyllaDB database tier"
+    answer: 1
+    explanation: |
+      They manually stood up 15 new instances (VMs via Terraform, configured by Salt,
+      registered in etcd), doubling the cluster and halving each instance's syncer
+      count — increasing supply so each box sat below its cliff.
+    ref: "concepts.md#how-they-recovered-rate-limits-then-double-the-supply"
+  - id: discord-voice-outage-postmortem-009
+    difficulty: advanced
+    tags: [remediation, kubernetes, admission-webhook]
+    question: |
+      What durable remediation did Discord add to prevent an ungraceful scale-down?
+    options:
+      - "A validating admissions webhook that rejects scale-down until pods drain"
+      - "A nightly job that snapshots all voice sessions to disk"
+      - "A hard cap of one pod termination per hour"
+      - "Moving the entire sessions cluster off Kubernetes and back onto bare-metal hosts"
+    answer: 0
+    explanation: |
+      They added a validating admissions webhook that rejects a Kubernetes scale-down
+      until the affected pods have actually drained their entities — turning the
+      graceful-drain assumption into a hard gate instead of a hope.
+    ref: "concepts.md#trade-offs-gotchas-and-the-fixes-that-followed"
+  - id: discord-voice-outage-postmortem-010
+    difficulty: advanced
+    tags: [remediation, partitionsupervisor, beam]
+    question: |
+      How does replacing the single supervisor with a PartitionSupervisor address the
+      root bottleneck?
+    options:
+      - "It caches spawn results so that repeated requests can skip the mailbox scan entirely"
+      - "It moves the pool off the BEAM onto a separate service"
+      - "It spreads work across many independent supervisors running concurrently"
+      - "It drops any message older than the 60-second TTL"
+    answer: 2
+    explanation: |
+      A PartitionSupervisor spreads work across many independent supervisors that run
+      concurrently, so no single mailbox becomes the chokepoint — converting a
+      single-threaded scaling cliff into parallel, bounded queues.
+    ref: "concepts.md#trade-offs-gotchas-and-the-fixes-that-followed"

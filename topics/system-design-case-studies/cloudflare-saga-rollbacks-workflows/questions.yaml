@@ -1,0 +1,172 @@
+topic: "Cloudflare Workflows: Saga-Style Rollbacks for Durable Execution"
+domain: system-design-case-studies
+topic_slug: cloudflare-saga-rollbacks-workflows
+version: 1
+questions:
+  - id: cloudflare-saga-rollbacks-workflows-001
+    difficulty: beginner
+    tags: [saga, durable-execution, motivation]
+    question: |
+      In Cloudflare's fund-transfer example, why can't a durable-execution
+      engine simply "undo" a committed debit when a later step fails?
+    options:
+      - "Because the engine loses the step's persisted output on restart"
+      - "Because a committed external side effect can only be reversed by a new compensating operation"
+      - "Because debits are always processed far more slowly than credits, so the reversal window closes before any compensation can run"
+      - "Because retries are disabled once a step commits"
+    answer: 1
+    explanation: |
+      Durable execution resumes work that didn't finish; it cannot undo work that
+      already committed a real-world side effect. A committed debit must be reversed
+      by a new operation that credits the money back — the saga pattern's compensating
+      action.
+    ref: "concepts.md#the-problem-a-failed-step-can-leave-the-world-half-changed"
+  - id: cloudflare-saga-rollbacks-workflows-002
+    difficulty: intermediate
+    tags: [saga, definition]
+    question: |
+      What does the "saga pattern" refer to in this post?
+    options:
+      - "Wrapping every step of a workflow in a single distributed database transaction that spans all of the external services involved"
+      - "Retrying a failed step with exponential backoff until it eventually succeeds"
+      - "Pairing each forward operation with a matching compensating operation to keep a multi-step process consistent"
+      - "Splitting a long workflow into independent microservices that never share state"
+    answer: 2
+    explanation: |
+      The saga pattern keeps a multi-step process consistent when you cannot use one
+      big transaction, by pairing each forward operation with a compensating operation
+      that reverses it if a later step fails.
+    ref: "concepts.md#the-problem-a-failed-step-can-leave-the-world-half-changed"
+  - id: cloudflare-saga-rollbacks-workflows-003
+    difficulty: intermediate
+    tags: [trycatch, naive-approach]
+    question: |
+      Per the post, why is a hand-rolled `try/catch` compensation block a poor fit for
+      a Workflow?
+    options:
+      - "A catch block only knows what is still in memory at its exact execution point, not the persisted history"
+      - "JavaScript catch blocks are not permitted to call async functions, so any compensation that needs to await a network call cannot run there"
+      - "A catch block runs before the forward steps, so it has no data yet"
+      - "Catch blocks silently swallow all errors and never re-throw"
+    answer: 0
+    explanation: |
+      A Workflow can crash and resume, at which point in-memory state is gone. A catch
+      block only sees what's in memory at its point of execution, so it can't reliably
+      reason about which persisted steps actually completed.
+    ref: "concepts.md#the-naive-approach-a-hand-rolled-trycatch-compensation-block"
+  - id: cloudflare-saga-rollbacks-workflows-004
+    difficulty: intermediate
+    tags: [api-design, step-do]
+    question: |
+      How does a developer attach a rollback to a step in the chosen API?
+    options:
+      - "By calling a separate global `workflow.onRollback()` registration once per workflow"
+      - "By chaining `.rollback()` onto the promise returned by `step.do()`"
+      - "By defining a top-level `catch` handler that inspects step IDs"
+      - "By passing a rollback handler in an options object to `step.do()`"
+    answer: 3
+    explanation: |
+      Rollback is metadata on the durable unit of work: you pass a rollback handler in
+      an options object to `step.do()`. This co-locates a step with the compensation
+      that undoes it.
+    ref: "concepts.md#the-design-rollback-as-metadata-on-the-durable-unit-of-work"
+  - id: cloudflare-saga-rollbacks-workflows-005
+    difficulty: advanced
+    tags: [handler-arguments, gotcha]
+    question: |
+      A rollback handler receives `output` — the persisted value the forward step
+      produced. Why must handlers tolerate `output === undefined`?
+    options:
+      - "Because the engine clears output after every successful retry attempt"
+      - "Because the step may have failed before it persisted any output"
+      - "Because outputs larger than 2 minutes of work are dropped"
+      - "Because parallel steps overwrite each other's output values"
+    answer: 1
+    explanation: |
+      If the forward step failed before persisting anything, there is no output to
+      compensate against, so `output` is `undefined`. A handler that blindly
+      dereferences it will itself throw.
+    ref: "concepts.md#the-design-rollback-as-metadata-on-the-durable-unit-of-work"
+  - id: cloudflare-saga-rollbacks-workflows-006
+    difficulty: advanced
+    tags: [execution-order, parallelism]
+    question: |
+      In what order do rollback handlers execute, and why?
+    options:
+      - "In reverse step-start order, because parallel steps can complete out of order"
+      - "In the exact order the steps completed, because completion order is the only thing that reliably reflects the real data dependencies between them"
+      - "In parallel all at once, to minimize total rollback time"
+      - "In the original forward order, to mirror how the steps first ran"
+    answer: 0
+    explanation: |
+      Handlers run in reverse step-start order, not completion order. Because parallel
+      steps can finish out of order, unwinding by start order gives deterministic,
+      stack-like "undo most-recently-started-first" behavior.
+    ref: "concepts.md#the-design-rollback-as-metadata-on-the-durable-unit-of-work"
+  - id: cloudflare-saga-rollbacks-workflows-007
+    difficulty: intermediate
+    tags: [terminal-failure, execution-rules]
+    question: |
+      When do rollback handlers actually fire?
+    options:
+      - "On every error caught anywhere inside a step body"
+      - "Only when the Workflow is about to fail terminally"
+      - "On the first retry attempt of any failing step"
+      - "Only when a step exceeds its configured timeout"
+    answer: 1
+    explanation: |
+      Rollbacks run only when the Workflow is about to fail for good — not on every
+      caught step error. A transient error that a retry later fixes never triggers
+      compensation.
+    ref: "concepts.md#the-design-rollback-as-metadata-on-the-durable-unit-of-work"
+  - id: cloudflare-saga-rollbacks-workflows-008
+    difficulty: advanced
+    tags: [durable-execution, recovery, stubs]
+    question: |
+      After an engine crash loses all in-memory stubs, how does Workflows restore the
+      set of registered rollbacks?
+    options:
+      - "It re-runs the completed forward step bodies to rebuild their handlers"
+      - "It fails the instance immediately because stubs cannot be recovered"
+      - "It reads a snapshot of the entire live memory heap that Workflows mirrors to durable disk storage once every second so stubs can be restored verbatim"
+      - "It replays the code, reading persisted results for completed steps so each rollback re-registers without repeating side effects"
+    answer: 3
+    explanation: |
+      On restart, Workflows replays your code but does not re-execute completed forward
+      step bodies — it reads their persisted results. As each `step.do()` with a
+      rollback is re-encountered, its stub re-registers without duplicating the side
+      effect.
+    ref: "concepts.md#under-the-hood-durable-step-history-and-a-callable-stub"
+  - id: cloudflare-saga-rollbacks-workflows-009
+    difficulty: advanced
+    tags: [api-design, tradeoffs, rejected-alternatives]
+    question: |
+      Why did Cloudflare reject the fluent API `step.do(...).rollback(...)`?
+    options:
+      - "It required introducing a brand-new language keyword that older Workers runtime versions running in production did not yet support"
+      - "It prevented rollback handlers from ever being made idempotent"
+      - "It made step timing ambiguous because `step.do()` returns a promise used for pipelining"
+      - "It broke backward compatibility with every existing `step.do()` call"
+    answer: 2
+    explanation: |
+      `step.do()` returns a Promise, and Cloudflare wants promise pipelining. A
+      `.rollback()` in that chain would make step timing depend on when the returned
+      Promise is consumed — ambiguous — so the fluent form was rejected.
+    ref: "concepts.md#why-this-api-shape-two-rejected-alternatives"
+  - id: cloudflare-saga-rollbacks-workflows-010
+    difficulty: advanced
+    tags: [idempotency, errored-state, gotcha]
+    question: |
+      What happens if a rollback handler exhausts its configured retries?
+    options:
+      - "Workflows records the outcome as failed, stops the remaining handlers, and the instance ends in the Errored state"
+      - "Workflows silently ignores the failure and simply continues running the rest of the rollback handlers as though nothing had gone wrong"
+      - "Workflows retries the entire saga from the very first step again"
+      - "Workflows marks the original forward step as succeeded to unblock the run"
+    answer: 0
+    explanation: |
+      Compensation is best-effort with a hard stop. If a handler exhausts its retries,
+      Workflows records failure, stops remaining handlers, and the instance ends in the
+      Errored state. Handlers should also be idempotent since a crash can run them more
+      than once.
+    ref: "concepts.md#trade-offs-and-gotchas"

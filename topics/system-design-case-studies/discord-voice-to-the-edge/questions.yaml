@@ -1,0 +1,180 @@
+topic: "Discord: Moving Real-Time Voice to the Edge for Lower Latency"
+domain: system-design-case-studies
+topic_slug: discord-voice-to-the-edge
+version: 1
+questions:
+  - id: discord-voice-to-the-edge-001
+    difficulty: beginner
+    tags: [latency, real-time-media, motivation]
+    question: |
+      According to the post, why is server proximity so central to Discord voice
+      call quality?
+    options:
+      - "Nearer servers are mainly able to hold a much larger number of simultaneous participants in each individual voice call"
+      - "Every millisecond of network distance adds latency to every packet"
+      - "Closer servers reduce the cloud bill for each region"
+      - "Distant servers cannot forward UDP packets at all"
+    answer: 1
+    explanation: |
+      The post's core physics: a call is a stream of latency-sensitive UDP packets, and
+      "every millisecond of network distance adds latency to every packet." Past a
+      threshold the call stops feeling live. Hence the team's philosophy: "Closer servers
+      make better calls." Distance doesn't cap participants or block UDP outright.
+    ref: "concepts.md#the-problem-distance-is-latency-and-latency-kills-the-feeling-of-presence"
+  - id: discord-voice-to-the-edge-002
+    difficulty: beginner
+    tags: [coverage, hyperscalers, legacy]
+    question: |
+      What limited the geographic coverage of Discord's legacy voice fleet?
+    options:
+      - "Voice servers lived only where major cloud providers build data centers"
+      - "Regulatory rules in many countries explicitly banned running voice servers outside thirty specifically named cities"
+      - "The etcd directory could not store more than 30 regions"
+      - "UDP routing was disabled outside North America and Europe"
+    answer: 0
+    explanation: |
+      Voice servers ran inside hyperscaler data centers, and those providers run only about
+      30 to 40 regions across roughly 30 cities. So places like Reykjavik and Auckland were
+      underserved. The limit was physical build-out, not regulation, a directory row cap, or
+      any UDP restriction.
+    ref: "concepts.md#why-the-old-setup-fell-short-coverage-limited-by-where-clouds-have-data-centers"
+  - id: discord-voice-to-the-edge-003
+    difficulty: intermediate
+    tags: [sfu, architecture, call-model]
+    question: |
+      What is the SFU's role and how are calls assigned to hosts in the new design?
+    options:
+      - "Each participant streams directly to every other participant, peer to peer"
+      - "An SFU transparently splits a single call across several different hosts purely for the sake of load balancing"
+      - "One SFU instance forwards every participant's stream and hosts an entire call"
+      - "The SFU only relays signaling metadata, never the media itself"
+    answer: 2
+    explanation: |
+      An SFU (Selective Forwarding Unit) receives each participant's media stream and forwards
+      it to the others, avoiding the full mesh of everyone-to-everyone. Discord's model puts
+      one whole call on a single SFU instance for its full duration. It is not peer-to-peer,
+      not split across hosts, and it carries media, not just signaling.
+    ref: "concepts.md#the-core-move-run-voice-servers-on-a-300-city-edge-network"
+  - id: discord-voice-to-the-edge-004
+    difficulty: intermediate
+    tags: [edge, pop, scale]
+    question: |
+      Roughly how many cities does the edge network span versus the hyperscaler regions
+      Discord left behind?
+    options:
+      - "About 100 edge cities compared against the roughly 30 to 40 regions that the major hyperscalers operate"
+      - "Over 300 edge cities versus about 30 to 40 hyperscaler regions"
+      - "About 300 edge cities versus over 1,000 hyperscaler regions"
+      - "About 30 edge cities versus 300 hyperscaler regions"
+    answer: 1
+    explanation: |
+      Discord moved onto Cloudflare's edge network, which runs in over 300 cities, roughly an
+      order of magnitude more than the ~30 to 40 regions hyperscalers operate. More PoPs means
+      a closer voice server on average.
+    ref: "concepts.md#the-core-move-run-voice-servers-on-a-300-city-edge-network"
+  - id: discord-voice-to-the-edge-005
+    difficulty: advanced
+    tags: [service-discovery, valkey, ttl]
+    question: |
+      How does the new service discovery keep the directory of live voice hosts accurate?
+    options:
+      - "A central controller polls every host once per minute over gRPC"
+      - "Hosts write to etcd, which is compacted nightly to drop dead entries"
+      - "Operators manually add and then remove individual hosts from a static per-region configuration file by hand"
+      - "Hosts self-register into Valkey with a ten-minute TTL and re-register periodically"
+    answer: 3
+    explanation: |
+      Hosts dial in: they register on boot, re-register periodically to prove liveness, and
+      unregister on clean shutdown. Records live in Valkey (an in-memory store) with a
+      ten-minute TTL, so a host that dies without unregistering auto-expires. This replaced the
+      strained etcd directory; there is no central poller or manual config list.
+    ref: "concepts.md#service-discovery-hosts-dial-in-and-register-themselves"
+  - id: discord-voice-to-the-edge-006
+    difficulty: advanced
+    tags: [migration, etcd, double-write]
+    question: |
+      What scaling pain in the legacy stack did the discovery change also address, and how
+      was cutover handled?
+    options:
+      - "etcd was straining at 25,000 hosts; new records were double-written before retiring etcd"
+      - "Valkey itself became badly overloaded at roughly 25,000 hosts, so the team sharded it across three separate regions"
+      - "The SFU pool exceeded 25,000 calls, so calls were capped per host"
+      - "DNS lookups timed out at scale, so a custom resolver replaced etcd overnight"
+    answer: 0
+    explanation: |
+      etcd, built for a smaller fleet, was straining at 25,000 voice hosts with rising discovery
+      latencies. The new directory double-wrote the legacy SFU records during cutover so both
+      sources stayed correct, and only then was etcd retired. Valkey is the new store, not the
+      bottleneck, and the pain was in discovery, not a call cap or DNS.
+    ref: "concepts.md#why-the-old-setup-fell-short-coverage-limited-by-where-clouds-have-data-centers"
+  - id: discord-voice-to-the-edge-007
+    difficulty: advanced
+    tags: [churn, graceful-drain, availability]
+    question: |
+      How does Discord avoid dropping calls when the edge scheduler reclaims a host?
+    options:
+      - "It pins every host so the scheduler can never reclaim it"
+      - "It transparently migrates the entire live call's in-memory state over to a replacement host in the middle of the stream"
+      - "A supervisor delays exit by five minutes so clients reconnect to new local hosts"
+      - "It buffers all packets in Valkey until a new host is ready"
+    answer: 2
+    explanation: |
+      Edge containers reboot at least monthly and any code change recreates them, risking a
+      zero-count window with no live hosts. A container supervisor catches the shutdown signal
+      and delays exit by five minutes so replacements come up first and reconnecting clients
+      land on new local hosts, avoiding drops and long-distance reroutes. There is no live
+      memory migration or Valkey packet buffering.
+    ref: "concepts.md#the-churn-problem-edge-machines-reboot-constantly-so-plan-for-it"
+  - id: discord-voice-to-the-edge-008
+    difficulty: intermediate
+    tags: [results, metrics, quality]
+    question: |
+      Which set of outcomes does the post actually report from the edge migration?
+    options:
+      - "Fully 100% of all traffic was migrated at once, with a flat 50% latency cut applied uniformly everywhere"
+      - "Over 80% of voice/video traffic on the edge; Frankfurt ping down 34%, packet loss down 42%"
+      - "About half of regions improved, with Frankfurt packet loss up 42%"
+      - "Traffic split evenly, with Santiago expand ratio up 40%"
+    answer: 1
+    explanation: |
+      The post reports more than 80% of voice and video traffic now runs on the edge, 70% of
+      regions show year-over-year quality gains, and Frankfurt saw ping down 34% and packet loss
+      down 42%. Europe and Latin America packet loss dropped 20 to 60%, and Santiago's expand
+      ratio dropped (not rose) 40%. The other options invert or invent figures.
+    ref: "concepts.md#the-concrete-results"
+  - id: discord-voice-to-the-edge-009
+    difficulty: expert
+    tags: [placement, peering, gotchas]
+    question: |
+      What did the Iceland and Rotterdam rollout experiments teach about host selection?
+    options:
+      - "The closest PoP is always the best choice regardless of who else is on the call"
+      - "Packet loss is unrelated to which host holds a call"
+      - "Peering and transit path quality can safely be ignored entirely once a chosen PoP is geographically close enough"
+      - "A local PoP can hurt mixed-region calls, and a nearby PoP fails if its network path is saturated"
+    answer: 3
+    explanation: |
+      Iceland: a local host improved Iceland-only calls but made mixed-region calls worse (ping
+      up 2.7x) because one host holds the whole call. Rotterdam to Amsterdam: a nearby PoP failed
+      because the Orange-to-Amsterdam path over Telia's transit was saturated at peak, so it was
+      reverted after ~ten days. Lesson: proximity is necessary but not sufficient; peering
+      matters, so those must be checked before a region goes live.
+    ref: "concepts.md#the-hard-part-real-time-media-exposes-gremlins-that-http-never-would"
+  - id: discord-voice-to-the-edge-010
+    difficulty: expert
+    tags: [tokio, scheduling, runtime]
+    question: |
+      What caused the SFU's flush timer to be starved, and how was it fixed?
+    options:
+      - "An always-ready recv future exhausted Tokio's poll budget; a nine-millisecond budget disabled recv to let the timer run"
+      - "A memory leak in Valkey; the store was restarted nightly"
+      - "A set of 128 worker threads all deadlocked against one another, so the entire worker pool was permanently shrunk down to just 8 threads"
+      - "DNS caching stalled writes; the TTL was lowered to one minute"
+    answer: 0
+    explanation: |
+      Each SFU worker is a single-threaded Tokio runtime with a select! loop. An always-ready
+      packet-receive future kept winning and starved the periodic flush timer, exhausting Tokio's
+      128-poll fairness budget in microseconds. The fix was a nine-millisecond budget that
+      disables the recv branch long enough to let the flush timer run. It had nothing to do with
+      Valkey, thread-pool deadlock, or DNS.
+    ref: "concepts.md#the-hard-part-real-time-media-exposes-gremlins-that-http-never-would"

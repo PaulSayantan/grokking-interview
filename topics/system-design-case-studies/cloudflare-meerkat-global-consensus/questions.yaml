@@ -1,0 +1,170 @@
+topic: "Cloudflare Meerkat: Global Consensus Without a Leader"
+domain: system-design-case-studies
+topic_slug: cloudflare-meerkat-global-consensus
+version: 1
+questions:
+  - id: cloudflare-meerkat-global-consensus-001
+    difficulty: beginner
+    tags: [consensus, control-plane, problem-framing]
+    question: |
+      What kind of data does Cloudflare's Meerkat aim to keep consistent across
+      its global network?
+    options:
+      - "Large customer datasets and analytics tables"
+      - "Control-plane state such as placement and leadership information"
+      - "Streaming video and large media assets served to end users through the CDN edge"
+      - "Web request logs collected at the edge"
+    answer: 1
+    explanation: |
+      Meerkat targets control-plane state — small but critical bookkeeping like
+      *placement* (where a resource such as an AI model instance lives) and
+      *leadership* (which machine may write to a database). It is explicitly not a
+      general-purpose database for bulk application data.
+    ref: "concepts.md#the-problem-everyone-must-agree-even-when-the-network-misbehaves"
+  - id: cloudflare-meerkat-global-consensus-002
+    difficulty: beginner
+    tags: [raft, leader, failure-modes]
+    question: |
+      According to Cloudflare, what is the central weakness of Raft that motivated
+      Meerkat?
+    options:
+      - "It cannot store more than a few kilobytes of data"
+      - "It requires a minimum of 100 replicas to function"
+      - "Its dependency on an elected leader causes outages when the leader is unavailable"
+      - "It only works inside a single data center and cannot span multiple geographic regions"
+    answer: 2
+    explanation: |
+      Raft elects a single leader that alone accepts writes; when the leader fails,
+      no writes happen until a new one is elected. Cloudflare says it hit "multiple
+      incidents caused by unavailable leaders" with its own Raft-based systems.
+    ref: "concepts.md#why-the-naive-approach-broke-leaders-and-timeouts-ie-raft"
+  - id: cloudflare-meerkat-global-consensus-003
+    difficulty: intermediate
+    tags: [quepaxa, leaderless, architecture]
+    question: |
+      What consensus algorithm underpins Meerkat, and what is its defining trait?
+    options:
+      - "QuePaxa, a leaderless algorithm where any replica can drive consensus"
+      - "Raft, tuned with very aggressive timeouts"
+      - "Two-phase commit coordinated by a fixed master node that must approve every write"
+      - "Gossip-based eventual consistency with no ordering"
+    answer: 0
+    explanation: |
+      Meerkat is built on QuePaxa (Tennage & Băsescu et al., 2023). Its defining
+      trait is that it requires no leader — any replica can drive consensus forward,
+      so a single machine's death cannot stall the cluster.
+    ref: "concepts.md#the-architecture-quepaxa-and-a-shared-log"
+  - id: cloudflare-meerkat-global-consensus-004
+    difficulty: intermediate
+    tags: [timeouts, network, raft]
+    question: |
+      Why are Raft's timeouts hard to tune on Cloudflare's global network?
+    options:
+      - "Timeouts must be identical on every machine in the cluster or the replicas refuse to start up at all"
+      - "The network is so fast that any timeout value triggers instantly"
+      - "Timeouts are fixed by the protocol and cannot be changed at all"
+      - "Unpredictable latency means short values cause needless elections while long values react slowly"
+    answer: 3
+    explanation: |
+      On a jittery global network there is no good timeout value: set it too short and
+      replicas "constantly be timing out" and hold needless elections; set it too long
+      and the system "reacts slowly" to real leader failures.
+    ref: "concepts.md#why-the-naive-approach-broke-leaders-and-timeouts-ie-raft"
+  - id: cloudflare-meerkat-global-consensus-005
+    difficulty: intermediate
+    tags: [log, slots, invariant]
+    question: |
+      In Meerkat, what is a "decided slot" in the log?
+    options:
+      - "A slot reserved exclusively for the current elected leader's writes during its term"
+      - "A slot in the log whose event all replicas have agreed on and never contradict"
+      - "A slot that has been garbage-collected and removed"
+      - "A time window during which no writes are allowed"
+    answer: 1
+    explanation: |
+      The log is a sequence of slots; a slot with an agreed event is a "decided slot."
+      The core safety invariant is that no two replicas ever disagree on a decided
+      slot — that is what keeps readers from seeing inconsistent state.
+    ref: "concepts.md#the-architecture-quepaxa-and-a-shared-log"
+  - id: cloudflare-meerkat-global-consensus-006
+    difficulty: advanced
+    tags: [quepaxa, leader, round-trips]
+    question: |
+      In QuePaxa, what role does a leader play if one is present?
+    options:
+      - "It is the only replica permitted to accept client writes"
+      - "It permanently owns the log and never relinquishes control"
+      - "It is an optimization that cuts a decision to one round trip instead of three or more"
+      - "It validates that no Byzantine or malicious node has tampered with any of the committed data"
+    answer: 2
+    explanation: |
+      A leader is optional in QuePaxa — purely a performance optimization. A leader
+      decides a value in one round trip versus three-or-more for a non-leader. If the
+      leader vanishes, the cluster keeps going on the slower path instead of stalling.
+    ref: "concepts.md#the-architecture-quepaxa-and-a-shared-log"
+  - id: cloudflare-meerkat-global-consensus-007
+    difficulty: advanced
+    tags: [linearizability, reads, ordering]
+    question: |
+      How does Meerkat achieve linearizability for reads?
+    options:
+      - "Reads bypass consensus entirely and hit a local cache"
+      - "Reads are served only by the leader after a quorum check"
+      - "Reads are disallowed until every prior write has been fully flushed to disk on all of the replicas"
+      - "Reads also create log events, and a read landing on a decided slot re-proposes at the next slot"
+    answer: 3
+    explanation: |
+      Even reads create log events. If a read lands on an already-decided slot, the
+      lagging replica adopts the decided value and re-proposes its read at the next
+      slot, ordering the read strictly after the write — giving linearizability.
+    ref: "concepts.md#the-architecture-quepaxa-and-a-shared-log"
+  - id: cloudflare-meerkat-global-consensus-008
+    difficulty: intermediate
+    tags: [numbers, throughput, scale]
+    question: |
+      Which concrete figure did Cloudflare report for QuePaxa's performance under
+      adverse conditions?
+    options:
+      - "Roughly 10x higher throughput than Raft and Multi-Paxos"
+      - "About 2x lower latency than a single machine"
+      - "Guaranteed support for exactly 330 replicas within every single cluster"
+      - "Zero round trips required to decide a value"
+    answer: 0
+    explanation: |
+      Cloudflare reports QuePaxa achieving "much higher (~10x) throughput than Raft
+      and Multi-Paxos" under adverse conditions. Its proof-of-concept was tested with
+      up to 50 replicas distributed around the world across 330+ data centers.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+  - id: cloudflare-meerkat-global-consensus-009
+    difficulty: advanced
+    tags: [trade-offs, latency, geography]
+    question: |
+      What fundamental latency limit does Cloudflare say QuePaxa cannot escape?
+    options:
+      - "The fixed 10ms batching window applied to every write"
+      - "Decision latency is proportional to the latency between a majority of replicas"
+      - "The time to elect a new leader after every single write"
+      - "The disk write speed of the slowest replica participating in the cluster's quorum"
+    answer: 1
+    explanation: |
+      Cloudflare states proposal decision latency "is proportional to the latency
+      between some majority of replicas," with "no getting around that." Removing the
+      leader bottleneck does not repeal the speed of light between distant replicas.
+    ref: "concepts.md#reasoned-trade-offs-and-gotchas"
+  - id: cloudflare-meerkat-global-consensus-010
+    difficulty: advanced
+    tags: [trade-offs, byzantine, scope]
+    question: |
+      Which of the following is a stated limitation of Meerkat/QuePaxa?
+    options:
+      - "It requires a dedicated leader that can never fail"
+      - "It only supports single-key reads and provides no multi-key transaction support"
+      - "It does not handle Byzantine (malicious) faults, only crash-stop failures"
+      - "It cannot run across more than three data centers"
+    answer: 2
+    explanation: |
+      Like Raft, QuePaxa does not handle Byzantine faults — nodes that lie or behave
+      maliciously — assuming crash-stop failures instead. It is also not meant for
+      general-purpose databases, though it does support compare-and-swap and general
+      transactions.
+    ref: "concepts.md#reasoned-trade-offs-and-gotchas"

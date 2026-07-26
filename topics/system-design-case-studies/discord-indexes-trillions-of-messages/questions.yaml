@@ -1,0 +1,182 @@
+topic: "Discord: Indexing Trillions of Messages for Search"
+domain: system-design-case-studies
+topic_slug: discord-indexes-trillions-of-messages
+version: 1
+questions:
+  - id: discord-indexes-trillions-of-messages-001
+    difficulty: intermediate
+    tags: [bulk-indexing, failure-isolation, elasticsearch]
+    question: |
+      In Discord's legacy system, why could a single node failure cause roughly
+      40% of bulk index operations to fail?
+    options:
+      - "Redis lost its network connection to roughly 40% of the worker processes that were pulling batches off the realtime indexing queue"
+      - "A batch of 50 messages fanned out to up to 50 nodes, and any failed operation re-enqueued the whole batch"
+      - "The master node rejected 40% of writes to protect its heap"
+      - "Query traffic consumed 40% of the indexing capacity"
+    answer: 1
+    explanation: |
+      With ~100 nodes and batches of 50, a batch could touch up to 50 different
+      nodes. Because one failed operation caused the entire batch to be
+      re-enqueued, a single sick node poisoned a large fraction of in-flight
+      batches — Discord measured ~40%. The rebuild fixes this by grouping messages
+      by destination so each bulk request hits one index/node.
+    ref: "concepts.md#why-the-old-system-broke-four-cracks-under-load"
+  - id: discord-indexes-trillions-of-messages-002
+    difficulty: intermediate
+    tags: [pubsub, redis, durability]
+    question: |
+      What was the main problem with the Redis-backed realtime queue that led
+      Discord to move to Google Pub/Sub?
+    options:
+      - "Redis could not store message text, only integer IDs"
+      - "Redis required a separate cluster per availability zone"
+      - "Under backlog, Redis maxed CPU and dropped messages, silently corrupting the index"
+      - "Redis was slower than Pub/Sub at every throughput level"
+    answer: 2
+    explanation: |
+      Redis was best-effort: when queues backed up (often right after a node
+      failure), it saturated CPU and lost messages, so those messages never became
+      searchable. Pub/Sub provides guaranteed delivery, converting a backlog into a
+      delay rather than data loss.
+    ref: "concepts.md#making-ingestion-durable-and-failure-isolated"
+  - id: discord-indexes-trillions-of-messages-003
+    difficulty: advanced
+    tags: [message-router, rust, failure-isolation]
+    question: |
+      What is the core benefit of the Message Router grouping messages by a
+      "Destination" (cluster + index) before bulk indexing?
+    options:
+      - "Each bulk operation talks to a single index/node, so one bad node can't poison the whole batch"
+      - "It compresses messages to reduce network bandwidth"
+      - "It lets Elasticsearch skip the master node entirely"
+      - "It guarantees that messages are always indexed in strict timestamp order across every cluster and index in the fleet"
+    answer: 0
+    explanation: |
+      By computing a Destination per message and spawning a task per destination,
+      every bulk request targets exactly one index on one node. This aligns the
+      batch boundary with the failure domain, eliminating the old fan-out-to-50-nodes
+      pattern where a single failure re-enqueued whole batches.
+    ref: "concepts.md#making-ingestion-durable-and-failure-isolated"
+  - id: discord-indexes-trillions-of-messages-004
+    difficulty: intermediate
+    tags: [sharding, dms, partition-key]
+    question: |
+      Why does Discord shard direct messages by user_id and store each DM twice?
+    options:
+      - "To comply with a per-user encryption requirement"
+      - "Because Lucene forbids two different users from ever sharing the same underlying index or shard within a single cluster"
+      - "To keep the master node's cluster state small"
+      - "So either participant's cross-DM search stays a single-shard lookup across all their conversations"
+    answer: 3
+    explanation: |
+      A DM cross-search spans all of a user's conversations, so sharding by user_id
+      co-locates a user's DMs in one place. The cost is storing each message twice —
+      once per participant — which Discord accepts to keep the read path a fast
+      single-shard lookup. Guild messages, by contrast, are sharded by guild_id.
+    ref: "concepts.md#sharding-dms-vs-guilds-two-different-partition-keys"
+  - id: discord-indexes-trillions-of-messages-005
+    difficulty: advanced
+    tags: [bfg, max-doc, zero-downtime-migration]
+    question: |
+      When migrating a "Big Freaking Guild" (BFG) approaching Lucene's MAX_DOC to a
+      larger index, what does Discord do while the historical backfill is running?
+    options:
+      - "Take search offline for that guild during the backfill"
+      - "Dual-index new messages to both indices while queries still read the old index"
+      - "Serve queries from both indices and merge results"
+      - "Pause new message ingestion until backfill completes"
+    answer: 1
+    explanation: |
+      Discord dual-indexes new writes to both the old index-a and the new
+      2x-shard index, backfills history into the new index while queries continue
+      to be served from the old one, then switches query traffic once backfill is
+      complete and cleans up the old index afterward — a zero-downtime migration.
+    ref: "concepts.md#bfgs-special-casing-the-outliers-big-freaking-guilds"
+  - id: discord-indexes-trillions-of-messages-006
+    difficulty: advanced
+    tags: [cluster-size, master-node, scalability]
+    question: |
+      Why did Discord move from a couple of 200+ node clusters to about 40 smaller
+      clusters?
+    options:
+      - "Smaller clusters are cheaper per node to license"
+      - "Kubernetes cannot schedule clusters larger than 200 nodes"
+      - "Bulk fan-out grows with node count, and the master node's cluster state doesn't scale, risking OOM on giant clusters"
+      - "Query latency stays completely fixed and identical no matter how many separate clusters or individual nodes are added to the search fleet"
+    answer: 2
+    explanation: |
+      The master node holds cluster state that doesn't scale with size, so a huge
+      cluster could OOM the master and stall indexing. Larger clusters also mean
+      wider bulk fan-out and more nodes that can fail. Many small clusters keep
+      coordination cheap and shrink the blast radius.
+    ref: "concepts.md#the-rebuild-cells-of-small-clusters-on-kubernetes"
+  - id: discord-indexes-trillions-of-messages-007
+    difficulty: intermediate
+    tags: [node-roles, ingest, kubernetes]
+    question: |
+      In the new architecture, what characterizes the dedicated "ingest" nodes?
+    options:
+      - "They hold the primary copy of every shard"
+      - "They run the Rust Message Router process directly"
+      - "They are automatically elected as the master node responsible for coordinating cluster state across every availability zone"
+      - "They are stateless (own no data), so they scale up to absorb ingestion spikes"
+    answer: 3
+    explanation: |
+      Discord splits nodes by role. Ingest nodes are stateless — they hold no data —
+      so they can scale independently to handle ingestion spikes without touching
+      the data layer. Master-eligible nodes handle coordination and data nodes hold
+      shards, keeping the roles from starving each other.
+    ref: "concepts.md#the-rebuild-cells-of-small-clusters-on-kubernetes"
+  - id: discord-indexes-trillions-of-messages-008
+    difficulty: beginner
+    tags: [latency, metrics, results]
+    question: |
+      How did median query latency change after the rebuild, per the post?
+    options:
+      - "Dropped from 500ms to under 100ms"
+      - "Dropped from 1s to under 500ms"
+      - "Stayed roughly the same but throughput doubled"
+      - "Rose slightly in exchange for guaranteed delivery"
+    answer: 0
+    explanation: |
+      Median query latency fell from 500ms to under 100ms, and p99 fell from 1s to
+      under 500ms, while indexing throughput roughly doubled. The 1s-to-under-500ms
+      figure is the p99 number, not the median.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+  - id: discord-indexes-trillions-of-messages-009
+    difficulty: advanced
+    tags: [shard-count, coordination, trade-offs]
+    question: |
+      Why does Discord prefer a single primary shard for the typical guild rather
+      than many shards?
+    options:
+      - "Elasticsearch does not support multiple primary shards per index"
+      - "A single shard avoids query fan-out and coordination overhead; extra shards only pay off for BFGs"
+      - "Single-shard indices are exempt from the MAX_DOC limit"
+      - "Replicas are only allowed when there is exactly one primary shard"
+    answer: 1
+    explanation: |
+      For a normal guild, one primary shard means a search hits one place — no
+      fan-out, no coordination cost. Multiple shards only help when a single shard
+      can't hold or serve the data (a BFG near MAX_DOC), and only when query cost
+      exceeds coordination cost. More shards is a trade, not a default.
+    ref: "concepts.md#bfgs-special-casing-the-outliers-big-freaking-guilds"
+  - id: discord-indexes-trillions-of-messages-010
+    difficulty: intermediate
+    tags: [operability, log4shell, kubernetes, eck]
+    question: |
+      What operational capability did running Elasticsearch on Kubernetes via the
+      ECK operator restore that the legacy clusters lacked?
+    options:
+      - "The ability to store more than 2 billion messages in one index"
+      - "Automatic sharding of DMs by user_id"
+      - "Guaranteed message delivery from the queue"
+      - "Safe rolling restarts and OS upgrades with no service impact"
+    answer: 3
+    explanation: |
+      The legacy clusters couldn't do rolling restarts, so patching log4shell meant
+      taking search fully offline. ECK on Kubernetes gives automatic OS upgrades and
+      safe rolling restarts with no service impact — restoring operability, a
+      first-class requirement of the rebuild.
+    ref: "concepts.md#why-the-old-system-broke-four-cracks-under-load"

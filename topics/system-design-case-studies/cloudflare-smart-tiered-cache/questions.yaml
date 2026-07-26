@@ -1,0 +1,184 @@
+topic: "Cloudflare: Smart Tiered Cache for Public Cloud Regions"
+domain: system-design-case-studies
+topic_slug: cloudflare-smart-tiered-cache
+version: 1
+questions:
+  - id: cloudflare-smart-tiered-cache-001
+    difficulty: beginner
+    tags: [tiered-cache, upper-tier, cache-hit-ratio]
+    question: |
+      In Cloudflare's tiered cache, what is the primary role of the
+      "upper tier" data center?
+    options:
+      - "It is the single point through which all cache misses funnel on their way to the origin"
+      - "It stores and rotates the TLS certificates for every customer origin across all of Cloudflare's data centers globally"
+      - "It replaces the origin server entirely so origins can be shut down"
+      - "It runs the latency probes that measure distance to end users"
+    answer: 0
+    explanation: |
+      The upper tier is "the single point through which all cache misses funnel on
+      their way to your origin." Concentrating misses on one warm cache means most
+      are served from that tier, so the origin sees far fewer requests and hit ratio
+      climbs. It doesn't replace the origin or store all certificates.
+    ref: "concepts.md#the-intuition-what-a-tiered-cache-is-and-why-the-upper-tier-matters"
+
+  - id: cloudflare-smart-tiered-cache-002
+    difficulty: beginner
+    tags: [smart-tiered-cache, latency-probes, 2021]
+    question: |
+      How did the original 2021 Smart Tiered Cache choose the upper tier for an origin?
+    options:
+      - "By asking the customer to manually assign a preferred upper-tier data center in the dashboard settings for each origin"
+      - "By selecting the data center with the most spare CPU capacity"
+      - "By electing the single lowest-latency data center from continuous probes to the origin IP"
+      - "By round-robin rotating the upper tier every 15 minutes"
+    answer: 2
+    explanation: |
+      The original approach measured network latency from every data center to the
+      origin's IP and elected the single lowest-latency one as the upper tier — one
+      warm funnel as close to the origin as the network allows, with zero config. It
+      was automatic, not manual, and not based on CPU or rotation.
+    ref: "concepts.md#smart-tiered-cache-and-why-it-picks-with-latency-probes"
+
+  - id: cloudflare-smart-tiered-cache-003
+    difficulty: intermediate
+    tags: [anycast, failure-mode, public-cloud]
+    question: |
+      Why did the latency-probe approach break for origins hosted on public clouds?
+    options:
+      - "Public cloud origins block all ICMP and TCP probe traffic at their firewalls, so no latency signal could ever be measured by any data center"
+      - "The origins sit behind anycast, so one IP looks equally close to many data centers and probes have nothing to lock onto"
+      - "Cloud providers rate-limit Cloudflare's probes to once per day"
+      - "The probes were disabled by default on all paid plans"
+    answer: 1
+    explanation: |
+      Cloud origins sit behind anycast or regional front ends, so "one origin IP can
+      look equally close to a dozen Cloudflare data centers at once." The latency
+      probes "have nothing to lock onto" — there's no single nearest data center to
+      elect. It's not about blocked ICMP or rate limits.
+    ref: "concepts.md#why-the-naive-approach-broke-anycast-confuses-the-probes"
+
+  - id: cloudflare-smart-tiered-cache-004
+    difficulty: intermediate
+    tags: [hairpinning, latency, singapore-chicago]
+    question: |
+      In the post's example, what is "hairpinning" and roughly what did it cost?
+    options:
+      - "Compressing request and response headers to save bandwidth on every hop; it saved only a few kilobytes per request"
+      - "Caching at the edge only; it had no measurable latency effect"
+      - "Duplicating the origin across regions; it doubled storage costs"
+      - "A request making a cross-continent U-turn (Asia to Chicago to Singapore); it added hundreds of milliseconds"
+    answer: 3
+    explanation: |
+      A mis-elected upper tier in Chicago meant an Asian user's request flew to North
+      America and back to a Singapore origin — a U-turn across the planet the post
+      calls hairpinning, which "adds hundreds of milliseconds of latency." The probe
+      number was fine; it was just meaningless because the IP is anycast.
+    ref: "concepts.md#why-the-naive-approach-broke-anycast-confuses-the-probes"
+
+  - id: cloudflare-smart-tiered-cache-005
+    difficulty: advanced
+    tags: [anycast-detection, speed-of-light, physics]
+    question: |
+      How does Cloudflare detect that an origin IP is anycast?
+    options:
+      - "If combined probe latencies from two far-apart checkpoints are faster than light in fiber could travel between them, the IP must answer from multiple locations"
+      - "It parses the origin's TLS certificate for an anycast extension field"
+      - "It counts how many distinct BGP routes across the global Internet routing table advertise the origin's IP prefix and flags any origin with more than ten separate advertisements"
+      - "It compares the origin's response body hash across regions for differences"
+    answer: 0
+    explanation: |
+      Cloudflare uses a physical constant as the test: sum the probe latencies from
+      two far-apart checkpoints; if that total is faster than light in fiber could
+      physically travel between them, no single machine could have answered both — so
+      the IP must be anycast. It's proven by physics, not guessed from BGP or certs.
+    ref: "concepts.md#the-fix-part-1-detect-anycast-with-the-speed-of-light"
+
+  - id: cloudflare-smart-tiered-cache-006
+    difficulty: advanced
+    tags: [region-mapping, voting, upper-tier-database]
+    question: |
+      Once an origin is known to be anycast, how does Cloudflare pick the upper tier?
+    options:
+      - "It always sends misses directly to the origin, skipping the tier entirely"
+      - "It picks the data center with the lowest latency probe, ignoring the anycast flag"
+      - "It matches the origin's subnet to a cloud region, then has that region's subnets cast weighted votes to elect a primary and fallback"
+      - "It lets the customer's DNS provider choose the upper tier by publishing a special TXT record that Cloudflare reads on every cache miss"
+    answer: 2
+    explanation: |
+      With latency useless, Cloudflare switches to structure: provider IP-range files
+      map the subnet to a region, those subnets are matched against the upper-tier
+      database, and each casts "a weighted vote based on its current upper-tier
+      assignment." The strongest signal becomes primary, with a fallback on a
+      different PoP.
+    ref: "concepts.md#the-fix-part-2-map-cloud-regions-then-vote"
+
+  - id: cloudflare-smart-tiered-cache-007
+    difficulty: intermediate
+    tags: [refresh-cadence, region-files, probing]
+    question: |
+      What are the two refresh cadences the post cites for the new pipeline?
+    options:
+      - "Region files hourly; probing every second"
+      - "Region files daily; probing weekly"
+      - "Region files are loaded once at boot time and never refreshed; latency probing runs only on demand when a cache miss occurs"
+      - "Provider IP-range files every few hours; the upper-tier probe database every 15 minutes"
+    answer: 3
+    explanation: |
+      Cloudflare fetches provider IP-range files "every few hours" and refreshes the
+      upper-tier database (built from continuous latency probing) "every 15 minutes."
+      Those are the only two cadences the post states.
+    ref: "concepts.md#concrete-numbers-from-the-post-stated-honestly"
+
+  - id: cloudflare-smart-tiered-cache-008
+    difficulty: advanced
+    tags: [availability, fallback, pop]
+    question: |
+      What rule does Cloudflare enforce about the primary and fallback upper tiers?
+    options:
+      - "They always come from different points of presence (PoPs)"
+      - "They must be within the same building for low latency"
+      - "The fallback must have exactly double the primary's capacity"
+      - "The fallback is only created for customers on enterprise plans"
+    answer: 0
+    explanation: |
+      "Primary and fallback always come from different points of presence (PoPs)," so
+      a single PoP outage can't take out both. This is the availability guardrail that
+      offsets the concentration risk of funneling all misses through one tier.
+    ref: "concepts.md#the-fix-part-2-map-cloud-regions-then-vote"
+
+  - id: cloudflare-smart-tiered-cache-009
+    difficulty: intermediate
+    tags: [cold-start, tier-1-pop, geographic-fallback]
+    question: |
+      What does Cloudflare do for a region that has no probe data yet?
+    options:
+      - "It refuses to serve that region until an admin files a support ticket"
+      - "It defaults to the closest Tier 1 PoP, then switches to the data-backed choice as origins onboard"
+      - "It caches nothing for that region and sends every single request straight through to the customer's origin permanently"
+      - "It randomly assigns any available data center and never revisits the choice"
+    answer: 1
+    explanation: |
+      Regions lacking probe data default to "the closest of our Tier 1 PoPs," a sane
+      bootstrap that self-corrects: as origins in that region onboard and generate
+      signal, Cloudflare switches to the data-backed upper tier. It doesn't refuse
+      service or freeze a random pick.
+    ref: "concepts.md#the-fix-part-2-map-cloud-regions-then-vote"
+
+  - id: cloudflare-smart-tiered-cache-010
+    difficulty: beginner
+    tags: [region-hint, configuration, providers]
+    question: |
+      What is the user's main job under the new feature, and which providers are covered at launch?
+    options:
+      - "Manually electing every upper-tier data center by hand for each individual origin; covering AWS only at launch"
+      - "Writing custom probe scripts; covering GCP and Azure"
+      - "Disabling anycast on the origin; covering no named providers"
+      - "Selecting the region hint (e.g. aws:us-east-1); covering AWS, GCP, Azure, and Oracle Cloud"
+    answer: 3
+    explanation: |
+      Cloudflare "automates probing, selection, and failover," so "your job is
+      selecting the region hint" (e.g. aws:us-east-1), settable one-at-a-time, in bulk,
+      via API, or Terraform. At launch the feature covers four providers: AWS, GCP,
+      Azure, and Oracle Cloud.
+    ref: "concepts.md#what-you-configure-vs-what-cloudflare-automates"

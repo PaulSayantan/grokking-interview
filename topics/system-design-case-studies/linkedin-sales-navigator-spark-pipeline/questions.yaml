@@ -1,0 +1,174 @@
+topic: "LinkedIn: Optimizing Sales Navigator's Search Pipeline with Spark"
+domain: system-design-case-studies
+topic_slug: linkedin-sales-navigator-spark-pipeline
+version: 1
+questions:
+  - id: linkedin-sales-navigator-spark-pipeline-001
+    difficulty: beginner
+    tags: [spark, batch, motivation]
+    question: |
+      What was the headline result of optimizing the Sales Navigator DM
+      pipeline reported in the post?
+    options:
+      - "Total pipeline execution dropped from 6-7 hours to around three hours"
+      - "Query latency at serving time was halved for end users"
+      - "The pipeline was fully migrated off Spark and back onto the older MapReduce execution engine"
+      - "Cluster cost was reduced by exactly 50 percent overall"
+    answer: 0
+    explanation: |
+      The optimizations cut total pipeline execution from 6-7 hours down to
+      around three hours. The work targeted the offline index-building batch
+      pipeline, not serving-time query latency, and it kept running on Spark.
+    ref: "concepts.md#the-problem-rebuild-a-giant-search-index-faster-without-more-compute"
+  - id: linkedin-sales-navigator-spark-pipeline-002
+    difficulty: intermediate
+    tags: [resource-caps, scaling]
+    question: |
+      Why couldn't LinkedIn simply add more executors to speed up the slowest
+      DM jobs?
+    options:
+      - "Spark cannot run more than 1,000 executors per application because of a hard architectural design limit"
+      - "Avro serialization prevents scaling beyond a fixed executor count"
+      - "HDFS throughput caps the number of executors a job can use"
+      - "Per-job resource caps enforce fair sharing, and some jobs were already at the limit"
+    answer: 3
+    explanation: |
+      LinkedIn enforces resource caps per Spark job for fair allocation on a
+      shared cluster, and some jobs (the largest needs ~5,000 executors) were
+      already at those caps. Speed had to come from doing less work and removing
+      waste, not from more compute.
+    ref: "concepts.md#the-naive-approach-and-why-it-broke-just-add-executors"
+  - id: linkedin-sales-navigator-spark-pipeline-003
+    difficulty: intermediate
+    tags: [skew, repartition, shuffle]
+    question: |
+      Repartitioning one job by search document ID produced what improvement?
+    options:
+      - "It removed the need for any network shuffle in that job entirely, letting every stage run fully within local executor memory"
+      - "It cut the job from around 2 hours to just 30 minutes, balancing shuffle read at ~4.3 GB per executor"
+      - "It reduced the job's executor count from 5,000 to 500"
+      - "It let the job be consolidated with two others"
+    answer: 1
+    explanation: |
+      Search document ID is high-cardinality and uniformly distributed, so
+      repartitioning on it spread data evenly: the job fell from ~2 hours to
+      30 minutes and each executor's shuffle read settled at about 4.3 GB.
+    ref: "concepts.md#fixing-data-skew-with-repartitioning"
+  - id: linkedin-sales-navigator-spark-pipeline-004
+    difficulty: intermediate
+    tags: [broadcast-join, joins]
+    question: |
+      How does a broadcast join speed up a join between a small and a large
+      table?
+    options:
+      - "It copies the small build table to every executor so the large probe table joins locally without a shuffle"
+      - "It shuffles both the small and large tables by their join key so that matching rows always co-locate on the same executor"
+      - "It samples the large table and joins only a representative subset"
+      - "It moves the join onto the driver to avoid using executors"
+    answer: 0
+    explanation: |
+      A broadcast join sends the small (build) table to every executor, which
+      then joins it locally against its slice of the large (probe) table,
+      avoiding a network shuffle of the big table.
+    ref: "concepts.md#broadcast-joins-for-size-mismatched-tables"
+  - id: linkedin-sales-navigator-spark-pipeline-005
+    difficulty: advanced
+    tags: [broadcast-join, oom, gotcha]
+    question: |
+      What is the risk of broadcasting a table that is too large?
+    options:
+      - "Spark silently falls back to a regular shuffle join and logs nothing about the change to the operator"
+      - "The join produces incorrect results due to partial broadcasts"
+      - "OutOfMemory errors and network saturation; over 2 GB caused significant degradation"
+      - "The driver deadlocks waiting for executor acknowledgements"
+    answer: 2
+    explanation: |
+      The build table is copied to every executor, so an oversized broadcast
+      risks OutOfMemory and network saturation. LinkedIn found broadcasting
+      tables over 2 GB caused significant performance degradation.
+    ref: "concepts.md#broadcast-joins-for-size-mismatched-tables"
+  - id: linkedin-sales-navigator-spark-pipeline-006
+    difficulty: intermediate
+    tags: [job-graph, critical-path, pruning]
+    question: |
+      What did consolidating three jobs into one achieve, and why tackle the
+      job graph first?
+    options:
+      - "It doubled executor utilization across the whole cluster; the job graph is always tuned last, only after memory settings"
+      - "It saved over 30 minutes by removing redundant work; critical-path bottlenecks gate the finish time"
+      - "It eliminated all shuffles; graph pruning is purely cosmetic"
+      - "It cut memory in half; job count has no effect on runtime"
+    answer: 1
+    explanation: |
+      Consolidating three jobs into one removed redundant reads/writes and saved
+      over 30 minutes. Critical-path analysis comes first because the pipeline's
+      finish time is set by its longest dependent path, not by any single job.
+    ref: "concepts.md#job-graph-pruning-do-less-work-before-tuning-anything"
+  - id: linkedin-sales-navigator-spark-pipeline-007
+    difficulty: advanced
+    tags: [shuffle-partitions, tuning]
+    question: |
+      What is a reasonable starting point for the number of shuffle partitions,
+      and what goes wrong if it is too low?
+    options:
+      - "One partition per dataset; too few slows only the driver"
+      - "The number of input files; too few causes duplicate rows"
+      - "Twice the total dataset size measured in gigabytes; setting it too few only ever triggers OutOfMemory errors"
+      - "Roughly executor count times cores per executor; too few causes skew and wastes resources"
+    answer: 3
+    explanation: |
+      A sensible baseline is executor count x cores per executor, giving about
+      one partition of work per core. Too few partitions forces each to hold too
+      much, causing skew even with a good key, and wastes cluster resources.
+    ref: "concepts.md#tuning-shuffle-partitions"
+  - id: linkedin-sales-navigator-spark-pipeline-008
+    difficulty: advanced
+    tags: [par, parallelism, driver]
+    question: |
+      When using Scala's `.par` to run joins concurrently, where can the
+      bottleneck appear?
+    options:
+      - "In HDFS, because parallel reads corrupt the Avro files"
+      - "On the driver, which orchestrates the parallel joins and struggles with 20+ DataFrames"
+      - "In the shuffle service, which cannot handle parallel writes"
+      - "In the watermark generation, which serializes all joins"
+    answer: 1
+    explanation: |
+      `.par` runs joins concurrently, but the driver orchestrates that
+      parallelism and can become the bottleneck with 20+ DataFrames. The joins
+      run on executors, so both driver and executors need spare capacity.
+    ref: "concepts.md#running-joins-in-parallel-with-par"
+  - id: linkedin-sales-navigator-spark-pipeline-009
+    difficulty: intermediate
+    tags: [right-sizing, auto-tuning, memory]
+    question: |
+      How does LinkedIn's Right-Sizing tool decide executor memory settings?
+    options:
+      - "It multiplies the input dataset size by a fixed safety factor"
+      - "It asks each job owner to submit memory estimates manually"
+      - "It analyzes the last 30 days of historical runs to adjust memory and overhead, flagging recurring OOMs"
+      - "It sets all jobs to the per-job resource cap by default"
+    answer: 2
+    explanation: |
+      Right-Sizing is rule-based: it uses the last 30 days of a job's historical
+      runs to adjust executor memory and overhead, and flags jobs with recurring
+      OutOfMemory patterns for deeper investigation instead of just adding memory.
+    ref: "concepts.md#auto-tuning-memory-with-right-sizing"
+  - id: linkedin-sales-navigator-spark-pipeline-010
+    difficulty: beginner
+    tags: [architecture, offline-nearline-serving]
+    question: |
+      In the search system's three components, what does the offline component
+      produce?
+    options:
+      - "Immutable base indexes stored in shards, plus a watermark timestamp"
+      - "An in-memory live index flushed periodically to disk"
+      - "The federation layer that fans queries out to brokers"
+      - "The response validator comparing live and dark clusters"
+    answer: 0
+    explanation: |
+      The offline component runs the batch DM pipeline: it loads datasets from
+      HDFS, transforms them, and builds immutable base indexes in shards, emitting
+      watermarks. The live index is nearline; federation and the validator are
+      serving-side.
+    ref: "concepts.md#the-three-components-of-the-search-system"
