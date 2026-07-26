@@ -1,0 +1,173 @@
+topic: "Stripe: Designing a Payments API That Survives 10 Years of Change"
+domain: "system-design-case-studies"
+topic_slug: "stripe-idempotency-and-api-design"
+version: 1
+questions:
+  - id: stripe-idempotency-and-api-design-001
+    difficulty: beginner
+    tags: [payments, abstraction, api-design]
+    question: |
+      According to the post, why were Stripe's original Charges + Tokens APIs a
+      poor abstraction for global payments even though they worked well at first?
+    options:
+      - "They were the first APIs Stripe had, shaped by cards, not by the full range of global payment behaviors"
+      - "They were written in Ruby, a language Stripe's core payments team later abandoned in favor of a statically typed one"
+      - "They exposed raw card numbers to the merchant's server"
+      - "They lacked any built-in authentication mechanism, forcing each API caller to hand-roll and manage its own credentials"
+    answer: 0
+    explanation: |
+      The post says those APIs were foundational "because they were the first APIs
+      we had, not because they were the right abstraction for global payments." They
+      assumed every payment behaves like a card (instant finalization, no customer
+      action), which is false for most global methods.
+    ref: "concepts.md#the-problem-payments-are-not-one-thing-but-the-api-pretended-they-were"
+  - id: stripe-idempotency-and-api-design-002
+    difficulty: intermediate
+    tags: [payment-methods, finalization, customer-action]
+    question: |
+      What two properties of card payments did Stripe's original API implicitly
+      assume were true of all payment methods?
+    options:
+      - "They are free to process and settle instantly into the merchant's own local currency with no FX conversion step"
+      - "They finalize immediately and require no additional action from the customer"
+      - "They are reversible and can be captured multiple times against the same authorization hold"
+      - "They are online-only and never involve a bank"
+    answer: 1
+    explanation: |
+      Cards are the one method that finalizes instantly AND needs no customer step.
+      Methods like ACH settle days later, and many European methods require the
+      customer to authorize at their bank — breaking both assumptions.
+    ref: "concepts.md#the-problem-payments-are-not-one-thing-but-the-api-pretended-they-were"
+  - id: stripe-idempotency-and-api-design-003
+    difficulty: intermediate
+    tags: [charges, resource-bloat, evolution]
+    question: |
+      What concrete sign of strain did the Charge resource show between 2011 and 2018?
+    options:
+      - "Its median API response latency roughly doubled every year as new validation logic piled on"
+      - "It was split into seven separate microservices"
+      - "It grew from 11 to 36 properties, and creation params from 5 to 14"
+      - "It stopped supporting several older card networks entirely"
+    answer: 2
+    explanation: |
+      The post cites the Charge resource growing from 11 to 36 properties and its
+      creation parameters from 5 to 14 — the abstraction quietly accumulating the
+      weight of every non-card feature bolted onto it.
+    ref: "concepts.md#the-original-design-charges--tokens-20112015"
+  - id: stripe-idempotency-and-api-design-004
+    difficulty: advanced
+    tags: [sources-api, redirect, conversion]
+    question: |
+      What was the key failure of the Sources API with a redirect method like iDEAL?
+    options:
+      - "It charged the merchant a non-refundable processing fee on every single declined or abandoned authorization attempt"
+      - "It required merchants to store the customer's raw bank login credentials on their own servers between the two steps"
+      - "It only worked in the US and could not handle EU currencies"
+      - "If the browser dropped connection between creating the Source and the Charge, money already moved got refunded"
+    answer: 3
+    explanation: |
+      With the two-step Source-then-Charge flow, a lost connection after the Source
+      but before the Charge caused already-moved money to be refunded — what the
+      author calls "a conversion nightmare."
+    ref: "concepts.md#why-the-naive-approach-broke-bolting-new-payment-types-onto-a-card-shaped-api"
+  - id: stripe-idempotency-and-api-design-005
+    difficulty: intermediate
+    tags: [paymentintents, paymentmethods, separation-of-concerns]
+    question: |
+      In the 2018 redesign, how do PaymentIntents and PaymentMethods divide
+      responsibility?
+    options:
+      - "PaymentMethod is the 'how' (static credentials); PaymentIntent is the 'what' (a stateful object tracking one payment attempt)"
+      - "PaymentMethod is the stateful attempt tracker, while PaymentIntent merely stores the static card number and expiry data"
+      - "Both are stateless objects that must be fully recreated from scratch on every single retry the customer makes"
+      - "PaymentIntent handles refunds only; PaymentMethod handles all charges"
+    answer: 0
+    explanation: |
+      PaymentMethod carries static "how you pay" credentials with no
+      transaction-specific state; PaymentIntent is the single stateful object
+      representing one attempt to collect a specific amount and currency.
+    ref: "concepts.md#the-redesign-paymentintents--paymentmethods-2018"
+  - id: stripe-idempotency-and-api-design-006
+    difficulty: advanced
+    tags: [state-machine, retry, paymentintents]
+    question: |
+      Why does the PaymentIntent state machine deliberately have no `failed` state?
+    options:
+      - "Because payment failures are logged to a separate audit system and are deliberately never surfaced through the public API at all"
+      - "So a failed attempt returns to requires_payment_method and the customer can retry within the same object"
+      - "Because Stripe's underlying processor guarantees that every submitted payment will eventually succeed given enough retries"
+      - "So the object is immediately deleted on any error"
+    answer: 1
+    explanation: |
+      A failed attempt sends the PaymentIntent back to requires_payment_method,
+      letting the customer try another card or method. Failure is a retry loop, not
+      a terminal dead end that discards the intent.
+    ref: "concepts.md#the-redesign-paymentintents--paymentmethods-2018"
+  - id: stripe-idempotency-and-api-design-007
+    difficulty: advanced
+    tags: [migration, backward-compatibility, legacy]
+    question: |
+      During the PaymentIntents migration, how did Stripe keep existing analytics and
+      reporting integrations working without a hard cutover?
+    options:
+      - "It shut those integrations off for a maintenance weekend and bulk-migrated all of their historical charge data in one offline batch pass"
+      - "It kept creating a Charge object for each attempt, layering the new PaymentIntents over the legacy APIs"
+      - "It emailed every merchant a one-off migration script and required them to rewrite their reporting pipeline before anything else would work"
+      - "It froze all new features until every integration had migrated to PaymentIntents"
+    answer: 1
+    explanation: |
+      Rather than force a cutover, Stripe layered PaymentIntents over the legacy APIs
+      and still emitted a Charge object per attempt, so existing analytics/reporting
+      code kept working untouched while the new model rolled out underneath.
+    ref: "concepts.md#keeping-old-integrations-working-layering-new-over-legacy"
+  - id: stripe-idempotency-and-api-design-008
+    difficulty: advanced
+    tags: [data-modeling, polymorphism, api-shape]
+    question: |
+      To represent many payment-method types on one clean Charge object, what
+      modeling technique did Stripe introduce?
+    options:
+      - "A separate normalized database table joined in for every single distinct payment method type Stripe supports"
+      - "Dozens of nullable method-specific columns added directly onto the Charge"
+      - "A `payment_method_details` field — a polymorphic, typed hash whose shape depends on the method"
+      - "A single free-text JSON blob with no schema at all, left to be parsed differently by each downstream client"
+    answer: 2
+    explanation: |
+      Stripe added `payment_method_details`, described in the post as "a polymorphic,
+      typed hash" — one field whose shape varies by method — instead of bloating the
+      Charge resource with dozens of method-specific columns.
+    ref: "concepts.md#keeping-old-integrations-working-layering-new-over-legacy"
+  - id: stripe-idempotency-and-api-design-009
+    difficulty: intermediate
+    tags: [migration, backward-compatibility, charge]
+    question: |
+      Why did Stripe keep creating a `Charge` object for each attempt after
+      introducing PaymentIntents?
+    options:
+      - "So existing analytics and reporting integrations kept working untouched"
+      - "Because the new PaymentIntents object was technically unable to represent ordinary card payments on its own"
+      - "To force every remaining merchant to complete their migration within a strict one-month deadline window"
+      - "Because Charges were cheaper to store than PaymentIntents"
+    answer: 0
+    explanation: |
+      Stripe layered PaymentIntents over the legacy APIs, still producing a Charge
+      per attempt so existing analytics/reporting integrations kept working, and
+      added a polymorphic payment_method_details hash to keep Charge clean.
+    ref: "concepts.md#the-migration-two-years-and-one-very-costly-early-mistake"
+  - id: stripe-idempotency-and-api-design-010
+    difficulty: advanced
+    tags: [migration, developer-experience, docs]
+    question: |
+      What was Stripe's most instructive early migration mistake, per the post?
+    options:
+      - "Deprecating and sunsetting the legacy Charges API months before the replacement PaymentIntents flow was actually production-ready"
+      - "Removing the Stripe CLI and its local testing tooling partway through the multi-year transition period"
+      - "Showing two different integration guides by developer location, which confused EU developers who then had to start over"
+      - "Charging a per-request migration fee that quietly discouraged developers from adopting the new API"
+    answer: 2
+    explanation: |
+      The first migration attempt showed different guides based on location, which
+      was "tremendously confusing" — EU developers followed the card-oriented path
+      and had to start over. The fix was the error_on_requires_action=true
+      convenience parameter rather than splitting the docs.
+    ref: "concepts.md#the-migration-two-years-and-one-very-costly-early-mistake"

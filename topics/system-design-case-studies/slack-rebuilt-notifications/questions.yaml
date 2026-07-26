@@ -1,0 +1,175 @@
+topic: "Slack: Rebuilding Notifications for Correctness Across Devices"
+domain: system-design-case-studies
+topic_slug: slack-rebuilt-notifications
+version: 1
+questions:
+  - id: slack-rebuilt-notifications-001
+    difficulty: beginner
+    tags: [problem-framing, decoupling]
+    question: |
+      What was the central structural flaw in Slack's legacy notification
+      system that the rebuild set out to fix?
+    options:
+      - "Push notifications were delivered too slowly to be useful, arriving long after the message they referred to"
+      - "A single setting controlled both what you were notified about and how you received it"
+      - "The database could not store per-channel notification preferences at the scale Slack needed"
+      - "Notifications were computed entirely on the client rather than being decided on the server"
+    answer: 1
+    explanation: |
+      The core problem was hidden coupling: one field decided both *what* you were
+      notified about and *how* it was delivered, so dialing down push also sacrificed
+      in-app awareness. The rebuild separated those two independent decisions.
+    ref: "concepts.md#the-core-move-decouple-what-from-how"
+  - id: slack-rebuilt-notifications-002
+    difficulty: intermediate
+    tags: [problem-framing, cross-device]
+    question: |
+      According to the post, notification problems ranked where among the causes
+      of Slack's customer-experience (support) tickets?
+    options:
+      - "Among the top three drivers"
+      - "The single largest driver by a wide margin"
+      - "A minor, long-tail source of tickets"
+      - "Roughly the tenth most common driver"
+    answer: 0
+    explanation: |
+      Slack stated notifications were "one of the top three drivers" of
+      customer-experience tickets — the motivation for rebuilding the system. This is
+      one of the few concrete figures the largely-qualitative post provides.
+    ref: "concepts.md#the-problem-one-decision-two-devices-millions-of-users"
+  - id: slack-rebuilt-notifications-003
+    difficulty: intermediate
+    tags: [legacy, mental-models]
+    question: |
+      Why did having "separate preference systems" for desktop and mobile hurt users
+      in the old design?
+    options:
+      - "It roughly doubled the storage cost of keeping every user's notification preferences"
+      - "It prevented Slack from ever sending any push notifications at all on the mobile client"
+      - "The same words meant different things across platforms — 'nothing' on mobile differed from 'Off' on desktop"
+      - "It required users to log in separately and re-authenticate on each individual device"
+    answer: 2
+    explanation: |
+      Desktop and mobile used conflicting mental models: 'nothing' on mobile did not
+      mean the same thing as 'Off' on desktop, forcing users to hold two incompatible
+      models in their heads. Unifying the model was a goal of the rebuild.
+    ref: "concepts.md#why-the-old-system-broke-four-tangled-mental-models"
+  - id: slack-rebuilt-notifications-004
+    difficulty: intermediate
+    tags: [schema, decoupling]
+    question: |
+      In the new schema, what does the dedicated `desktop_push_enabled` boolean field
+      represent?
+    options:
+      - "Whether the user currently has any active desktop device registered with the account"
+      - "Whether desktop push notifications fire, independent of what activity is tracked"
+      - "Whether the desktop and mobile notification settings should be kept in sync with one another"
+      - "Whether the user is currently signed in and online on their desktop client right now"
+    answer: 1
+    explanation: |
+      The new field isolates the *how* (does desktop push fire?) from the *what*
+      (which activity to be aware of). This lets a user stay aware everywhere while
+      turning off buzzing on a specific device — impossible in the old coupled model.
+    ref: "concepts.md#the-core-move-decouple-what-from-how"
+  - id: slack-rebuilt-notifications-005
+    difficulty: advanced
+    tags: [migration, rollback]
+    question: |
+      Why did Slack choose a read-time transformation over a wholesale database
+      backfill for the risky `off` → `mentions` change?
+    options:
+      - "Read-time logic was measurably faster to execute on every individual request"
+      - "The database engine simply did not support bulk update operations at that scale"
+      - "It let Slack avoid storing any notification preferences on the server at all"
+      - "A destructive mass rewrite was deemed too risky to roll back; read-time logic keeps rollback to one code deploy"
+    answer: 3
+    explanation: |
+      Slack called the value migration "too risky for rollback." By translating at
+      read time and leaving the stored data intact, undoing a bad change is a single
+      code deploy rather than a second mass mutation of millions of rows.
+    ref: "concepts.md#the-migration-change-behavior-at-read-time-not-in-the-database"
+  - id: slack-rebuilt-notifications-006
+    difficulty: advanced
+    tags: [migration, backfill]
+    question: |
+      How did Slack handle the genuinely new `desktop_push_enabled` field at rollout,
+      and why was that approach acceptable?
+    options:
+      - "An additive backfill derived from whether the user previously had 'off', because it added derived state without clobbering the source of truth"
+      - "It was left null and computed lazily on every single preference read, forever afterward"
+      - "Users were forced to re-enter all of their notification preferences on their next login"
+      - "It was assigned at random initially and corrected over time based on user feedback"
+    answer: 0
+    explanation: |
+      Additive backfills are safe because they add derived state without destroying
+      the source of truth, so nobody's experience changed on day one. The risky
+      *value-rewriting* transformation, by contrast, was handled at read time.
+    ref: "concepts.md#the-migration-change-behavior-at-read-time-not-in-the-database"
+  - id: slack-rebuilt-notifications-007
+    difficulty: advanced
+    tags: [consistency, cross-device]
+    question: |
+      How did Slack improve cross-device consistency of notification preferences?
+    options:
+      - "By forcing the mobile client to always mirror whatever the desktop setting was"
+      - "By removing the implicit sync parameter and storing explicit per-surface values as a single source of truth"
+      - "By disabling preferences on one device whenever the other device happened to be active"
+      - "By moving all notification preference evaluation logic onto the client itself"
+    answer: 1
+    explanation: |
+      The old implicit 'sync' parameter was itself the source of drift. Storing
+      explicit desktop and mobile values gives every client one unambiguous source of
+      truth to render identically — "Clarity beats cleverness."
+    ref: "concepts.md#correctness-across-devices-explicit-state-over-clever-sync"
+  - id: slack-rebuilt-notifications-008
+    difficulty: intermediate
+    tags: [data-integrity, incidents]
+    question: |
+      What did the bug where a malformed field silently reset preferences to
+      "Mentions" require to fully resolve?
+    options:
+      - "Rolling back the entire notifications rebuild and reverting to the legacy system"
+      - "Migrating every single affected user over to a brand-new preferences database"
+      - "Cleaning the bad data and flushing memcache, which had served the corrupt value"
+      - "Disabling push notifications globally for all users until further notice was given"
+    answer: 2
+    explanation: |
+      Fixing the data alone was not enough — an in-memory cache (memcache) kept
+      serving the corrupt value, so it had to be flushed too. The lesson: "tiny schema
+      issues can cause major UX bugs," and cache invalidation is part of correctness.
+    ref: "concepts.md#correctness-across-devices-explicit-state-over-clever-sync"
+  - id: slack-rebuilt-notifications-009
+    difficulty: beginner
+    tags: [outcomes, metrics]
+    question: |
+      Which measurable outcome does the post report after launching the redesigned
+      notification settings?
+    options:
+      - "Push notification delivery latency dropped by roughly 40 percent overall"
+      - "The number of servers dedicated to notifications was cut by about half"
+      - "Daily message volume across the platform doubled within a single month"
+      - "Settings engagement increased 5x and stayed elevated for weeks"
+    answer: 3
+    explanation: |
+      The post's headline metric is a 5x increase in settings engagement, sustained
+      for weeks. It gives no latency, throughput, or server-count figures — those
+      distractors describe numbers the post never provides.
+    ref: "concepts.md#what-actually-changed-for-users-the-numbers-honestly"
+  - id: slack-rebuilt-notifications-010
+    difficulty: advanced
+    tags: [design-principles, safety]
+    question: |
+      Which principle best captures Slack's approach to the safety-critical direction
+      of the notification logic?
+    options:
+      - "A disabled push must stay disabled under every condition, including mid-rollback (fail closed)"
+      - "When uncertain, always err toward sending the notification so that users never miss anything at all"
+      - "Prefer bulk database migrations wherever possible because they are atomic and final"
+      - "Keep policy and mechanism together in a single field in order to reduce the schema size"
+    answer: 0
+    explanation: |
+      The safety-critical direction fails closed: `push_enabled: false` had to mean no
+      push under every condition, even during a rollback. When in doubt about
+      interrupting a human, silence is the safe default — the opposite of erring toward
+      sending.
+    ref: "concepts.md#trade-offs-and-gotchas-gathered"

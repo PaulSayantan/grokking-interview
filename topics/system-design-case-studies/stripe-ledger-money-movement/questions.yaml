@@ -1,0 +1,194 @@
+topic: "Stripe: Ledger — Tracking and Validating Money Movement"
+domain: system-design-case-studies
+topic_slug: stripe-ledger-money-movement
+version: 1
+
+questions:
+  - id: stripe-ledger-money-movement-001
+    difficulty: beginner
+    tags: [problem, motivation, correctness]
+    question: |
+      What core problem does Stripe's Ledger exist to solve?
+    options:
+      - "Serving low-latency reads of a customer's current account balance directly into the consumer mobile and web dashboards"
+      - "Proving, to Stripe and to auditors, that expected money movement actually occurred across many systems"
+      - "Routing each payment to the cheapest available bank partner in real time to reduce fees"
+      - "Encrypting stored card numbers at rest so that any database breach cannot expose the raw payment credentials to attackers"
+    answer: 1
+    explanation: |
+      Ledger is a system of record built to demonstrate — internally and to auditors —
+      that the money movement Stripe expected actually happened, across a messy world
+      of many banks and networks. It is not a latency-optimized balance cache, a payment
+      router, or an encryption layer; it is a correctness-and-audit mechanism.
+    ref: "concepts.md#the-problem-proving-money-moved-across-a-messy-real-world"
+
+  - id: stripe-ledger-money-movement-002
+    difficulty: intermediate
+    tags: [decomposition, upstream-systems, validation]
+    question: |
+      Why couldn't Stripe validate money movement simply by asking each of its
+      segmented services, databases, and APIs whether it was correct?
+    options:
+      - "There is no intrinsic mechanism forcing those systems to represent or deliver data in the same way, and they differ in timing, volume, and their definition of correctness"
+      - "The individual segmented services were consistently too slow to respond to synchronous health-check and validation requests within the strict window auditors imposed on every reconciliation run"
+      - "Financial regulators explicitly forbid querying live production payment services directly for any audit or reconciliation purpose, so an entirely separate offline copy of the data had to be maintained instead"
+      - "Each service stored its data in a different cloud region with high cross-region latency"
+    answer: 0
+    explanation: |
+      Segmenting the platform into discrete services makes software tractable but
+      offers no shared notion of truth: nothing forces the systems to represent or
+      deliver data the same way, and producers diverge on timing (real-time vs monthly),
+      volume (billions vs hundreds of events), and even what "correct" means. That gap
+      is why a single unifying validation mechanism was needed.
+    ref: "concepts.md#why-the-naive-approach-broke-many-systems-no-shared-truth"
+
+  - id: stripe-ledger-money-movement-003
+    difficulty: intermediate
+    tags: [data-model, accounts, events, fund-flow]
+    question: |
+      In Ledger's data model, how are accounts and events best described?
+    options:
+      - "Accounts are durable message queues and events are the downstream consumer workers that continuously drain and acknowledge them"
+      - "Accounts are database shards and events are the replication messages between them"
+      - "Accounts are buckets of money (the states), and events move money between accounts (the transitions)"
+      - "Accounts are user profiles and events are the audit-log lines attached to each profile"
+    answer: 2
+    explanation: |
+      Ledger models each producer as a state machine expressed as a logical fund flow.
+      Accounts are "buckets of money" (the states), distinguished by type and properties
+      such as id and business; events (e.g. charge.creation, charge.release) move money
+      between accounts (the transitions). Together they let Stripe re-express every
+      system's activity in one shared model.
+    ref: "concepts.md#the-core-idea-model-everything-as-a-logical-fund-flow"
+
+  - id: stripe-ledger-money-movement-004
+    difficulty: advanced
+    tags: [ordering, idempotency, matching]
+    question: |
+      In the charge.creation / charge.release example, how does Ledger correctly
+      associate the two independent events even if they arrive out of order?
+    options:
+      - "It buffers all events for 24 hours and sorts them by wall-clock timestamp before processing"
+      - "It matches them by their shared business and id properties, so ordering does not matter"
+      - "It requires producers to send events strictly in order and rejects any that arrive late"
+      - "It uses a distributed lock so only one event for a charge can be processed at a time"
+    answer: 1
+    explanation: |
+      The events are independent and are matched via their business and id properties,
+      so they associate correctly even when they arrive out of order. This
+      order-independent, match-by-identity design is what lets a distributed,
+      eventually-consistent world still tabulate cleanly — no strict ordering or global
+      lock is required.
+    ref: "concepts.md#the-core-idea-model-everything-as-a-logical-fund-flow"
+
+  - id: stripe-ledger-money-movement-005
+    difficulty: intermediate
+    tags: [immutability, audit, corrections]
+    question: |
+      Ledger transactions cannot be deleted or modified. How are mistakes corrected?
+    options:
+      - "A database administrator runs a carefully scoped in-place UPDATE query against only the specific affected rows"
+      - "The incorrect transaction is soft-deleted with a tombstone flag and then permanently hidden from every future report"
+      - "The entire fund flow is dropped and re-ingested from the upstream source"
+      - "By reverting and reprocessing — appending compensating events that leave history intact"
+    answer: 3
+    explanation: |
+      Ledger is immutable: past state is reconstructed by replaying events, and nothing
+      is ever overwritten. Corrections are made by reverting and reprocessing — appending
+      compensating events — so the full history (the audit evidence) stays intact. There
+      are deliberately no mutation queries.
+    ref: "concepts.md#immutability-correct-by-construction-never-by-mutation"
+
+  - id: stripe-ledger-money-movement-006
+    difficulty: advanced
+    tags: [double-entry, clearing, invariant]
+    question: |
+      Ledger uses double-entry bookkeeping and a "water through pipes" analogy. What
+      does the clearing metric measure?
+    options:
+      - "Whether the fund flow completed correctly, by measuring the fraction of the Ledger that has zeroed out at steady state"
+      - "How long data took to travel from each upstream platform producer into Ledger, measured against a fixed per-producer latency threshold set by the team"
+      - "Whether every single producer-database record ID has a corresponding matching event correctly recorded and reconciled inside Ledger"
+      - "The total dollar volume processed during a peak sales window such as Cyber Monday"
+    answer: 0
+    explanation: |
+      Clearing answers "Did the fund flow complete correctly?" by measuring the fraction
+      of Ledger that has zeroed out at steady state — the intermediate clearing "pipes"
+      should be empty. A wrong id or business value leaves a nonzero clearing balance
+      ("stuck water"), detectable with a simple query. Time deltas are timeliness;
+      ID matching is completeness.
+    ref: "concepts.md#data-quality-double-entry-bookkeeping-as-a-proof-of-correctness"
+
+  - id: stripe-ledger-money-movement-007
+    difficulty: advanced
+    tags: [data-quality, completeness, metrics]
+    question: |
+      Why does Ledger track three separate DQ metrics (clearing, timeliness,
+      completeness) rather than one combined correctness check?
+    options:
+      - "External financial auditors formally mandate exactly three separate and independent quality metrics for any regulated money-movement system"
+      - "They catch three distinct failure modes: data that is wrong, data that is late, and data that is missing"
+      - "Each of the metrics can only be computed on a different database engine, forcing an unavoidable split into three separate pipelines"
+      - "Splitting the score into three lets Stripe report a higher overall number to customers"
+    answer: 1
+    explanation: |
+      The three metrics map to three distinct failure modes: clearing catches data that
+      is wrong (won't balance), timeliness catches data that is late, and completeness
+      catches data that is missing entirely. Late and absent data can both look "correct"
+      in whatever did arrive, so a single check would miss them — you need all three.
+    ref: "concepts.md#data-quality-double-entry-bookkeeping-as-a-proof-of-correctness"
+
+  - id: stripe-ledger-money-movement-008
+    difficulty: intermediate
+    tags: [scale, numbers, throughput]
+    question: |
+      According to the post, roughly how many events does Ledger process per day?
+    options:
+      - "Three hundred million events per day"
+      - "Ten billion events per day"
+      - "Five billion events per day"
+      - "One hundred and thirty-five million events per day"
+    answer: 2
+    explanation: |
+      Ledger processes five billion events per day. (The 300 million figure was the
+      Black Friday–Cyber Monday transaction count totaling $18.6B, and 135 refers to the
+      number of currencies and payment methods — different figures from the post.)
+    ref: "concepts.md#concrete-numbers-from-the-post"
+
+  - id: stripe-ledger-money-movement-009
+    difficulty: advanced
+    tags: [slas, guarantees, nines]
+    question: |
+      Which of the post's stated data-quality guarantees is correct?
+    options:
+      - "A full 100% of dollar volume is fully ingested and verified in real time, with absolutely no manual investigation or human analysis ever required at any point in the pipeline"
+      - "Only about 90% of total dollar volume is actively monitored, and the explainability of any given money movement is estimated to sit somewhere around the 95% mark"
+      - "All money movement is verified within one hour, with explainability capped at 99.9%"
+      - "99.99% of dollar volume is fully ingested and verified within four days, with over 99.9999% explainability of money movement"
+    answer: 3
+    explanation: |
+      The post states 99.99% of dollar volume is fully ingested and verified within four
+      days, 99.999% is monitored/categorized/triaged, and over 99.9999% explainability of
+      money movement. The bar deliberately drops as the guarantee gets stricter, and the
+      long tail beyond these lines still needs manual analysis — not a 100%, real-time,
+      zero-human claim.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+
+  - id: stripe-ledger-money-movement-010
+    difficulty: advanced
+    tags: [gotchas, operations, ownership]
+    question: |
+      Which statement reflects a trade-off or gotcha Stripe calls out about Ledger?
+    options:
+      - "Persistent uncleared balances reduce visibility into new problems and can corrupt reporting, so clearing must be kept current"
+      - "Ledger alarms almost always indicate harmless upstream transcription typos rather than any real underlying system or money-movement issue"
+      - "Because Ledger is immutable, any mistake can be patched instantly and safely with a single carefully targeted in-place mutation query"
+      - "Third-party incidents are always treated as the owning internal team's own fault and are never reassigned to anyone else"
+    answer: 0
+    explanation: |
+      Stripe notes that persistent uncleared problems reduce visibility into new problems
+      and can corrupt reporting, so clearing must stay current. Ledger alarms usually
+      reflect real upstream/money-movement issues (not typos), immutability makes fixes
+      harder (no mutation queries — revert-and-reprocess instead), and third-party
+      incidents are handled by reassigning ownership and excluding alerts.
+    ref: "concepts.md#trade-offs-and-gotchas-gathered"

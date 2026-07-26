@@ -1,0 +1,183 @@
+topic: "Slack Shipyard: Making EC2 Instances Immutable, Deployable Artifacts"
+domain: system-design-case-studies
+topic_slug: slack-shipyard-ec2-platform
+version: 1
+questions:
+  - id: slack-shipyard-ec2-platform-001
+    difficulty: beginner
+    tags: [immutable-infrastructure, chef, drift]
+    question: |
+      What was the core problem with Slack's legacy EC2 model that Shipyard set
+      out to fix?
+    options:
+      - "Instances were long-lived and continuously mutated by scheduled Chef runs, causing drift and risky deploys"
+      - "EC2 as a service had become far too expensive to keep running at scale compared with migrating every workload into managed containers"
+      - "There were not enough availability zones to place instances safely"
+      - "Chef recipes could not express the required network configuration"
+    answer: 0
+    explanation: |
+      Legacy instances lived a long time and ran scheduled Chef jobs that
+      re-applied desired state. That caused continuous background load, risked
+      unintended overwrites, and led to inevitable configuration drift, making
+      service-level deployments difficult. Shipyard replaces this with immutable,
+      short-lived instances.
+    ref: "concepts.md#the-problem-continuously-mutating-servers-eventually-fights-you"
+  - id: slack-shipyard-ec2-platform-002
+    difficulty: intermediate
+    tags: [immutable-infrastructure, core-concept]
+    question: |
+      What is the central shift in mental model that defines Shipyard?
+    options:
+      - "Moving all workloads from EC2 into Kubernetes pods"
+      - "Running Chef more frequently so drift is corrected sooner"
+      - "Treating infrastructure as deployable artifacts you build and replace, rather than mutable instances you patch"
+      - "Storing every piece of host and service configuration in one central database that instances query at boot instead of on the host"
+    answer: 2
+    explanation: |
+      Shipyard treats infrastructure as deployable artifacts: to change an
+      instance you bake a new image and replace it, rather than mutating a
+      running box. This immutable model eliminates drift, makes deploys
+      reversible, and shrinks the attack surface with short-lived hosts.
+    ref: "concepts.md#the-core-shift-from-configure-the-server-to-build-and-replace-it"
+  - id: slack-shipyard-ec2-platform-003
+    difficulty: intermediate
+    tags: [layered-images, slack-zero, shared-responsibility]
+    question: |
+      What role does the "slack-zero" image play in Shipyard's layered-image model?
+    options:
+      - "It is the ephemeral worker that runs Chef and then terminates"
+      - "It is the shared golden base image, with OS hardening and agents, that service teams build their own AMIs on top of"
+      - "It is the deployment orchestrator that drives progressive rollouts and coordinates canary and production stages across availability zones"
+      - "It is the S3 bucket that stores versioned Chef recipe artifacts"
+    answer: 1
+    explanation: |
+      slack-zero is the shared "golden" base AMI built by the Compute Platform
+      team, containing OS baseline/hardening, networking and service discovery,
+      and monitoring/security agents. Service teams bake their own AMIs on top,
+      inheriting fixes when they rebuild — a shared-responsibility split.
+    ref: "concepts.md#layered-images-a-shared-golden-base-plus-per-team-amis"
+  - id: slack-shipyard-ec2-platform-004
+    difficulty: advanced
+    tags: [bake-provision, boot-time, performance]
+    question: |
+      Why does Shipyard split image preparation into a "bake" phase and a
+      "provision" phase?
+    options:
+      - "To let two entirely different platform teams independently own the security scanning and compliance review of each separate phase"
+      - "To avoid using AWS Image Builder for the heavy installation work"
+      - "To keep secrets baked into the AMI so they never change at runtime"
+      - "So slow package installation happens once into the AMI, leaving only light per-instance work at launch, so instances boot in seconds"
+    answer: 3
+    explanation: |
+      The bake phase installs packages and consistent config once into the AMI,
+      so every instance is identical; the provision phase does only lightweight
+      per-instance work (secrets, regional config, metadata) at launch. That is
+      why instances "become operational in seconds rather than minutes."
+    ref: "concepts.md#bake-vs-provision-split-the-heavy-work-from-the-fast-work"
+  - id: slack-shipyard-ec2-platform-005
+    difficulty: advanced
+    tags: [gondola, deployment, rollback]
+    question: |
+      A Gondola "deployable unit" consists of which two parts?
+    options:
+      - "The AMI plus the Chef artifact of versioned recipes tied to a git commit"
+      - "A launch template plus a Karpenter node pool definition"
+      - "A canary Auto Scaling Group plus a matching production Auto Scaling Group placed together in the very same availability zone"
+      - "An EventBridge rule plus the Lambda function it triggers"
+    answer: 0
+    explanation: |
+      A Gondola deployable unit pairs the baked AMI with the Chef artifact
+      containing versioned recipes associated with a git commit. Executors then
+      apply it by updating ASG launch templates (with Instance Refresh) or by
+      telling Karpenter which AMI to use for Kubernetes worker fleets.
+    ref: "concepts.md#deploying-and-scaling-replace-instances-dont-patch-them"
+  - id: slack-shipyard-ec2-platform-006
+    difficulty: intermediate
+    tags: [gondola, progressive-rollout, safety]
+    question: |
+      How does Gondola make a fleet-wide rollout safe?
+    options:
+      - "It requires an explicit manual operator approval step before every single instance in the fleet is allowed to be replaced"
+      - "It patches all instances at once so the fleet is never in a mixed state"
+      - "Progressive rollouts with metric-based checks that can auto-halt or auto-rollback to a known-good version"
+      - "It disables monitoring during the deploy to avoid false alarms"
+    answer: 2
+    explanation: |
+      Gondola drives progressive rollouts with metric-based automated safety
+      checks; if metrics regress it can auto-halt or auto-rollback to a
+      known-good version. Slack's Egress team, for example, runs canary and
+      production ASGs per availability zone in sequential stages.
+    ref: "concepts.md#deploying-and-scaling-replace-instances-dont-patch-them"
+  - id: slack-shipyard-ec2-platform-007
+    difficulty: advanced
+    tags: [reaper, lifecycle, safety]
+    question: |
+      What two inputs does The Reaper act on when deciding to replace an instance?
+    options:
+      - "CPU utilization crossing a threshold, and a manual operator request"
+      - "External signals marking an instance tainted, and periodic checks for instances exceeding their allowed lifespan"
+      - "A failed application health check on the instance, and a detected mismatch against the recorded Chef Server inventory of record"
+      - "A new slack-zero release, and a change in the region's spot price"
+    answer: 1
+    explanation: |
+      The Reaper evaluates external signals that mark an instance "tainted" (e.g.
+      after break-glass access or an emergency change) and periodic lifespan
+      checks (using Peekaboo for age). It rate-limits by service/region/AZ and
+      has a "big red button" global pause via a control object in S3.
+    ref: "concepts.md#the-reaper-enforcing-short-lived-so-drift-never-creeps-back"
+  - id: slack-shipyard-ec2-platform-008
+    difficulty: intermediate
+    tags: [peekaboo, inventory, source-of-truth]
+    question: |
+      Why did Slack build Peekaboo instead of continuing to use the Chef Server
+      as the source of truth for what is running?
+    options:
+      - "Because the Chef Server software simply could not be made to run on the newer Graviton (ARM) based instance hardware at all"
+      - "Because Peekaboo replaces Gondola as the deployment orchestrator"
+      - "Because AWS deprecated the Chef Server integration with EC2"
+      - "Because ephemeral instances launch and terminate constantly, so real-time inventory needs event-driven data, not a slow config server"
+    answer: 3
+    explanation: |
+      In an immutable world instances are constantly created and destroyed, so a
+      config server is too slow and coupled to be the truth. Peekaboo taps cloud
+      events and instance metadata (EventBridge + OpenSearch + Lambda) for
+      real-time inventory, exposes UI/API/CLI, and can even track non-Shipyard
+      instances during migration.
+    ref: "concepts.md#peekaboo-knowing-whats-actually-running"
+  - id: slack-shipyard-ec2-platform-009
+    difficulty: advanced
+    tags: [secrets, semi-immutable, consul-template, vault]
+    question: |
+      Shipyard calls its fleet "semi-immutable." How are secrets handled as the
+      exception to immutability?
+    options:
+      - "Each instance runs Consul Template to pull refreshed secrets from Vault in place, without cycling the instance"
+      - "Secrets are baked directly into the AMI at build time and the entire fleet is fully re-imaged and cycled every time one rotates"
+      - "Secrets are disabled entirely and replaced with short-lived SSH certificates"
+      - "The Reaper replaces every instance the moment any secret is rotated"
+    answer: 0
+    explanation: |
+      Secrets rotate faster than you can re-image, so they are the deliberate
+      exception: each instance uses Consul Template to pull updated secrets from
+      Vault in place. The OS and application layers stay immutable while runtime
+      secrets refresh without cycling the fleet.
+    ref: "concepts.md#the-hard-exceptions-where-fully-immutable-bends-on-purpose"
+  - id: slack-shipyard-ec2-platform-010
+    difficulty: intermediate
+    tags: [long-lived, open-problem, data-nodes]
+    question: |
+      Which workloads does Slack identify as the remaining hard challenge for the
+      Shipyard model?
+    options:
+      - "Stateless front-end web services that automatically scale up and down many times per hour in response to fluctuating user traffic patterns"
+      - "Worker fleets that bake and provision images"
+      - "Long-lived instances like data nodes, singletons such as GitHub Enterprise, and third-party tools like JIRA that cannot be cycled quickly"
+      - "Canary instances that only receive a small fraction of traffic"
+    answer: 2
+    explanation: |
+      Shipyard works well for short-lived services you can cycle freely. The open
+      problem is long-lived instances — data nodes, singletons like a self-hosted
+      GitHub Enterprise, and third-party tools like Atlassian JIRA — that cannot
+      be terminated quickly. Slack is building new Gondola deploy executors for
+      these cases.
+    ref: "concepts.md#whats-still-hard-long-lived-instances"

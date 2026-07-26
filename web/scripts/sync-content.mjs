@@ -42,7 +42,7 @@ const ASTRO_DATA_STORE = path.join(WEB_ROOT, ".astro/data-store.json");
 // --- Domain configuration -------------------------------------------------
 
 /** Authored domains render as browsable cards; order here drives display order. */
-const AUTHORED_DOMAINS = ["system-design", "spring-boot", "spring-core", "java-jvm", "rest-api-design", "networking", "security", "messaging-databases", "testing", "observability", "devops-cicd", "docker", "kubernetes", "interview-craft", "dsa-coding", "lld-and-ood", "reliability-ops", "hibernate-jpa", "grpc"];
+const AUTHORED_DOMAINS = ["system-design", "spring-boot", "spring-core", "java-jvm", "rest-api-design", "networking", "security", "messaging-databases", "testing", "observability", "devops-cicd", "docker", "kubernetes", "interview-craft", "dsa-coding", "lld-and-ood", "reliability-ops", "hibernate-jpa", "grpc", "system-design-case-studies"];
 
 /** Not-yet-authored domains -> "Coming soon" cards. Titles from topics/<d>/README.md. */
 const COMING_SOON_DOMAINS = [];

@@ -1,0 +1,186 @@
+topic: "Dropbox Magic Pocket: Reclaiming Wasted Space in an Exabyte-Scale Immutable Blob Store"
+domain: system-design-case-studies
+topic_slug: dropbox-magic-pocket-storage-efficiency
+version: 1
+questions:
+  - id: dropbox-magic-pocket-storage-efficiency-001
+    difficulty: beginner
+    tags: [immutability, deletes, fragmentation]
+    question: |
+      In Magic Pocket, blobs are immutable and closed volumes are never reopened.
+      What happens to disk space when a user deletes a file?
+    options:
+      - "The blob is edited out of the middle of its sealed volume in place, immediately freeing the physical bytes it occupied"
+      - "The dead data stays physically on disk until compaction rewrites the live blobs elsewhere"
+      - "The entire volume is deleted immediately as soon as one blob is removed"
+      - "The delete is rejected because immutable stores cannot process deletes"
+    answer: 1
+    explanation: |
+      Because a sealed volume is never reopened, you cannot carve a deleted blob
+      out of the middle of it. The delete leaves dead data occupying disk; only a
+      background compaction process that rewrites the still-live blobs into fresh
+      volumes can actually reclaim that space.
+    ref: "concepts.md#the-problem-dead-data-piles-up-in-an-immutable-store"
+  - id: dropbox-magic-pocket-storage-efficiency-002
+    difficulty: intermediate
+    tags: [garbage-collection, compaction, definitions]
+    question: |
+      How do garbage collection (GC) and compaction differ in Magic Pocket?
+    options:
+      - "GC physically frees the disk immediately while compaction merely marks individual blobs as dead and safe to remove later"
+      - "They are two names for the same single background process"
+      - "GC marks unreferenced blobs as dead; compaction physically reclaims the disk by rewriting live data"
+      - "GC runs only on reads while compaction runs only on writes"
+    answer: 2
+    explanation: |
+      GC identifies which blobs are no longer referenced but does not free disk.
+      Compaction does the physical reclamation: it rewrites the live blobs into new
+      volumes so the old, hole-riddled volumes can be discarded and their disk
+      reused. Conflating the two is a common mistake.
+    ref: "concepts.md#the-problem-dead-data-piles-up-in-an-immutable-store"
+  - id: dropbox-magic-pocket-storage-efficiency-003
+    difficulty: intermediate
+    tags: [placement, write-amplification, fragmentation]
+    question: |
+      What side effect did the new data-placement service introduce even though it
+      successfully reduced write amplification?
+    options:
+      - "Fragmentation increased, concentrating overhead in a few severely under-filled volumes"
+      - "Blob durability dropped sharply because erasure coding was silently disabled across every affected cell in the fleet"
+      - "Read latency doubled across every cell in the fleet"
+      - "Deletes stopped being processed until GC caught up"
+    answer: 0
+    explanation: |
+      The placement change lowered write amplification (a win) but pushed
+      fragmentation up. The extra overhead was not spread evenly; it concentrated
+      in a small number of severely under-filled volumes, which is the pathological
+      case the layered compaction system had to attack.
+    ref: "concepts.md#what-kicked-it-off-a-placement-change-that-traded-one-problem-for-another"
+  - id: dropbox-magic-pocket-storage-efficiency-004
+    difficulty: intermediate
+    tags: [under-filling, scale, numbers]
+    question: |
+      In the worst-case under-filled volumes, roughly how much of the allocated
+      capacity actually contained live data?
+    options:
+      - "Around half of the allocated capacity"
+      - "Roughly ninety percent of the allocated capacity"
+      - "Exactly zero — the volumes were completely empty"
+      - "Less than five percent of the allocated capacity"
+    answer: 3
+    explanation: |
+      Dropbox reports the pathological volumes held live data in less than five
+      percent of their allocated capacity — over 95% dead bytes. This extreme
+      sparsity is exactly why a single top-off heuristic was not enough and why the
+      L3 streaming re-encode strategy was needed.
+    ref: "concepts.md#what-kicked-it-off-a-placement-change-that-traded-one-problem-for-another"
+  - id: dropbox-magic-pocket-storage-efficiency-005
+    difficulty: advanced
+    tags: [l1, packing, limitations]
+    question: |
+      Why did the baseline L1 compaction strategy perform poorly once fragmentation
+      spiked?
+    options:
+      - "It required reopening sealed volumes, which immutability forbids"
+      - "It read tens of GiB per run yet reclaimed fewer than one full volume, and had no good story for the sparsest volumes"
+      - "It corrupted metadata every time it moved a blob between volumes"
+      - "It only ran during narrow off-peak maintenance windows each night, so it could never keep pace with the steady stream of daily user deletes"
+    answer: 1
+    explanation: |
+      L1 assumes most volumes are highly filled and just tops off a host from a
+      donor. When many volumes are severely under-filled, each run may read tens of
+      GiB but reclaims fewer than one full volume, and there is no single full host
+      that can cleanly absorb the sparsest volumes.
+    ref: "concepts.md#why-the-naive-approach-fell-short-one-packing-heuristic-l1"
+  - id: dropbox-magic-pocket-storage-efficiency-006
+    difficulty: advanced
+    tags: [l2, dynamic-programming, bin-packing]
+    question: |
+      How does the L2 strategy decide which under-filled volumes to combine, and
+      how is it kept tractable at scale?
+    options:
+      - "It picks volumes at random until a destination volume is full"
+      - "It sorts volumes alphabetically by ID and merges adjacent pairs"
+      - "It solves a bounded packing problem with dynamic programming, capping source count and coarsening byte counts"
+      - "It asks the central metadata service to compute a provably exact optimal packing on every single run, regardless of scale"
+    answer: 2
+    explanation: |
+      L2 groups several under-filled donors whose combined live data nearly fills a
+      new destination volume. Choosing the combination is a bounded packing problem
+      solved with dynamic programming; to keep it tractable, Dropbox caps the number
+      of source volumes and coarsens (buckets) the byte counts — approximating a
+      problem that is otherwise NP-hard.
+    ref: "concepts.md#the-fix-a-layered-compaction-pipeline-l1-l2-l3"
+  - id: dropbox-magic-pocket-storage-efficiency-007
+    difficulty: intermediate
+    tags: [l2, results, numbers]
+    question: |
+      What improvement did cells running L2 show compared with cells running L1
+      alone?
+    options:
+      - "Storage overhead thirty to fifty percent lower, cleared two to three times faster"
+      - "Ten times more blobs stored per volume with essentially no additional metadata cost or write amplification whatsoever"
+      - "Overhead unchanged, but read latency cut in half"
+      - "Durability raised from three copies to five copies"
+    answer: 0
+    explanation: |
+      L2 reduced compaction overhead two to three times faster than L1 and drove
+      overhead thirty to fifty percent lower than L1-only cells, returning overhead
+      to sustainable levels within days over about a week.
+    ref: "concepts.md#the-fix-a-layered-compaction-pipeline-l1-l2-l3"
+  - id: dropbox-magic-pocket-storage-efficiency-008
+    difficulty: advanced
+    tags: [l3, live-coder, metadata]
+    question: |
+      What is the main cost of the L3 strategy, which streams the sparsest volumes
+      through the Live Coder to re-encode them?
+    options:
+      - "It permanently weakens durability by skipping erasure coding"
+      - "It can only run safely when an entire cell is completely idle, so in practice it almost never gets a chance to execute"
+      - "It cannot reclaim source volumes until the entire cell is drained"
+      - "It rewrites most blobs, so most need new location entries — heavy metadata write load"
+    answer: 3
+    explanation: |
+      L3 feeds the remaining live blobs of near-empty volumes through the Live Coder
+      into brand-new volumes. Because it rewrites blobs, most need new IDs and new
+      location entries in the metadata store, producing a large sustained metadata
+      write load — which is why it must be rate-limited.
+    ref: "concepts.md#the-fix-a-layered-compaction-pipeline-l1-l2-l3"
+  - id: dropbox-magic-pocket-storage-efficiency-009
+    difficulty: advanced
+    tags: [metadata, constraints, trade-offs]
+    question: |
+      According to Dropbox, what turned out to be one of the biggest constraints on
+      the compaction system — rather than raw disk-packing efficiency?
+    options:
+      - "Metadata capacity, because rewriting blobs generates new location entries"
+      - "Network bandwidth between geographically distant regions and data centers, which throttled every cross-region compaction move"
+      - "The CPU cost of computing SHA hashes for every blob"
+      - "The number of physical disks available for purchase"
+    answer: 0
+    explanation: |
+      The real ceiling was metadata capacity, not physical packing. Every rewritten
+      blob needs a new location entry mapping it to a volume and offset; L3 rewrites
+      most blobs, so it generates the heaviest metadata load. Dropbox calls metadata
+      one of its biggest constraints, which is why L3 is rate-limited.
+    ref: "concepts.md#the-fix-a-layered-compaction-pipeline-l1-l2-l3"
+  - id: dropbox-magic-pocket-storage-efficiency-010
+    difficulty: advanced
+    tags: [control-loop, tuning, eligibility]
+    question: |
+      Why did Dropbox replace a static host-eligibility threshold with a dynamic
+      control loop?
+    options:
+      - "To let human operators manually set and re-set the eligibility threshold from a monitoring dashboard at the start of each morning shift"
+      - "Because a static number is always stale as the fill distribution shifts — too high starves hosts, too low wastes compute and I/O"
+      - "Because dynamic loops require no monitoring or metrics at all"
+      - "To disable compaction entirely during periods of high write traffic"
+    answer: 1
+    explanation: |
+      The eligibility threshold governs how full a volume must be to act as a
+      packing host. Set it too high and live data has nowhere to go, so overhead
+      climbs; set it too low and the system wastes compute and I/O compacting
+      volumes that barely need it. Because the fill distribution keeps shifting, a
+      static value is always stale, so the threshold is adjusted automatically —
+      manual tuning does not scale.
+    ref: "concepts.md#tuning-from-static-thresholds-to-a-dynamic-control-loop"
