@@ -175,6 +175,16 @@ The "three pillars" model is a useful teaching device but is increasingly critic
 The pillars remain the working vocabulary of the field, and most stacks are built on
 them — but the maturity signal is knowing their limits.
 
+Some teams treat **continuous profiling** as a fourth always-on production signal.
+Continuous profiling is low-overhead statistical sampling of CPU and
+memory-allocation profiles *in production* (not just in a one-off lab run),
+attributed down to the function/line level and increasingly correlated by service
+and trace context. It answers a question the three classic pillars struggle with —
+*which code is burning the resource?* — but, like the pillars, it is only useful
+when it can be joined to the rest of your telemetry. (Reading a single flame graph
+as a performance-tuning skill belongs to performance-engineering; here it is just
+another correlated signal.)
+
 ## Observability 2.0: wide structured events & high cardinality
 
 "**Observability 2.0**" reframes the ideal primitive not as three separate pillars

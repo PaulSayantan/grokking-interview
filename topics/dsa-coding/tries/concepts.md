@@ -118,12 +118,61 @@ the `car` node in O(L) and reading a subtree.
 > common start," or "shortest/longest matching prefix,"** reach for a trie. If it is
 > purely *exact* membership with no prefix structure, a hash set is simpler and lighter.
 
+## Enumerating all words under a prefix (autocomplete)
+
+The trie's headline superpower is autocomplete: *"given prefix p, list every stored word
+that starts with p."* Two steps: (1) `walk(p)` to the prefix node in O(len(p)); (2) DFS
+that subtree, appending each edge char and emitting the accumulated string whenever you
+hit an `isEnd`.
+
+```java
+List<String> withPrefix(String p) {
+    List<String> out = new ArrayList<>();
+    TrieNode start = walk(p);          // null → no matches
+    if (start != null) dfs(start, new StringBuilder(p), out);
+    return out;
+}
+void dfs(TrieNode n, StringBuilder path, List<String> out) {
+    if (n.isEnd) out.add(path.toString());
+    for (int i = 0; i < 26; i++) {     // iterate a..z in order
+        if (n.children[i] != null) {
+            path.append((char) ('a' + i));
+            dfs(n.children[i], path, out);
+            path.deleteCharAt(path.length() - 1);   // backtrack
+        }
+    }
+}
+```
+
+**Worked trace** over the `{cat, car, card, cow}` trie for prefix `"ca"`:
+
+1. `walk("ca")` lands on node `ca` (isEnd = false → not emitted).
+2. DFS `ca`, children in a–z order: `r` (index 17) before `t` (index 19).
+   - Descend `r` → node `car`, isEnd = true → emit **`car`**. Its child `d` → node
+     `card`, isEnd = true → emit **`card`**. Backtrack.
+   - Descend `t` → node `cat`, isEnd = true → emit **`cat`**.
+
+Result: `["car", "card", "cat"]` — already in lexicographic order.
+
+> [!WARNING]
+> That free ordering only holds for the **array-of-26** layout, whose slots iterate a→z.
+> A `HashMap<Character, TrieNode>` iterates in arbitrary order, so autocomplete over a
+> hash-map trie must **sort** the results (or push into a min-heap / TreeMap) — and for
+> *top-k* / ranked autocomplete you sort by frequency, not alphabet, regardless of layout.
+
 ## Space cost and the array-vs-map trade-off
 
 The trie's weakness is memory. With array nodes over `a–z`, every node — even one with a
 single child — reserves 26 pointers. Worst case (no shared prefixes) the node count is
 O(N·L), and each node is O(Σ), giving **O(N·L·Σ)**. In practice shared prefixes near the
 root collapse a lot of this, but tries are still far heavier than a packed hash set.
+
+To make that visceral: **100k words × avg length 10** ≈ up to 1,000,000 nodes worst case
+(no sharing). Each array node holds 26 references × 8 bytes = 208 bytes just for the
+children slots, so ≈ 1M × 208 B ≈ **~200 MB** — versus a `HashSet<String>` holding the raw
+1M characters plus per-string overhead, on the order of tens of MB. That two-orders-of-
+magnitude gap in the sparse case is why "tries are memory-heavy" is a real warning, and why
+radix/hash-map layouts exist.
 
 | Children representation | Child lookup | Memory per node | Best for |
 |---|---|---|---|
@@ -163,9 +212,43 @@ string, MSB first, in a binary trie (each node has children `0` and `1`).
 
 To maximize `x XOR y` for a query `x`: walk from the MSB and **greedily take the opposite
 bit** at each level when that child exists (opposite bits make that XOR bit 1, the most
-valuable because it's the highest place value). This gives the best partner for `x` in
-**O(32)** per query instead of O(N) pairwise comparison — turning Maximum XOR of Two
-Numbers from O(N²) into O(N·32).
+valuable because it's the highest place value). If the opposite-bit child is **absent**,
+you are forced down the *same*-bit child — that XOR position contributes 0 — and you keep
+descending. This gives the best partner for `x` in **O(W)** per query (W = bit width)
+instead of O(N) pairwise comparison — turning Maximum XOR of Two Numbers from O(N²) into
+O(N·W).
+
+Pick **W = just enough bits to cover the max value**: for non-negative 32-bit ints, W = 31
+is standard (skip the sign bit, which is always 0). Too few bits loses high pairs; extra
+leading-zero bits are harmless but wasted work.
+
+**Why greedy-from-MSB is optimal:** a single 1 at bit position *k* is worth 2ᵏ, which is
+*more* than every lower bit combined (2ᵏ > 2ᵏ⁻¹ + … + 2⁰ = 2ᵏ − 1). So securing the
+highest possible 1 can never be beaten by any choice of lower bits — the greedy choice
+dominates.
+
+**Worked trace.** Array `{3, 10, 5, 25, 2, 8}`, W = 5 bits, all inserted MSB-first:
+
+```
+ 3 = 00011      5 = 00101      2 = 00010
+10 = 01010     25 = 11001      8 = 01000
+```
+
+Query `x = 25 = 11001`. Descend the trie, at each level wanting the opposite of x's bit.
+Place values are 16, 8, 4, 2, 1.
+
+| bit (value) | x's bit | want | opposite child exists? | take | XOR bit | running XOR | survivors |
+|---|---|---|---|---|---|---|---|
+| b4 (16) | 1 | 0 | yes (3,10,5,2,8 all start 0) | 0 | 1 | 16 | {3,10,5,2,8} |
+| b3 (8)  | 1 | 0 | yes (3,5,2) | 0 | 1 | 24 | {3,5,2} |
+| b2 (4)  | 0 | 1 | yes (only 5=00101) | 1 | 1 | 28 | {5} |
+| b1 (2)  | 0 | 1 | **no** (5 has 0 here) | 0 (forced) | 0 | 28 | {5} |
+| b0 (1)  | 1 | 0 | **no** (5 has 1 here) | 1 (forced) | 0 | 28 | {5} |
+
+Partner = `5`. Check: `25 XOR 5 = 11001 XOR 00101 = 11100 = 28` ✓ — matching the running
+accumulator (16 + 8 + 4). Notice the last two levels: once only `5` survives, the walk is
+pinned to its remaining bits and the two forced same-bit steps add nothing. This 28 is also
+the global maximum XOR for the array.
 
 > [!TIP]
 > Bit-tries also solve "maximum XOR with a value ≤ limit," "count pairs with XOR < k," and
@@ -182,10 +265,45 @@ prefix of *any* word (the trie has no matching child), you prune the entire bran
 you reach a node with `isEnd`, you've found a word. This collapses redundant work across
 words and is the canonical "trie as a shared prefix index for backtracking" pattern.
 
+**Traced pruning.** Grid row `[b, a, x]` with the words trie built from `{bat, car}`.
+Start DFS at cell `b`: trie root has child `b`? yes → descend to node `b`. Move to
+neighbor `a`: node `b` has child `a`? yes → descend to node `ba`. Move to neighbor `x`:
+node `ba` has child `x`? **no → `children['x'-'a'] == null`, so prune this entire branch
+immediately** (no point exploring further — no word continues `bax…`). The trie pointer and
+the grid DFS advance in lockstep; a single null child kills a whole subtree of grid paths
+that a per-word search would have re-explored. Had the grid instead read `b, a, t`, the
+walk would reach node `bat` with `isEnd = true` and collect **`bat`**.
+
 > [!WARNING]
 > Two classic bugs in Word Search II: (1) forgetting to mark cells visited and restore
 > them on backtrack, and (2) adding a found word to results repeatedly — set the node's
 > word to null after collecting it (or use a set) to dedupe.
+
+## Wildcard search (the `.` follow-up)
+
+*Design Add and Search Words* is the most common trie follow-up: `search` may contain `.`,
+which matches any single character. The change is small but forces trie + DFS **branching**:
+on a normal char you descend the one matching child; on a `.` you **recurse into every
+non-null child** and succeed if any branch matches.
+
+```java
+boolean search(TrieNode n, String w, int i) {
+    if (n == null) return false;
+    if (i == w.length()) return n.isEnd;
+    char c = w.charAt(i);
+    if (c == '.') {
+        for (TrieNode child : n.children)      // try ALL children
+            if (search(child, w, i + 1)) return true;
+        return false;
+    }
+    return search(n.children[c - 'a'], w, i + 1);   // one child
+}
+```
+
+Complexity: a concrete-char query is still O(L), but with *k* dots the worst case is
+**O(Σᵏ · L)** — each `.` fans out to up to Σ children. `search(".at")` in `{cat, car,
+card, cow}` tries children `c` (only match), descends `at`, and returns true at `cat`;
+`search("..r")` branches at both dots and finds `car`.
 
 ## Deleting from a trie
 

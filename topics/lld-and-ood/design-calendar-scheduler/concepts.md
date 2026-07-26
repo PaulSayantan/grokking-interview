@@ -402,6 +402,19 @@ public List<Event> conflicts(Calendar cal, TimeSlot proposed) {
 }
 ```
 
+**Trace it on three pairs** (the two-sided condition is the part students get backwards —
+watch each clause). Recall `overlaps` = `this.start.isBefore(other.end) && other.start.isBefore(this.end)`:
+
+| `this` | `other` | `this.start < other.end` | `other.start < this.end` | `overlaps` | Why |
+|---|---|---|---|---|---|
+| `[9:00,10:00)` | `[10:00,11:00)` | `9:00 < 11:00` = T | `10:00 < 10:00` = **F** | **false** | back-to-back — half-open makes the touch-point a non-conflict for free |
+| `[9:00,10:00)` | `[9:30,10:30)` | `9:00 < 10:30` = T | `9:30 < 10:00` = T | **true** | partial overlap |
+| `[9:00,11:00)` | `[9:30,10:00)` | `9:00 < 10:00` = T | `9:30 < 11:00` = T | **true** | full containment |
+
+The back-to-back row is the payoff: a single `false` clause kills the false conflict, so no
+`-1`-second fudging is needed. Both clauses must be true for an overlap — one gap on either
+side is enough to separate them.
+
 Points interviewers probe:
 
 - **Why half-open?** A meeting `[9:00, 10:00)` and `[10:00, 11:00)` must *not* conflict —
@@ -441,6 +454,35 @@ public List<TimeSlot> find(List<Calendar> cals, Duration length, TimeSlot window
                .collect(Collectors.toList());
 }
 ```
+
+**Worked example — three calendars, one 30-min request.** Search window `[9:00, 17:00)`:
+
+- Alice busy: `[9:00,10:00)`, `[13:00,14:00)`
+- Bob busy: `[9:30,11:00)`, `[15:00,16:00)`
+- Room busy: `[14:00,15:00)`
+
+Step 1 — **gather + sort by start** (5 intervals):
+`[9:00,10:00)`, `[9:30,11:00)`, `[13:00,14:00)`, `[14:00,15:00)`, `[15:00,16:00)`.
+
+Step 2 — **sweep and coalesce.** Carry a running block; extend it whenever the next start is
+`<=` the current end (touching counts as adjacent so we don't leave a zero-length gap):
+
+- Start block `[9:00,10:00)`. Next `[9:30,11:00)`: `9:30 <= 10:00` → overlaps, extend end to `max(10:00,11:00)=11:00` → block `[9:00,11:00)`.
+- Next `[13:00,14:00)`: `13:00 > 11:00` → gap. Emit `[9:00,11:00)`, start new block `[13:00,14:00)`.
+- Next `[14:00,15:00)`: `14:00 <= 14:00` → adjacent, extend end to `15:00` → block `[13:00,15:00)`.
+- Next `[15:00,16:00)`: `15:00 <= 15:00` → adjacent, extend end to `16:00` → block `[13:00,16:00)`.
+- End of list → emit `[13:00,16:00)`.
+
+Merged busy blocks: **`[9:00,11:00)`, `[13:00,16:00)`**.
+
+Step 3 — **complement within `[9:00,17:00)`** (gaps between window edge → first block → …
+→ last block → window edge):
+`[11:00,13:00)` (2h) and `[16:00,17:00)` (1h). The `9:00` window edge equals the first block's
+start, so no leading gap.
+
+Step 4 — **filter by `duration() >= 30 min`.** Both survive (120 min, 60 min). Result:
+**`[11:00,13:00)`, `[16:00,17:00)`**; earliest-first, `[11:00,13:00)` is the answer. (A 90-min
+request would drop `[16:00,17:00)` and return only `[11:00,13:00)`.)
 
 Points to narrate:
 
@@ -598,11 +640,22 @@ write lands, and the room is double-booked. (Cross-ref concurrency-in-lld.)
 
 ## Edge Cases and Error States
 
-- **Invalid slot:** `end <= start`, zero-length, or past-time — validate in the `TimeSlot`
-  constructor so bad slots can't exist.
+- **Invalid slot:** `end <= start` or zero-length — validate in the `TimeSlot` constructor so
+  malformed intervals can't exist. Do **not** bake a "not in the past" check into the value
+  object: `TimeSlot` is also used for query windows, reconstructing busy intervals, and
+  recording historical/imported events — all legitimately in the past. "No creating an event
+  in the past" is a *business rule*, so enforce it in a create-event policy layer, not the
+  interval invariant.
 - **DST / timezone boundaries:** store instants in UTC; a "9 AM daily" recurrence must
   re-anchor to the user's wall-clock time across a DST shift — expand in the user's
   `ZoneId`, not by adding fixed 24h. A frequent senior probe.
+  *Worked example — 09:00 daily standup in `America/New_York` across US spring-forward.*
+  Before the shift EST is UTC−5, so 09:00 local = **14:00 UTC**. On the second Sunday of
+  March clocks jump forward and EDT becomes UTC−4. **Naive add-fixed-24h** keeps the stored
+  instant at 14:00 UTC, which now renders as **10:00 local** — the standup silently drifts an
+  hour. **Correct expansion**: take `LocalTime 09:00` on the next date in `ZoneId`
+  `America/New_York`, then convert to an instant → 09:00 EDT = **13:00 UTC**, so it stays
+  09:00 on everyone's wall clock. Same trap in reverse (fall-back) drifts it to 08:00.
 - **Editing one occurrence of a series:** must not mutate the whole series — record a
   per-instance override/exception; deleting one occurrence adds an EXDATE-style exception.
 - **Responding to a cancelled/deleted meeting:** invitation state guards it — throws.
@@ -641,7 +694,18 @@ The "now add X" follow-ups and where they land — each should be Open/Closed:
 
 1. **"An attendee edits a single occurrence of a weekly standup."** Split series vs.
    occurrence: keep the `RecurrenceRule` on the series and an override/exception list; the
-   edited instance becomes a detached `Event` referencing its parent.
+   edited instance becomes a detached `Event` referencing its parent. Concretely the series
+   carries two collections keyed by *occurrence-start instant*:
+   ```java
+   Set<Instant> exdates;              // occurrences to skip (EXDATE)
+   Map<Instant, Event> overrides;     // occurrence-start -> detached override event
+   ```
+   `occurrencesIn(window)` then expands the rule, **drops** any start in `exdates`, and
+   **substitutes** the override where `overrides` has that start. So "cancel this Tuesday"
+   adds `2026-07-28T13:00Z` to `exdates`; "move this Tuesday to 3pm" puts a detached `Event`
+   at `overrides[2026-07-28T13:00Z]` with the new 15:00 slot — the rest of the series is
+   untouched, and "edit all future" splits the series (set the old rule's `until` and start a
+   new series). This is exactly RFC 5545's RRULE + EXDATE + RECURRENCE-ID model.
 2. **"Find the earliest 30-min slot next week where five people and a room are all free."**
    Merge all six busy-interval sets, complement within next-week's window ∩ working hours,
    filter by duration, return earliest — the merge-intervals answer.

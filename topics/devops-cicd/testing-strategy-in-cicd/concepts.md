@@ -49,6 +49,20 @@ flowchart LR
 > most likely to catch a mistake first. The pipeline is a filter — each stage should
 > reject as many bad builds as possible before you spend money on the next.
 
+**Worked example — why cheap-first actually saves money.** Say 100 PRs run the
+pipeline, and 20 of them have a lint error (a 5-second check catches it) while E2E
+takes 30 min (1,800 s) per run.
+
+- **Lint-first:** all 100 run lint (100 × 5 s = 500 s), 20 are rejected immediately,
+  only the surviving 80 pay for E2E (80 × 1,800 s = 144,000 s).
+- **E2E-first:** all 100 pay for E2E *before* anything cheap runs (100 × 1,800 s =
+  180,000 s), so the 20 lint-breakers each waste a full 30-min E2E run.
+
+The gap is **20 × 1,800 s = 36,000 s = 10 hours** of compute burned on PRs a
+5-second check would have rejected. That is the slogan turned into a decision
+procedure: run the stage with the lowest `cost ÷ (fraction of bad builds it catches)`
+first.
+
 This mirrors the **test pyramid** (Mike Cohn / Martin Fowler): many fast unit tests at
 the base, fewer integration tests in the middle, very few slow E2E tests at the top.
 An **inverted pyramid** (mostly E2E) produces slow, flaky pipelines that engineers
@@ -68,7 +82,8 @@ Mechanics differ by tool:
   a downstream job only runs after upstream success. Within a matrix, `fail-fast: true`
   (the default) cancels sibling matrix jobs when one fails.
 - **GitLab CI**: `stages:` run sequentially; a stage only starts if the previous stage
-  succeeded. `needs:` creates a DAG so independent jobs can start early.
+  succeeded. `needs:` creates a DAG (directed acyclic graph — jobs wired by dependency,
+  not by fixed stage order) so independent jobs can start early.
 - **Jenkins**: declarative `stage` blocks run in order; `failFast true` in a `parallel`
   block aborts siblings on first failure.
 
@@ -111,6 +126,22 @@ The gate turns "we measured it" into "the pipeline enforces it."
   actually *catch* injected bugs and is a stronger gate — but slower, so it's often a
   nightly/periodic gate rather than per-PR.
 
+**Worked example — a surviving mutant.** Take `boolean isBigger(a, b) { return a > b; }`
+with one test: `assertTrue(isBigger(5, 3))`. The mutation tool makes small edits
+("mutants") to the code and reruns the tests; a mutant the tests still pass on is a
+**survivor** (a bug your suite is blind to).
+
+- Mutant: flip `>` to `>=`. `isBigger(5, 3)` now returns `5 >= 3` = `true`. The one
+  test still asserts `true`, so it **passes** — the mutant **survives**. Your test
+  never exercised the boundary (`a == b`), so it can't tell `>` from `>=`.
+- Add `assertFalse(isBigger(3, 3))`: against the `>=` mutant this returns `true` when
+  the test expects `false`, so the test **fails** and the mutant is now **killed**.
+
+Mutation score = killed ÷ total mutants. If a tool generates 10 mutants and your suite
+kills 7, the score is **7/10 = 70%** — a far more honest number than "85% line
+coverage," because it measures whether assertions actually *detect* changed behavior,
+not just whether a line was executed.
+
 ```yaml
 # SonarQube "Quality Gate" concept — pipeline fails if gate status != OK
 # Typical "Sonar way" conditions on NEW code:
@@ -140,9 +171,36 @@ Two distinct axes:
 | **Sharding / test splitting** | One test suite across N machines | Jest `--shard=1/4`, CircleCI `circleci tests split`, Playwright `--shard` |
 | **Matrix / fan-out** | Same suite across configs (OS, versions) | GH Actions `strategy.matrix` |
 
+**Worked example — the crossover point.** Take a suite that runs **40 min serially**,
+with **1.5 min (90 s) of fixed overhead** per runner (checkout, dependency install,
+container pull). Wall clock ≈ (40 / N) + 1.5:
+
+| Shards (N) | Test time (40/N) | + Overhead | Wall clock |
+|---|---|---|---|
+| 1 | 40 min | 1.5 | **41.5 min** |
+| 4 | 10 min | 1.5 | **11.5 min** |
+| 20 | 2 min | 1.5 | **3.5 min** |
+| 40 | 1 min | 1.5 | **2.5 min** |
+| 2000 | 0.02 min | 1.5 | **1.52 min** |
+
+Notice the wall clock can never drop below the 1.5-min overhead floor no matter how
+many runners you add — at 2000 shards each runner boots for 90 s to run ~1.2 s of
+tests. The useful range is where cutting test time still beats the fixed cost; past
+that you are paying 2000× the overhead to shave seconds (and burning 2000 runners'
+worth of billed minutes). Cache dependencies to shrink that 1.5-min floor and measure
+where the curve flattens.
+
 **Balancing shards matters.** Naive splitting (alphabetical, or by file count) leaves
-one runner with all the slow tests while others idle. Good splitters use **historical
-timing data** to balance so every shard finishes at roughly the same time.
+one runner with all the slow tests while others idle. Wall clock is set by the
+*slowest* shard, not the average. With 20 min of tests across 4 shards:
+
+| Split strategy | Shard finish times | Wall clock |
+|---|---|---|
+| Naive (unbalanced) | 12 / 3 / 3 / 2 min | **12 min** (3 runners idle most of it) |
+| Timing-balanced | 5 / 5 / 5 / 5 min | **5 min** |
+
+Same tests, same 4 runners — balancing on **historical timing data** so every shard
+finishes together turns 12 min into 5 min.
 
 ```yaml
 # GitHub Actions — shard a suite across 4 runners
@@ -254,6 +312,22 @@ Flow (consumer-driven, Pact):
 4. Before deploying, the pipeline runs **`can-i-deploy`**: it asks the broker "given the
    versions already in `production`, is this version compatible with all its integration
    partners?" — and **blocks the deploy** if any contract is unsatisfied.
+
+**Worked example — a mismatch that blocks the deploy.** The consumer's pact says "when
+I GET /customers/1, I expect a body containing `{"id": 1, "name": "Acme"}`." Later a
+provider dev refactors the response to `{"id": 1, "fullName": "Acme"}` — renaming
+`name` to `fullName`.
+
+- Provider verification replays the consumer's pact against the real provider. The
+  response now has no `name` field, so the expectation **`name: "Acme"` fails** — the
+  broker records this provider version as *not* verifying the consumer's pact.
+- At deploy time, `can-i-deploy --to-environment production` sees the consumer version
+  currently in prod still expects `name`, and this provider version doesn't satisfy it
+  → the broker returns **"no"**, the stage exits non-zero, and the deploy is **blocked**
+  — *before* the rename reaches prod and breaks the live consumer with a null name.
+
+The single renamed field is what breaks it. The fix is to add `name` back (or roll the
+consumer forward first), then both pacts verify and `can-i-deploy` returns "yes."
 
 ```mermaid
 sequenceDiagram
@@ -415,8 +489,9 @@ classic bottleneck (contention, drift, "works on staging"). Modern practice:
 > [!WARNING]
 > A single shared staging environment that every pipeline deploys to serially is a
 > throughput killer and a flakiness source: one team's bad deploy fails everyone's E2E.
-> Ephemeral per-change environments (or hermetic container-backed tests) trade a bit of
-> spin-up cost for isolation and parallelism.
+> Ephemeral per-change environments (or hermetic — self-contained, no dependence on
+> shared external state — container-backed tests) trade a bit of spin-up cost for
+> isolation and parallelism.
 
 ---
 

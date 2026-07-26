@@ -27,7 +27,8 @@ The trade-off is not free:
   size per index.
 - **Write amplification:** every `INSERT`/`DELETE` and every `UPDATE` of an indexed
   column must also update *every* index on that column. A table with 6 indexes turns
-  one row insert into 7 structure modifications.
+  one row insert into **1 table/heap write + 6 index writes** — 7 structure
+  modifications, each potentially triggering its own page split and WAL/redo record.
 - **Planner/optimizer overhead:** more indexes means more candidate plans to cost.
 
 Rules of thumb an interviewer wants to hear: index columns used in `WHERE`, `JOIN`,
@@ -81,6 +82,31 @@ A range scan descends to the first matching leaf, then walks the linked leaves
 sideways. This is why a B-tree is great for `WHERE created_at BETWEEN a AND b` but a
 **hash index cannot do ranges at all** (it only supports `=`).
 
+**Worked example — why the height is only 3–4 (fan-out math).** Take an 8 KB page.
+After per-key overhead you fit roughly **400 keys + child pointers** in one internal
+node, so each level multiplies reachable rows by ~400:
+
+- Level 1 (root): 400 separator keys
+- Level 2: 400 × 400 = **160,000** rows
+- Level 3: 400³ = **64,000,000** rows
+- Level 4: 400⁴ = **25.6 billion** rows
+
+So a **4-level B-tree indexes ~25 billion rows**, and *any* single-row lookup costs
+exactly **4 page reads** — and the top 2–3 levels are almost always resident in the
+buffer pool, so it is often just **1 real disk read** at the leaf. That is the whole
+point of high fan-out: the cost is `O(log_fanout N)`, i.e. `log_400(N)`, not `log_2(N)`
+— `log_400(64M) = 3`, whereas `log_2(64M) ≈ 26`. Doubling the row count barely moves the
+height. That is also the honest answer to "how many disk reads to find one row in a
+billion-row table?": **3–4, mostly served from cache.**
+
+**Adjacent probe — B-tree vs LSM-tree.** Postgres and MySQL/InnoDB default to B-trees:
+updates happen **in place**, which is read-optimized but pays **write amplification**
+(rewrite a whole page + WAL record per change). LSM-trees (Cassandra, RocksDB, ScyllaDB)
+instead **append** writes to sorted files and merge them later via **compaction** —
+write-optimized, but reads may check several levels (**read amplification**, mitigated by
+Bloom filters). Rule of thumb: B-tree for read-heavy/OLTP with range scans; LSM for
+write-heavy ingestion. (Covered in depth in the storage-engines topic.)
+
 > [!WARNING]
 > A B-tree can only be scanned left-to-right on its key. `ORDER BY col DESC` still works
 > (walk the leaf list backwards), but `LIKE '%abc'` (leading wildcard) cannot use the
@@ -112,6 +138,15 @@ clustered index per table (a table can only be physically sorted one way).
 > splits, good locality), whereas random UUIDs scatter inserts across the whole B-tree,
 > causing page splits, fragmentation, and cache misses. (UUID v7 / ULID, being
 > time-ordered, largely fix this.)
+
+A **page split** is what happens when an insert must go into a leaf page that is already
+full: the engine allocates a new page and moves ~50% of the entries into it to make room,
+costing extra I/O and a parent-node update, and leaving **two half-empty pages** (that is
+the "fragmentation" — more pages to cache and scan for the same data). Monotonic PKs
+almost never split because every insert lands at the right edge and just fills fresh pages
+to ~100%; random UUIDs hit already-full interior pages constantly. `fillfactor` (Postgres)
+/ `MERGE_THRESHOLD` (InnoDB) deliberately leaves leaf pages partly empty so later inserts
+have slack and split less often.
 
 ## Composite indexes and the leftmost-prefix rule
 
@@ -168,6 +203,26 @@ The `INCLUDE` clause (PostgreSQL 11+, SQL Server) stores extra **payload columns
 the leaf level**, not as part of the sort key — cheaper than adding them to the key when
 you never filter/sort on them.
 
+**Worked example — counting the I/Os the covering index saves.** Say
+`WHERE customer_id = 42` matches **5 rows**, and the index is a 3-level B-tree.
+
+- *Non-covering secondary index* (`SELECT status, total ...` but the index only has
+  `customer_id`): descend the index to the leaf = **~3 reads** (top levels cached, so
+  ~1 real), find 5 PK/`ctid` pointers, then do **5 bookmark lookups** — one random
+  fetch per row into the heap (Postgres) or the clustered index (InnoDB). Total ≈
+  **1 index descent + 5 random row fetches ≈ 6 page accesses**, and those 5 are random
+  I/O scattered across the table.
+- *Covering / index-only version* (`INCLUDE (status, total)`): the leaf already holds
+  `status` and `total`, so after the descent the engine reads the 5 entries straight off
+  one or two adjacent leaf pages and **stops — zero heap fetches**. Total ≈ **1–2 page
+  accesses.**
+
+That is 6 accesses (5 of them random) collapsing to ~1–2 sequential ones. Now scale the
+match to **1,000 rows**: non-covering pays ~1,000 random heap fetches; covering walks a
+handful of linked leaf pages. This is exactly why `INCLUDE` earns its keep on hot
+read paths — and why InnoDB's mandatory PK "double lookup" for non-covered secondary
+indexes is a real cost, not a footnote.
+
 > [!WARNING]
 > PostgreSQL's index-only scan still needs the row's **visibility** to be confirmed via
 > the **visibility map**. If the page is not marked all-visible (recently updated, not
@@ -192,17 +247,37 @@ seq scan — why?" Common causes:
 4. **Low selectivity.** If the predicate matches a large fraction of rows, the planner
    correctly decides a seq scan is *cheaper* than millions of random index lookups +
    heap fetches. This is the planner being *right*, not broken.
+
+   **Worked example — where the tipping point actually is.** Table = **1,000,000 rows**
+   packed into **10,000 heap pages** (100 rows/page). A `Seq Scan` reads all 10,000 pages
+   **sequentially** — cheap per page. Now compare an `Index Scan` for two predicates,
+   costing each roughly as "one random page fetch per matching row" (worst case, no two
+   matches on the same page):
+
+   - Predicate matches **1%** (10,000 rows): Index Scan ≈ **10,000 random fetches** vs
+     Seq Scan = 10,000 sequential reads. Random I/O is several× more expensive per page,
+     so the **index still wins** here because it also skips reading the other 99% of pages.
+   - Predicate matches **10%** (100,000 rows): Index Scan ≈ **100,000 random fetches** vs
+     Seq Scan = still only **10,000 sequential reads**. Now the index does **10× more page
+     work, all of it random** — the **Seq Scan wins.**
+
+   So the crossover sits somewhere in the low-single-digit-to-~20% range (Postgres's
+   default `random_page_cost = 4` vs `seq_page_cost = 1` puts it near ~5–10%). Between the
+   two — "medium selectivity" — Postgres reaches for a **Bitmap Heap Scan**: collect all
+   matching tuple locations, sort them, then read each heap page **once in physical order**,
+   turning that random I/O back into sequential. That is why the middle of the range has
+   its own access path rather than a hard either/or.
 5. **Stale statistics** make the planner mis-estimate row counts (run `ANALYZE`).
 6. **`OR` across different columns, `!=`/`<>`, or `NOT IN`** often can't use one index
    (though Postgres may combine per-branch indexes via a `BitmapOr`).
 7. **Leftmost-prefix violation** (querying a non-leading composite column).
 
-```sql
--- NOT sargable (index on created_at unused):
-WHERE EXTRACT(YEAR FROM created_at) = 2026
--- Sargable rewrite (uses the index):
-WHERE created_at >= '2026-01-01' AND created_at < '2027-01-01'
-```
+Causes 1, 2, 3, and 6 above are all one underlying defect — a predicate the engine cannot
+use as a search key. The next section names that property (**sargability**), states the
+mechanical rule once, and catalogs the rewrites in a single table (including the
+`EXTRACT(YEAR …)` → half-open-range case). Read "when an index is not used" as the
+symptom checklist and "SARGable predicates" as its root cause and cure, not as two
+separate lists.
 
 > [!TIP]
 > "Sargable" (Search ARGument ABLE) = a predicate the engine can satisfy by seeking an
@@ -341,6 +416,24 @@ staple question.
 | **Nested loop** | For each row of the outer, probe the inner (ideally via an index) | Outer side is small **and** inner has an index on the join key | O(outer × inner) without an index; O(outer × log inner) with one |
 | **Hash join** | Build a hash table on the smaller ("build") input, then probe it with the larger ("probe") input | Large, unsorted inputs; **equi-joins only** (`=`) | O(N+M); needs memory (`work_mem`) or spills to disk |
 | **Merge join** | Sort both inputs on the join key, then walk them in lockstep | Both inputs already sorted (e.g. by an index) or sortable; supports range/`<` joins | O(N log N + M log M), or O(N+M) if pre-sorted |
+
+**Worked example — the same join, three ways.** Join a **10,000-row** outer table to a
+**1,000,000-row** inner table on `inner.k = outer.k`:
+
+- **Nested loop, no inner index:** for each of the 10,000 outer rows, scan all 1,000,000
+  inner rows → 10,000 × 1,000,000 = **10,000,000,000 (10¹⁰) row comparisons.** This is the
+  accidental O(N×M) disaster.
+- **Nested loop, inner index on `k`:** each outer row does an index seek ≈ `log₂(1,000,000)
+  ≈ 20` probes → 10,000 × 20 = **~200,000 probes.** A 50,000× cut — this is why the planner
+  loves nested loop *when the inner side is indexed and the outer side is small*.
+- **Hash join:** build a hash table on the smaller (10,000-row) input, then scan the
+  1,000,000-row input probing it → ~10,000 build + ~1,000,000 probe = **~1,010,000 ops**,
+  no index required.
+
+Note the flip: with the inner index, nested loop (~200K) **beats** hash join (~1.01M);
+strip the index and nested loop explodes to 10¹⁰ while hash join is unchanged at ~1.01M.
+That is exactly the trade the planner re-evaluates from cardinality estimates — and why a
+*wrong* estimate that hides the missing index can drop it into the 10¹⁰ path.
 
 Key points:
 

@@ -261,6 +261,21 @@ flowchart LR
     SV2 --> Q
 ```
 
+**Worked example — what a merged answer actually looks like.** Query: "how many
+`OrderPlaced` events total?" The last batch job ran at **midnight** and counted every
+event up to that instant: **batch view = 1,000,000**. Since midnight, the speed layer has
+been counting only the new arrivals: **real-time view = 4,200**. It's now 09:15. Neither
+view is the answer alone — the serving layer *merges* them:
+
+```
+answer = batch_view + speed_view = 1,000,000 + 4,200 = 1,004,200
+```
+
+At the next midnight run the batch layer recomputes over *all* the data (now
+1,004,200-plus), and the speed-layer counter is **reset to 0** — the fresh, approximate
+tail is folded into the accurate, complete base. That reset-and-reabsorb cycle is why a
+transient bug in the speed layer self-heals: the batch recompute overwrites it.
+
 **Trade-offs.**
 - **Pros:** correctness **and** freshness together; batch layer is a self-healing source
   of truth (a bug is fixed by recomputing from immutable data); tolerant of speed-layer
@@ -306,6 +321,24 @@ flowchart LR
     SP2 --> V2[("Rebuilt view → cut over")]
 ```
 
+**Worked example — reprocessing is "just replay."** The log holds offsets `0…1,000,000`.
+Stream job **v1** has consumed up to offset 1,000,000 and writes a `daily_revenue` view
+that currently reads **$48,000** — but you discover v1 double-counted refunds, so the
+number is wrong. You don't patch rows in place. You deploy job **v2** (correct refund
+logic) pointed at a *fresh* output table and set its start offset to **0**:
+
+```
+v2 replays offset 0 → 1,000,000 into daily_revenue_v2
+  ... reaches offset 1,000,000, now caught up to live
+  daily_revenue_v2 = $45,600   (refunds counted once)
+cut over: point readers at daily_revenue_v2, retire v1
+```
+
+The same code that processes live events (offsets past 1,000,000 keep flowing into v2)
+also rebuilt all of history — no separate batch job, which is exactly Kappa's pitch over
+Lambda. The cost is real: replaying a million-plus offsets is a heavy job, and the log
+must retain offset 0, which is why Kappa demands long/infinite retention.
+
 **Trade-offs.**
 - **Pros:** **one codebase, one framework** → far simpler ops and reasoning than Lambda;
   reprocessing is "just replay"; naturally event-driven end to end.
@@ -327,6 +360,25 @@ an aggregate's state from its events), while Kappa is a *data-processing pipelin
 
 > Deep dive: `realtime-streaming-systems`; `event-driven-cqrs-saga-cdc` for the log /
 > event-sourcing relationship.
+
+---
+
+## Batch vs. Stream vs. Lambda vs. Kappa at a glance
+
+The four data-processing styles above are best held side by side — they answer the same
+question (turn incoming data into serving views) with different bounded/unbounded and
+one-path/two-path choices:
+
+| Dimension | Batch | Stream | Lambda | Kappa |
+|---|---|---|---|---|
+| **Input** | bounded (finite dataset) | unbounded (continuous) | both (master data + live stream) | unbounded (replayable log) |
+| **Latency** | high (hours) | low (ms–seconds) | low for fresh view, high for batch view | low (ms–seconds) |
+| **Code paths** | one (batch job) | one (stream job) | **two** (batch + speed, same logic twice) | **one** (stream job, used for live *and* history) |
+| **Reprocessing** | re-run the job over the data | hard — no natural history rerun | recompute batch layer from immutable master | **replay the log from offset 0** through a new job |
+| **Best for** | analytics, billing, EOD rollups | fraud, live metrics, continuous ETL | needs exact history *and* fresh approximation | event-centric systems on a log wanting one codebase |
+
+Lambda and Kappa both exist to combine batch's correctness with stream's freshness;
+Lambda pays for it with duplicated logic, Kappa with storage and heavy replay jobs.
 
 ---
 
@@ -478,6 +530,20 @@ flowchart TD
 - **When to avoid:** strict request/response with immediate results, or when a simple
   point-to-point queue (single consumer, work distribution) is all you need.
 
+> [!INTERVIEW]
+> **The dual-write problem — the senior probe you must have an answer for.** A service
+> that both commits to its DB *and* publishes an event has two independent writes with no
+> shared transaction. If it crashes between them you get an inconsistency: DB updated but
+> event lost (downstream never learns), or event published but DB rolled back (a phantom).
+> You cannot fix this with a distributed transaction across the DB and the broker in
+> practice. Standard fixes: **transactional outbox** — write the event into an `outbox`
+> table *in the same DB transaction* as the state change, then a separate relay (often via
+> **CDC** tailing the transaction log) publishes rows from the outbox to the broker, so the
+> state change and the intent-to-publish commit atomically; **listen-to-yourself** — write
+> only the event, then update your own state from consuming it. Pair either with a
+> **dead-letter queue** for poison messages that repeatedly fail processing, so one bad
+> event doesn't wedge the consumer. Mechanics live in `event-driven-cqrs-saga-cdc`.
+
 **Differs from adjacent styles.** Versus the **EDA broker topology**: pub/sub is the
 *messaging mechanism*; the broker topology is the *application style* built on it.
 Versus the GoF **Observer** pattern (`dp-behavioral`): Observer is in-process object
@@ -514,6 +580,26 @@ flowchart LR
     U -->|queries / reads| QRY["Query side"]
     QRY --> RDB
 ```
+
+**Worked example — the stale-read a user actually hits.** The projector that updates the
+read model lags the write by ~200ms. Trace one user editing their display name:
+
+```
+t = 0ms    POST /profile {name: "Sam"}  → command side commits to write store, returns 200
+t = 50ms   GET /profile (user refreshes) → query side reads the read model
+                                          → projector hasn't caught up yet
+                                          → returns OLD name "Samuel"   ← user sees a stale read
+t = 200ms  projector applies the ProfileUpdated event → read model now says "Sam"
+t = 260ms  GET /profile → returns "Sam"                                 ← consistent again
+```
+
+The user "saved" a change and the very next page load still showed the old value — the
+classic eventual-consistency surprise. Two standard mitigations: **read-your-writes** —
+for *that* user's own request, serve the answer from the write model (or block the read
+until the projection catches up), so they always see their own edits; or a
+**version/ETag** — the write returns version `v7`, the client polls the read side until
+it reports `>= v7` before rendering. Other users, who don't expect immediacy, tolerate
+the 200ms lag fine.
 
 **Trade-offs.**
 - **Pros:** **independent scaling** of reads vs. writes; each side optimized (write
@@ -567,6 +653,31 @@ sequenceDiagram
     ES-->>App: replay events (+ snapshot) → current state
     ES->>Proj: stream events → build read model
 ```
+
+**Worked example — fold a stream into state, then snapshot + tail.** Take a bank
+account. The store holds three immutable events; current state is the left fold:
+
+```
+start balance = 0
+apply Deposited(100) → 0 + 100 = 100
+apply Withdrew(30)   → 100 − 30 = 70
+apply Deposited(50)  → 70 + 50  = 120     ← current balance
+```
+
+There is no "balance" column anywhere — `120` is *derived* by replaying. Now imagine the
+account has **53 events** and replaying all of them on every load is wasteful. So you
+snapshot: at sequence 50 you persist `snapshot{balance: 900}`. To load, you start from
+the snapshot and fold only the **3 tail events** after it (seq 51–53), not all 53:
+
+```
+load snapshot(seq 50) → 900
+apply Withdrew(200)  → 700
+apply Deposited(50)  → 750
+apply Withdrew(100)  → 650    ← current balance, from snapshot + 3 events
+```
+
+Same answer as a full replay, a fraction of the work. That is why "snapshot + tail" is
+the standard read path.
 
 **Trade-offs.**
 - **Pros:** complete **audit trail & temporal queries** (state at any point in time);
@@ -679,6 +790,16 @@ flowchart LR
     SVC <-->|"demand signals (backpressure)"| SVC2["Downstream"]
     SVC -.replicate / scale out.-> SVC
 ```
+
+**What breaks without backpressure — a concrete contrast.** A producer emits 10,000
+msg/s; the consumer can only handle 1,000 msg/s. With an **unbounded queue** in between,
+9,000 msg/s pile up — after 10s that's 90,000 buffered, after a minute ~540,000, and the
+heap grows without bound until latency blows up and the process **OOM-crashes**. With
+**Reactive Streams demand signalling** the consumer stays in control: it calls
+`request(1000)`, the producer sends **at most 1,000** and then *stops* until the consumer
+requests more. Throughput self-limits to what the slow side can absorb — memory stays
+bounded, nothing crashes, and the pressure propagates upstream (the producer slows, or
+sheds load deliberately) instead of silently accumulating.
 
 **Trade-offs.**
 - **Pros:** **responsiveness, elasticity, and resilience** under load and failure; high

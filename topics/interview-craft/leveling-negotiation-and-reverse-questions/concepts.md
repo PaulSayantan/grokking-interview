@@ -228,6 +228,23 @@ ultimatums, or fake competing offers can blow up the offer and your reputation.
   these people; a scorched close poisons the relationship.
 - **Get every counter in writing** before you respond to it.
 
+**Worked example — the dollars a single respectful counter captures.** Initial offer:
+
+- Base **$180k** + equity **$150k/yr** ($600k over 4) + sign-on **$20k** (Year 1 only).
+- First-year TC ≈ 180 + 150 + 20 = **$350k**; steady-state (Years 2–4) ≈ 180 + 150 = **$330k**.
+
+You pull levels.fyi, see the level's midpoint is higher, and counter on the *flexible* levers
+(not base, which is band-capped): "To get to yes I'd need to reach the midpoint — is there room
+on equity and sign-on?" Recruiter moves **equity to $210k/yr** and **sign-on to $40k**.
+
+- New first-year TC ≈ 180 + 210 + 40 = **$430k**; steady-state ≈ 180 + 210 = **$390k**.
+- Delta vs. accepting on the spot: first year **$430k − $350k = +$80k**; each of Years 2–4
+  **$390k − $330k = +$60k**. Over 4 years that's $80k + 3 × $60k = **+$260k** you'd have left on
+  the table by saying "yes" immediately.
+
+One email, one data-backed ask, no ultimatum — and it's why "accepting instantly" is a scored
+mistake, not just etiquette.
+
 > [!TIP]
 > A useful frame: *"I'm not trying to squeeze you — I want to say yes. Here's the gap and the
 > data behind it. What can we do on equity or sign-on?"* Collaborative framing gets recruiters
@@ -236,6 +253,18 @@ ultimatums, or fake competing offers can blow up the offer and your reputation.
 **Failure modes interviewers/recruiters penalize:** exploding ultimatums ("$X or I walk"),
 bluffed offers, negotiating rudely or with entitlement, and re-trading (agreeing then re-opening).
 Also: accepting instantly (you leave money on the table and signal you undervalue yourself).
+
+**Leverage constraints (know yours before you push):**
+
+- **Visa/immigration status.** If you're on an H-1B needing transfer, or have a green card in
+  progress you don't want to restart, your *walk-away* leverage is weaker — you can't as easily
+  say "I'll take the other offer." Weigh sponsorship and timing (will they transfer the H-1B?
+  will a job change reset your GC priority date/PERM?) as part of the package, not just TC. It's
+  fair to ask the recruiter directly about sponsorship early.
+- **Clawbacks.** Sign-on bonuses (and sometimes relocation) frequently carry a **1–2 year
+  clawback** — leave early and you repay a prorated or full amount. Don't count a sign-on as
+  guaranteed money until you've seen the clawback terms **in writing**; a $40k sign-on you'd owe
+  back if you leave in month 10 is not the same as $40k free and clear.
 
 ---
 
@@ -257,6 +286,11 @@ that later "weren't what we discussed."
   vesting schedule, sign-on and any clawback, level, title, start date.
 - **Buy time** politely: a few days to a week is standard and reasonable; use it to negotiate
   and to let other processes catch up.
+- **Cluster your loops so offers land together.** The competing-offer leverage the negotiation
+  section relies on only exists if two offers are live at once. Start your processes in the same
+  window, and when timelines drift it's fair to say *"I have another process closing on [date] —
+  can we align timelines?"* to one company, or ask the fast one to **extend** its deadline a few
+  days. That's how you honestly manufacture leverage rather than bluff it.
 - Never resign your current job on a *verbal* offer.
 
 > [!WARNING]
@@ -283,10 +317,42 @@ headline number.
 - **Refreshers** — additional grants awarded during employment (annual/performance) that offset
   the "vesting cliff" drop when your initial grant runs out around year 4. Ask about the refresh
   policy — without refreshers, TC falls off a cliff in year 5.
+- **Tax (model it, don't just eyeball gross TC).** RSUs are taxed as **ordinary income at vest**;
+  the automatic withholding often under-covers a high earner, so expect a top-up bill in April.
+  Options split by type: **NSOs** are taxed as income on the spread at exercise; **ISOs** can
+  trigger **AMT** on the spread *at exercise even before you sell a single share* — a classic way
+  people owe real tax on paper gains that later evaporate. Model after-tax, and consult a tax
+  advisor for ISO/AMT.
 
 **Why it matters.** Two offers with identical "equity value" can be worth wildly different
 amounts depending on vesting shape, strike price, and refresh policy. A back-loaded grant with
 no refresher can mean a low year-1 and a comp cliff at year 4.
+
+**Worked example — options are worth $0 until the price clears the strike.** You hold 10,000
+options at a **$2 strike**.
+
+- Shares reach **$10** at exit → gain = 10,000 × ($10 − $2) = 10,000 × $8 = **$80,000** (before
+  the $2 × 10,000 = $20,000 you pay to exercise, and taxes).
+- Shares sit at **$1.50** → the option to buy at $2 is worthless (why pay $2 for a $1.50 share?).
+  Your 10,000 options = **$0**. This is "underwater," and it's the whole risk RSUs don't carry:
+  an RSU at $1.50 is still worth $1.50 × 10,000 = $15,000.
+
+**Worked example — Amazon's 5/15/40/40 back-load and the year-5 cliff.** A **$600k** grant vests
+5% / 15% / 40% / 40% by year:
+
+| Year | Equity vesting | + Base $180k + Bonus $50k | Sign-on to fill the gap | Year TC |
+|---|---|---|---|---|
+| 1 | 5% = **$30k** | $260k | ~$120k Year-1 sign-on | **~$380k** |
+| 2 | 15% = **$90k** | $320k | ~$60k Year-2 sign-on | **~$380k** |
+| 3 | 40% = **$240k** | $470k | — | **$470k** |
+| 4 | 40% = **$240k** | $470k | — | **$470k** |
+| 5 | initial grant done → **$0** | $230k | — | **$230k** |
+
+Equity check: $30k + $90k + $240k + $240k = $600k. The **front-loaded sign-on** ($120k + $60k)
+is exactly what patches the tiny Year-1/Year-2 equity so early TC matches the ~$380k headline.
+But notice Year 5: once the initial grant is fully vested and the sign-on is gone, TC **drops
+~$240k to $230k** unless a **refresher** grant lands in Years 2–3 to overlap. That drop is the
+"comp cliff," and asking about the refresh policy is how you find out whether it's real for you.
 
 > [!TIP]
 > Questions to always ask about equity: *What's the vesting schedule and cliff? Are these RSUs
@@ -321,6 +387,26 @@ and its realistic value.
 **Why it matters.** Startup equity is a lottery ticket with fine print. "0.5% of a company
 that might be worth $1B" sounds like $5M but can be near-zero after dilution, liquidation
 preferences, and a strike you must pay. Value it soberly and weight cash accordingly.
+
+**Worked example — watch $5M shrink step by step.** You're granted **50,000 options** when the
+company has **10,000,000** fully-diluted shares → **0.5%** ownership. Naive math: 0.5% × $1B
+exit = **$5,000,000**. Now apply reality:
+
+1. **Dilution.** Two more funding rounds issue new shares (say the count grows to ~25M shares
+   while your 50,000 stays fixed). Your stake falls from 0.5% to 50,000 / 25,000,000 = **0.2%**.
+2. **Liquidation preferences.** The company exits at **$1B**, but investors hold **$300M of 1×
+   preferences that pay out first**. Common shareholders (you) split what's left: $1B − $300M =
+   **$700M**. Your 0.2% of $700M = 0.002 × $700,000,000 = **$1,400,000** gross — not $5M.
+3. **Strike (you must pay to exercise).** Exercising 50,000 options at a **$2 strike** costs
+   50,000 × $2 = **$100,000** out of pocket. Net before tax: $1,400,000 − $100,000 =
+   **$1,300,000**.
+4. **Tax.** The ~$1.3M spread/gain is taxable (often at ordinary-income rates for NSOs, or an
+   AMT hit for ISOs), so the take-home is meaningfully lower again.
+
+So the honest number on a *great* outcome is **~$1.3M pre-tax, not $5M** — and that's the
+success case. If dilution is heavier, preferences are 2×/participating, or the exit is below
+the preference stack, common can net **near $0**. That's why you value startup equity soberly
+and weight guaranteed cash.
 
 > [!WARNING]
 > Never accept a startup offer on share count alone. Ask: *What percentage is this on a

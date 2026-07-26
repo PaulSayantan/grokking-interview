@@ -12,11 +12,14 @@ questions:
   question: |
     What does the FLP impossibility result actually prove about consensus?
   options:
-  - Consensus is impossible in any distributed system with more than one node
+  - Consensus is fundamentally impossible in any distributed system with more than one node, even
+    under a fully synchronous network
   - In a purely asynchronous system with even one crash-faulty process, no deterministic protocol can
     guarantee both safety and termination
-  - Consensus requires a Byzantine fault-tolerant protocol to be correct
-  - Majority quorums cannot intersect when messages are delayed
+  - Consensus requires a Byzantine fault-tolerant protocol with at least 3f+1 nodes to be correct
+    whenever any process can crash
+  - Majority quorums provably cannot intersect once message delays exceed the configured election
+    timeout, so agreement is lost
   answer: 1
   explanation: |
     FLP shows that in a *purely asynchronous* model (no timing bounds) with one crash fault, a
@@ -35,11 +38,14 @@ questions:
     Raft and Multi-Paxos are often described as "safe under asynchrony, live under partial
     synchrony." What does this precisely mean in relation to FLP?
   options:
-  - They can violate agreement briefly during a partition but repair it afterward
-  - They give up safety to guarantee they always terminate within the election timeout
+  - They can violate agreement briefly during a partition, letting two leaders commit different values,
+    then reconcile by discarding the loser's log once the partition heals
+  - They give up safety to guarantee they always terminate within one election timeout, accepting that
+    two nodes may occasionally commit conflicting entries as the price of liveness
   - They never violate agreement even under arbitrary asynchrony; they only lose the guarantee of progress
     (termination) during pathological asynchrony, and rely on eventual timing bounds to make progress
-  - They require synchronized physical clocks to guarantee both properties
+  - They require synchronized physical clocks (via NTP or PTP) on every node to guarantee both safety
+    and liveness, and lose agreement the moment clock skew exceeds the bound
   answer: 2
   explanation: |
     These protocols preserve safety (agreement) unconditionally — no partition or GC pause causes
@@ -56,12 +62,16 @@ questions:
     The Chandra-Toueg result identifies the weakest failure detector for solving consensus.
     What is it and why does it matter?
   options:
-  - A perfect failure detector (P) that never makes mistakes — anything weaker is insufficient
-  - A synchronized-clock detector that bounds message delay to a constant
-  - A randomized coin-flip oracle that ensures termination with probability 1
+  - A perfect failure detector (P) that never makes a mistake about which process has crashed — anything
+    weaker leaves a bivalent execution and cannot solve consensus
+  - A synchronized-clock detector that bounds end-to-end message delay to a fixed constant and flags any
+    process exceeding it as crashed
+  - A randomized coin-flip oracle that ensures termination with probability 1 by breaking symmetry
+    whenever the deterministic protocol would otherwise stall
   - The eventually-weak detector (◇W), meaning you only need to *eventually* and *weakly* detect crashes,
     which is why timeout-based detection suffices in partially synchronous systems
-  - A Byzantine detector that identifies malicious nodes
+  - A Byzantine detector that reliably identifies malicious or equivocating nodes so honest replicas can
+    exclude them from every quorum
   answer: 3
   explanation: |
     Chandra-Toueg proved ◇W (eventually weak) is the weakest failure detector sufficient for
@@ -80,9 +90,12 @@ questions:
   options:
   - Because if every deterministic replica applies the same commands in the same order, they stay identical
     — so consensus on 'the next log entry' repeated forever yields a consistent replicated system
-  - Because each replica needs a synchronized physical clock to apply commands
-  - Because SMR requires two-phase commit across all replicas per command
-  - Because replicas must use vector clocks to detect divergence
+  - Because each replica needs a synchronized physical clock so it can apply commands in wall-clock order
+    and thereby stay identical to its peers
+  - Because SMR requires a two-phase commit across all replicas for every command, and 2PC is itself just
+    a restricted form of the consensus problem
+  - Because replicas must exchange vector clocks on each command to detect divergence and roll back to the
+    last agreed state whenever they disagree
   answer: 0
   explanation: |
     SMR relies on determinism plus identical ordered input. Agreeing on an ordered log (repeated
@@ -100,11 +113,14 @@ questions:
     In single-decree Paxos, after Phase 1, when a proposer sends Accept in Phase 2, which value
     must it propose?
   options:
-  - Always its own client-supplied value, since it won the ballot
+  - Always its own client-supplied value, since winning the ballot in Phase 1 gives it exclusive authority
+    to choose the value for that slot
   - The value of the highest-ballot proposal already accepted by any acceptor in its Phase-1 majority;
     only if none was reported may it use its own value
-  - The value with the lowest ballot number reported by any acceptor
-  - Whatever value the majority of acceptors voted for by simple count
+  - The value carrying the lowest ballot number reported by any acceptor in its Phase-1 majority, since the
+    oldest surviving proposal is the one already chosen
+  - Whatever value the largest number of acceptors voted for, decided by a simple plurality count across
+    the Phase-1 responses
   answer: 1
   explanation: |
     This "adopt the highest previously-accepted value" rule is the entire safety argument: because
@@ -122,11 +138,14 @@ questions:
     What is the core optimization that turns single-decree Paxos into Multi-Paxos, and what does
     it buy you?
   options:
-  - It runs Phase 1 and Phase 2 in parallel for every command, halving latency
-  - It replaces majority quorums with grid quorums to reduce message count
+  - It pipelines Phase 1 and Phase 2 so both rounds run in parallel for every command, halving the
+    per-command latency to a single message delay
+  - It replaces majority quorums with row-and-column grid quorums, cutting the number of acceptors that
+    must reply to each command and reducing message count
   - A stable leader runs Phase 1 (prepare) once for a range of future log slots, so steady-state commits
     need only Phase 2 — a single round trip per command
-  - It uses vector clocks so acceptors can commit out of order without a leader
+  - It attaches vector clocks to proposals so acceptors can commit slots out of order without electing any
+    distinguished leader, removing the single-round-trip bottleneck
   answer: 2
   explanation: |
     Multi-Paxos amortizes Phase 1 by electing a stable "distinguished proposer" (leader) that
@@ -144,9 +163,12 @@ questions:
     Why is Paxos famously "hard to implement" compared to Raft, per the "Paxos Made Live"
     experience?
   options:
-  - Paxos requires special GPS/atomic-clock hardware
-  - Paxos cannot tolerate any node failures, so implementations need extra recovery code
-  - Paxos uses Byzantine quorums which are complex to size
+  - Paxos requires special GPS/atomic-clock hardware in every replica to bound message delay, and that
+    hardware integration is what makes implementations so difficult
+  - Paxos cannot tolerate any node failures without losing safety, so real implementations must bolt on
+    large amounts of extra crash-recovery and re-proposal code
+  - Paxos relies on Byzantine quorums whose sizing is complex and error-prone, and getting the 3f+1 math
+    wrong silently breaks agreement
   - The published algorithm specifies single-decree consensus; building a real replicated log (leader
     election, log holes, membership changes, snapshotting, catch-up) is underspecified and left to the
     implementer
@@ -171,9 +193,12 @@ questions:
   - Multi-Paxos allows more concurrency — out-of-order acceptance of multiple log slots in flight and
     does not strictly require a single strong leader, which can help under some leader-churn/pipelining
     patterns
-  - Multi-Paxos guarantees stronger consistency than Raft (linearizable vs sequential)
-  - Multi-Paxos avoids the need for majority quorums, improving availability during partitions
-  - Multi-Paxos has lower steady-state commit latency than Raft by design
+  - Multi-Paxos guarantees a strictly stronger consistency model than Raft — full linearizability versus
+    Raft's merely sequential consistency for committed entries
+  - Multi-Paxos avoids the need for majority quorums by using smaller sub-quorums, which improves write
+    availability during network partitions
+  - Multi-Paxos achieves lower steady-state commit latency than Raft by design, committing in fewer message
+    delays per command on the hot path
   answer: 0
   explanation: |
     Both provide linearizable SMR and both need majority quorums with ~1 RTT steady-state commit,
@@ -191,12 +216,15 @@ questions:
   question: |
     What role do "terms" play in Raft?
   options:
-  - They are wall-clock timestamps used to order log entries globally
+  - They are wall-clock timestamps, synchronized via NTP, used to order log entries globally across the
+    whole cluster
   - They are a monotonically increasing logical epoch counter with at most one leader per term; nodes
     seeing a higher term revert to follower and adopt it, which lets Raft discard stale leaders after
     partitions
-  - They count the number of clients connected to the leader
-  - They are randomized values used to break election ties
+  - They count the number of clients currently connected to the leader, so the cluster can shed load once
+    the count exceeds a configured threshold
+  - They are randomized nonce values attached to each vote and used purely to break ties when two candidates
+    request votes in the same election
   answer: 1
   explanation: |
     Terms are logical epochs (a logical clock) with ≤1 leader each. Every RPC carries a term;
@@ -218,7 +246,8 @@ questions:
   - To ensure the node with the lowest ID always wins; a split vote elects two leaders temporarily
   - To make one node usually time out first and avoid perpetual split votes; if a split vote still occurs,
     it merely triggers another randomized election round — safety holds, only liveness is delayed
-  - To reduce heartbeat traffic; a split vote causes log divergence that must be repaired
+  - To reduce heartbeat traffic between followers; a split vote lets two candidates both append entries,
+    causing log divergence that must later be repaired by rolling back one side
   answer: 2
   explanation: |
     Identical timeouts would make everyone become a candidate at once, split the vote, and loop.
@@ -238,9 +267,12 @@ questions:
     pressure, causing write stalls. Which tuning change most directly addresses the root cause,
     and what is the trade-off?
   options:
-  - Decrease the election timeout so a new leader is elected faster — trade-off is more network traffic
-  - Reduce the cluster from 5 nodes to 3 — trade-off is lower durability
-  - Switch reads to the followers — trade-off is stale reads
+  - Decrease the election timeout so a replacement leader is chosen faster whenever the current one slows
+    down — the trade-off is somewhat more heartbeat and election network traffic
+  - Reduce the cluster from 5 nodes to 3 so fewer heartbeats can be missed under load — the trade-off is
+    lower durability because only one node may now fail
+  - Switch reads to the followers to take load off the leader during GC pressure — the trade-off is that
+    clients may occasionally observe slightly stale reads
   - Increase the election timeout (keeping broadcastTime << electionTimeout << MTBF) so transient slowness
     no longer triggers spurious elections — trade-off is a longer unavailability window on genuine crashes
   answer: 3
@@ -264,9 +296,12 @@ questions:
   - 'They enforce the consistency check: the follower accepts only if its log matches at that index/term;
     on mismatch it rejects, and the leader decrements nextIndex and retries backward until logs converge,
     then overwrites the divergent suffix'
-  - They tell the follower which client to reply to; on mismatch the follower drops the request
-  - They are the commit index; on mismatch the follower advances its state machine
-  - They carry the term of the next election; on mismatch the follower starts a new election
+  - They tell the follower which client connection to send the reply to; on mismatch the follower simply
+    drops the request and lets the client time out and retry elsewhere
+  - They carry the leader's current commit index; on mismatch the follower advances its state machine up to
+    that index to catch up before appending the new entries
+  - They carry the term number of the next scheduled election; on mismatch the follower assumes the leader
+    is stale and immediately starts a new election of its own
   answer: 0
   explanation: |
     prevLogIndex/prevLogTerm implement the consistency check underpinning the Log Matching
@@ -284,11 +319,14 @@ questions:
     In steady state, a Raft leader with 5 nodes commits an entry as soon as it is durably stored
     on how many nodes, and what determines commit latency?
   options:
-  - All 5 nodes; latency is the slowest follower's RTT
+  - All 5 nodes must durably store the entry; latency is therefore the round-trip time to the single
+    slowest follower, since the leader waits for every replica to acknowledge
   - 3 nodes (a majority including the leader); latency is roughly the RTT to the *median* follower that
     completes the quorum
-  - 2 nodes; latency is the fastest follower's RTT
-  - 1 node (the leader only); latency is local disk fsync time
+  - 2 nodes (the leader plus any one follower); latency is the round-trip time to the single fastest
+    follower that responds first
+  - 1 node (the leader alone, replicating asynchronously afterward); latency is just the leader's local
+    disk fsync time
   answer: 1
   explanation: |
     A 5-node group needs a majority of 3 (leader + 2 followers). The entry commits once the quorum
@@ -306,12 +344,15 @@ questions:
     Raft §5.4.2 forbids a leader from committing an entry from a *previous* term merely because it
     is now stored on a majority. Why?
   options:
-  - Because entries from previous terms have expired timestamps and must be re-proposed
-  - Because previous-term entries belong to a different state machine and would corrupt state
+  - Because entries created in a previous term carry expired term timestamps that the commit rule treats as
+    stale, so they must be discarded and re-proposed under the current term first
+  - Because previous-term entries were produced by a different logical state machine instance and applying
+    them under the new leader would corrupt the replicated state
   - Because such an entry can still be overwritten by a future leader (the Figure 8 scenario); a leader
     may only directly commit current-term entries by counting replicas, after which prior entries commit
     indirectly via the Log Matching Property
-  - Because counting replicas across terms double-counts nodes that changed terms
+  - Because counting replicas across term boundaries double-counts nodes that advanced their term mid-flight,
+    inflating the apparent quorum and falsely marking the entry committed
   answer: 2
   explanation: |
     The Figure 8 case shows a majority-stored previous-term entry can still be clobbered by a later
@@ -328,9 +369,9 @@ questions:
     Raft's Log Matching Property states that if two logs contain an entry with the same index and
     term, then which of the following holds?
   options:
-  - The two logs have the same length
-  - The entry has been committed on a majority
-  - Both nodes are in the same term currently
+  - The two logs necessarily have the same total length up to and including that matching index+term entry
+  - The entry has already been committed and durably stored on a majority of the cluster's nodes
+  - Both nodes are currently operating in the same term and recognize the same active leader
   - They store the same command at that index, AND all preceding entries are identical
   answer: 3
   explanation: |
@@ -351,9 +392,12 @@ questions:
   - 'The election restriction: a voter refuses to vote for a candidate whose log is less up-to-date than
     its own; since a committed entry is on a majority and an election needs a majority, the two majorities
     intersect, so any winner already has all committed entries'
-  - The leader downloads the full log from every follower before serving writes
-  - The leader with the highest node ID always wins, and IDs are assigned by commit order
-  - Followers erase their logs on election so only the leader's log survives
+  - The newly elected leader first downloads the complete log from every follower and merges them before it
+    begins serving any client writes, guaranteeing it holds every committed entry
+  - The candidate with the highest node ID always wins the election, and node IDs are assigned strictly in
+    commit order so the most up-to-date node necessarily has the largest ID
+  - Followers erase their own logs the moment they cast a vote, so only the elected leader's log survives and
+    it cannot possibly be missing any committed entry
   answer: 0
   explanation: |
     The election restriction (compare last log entry: higher term wins, else longer log) makes a
@@ -371,11 +415,14 @@ questions:
     Why are Raft membership changes dangerous if done by simply pushing a new config to all nodes
     at once?
   options:
-  - The new nodes might have faster clocks, skewing the log timestamps
+  - The newly added nodes might run faster physical clocks, skewing the log entry timestamps and thereby
+    corrupting the total order of committed entries
   - Because configs can't be switched atomically across nodes; during the switch you can transiently have
     two disjoint majorities (old and new configs), producing two leaders and split brain
-  - Because the commit index resets to zero on any config change
-  - Because vector clocks grow unbounded when membership changes
+  - Because the commit index is forced to reset to zero on any configuration change, so every previously
+    committed entry has to be re-replicated and re-committed from scratch
+  - Because Raft tracks membership with per-node vector clocks that grow without bound each time a server is
+    added or removed, eventually bloating every RPC
   answer: 1
   explanation: |
     A non-atomic switch can create an interval where the old config and new config each admit a
@@ -393,11 +440,14 @@ questions:
     Why is the "add or remove one server at a time" approach to Raft membership change considered
     simpler and always safe?
   options:
-  - Because a single server cannot ever become a leader
-  - Because it avoids the need for any majority quorum during the change
+  - Because a single newly added server can never become a leader during the transition, so it cannot
+    possibly create a competing majority while the change is in flight
+  - Because a one-node change avoids the need for any majority quorum during the transition, letting the
+    leader apply the new configuration unilaterally without risk
   - Because a single-server change never creates two disjoint majorities, so split brain is impossible
     during the transition
-  - Because removing one server automatically triggers a snapshot that resets consensus
+  - Because removing one server automatically triggers a full state-machine snapshot that resets consensus to
+    a clean baseline, eliminating any window for split brain
   answer: 2
   explanation: |
     Changing membership by one node guarantees the old and new majorities overlap (you can't split
@@ -414,9 +464,12 @@ questions:
   question: |
     What is the purpose of Raft's InstallSnapshot RPC?
   options:
-  - To broadcast the leader's identity to new followers
-  - To force all followers to erase their state machines and rebuild from term 0
-  - To compress the network protocol during elections
+  - To broadcast the newly elected leader's identity and current term to freshly joined followers
+    so they know which node to route their client writes to
+  - To force every follower to erase its entire state machine and replay the whole log from term 0,
+    guaranteeing all replicas rebuild identically from scratch
+  - To compress the AppendEntries wire protocol during contested elections so heartbeat traffic drops
+    while multiple candidates are competing for votes
   - To ship a snapshot of the state machine to a follower that has fallen so far behind that the needed
     log prefix has already been discarded by the leader
   answer: 3
@@ -437,9 +490,12 @@ questions:
   options:
   - The high 32 bits are an epoch (analogous to a Raft term) and the low 32 bits are a monotonic counter
     within that epoch, giving a total order of committed transactions
-  - A wall-clock timestamp plus a client session id
-  - A vector clock with one 8-bit counter per server
-  - The hash of the transaction payload for deduplication
+  - A 48-bit wall-clock timestamp concatenated with a 16-bit client session id, so every transaction
+    is ordered by the physical time at which the leader received it
+  - A vector clock packing one 8-bit counter per server, letting the ensemble detect concurrent
+    transactions and surface conflicting writes for reconciliation
+  - A cryptographic hash of the transaction payload used for deduplication, so replaying the same
+    request twice collapses to a single committed entry
   answer: 0
   explanation: |
     A zxid splits into epoch (high 32 bits, ≈ term) and an in-epoch counter (low 32 bits). This
@@ -457,11 +513,14 @@ questions:
     ZooKeeper serves reads locally from any server for performance. What consistency implication
     does this have, and how do you get a fully up-to-date read?
   options:
-  - Reads are always linearizable because Zab totally orders everything
+  - Reads are always linearizable because Zab totally orders every operation, so any server can safely
+    answer from local state and still return the most recent committed write
   - Reads can be stale (sequentially consistent, not linearizable); to guarantee you see the latest committed
     state you must issue a sync() before the read
-  - Reads block until a quorum acknowledges, so they are never stale
-  - Reads are eventually consistent with no way to force freshness
+  - Reads block until a majority quorum of servers acknowledges the read request, so a follower can never
+    return a value older than the leader's latest committed state
+  - Reads are eventually consistent and there is no client-side primitive to force a follower to catch up,
+    so freshness can only be improved by reconnecting to the current leader
   answer: 1
   explanation: |
     Local reads make ZooKeeper writes linearizable but reads only sequentially consistent — a
@@ -479,12 +538,15 @@ questions:
   question: |
     What is the most accurate statement about Viewstamped Replication (VR), Paxos, Raft, and Zab?
   options:
-  - 'They use fundamentally different fault models: VR is Byzantine, Paxos is crash-only, Raft is fail-stop'
-  - Only Paxos provides linearizability; VR and Zab are eventually consistent
+  - 'They use fundamentally different fault models: VR tolerates Byzantine faults via 3f+1 quorums, Paxos
+    is crash-only, and Raft is strictly fail-stop, so they cannot substitute for one another'
+  - Only Paxos provides linearizability; VR and Zab give merely eventual consistency, so a committed VR or
+    Zab write may be observed out of order by clients until replicas converge
   - They are all solutions to leader-based state-machine replication over majority quorums, differing
     mainly in presentation and recovery/view-change mechanics rather than fundamental guarantees; VR's
     'views' are analogous to Raft's terms
-  - VR requires synchronized physical clocks whereas Raft does not
+  - VR requires synchronized physical clocks (kept in step by NTP) to order its views, whereas Raft relies
+    only on logical terms and needs no clock synchronization at all
   answer: 2
   explanation: |
     VR (1988), Paxos, Zab, and Raft are all crash-fault-tolerant SMR protocols relying on majority
@@ -524,9 +586,12 @@ questions:
   options:
   - N=6 tolerates the same number of failures as N=5 (2) but has a larger quorum (4 vs 3), so it costs
     more and adds latency for no extra fault tolerance
-  - Even N cannot form a majority at all
-  - Odd N is required so the leader ID is unique
-  - Even N is only usable with grid quorums
+  - Even N can never assemble a strict majority because the votes split exactly in half, so an even-sized
+    group deadlocks and cannot commit any write at all
+  - Odd N is mandatory because the consensus algorithm derives a unique leader identity from the parity
+    of the node count, and an even count yields two nodes that both claim leadership
+  - Even N is only usable with grid quorums, since majority quorums are mathematically defined solely for
+    odd cluster sizes and reject an even membership list
   answer: 0
   explanation: |
     N=5 tolerates 2 failures (quorum 3); N=6 also tolerates only 2 (quorum ⌊6/2⌋+1 = 4). The even
@@ -543,10 +608,13 @@ questions:
     In a Dynamo-style system with N replicas per key, which conditions on read quorum R and write
     quorum W give you strong-ish (overlapping) consistency and serialized writes?
   options:
-  - R + W < N and W < N/2
+  - R + W < N and W < N/2, so smaller quorums keep both reads and writes cheap while still guaranteeing
+    that every read observes the most recent committed write
   - R + W > N (read and write quorums overlap) and W > N/2 (two writes overlap so they are serialized)
-  - R = W = 1 for maximum availability
-  - R = N and W = N so every operation touches every replica
+  - R = W = 1 for maximum availability, since contacting a single replica per operation is enough for a
+    read quorum to always intersect the latest write quorum
+  - R = N and W = N so every operation touches every replica, which is the only configuration that lets
+    concurrent writes be detected and serialized correctly
   answer: 1
   explanation: |
     R + W > N forces read and write quorums to intersect (a read sees the latest write's node), and
@@ -566,11 +634,14 @@ questions:
     keep accepting writes during a partition. What guarantee does this break, and what is the
     consequence?
   options:
-  - It breaks durability; writes are lost on any single node failure
-  - It breaks partition tolerance; the cluster can no longer survive network splits
+  - It breaks durability, because a write accepted at consistency level ANY is buffered only in memory
+    on the coordinator and is therefore lost the instant any single node crashes before flushing
+  - It breaks partition tolerance, because routing writes to non-home nodes forces the ring to close off
+    the minority side, so the cluster can no longer survive a network split at all
   - 'It breaks the R + W > N overlap guarantee: writes may land on non-home nodes, so a later read of
     the home replicas can miss the write — it is an availability lever, not a consistency guarantee'
-  - It breaks monotonic reads only; strong consistency is otherwise preserved
+  - It breaks monotonic reads only, so a client may momentarily go backward in time, but strong single-key
+    consistency and the R + W > N overlap are otherwise fully preserved by hinted handoff
   answer: 2
   explanation: |
     Sloppy quorums accept writes on any N reachable nodes (not the home replicas), so the intended
@@ -588,9 +659,12 @@ questions:
     PBFT tolerates f Byzantine nodes with N = 3f + 1 and quorums of 2f + 1. Why is the 2f+1 quorum
     size necessary?
   options:
-  - So the leader can be elected by a simple majority
-  - Because Byzantine nodes need 2f+1 votes to be detected
-  - Because network latency triples under Byzantine conditions
+  - So the primary can be elected by a simple majority of 2f+1 replicas, which is the smallest quorum
+    that guarantees a unique leader is chosen in every view-change round
+  - Because a Byzantine node needs at least 2f+1 accusing votes before honest replicas are allowed to
+    flag it as faulty and evict it from the active quorum set
+  - Because message latency roughly triples once Byzantine replicas start equivocating, and a 2f+1 quorum
+    is sized to absorb those extra delayed rounds without stalling the protocol
   - Because two quorums of size 2f+1 in a system of 3f+1 nodes intersect in at least f+1 nodes, guaranteeing
     at least one honest node in the overlap despite f malicious ones
   answer: 3
@@ -610,9 +684,12 @@ questions:
   options:
   - 'Only Phase-1 (leader-election) quorums and Phase-2 (replication) quorums must intersect each other:
     |Q1| + |Q2| > N; Q1s need not intersect other Q1s, and Q2s need not intersect other Q2s'
-  - All Phase-1 quorums must intersect each other, and all Phase-2 quorums must intersect each other
-  - Every quorum must contain the current leader
-  - Quorums must be exactly N/2 in size
+  - All Phase-1 quorums must intersect each other, and all Phase-2 quorums must independently intersect
+    each other, but a Phase-1 quorum need never overlap a Phase-2 quorum
+  - Every quorum, whether used for election or replication, must contain the current distinguished leader,
+    since safety follows from the leader witnessing every decision personally
+  - Quorums must be exactly N/2 in size for both phases, because any smaller set fails to intersect and any
+    larger set needlessly inflates commit latency
   answer: 0
   explanation: |
     FPaxos shows safety only needs Q1 (election) and Q2 (replication) to intersect: |Q1|+|Q2| > N.
@@ -630,12 +707,15 @@ questions:
     With N=5 you configure FPaxos with Q2=2 (replication) and Q1=4 (election). What is the
     trade-off you are making?
   options:
-  - Faster commits and faster elections, with no downside
+  - Faster commits and faster elections at the same time, because shrinking Q2 to 2 also shrinks the
+    election path, so both the hot path and the recovery path get cheaper with no downside at all
   - Faster steady-state commits (only 2 acks needed on the constant hot path) at the cost of requiring
     4 of 5 nodes for the rarely-run leader election, plus reduced redundancy since each committed entry
     is on fewer nodes
-  - You gain Byzantine fault tolerance
-  - You lose linearizability and get only causal consistency
+  - You gain Byzantine fault tolerance, because the asymmetric Q1=4 / Q2=2 sizing lets the group mask up
+    to one equivocating replica in addition to the crash faults a symmetric majority tolerates
+  - You lose linearizability and drop to merely causal consistency, since a 2-node write quorum can no
+    longer establish the single real-time total order that linearizable reads depend on
   answer: 1
   explanation: |
     Since |Q1|+|Q2| = 6 > 5, safety holds. Q2=2 makes constant-frequency commits cheap/low-latency;
@@ -652,11 +732,14 @@ questions:
     In a grid quorum scheme, nodes are arranged in a rows×cols grid with Q1 = a full row and
     Q2 = a full column. Why does this satisfy quorum intersection?
   options:
-  - Because every row contains a majority of nodes
-  - Because the grid is replicated on every node
+  - Because every full row is itself sized to be a strict majority of all the nodes in the grid, so any
+    two rows automatically overlap and no column reasoning is even required
+  - Because the entire grid of nodes is fully replicated onto every single participant, so any quorum
+    trivially sees all state regardless of which row or column it selects
   - Because any row and any column always intersect in exactly one cell, so the row-quorum and column-quorum
     overlap even though each can be far smaller than a majority for large N
-  - Because rows and columns are chosen to be identical sets
+  - Because rows and columns are deliberately chosen to be identical sets of nodes, guaranteeing that a
+    Q1 row and a Q2 column are always the very same members and therefore trivially overlap
   answer: 2
   explanation: |
     A row and a column of a grid always share exactly one cell, guaranteeing intersection between
@@ -673,9 +756,12 @@ questions:
     Which statement best captures the fundamental trade-off between leader-based and leaderless
     replication?
   options:
-  - Leader-based is always faster and more available than leaderless
-  - Leaderless replication cannot tolerate any node failures
-  - Leader-based replication does not require majority quorums
+  - Leader-based is strictly faster and more available than leaderless in every scenario, because routing
+    all writes through one coordinator eliminates the conflict-resolution overhead leaderless systems pay
+  - Leaderless replication cannot tolerate any node failures, since with no leader there is nobody to detect
+    a downed replica and re-route the writes that were destined for it
+  - Leader-based replication does not require majority quorums, because the single leader alone is the
+    authoritative copy and can acknowledge a write the moment it is durable on that one node
   - Leader-based gives a simple total order and easy linearizability but has a leader bottleneck and a
     failover gap; leaderless removes the failover gap and offers smooth availability but must resolve
     concurrent-write conflicts and gives only tunable, non-linearizable consistency
@@ -700,9 +786,12 @@ questions:
   - Multi-leader (one leader per region with async replication); the defining cost is that concurrent
     writes in different regions can conflict, requiring conflict resolution (LWW, CRDTs, or app merge)
     and giving up linearizability
-  - Single-leader in one region; cost is cross-region write latency
-  - Leaderless with W=N; cost is no write availability during partitions
-  - A single global Raft group; cost is Byzantine fault tolerance overhead
+  - Single-leader in one region with synchronous read replicas elsewhere; the defining cost is that every
+    write from a remote region pays a full cross-region round trip to the one leader before it commits
+  - Leaderless replication configured with W=N; the defining cost is that requiring all replicas to ack
+    each write destroys write availability the instant any single node or link is partitioned away
+  - A single global Raft group spanning all regions; the defining cost is the Byzantine-fault-tolerance
+    overhead of the extra signing and 3f+1 quorum rounds such a wide deployment demands
   answer: 0
   explanation: |
     Multi-leader gives each region a local leader (low local write latency) with async cross-region
@@ -720,12 +809,15 @@ questions:
     In a leaderless (Dynamo-style) system, what mechanisms keep replicas converging, and what
     residual consistency limitation remains?
   options:
-  - A leader periodically pushes all writes; the system is fully linearizable
+  - A designated leader periodically pushes the full write stream to every replica in ring order, and
+    because that push is totally ordered the resulting system ends up fully linearizable
   - Read repair (fix stale replicas seen during a read) and anti-entropy (background Merkle-tree sync)
     drive convergence, but concurrent writes still conflict and there is no global total order across
     keys, so it is not linearizable in general
-  - Two-phase commit on every write; the limitation is high latency only
-  - Vector clocks on the leader alone; the limitation is unbounded metadata
+  - A two-phase commit coordinated across all replicas on every single write drives convergence, and the
+    only residual limitation this imposes is the high latency of the extra prepare-and-commit round
+  - Vector clocks maintained solely on an elected leader drive convergence, and the residual limitation is
+    that this per-key metadata grows without bound as the number of writers increases over time
   answer: 1
   explanation: |
     Leaderless systems converge via read repair plus background anti-entropy (Merkle trees). But
@@ -743,11 +835,14 @@ questions:
     Why should you use CLOCK_MONOTONIC rather than the time-of-day (wall) clock to measure the
     duration of an operation or drive a timeout?
   options:
-  - The monotonic clock has higher resolution in nanoseconds
-  - The monotonic clock is synchronized across machines by NTP
+  - The monotonic clock exposes far higher nanosecond resolution, while the time-of-day clock is capped at
+    millisecond granularity and therefore cannot measure short operations precisely
+  - The monotonic clock is continuously synchronized across all machines by NTP, so a duration measured on
+    one host stays directly comparable to one measured on another
   - The time-of-day clock can jump backward (NTP corrections, leap seconds), which would produce negative
     or wrong durations, whereas the monotonic clock only moves forward
-  - The time-of-day clock stops during high CPU load
+  - The time-of-day clock freezes and stops advancing whenever the CPU is under heavy load, so intervals
+    measured with it silently under-count the elapsed time during busy periods
   answer: 2
   explanation: |
     The wall clock can step backward due to NTP adjustments or leap seconds, so measuring an
@@ -764,9 +859,12 @@ questions:
   question: |
     Which of the following best reflects realistic clock synchronization accuracy?
   options:
-  - NTP over the public internet is accurate to nanoseconds; PTP is accurate to seconds
-  - Both NTP and PTP guarantee zero skew because they use atomic clocks
-  - Clock skew is irrelevant because TCP corrects it automatically
+  - NTP over the public internet routinely holds nanosecond accuracy, whereas PTP is a coarser protocol
+    that only manages second-level accuracy and is therefore reserved for non-critical timing
+  - Both NTP and PTP guarantee exactly zero skew across all synchronized hosts, because each protocol
+    disciplines every node directly against a shared atomic clock reference
+  - Clock skew between machines is irrelevant in practice because TCP's sequencing and retransmission logic
+    transparently corrects any timestamp disagreement as packets flow between the hosts
   - NTP is typically accurate to ~1-50 ms (worse under congestion/asymmetric paths), while PTP (IEEE 1588)
     with hardware timestamping can reach sub-microsecond within a datacenter
   answer: 3
@@ -789,9 +887,12 @@ questions:
   - The causally-later write can be silently discarded because the node with the faster clock stamped
     its (earlier) write with a higher timestamp — LWW then keeps the wrong value, causing silent data
     loss
-  - The system will crash because timestamps disagree
-  - Both writes are always preserved as siblings for the app to merge
-  - TCP retransmission fixes the ordering automatically
+  - The system will halt and crash the moment it detects that node A's and node B's timestamps disagree
+    by more than the configured maximum skew, refusing to resolve the conflict at all
+  - Both conflicting writes are always preserved side by side as sibling versions, and Last-Write-Wins
+    hands them up to the application layer to inspect and merge without ever dropping either one
+  - TCP retransmission and in-order delivery quietly repair the ordering, so the causally-later write is
+    always applied after the earlier one regardless of the clock skew between the two nodes
   answer: 0
   explanation: |
     LWW on skewed wall clocks can let an earlier write with a higher timestamp beat a later write —
@@ -809,12 +910,15 @@ questions:
     Kleppmann argues you should treat a clock reading as "an interval, not a point." What is the
     practical design consequence?
   options:
-  - You should always round timestamps to the nearest second
+  - You should always round every timestamp to the nearest whole second, since coarsening the resolution
+    to one-second buckets makes the error bound vanish and lets you compare any two events directly by value
   - Every reading carries an error bound; to safely order two events by physical time you must either
     wait out the uncertainty window (as Spanner's commit-wait does) or use logical clocks, because events
     within the error bar can't be reliably ordered
-  - You should disable NTP to avoid clock jumps
-  - You should use the time-of-day clock for all duration measurements
+  - You should disable NTP entirely and let each node free-run on its local oscillator, since removing the
+    periodic corrections eliminates the backward jumps that create the ordering uncertainty in the first place
+  - You should switch to the time-of-day (wall) clock for all duration and interval measurements, because its
+    absolute epoch reference makes cross-machine comparisons exact once every host is on the same calendar
   answer: 1
   explanation: |
     Because each reading has an error bar (skew ε), two events within ε of each other can't be
@@ -829,11 +933,14 @@ questions:
   question: |
     What guarantee do Lamport timestamps provide, and what is their fundamental limitation?
   options:
-  - If C(a) < C(b) then a happens-before b; there is no limitation
-  - They detect concurrency exactly, like vector clocks, but with O(1) space
+  - If C(a) < C(b) then a happens-before b, so the relation is a full two-way equivalence and there is no
+    limitation — any pair of timestamps directly reveals whether one event caused the other
+  - They detect concurrency exactly, just like vector clocks do, but compress the whole causal history into
+    O(1) space, so a single scalar per event suffices to tell causal pairs from concurrent ones
   - If a happens-before b then C(a) < C(b), but the converse is false — given two timestamps you cannot
     tell whether one caused the other or they are concurrent
-  - They provide a total order consistent with real (physical) time
+  - They provide a total order that is consistent with real (physical) wall-clock time, so comparing two
+    Lamport values tells you which event actually occurred first in absolute time across the cluster
   answer: 2
   explanation: |
     Lamport clocks guarantee a→b ⇒ C(a)<C(b), giving a total order consistent with causality (break
@@ -871,9 +978,12 @@ questions:
   options:
   - Imposing a total order where any causally-consistent order is acceptable (e.g. totally-ordered multicast,
     tie-breaking, allocating monotonic IDs)
-  - Surfacing concurrent conflicting writes to the application to merge
-  - Detecting which of two replica versions causally precedes the other
-  - Tracking exactly which replica has seen which update
+  - Surfacing concurrent conflicting writes to the application as sibling versions to merge, since a single
+    Lamport scalar carries enough information to flag two writes as genuinely concurrent rather than ordered
+  - Detecting which of two replica versions causally precedes the other, using the fact that a smaller Lamport
+    timestamp reliably proves its event happened-before the event carrying the larger timestamp
+  - Tracking exactly which replica has already seen which update, since each Lamport counter records the
+    complete per-node set of updates observed and lets any node compute what its peers are still missing
   answer: 0
   explanation: |
     Lamport clocks (O(1) space) are ideal when you just need *a* total order consistent with
@@ -889,11 +999,14 @@ questions:
   question: |
     Given two vector clocks Va and Vb, how do you conclude that events a and b are *concurrent*?
   options:
-  - Va[i] = Vb[i] for exactly one i
+  - Va[i] = Vb[i] holds for exactly one component i while every other component differs, which is the
+    signature the comparison uses to classify the two events as concurrent rather than causally ordered
   - Neither Va ≤ Vb nor Vb ≤ Va holds — i.e. each has at least one component strictly greater than the
     other
-  - Va and Vb are identical
-  - The sum of Va's components equals the sum of Vb's components
+  - Va and Vb are component-for-component identical, because two events are deemed concurrent precisely when
+    their vector clocks match exactly and neither has advanced any counter beyond the other
+  - The scalar sum of Va's components equals the scalar sum of Vb's components, since equal totals of observed
+    events on both sides mean neither vector could dominate and the two events must be concurrent
   answer: 1
   explanation: |
     Concurrency means neither vector dominates: there is some component where Va > Vb and another
@@ -910,11 +1023,14 @@ questions:
     Why is a vector clock (or version vector) strictly more powerful than a Lamport clock for a
     system like Dynamo/Riak?
   options:
-  - It uses less space than a Lamport clock
-  - It provides real-time ordering that Lamport clocks lack
+  - It uses strictly less per-event space than a Lamport clock, collapsing the whole participant set into a
+    single compact counter while still recording everything a Lamport scalar could and more
+  - It provides a real-time (wall-clock) ordering that Lamport clocks lack, so comparing two version vectors
+    additionally tells you which write physically happened first in absolute time across the replicas
   - It can *detect concurrency exactly* (the converse of happens-before holds), letting the system surface
     sibling conflicts for the application/CRDT to merge instead of silently losing data via LWW
-  - It guarantees linearizability without any coordination
+  - It guarantees linearizability across all replicas without any coordination, because exact causality
+    tracking lets each node independently reconstruct the one real-time total order every client observes
   answer: 2
   explanation: |
     Vector clocks satisfy both directions: Va<Vb ⇔ a→b, and incomparable ⇔ concurrent. That exact
@@ -932,9 +1048,12 @@ questions:
     What is the primary scaling problem with vector/version vectors in a system with many
     short-lived client writers, and one mitigation?
   options:
-  - They cannot be serialized to disk; use a binary format
-  - They lose the happens-before guarantee at scale; add a Lamport clock
-  - They require synchronized clocks; deploy NTP
+  - They cannot be serialized to durable storage because their nested map structure has no stable on-disk
+    representation; the mitigation is to encode them in a compact binary format before persisting each object
+  - They silently lose the happens-before guarantee once the participant count grows large; the mitigation is
+    to attach a companion Lamport scalar to each object so causal ordering is restored above that threshold
+  - They require tightly synchronized physical clocks to merge correctly across writers; the mitigation is to
+    deploy NTP on every node so the per-participant counters stay comparable as clients come and go
   - They are O(N) in the number of participants and grow as clients come and go, bloating metadata; dotted
     version vectors (DVV) give per-client accuracy without unbounded growth
   answer: 3
@@ -956,9 +1075,12 @@ questions:
   - They capture happens-before like a logical clock while staying within a bounded offset of physical
     time (≈ NTP error) in O(1) space, so timestamps are causally correct AND meaningful for TTLs/range
     queries — without special hardware
-  - They detect concurrent conflicts exactly, replacing vector clocks
-  - They eliminate the need for consensus by synchronizing clocks perfectly
-  - They provide external consistency for free, matching Spanner without TrueTime hardware
+  - They detect concurrent conflicting writes exactly, surfacing incomparable siblings the way version
+    vectors do, and so can fully replace vector clocks while using only a single O(1) timestamp per event
+  - They eliminate the need for a consensus protocol altogether by disciplining every node's clock into
+    perfect agreement, so nodes can agree on a total order purely from their timestamps without any voting
+  - They provide external consistency for free, matching Spanner's guarantees without any TrueTime hardware,
+    because the bounded physical component already covers the clock uncertainty that commit-wait would handle
   answer: 0
   explanation: |
     HLC packs a physical component (tracks max wall-clock seen, staying near real time within NTP
@@ -977,11 +1099,14 @@ questions:
     CockroachDB uses HLC with a configured maximum clock offset (e.g. 500 ms). What are the two
     key behaviors that preserve consistency under this model?
   options:
-  - It waits out 2ε on every commit, exactly like Spanner's commit-wait
+  - It sleeps out the full 2ε uncertainty window on every single commit, exactly like Spanner's commit-wait,
+    relying on the configured 500 ms max offset as the wait duration before releasing any transaction's locks
   - It performs an 'uncertainty restart' when it can't rule out that a value was written within the uncertainty
     window, and it *self-terminates* (crashes) a node whose clock exceeds the configured max offset
-  - It falls back to Last-Write-Wins whenever clocks disagree
-  - It disables reads on any node that is not the leader
+  - It automatically falls back to Last-Write-Wins conflict resolution whenever two nodes' clocks disagree by
+    more than a few milliseconds, letting the higher wall-clock timestamp win so the commit can proceed
+  - It disables reads on any node that is not the current range leaseholder, forcing every read through the
+    leader so a lagging replica's clock uncertainty can never be observed by a client during the window
   answer: 1
   explanation: |
     Without TrueTime hardware, CockroachDB assumes a bounded max offset. If a read's uncertainty
@@ -998,12 +1123,15 @@ questions:
   question: |
     What does Spanner's TrueTime API return, and how is the uncertainty kept small?
   options:
-  - A single precise nanosecond timestamp derived from NTP
-  - A Lamport timestamp incremented per transaction
+  - A single precise nanosecond-resolution timestamp derived from disciplined NTP synchronization, with the
+    residual error assumed negligible so callers can treat the returned value as the exact current instant
+  - A Lamport logical timestamp incremented once per committed transaction, kept small by piggybacking the
+    counter on inter-datacenter messages so every replica advances to the maximum value it has observed
   - An interval [earliest, latest] guaranteed to contain the true time, with the half-width ε kept to
     a few milliseconds using GPS receivers and atomic clocks in every datacenter, cross-checked to evict
     bad clocks
-  - A vector clock across all datacenters
+  - A vector clock carrying one counter per datacenter, kept small by evicting datacenters whose entries have
+    not advanced recently so the vector never grows beyond the set of actively participating regions
   answer: 2
   explanation: |
     TrueTime deliberately exposes uncertainty as an interval [earliest, latest] containing true
@@ -1021,9 +1149,12 @@ questions:
     How does Spanner's commit-wait use TrueTime to achieve external consistency, and what is the
     cost?
   options:
-  - It assigns the earliest possible timestamp and returns immediately; cost is stale reads
-  - It uses a global lock server to serialize all commits; cost is the lock server bottleneck
-  - It broadcasts each commit to all replicas synchronously; cost is cross-region RTT only
+  - It assigns each transaction the earliest possible TrueTime value and returns immediately without waiting,
+    achieving external consistency at the cost of occasionally serving slightly stale reads to clients
+  - It routes every commit through a single global lock server that serializes all transactions into one real-
+    time order; the cost is that this centralized lock server becomes a throughput bottleneck under load
+  - It synchronously broadcasts each commit to every replica in all regions before acknowledging, and this
+    all-replica handshake is what pins commits to real-time order; the only cost is the cross-region RTT
   - After choosing commit timestamp s = TT.now().latest, it waits until TT.now().earliest > s (sleeping
     out ~2ε, a few ms) before releasing locks, guaranteeing timestamp order matches real-time order; the
     cost is added commit latency (~2ε) and expensive time-sync hardware to keep ε small
@@ -1046,9 +1177,12 @@ questions:
   options:
   - Commit-wait grows proportionally, so latency degrades gracefully while correctness (external consistency)
     is preserved
-  - Transactions start committing in the wrong order, violating external consistency
-  - Spanner falls back to eventual consistency automatically
-  - All reads become unavailable
+  - Transactions immediately start committing in the wrong real-time order, violating external consistency,
+    because the commit-wait interval is fixed at deploy time and cannot stretch to cover the enlarged ε
+  - Spanner automatically falls back to an eventual-consistency mode for the duration of the degradation,
+    relaxing external consistency until the time masters recover and ε shrinks back below the safe threshold
+  - All reads across every region become unavailable, since a read cannot bound its own uncertainty interval
+    once ε grows and Spanner refuses to return any value it cannot prove is current
   answer: 0
   explanation: |
     The crucial design property: uncertainty affects *performance*, never *safety*. A larger ε means
@@ -1064,12 +1198,15 @@ questions:
   question: |
     What does linearizability actually guarantee?
   options:
-  - That every transaction moves the database between valid states (the ACID C)
+  - That every transaction moves the database from one valid state to another while preserving all declared
+    integrity constraints — the consistency (C) property of ACID applied to each individual operation
   - That there is a single total order of operations consistent with real time — once a write completes,
     every subsequent read by any client sees that value or a later one; it's a recency + single-copy guarantee
     on single objects
-  - That multi-object transactions execute atomically in some serial order
-  - That replicas eventually converge if writes stop
+  - That multi-object transactions each execute atomically in some equivalent serial order, so any set of
+    concurrent transactions produces the same result as if they had run one after another with no interleaving
+  - That all replicas eventually converge to the same value once writes stop and enough anti-entropy rounds
+    complete, guaranteeing every client will read an identical result after the system quiesces
   answer: 1
   explanation: |
     Linearizability is a recency guarantee giving the illusion of a single copy: after a write
@@ -1086,12 +1223,15 @@ questions:
   question: |
     What is the key difference between linearizability and sequential consistency?
   options:
-  - Linearizability allows stale reads; sequential consistency does not
-  - Sequential consistency is strictly stronger than linearizability
+  - Linearizability permits stale reads as long as they respect program order, whereas sequential consistency
+    forbids any stale read by tying every operation to a strict real-time recency requirement
+  - Sequential consistency is strictly stronger than linearizability because it adds a real-time ordering
+    constraint on top of program order that linearizability, lacking any wall-clock anchor, cannot provide
   - Both require a total order, but linearizability additionally requires that order to be consistent
     with *real time* (the wall-clock order of non-overlapping operations), whereas sequential consistency
     only requires consistency with each process's program order
-  - Sequential consistency requires majority quorums; linearizability does not
+  - Sequential consistency can only be implemented with majority quorums, whereas linearizability is achievable
+    on a single unreplicated node and therefore imposes no quorum-intersection requirement at all
   answer: 2
   explanation: |
     Both give a single total order, but linearizability ties it to real time (a completed op is
@@ -1108,9 +1248,12 @@ questions:
     Why is causal consistency often called the strongest consistency model that remains available
     during a network partition?
   options:
-  - Because it requires a leader and majority quorum, which survive partitions
-  - Because it is equivalent to eventual consistency with timestamps
-  - Because it forbids concurrent operations entirely
+  - Because it relies on an elected leader and a majority quorum that continue operating on the larger side of
+    any split, so causally-ordered writes keep committing even while a partition isolates the minority
+  - Because it is functionally equivalent to eventual consistency augmented with wall-clock timestamps, and
+    timestamp-ordered convergence is exactly what lets both sides of a partition keep serving requests
+  - Because it forbids concurrent operations entirely, forcing every write into a single causal chain, which
+    is what allows each partitioned side to proceed without ever having to reconcile conflicting updates
   - Because it only requires that happens-before-related operations be seen in order (no recency/real-time
     requirement), so nodes can keep serving reads and writes on both sides of a partition and reconcile
     later, unlike linearizability which demands recency
@@ -1131,9 +1274,12 @@ questions:
     practically useful way?
   options:
   - Read-your-writes (a client always sees its own prior writes), along with monotonic reads and writes-follow-reads
-  - Two-phase commit
-  - Byzantine fault tolerance
-  - Commit-wait
+  - Two-phase commit, which coordinates a prepare-then-commit handshake across all replicas so that each
+    client session is guaranteed to observe its own writes as soon as the transaction returns
+  - Byzantine fault tolerance, which masks malicious or equivocating replicas via 3f+1 quorums and thereby
+    strengthens eventual consistency into a per-session freshness guarantee for each connected client
+  - Commit-wait, which delays releasing a transaction's locks until the clock-uncertainty window has elapsed,
+    so that within a client session every subsequent read is guaranteed to reflect the prior write
   answer: 0
   explanation: |
     Session guarantees — read-your-writes, monotonic reads, monotonic writes, writes-follow-reads —
@@ -1151,12 +1297,15 @@ questions:
     A candidate says "linearizable and serializable are the same thing." What is the precise
     correction?
   options:
-  - They are indeed identical terms
+  - They are indeed identical terms describing the same guarantee, since any system that orders single-object
+    operations in real time automatically orders multi-object transactions serially as well
   - Linearizability is a real-time recency guarantee on single-object operations; serializability is a
     guarantee that multi-object transactions appear in *some* serial order (no real-time requirement).
     The combination — real-time order over transactions — is 'strict serializability'
-  - Serializability is weaker and applies only to reads
-  - Linearizability applies only to transactions; serializability applies only to single objects
+  - Serializability is the weaker of the two and constrains only read operations, leaving writes free to be
+    reordered, whereas linearizability governs both reads and writes across every object in the system
+  - Linearizability applies only to multi-object transactions while serializability applies only to individual
+    single-object operations, so the two guarantees never overlap and address entirely separate scopes
   answer: 1
   explanation: |
     Linearizability = real-time recency on single objects; serializability = transactions execute
@@ -1175,12 +1324,15 @@ questions:
     How does a Jepsen-style linearizability check determine that a system violated its claimed
     consistency model?
   options:
-  - It measures average latency and flags anything above a threshold
-  - It counts the number of leader elections during the test
+  - It measures the average and tail latency of every operation under fault injection and flags a consistency
+    violation whenever a response exceeds a configured latency threshold during the partition
+  - It counts the number of leader elections that occur during the test window and declares the model violated
+    once that count exceeds what a healthy cluster would trigger under the same injected partitions
   - It records a history of operation invocations/responses under injected partitions and clock skew,
     then a checker (Knossos/Elle) searches for *any* valid linearization/serialization; if none exists,
     the model was violated
-  - It compares replica disk contents byte-for-byte after the test
+  - It compares every replica's on-disk contents byte-for-byte once the test completes and reports a violation
+    whenever any two replicas fail to converge to an identical stored state after the faults are healed
   answer: 2
   explanation: |
     Jepsen injects faults (partitions, skew) and records a concurrent history, then Knossos/Elle
@@ -1198,9 +1350,12 @@ questions:
     Which requirement genuinely necessitates consensus/linearizability rather than a CRDT/eventual
     approach?
   options:
-  - A collaborative text editor merging concurrent edits
-  - A shopping cart that merges items added on different devices
-  - A like/favorite counter
+  - A collaborative text editor merging concurrent edits from many users, where each keystroke is a
+    commutative operation any replica can apply in any order and still converge to the same document
+  - A shopping cart that merges items added on different devices, treating each add as an idempotent
+    set-union that any replica can reconcile without coordination
+  - A like/favorite counter that increments independently on every replica and sums the per-node
+    tallies during background anti-entropy
   - Enforcing that a username is globally unique (or that inventory is not oversold) — a non-commutative
     global invariant that cannot be satisfied by independent merges
   answer: 3
@@ -1222,9 +1377,12 @@ questions:
   - Convergence is automatic but they cannot enforce a *global invariant* (e.g. balance ≥ 0, ≤ 100 seats
     sold) because such constraints are non-commutative and require coordination; CRDTs only guarantee
     that replicas agree, not that the agreed value is admissible
-  - They cannot be replicated across more than three nodes
-  - They require synchronized clocks to merge
-  - They provide linearizability but not availability
+  - They cannot be replicated across more than three nodes, because the merge function's complexity
+    grows factorially with replica count and becomes intractable beyond a small cluster
+  - They require tightly synchronized physical clocks to merge correctly, so every replica must run
+    NTP or PTP and reject any update whose timestamp falls outside the agreed skew bound
+  - They provide full linearizability but sacrifice availability, blocking all writes during any
+    partition until a quorum of replicas can be re-contacted
   answer: 0
   explanation: |
     CRDTs guarantee convergence via commutative/associative/idempotent merges, but they cannot
@@ -1242,13 +1400,16 @@ questions:
     Kleppmann's critique of Redlock centers on which failure, and what is the recommended fix for
     *correctness*?
   options:
-  - Redis is single-threaded, so Redlock is too slow; fix by sharding
+  - Redis is single-threaded, so Redlock serializes every lock request through one event loop and
+    becomes too slow under contention; the fix is to shard the lock keyspace across many Redis instances
   - 'Redlock relies on bounded clocks and bounded process pauses — a GC pause, NTP jump, or delay can
     let a client believe it still holds an expired lock so two clients act at once; the fix is fencing
     tokens: a monotonically increasing token issued with each grant that the protected resource checks
     and rejects if stale'
-  - Redlock uses too few nodes; fix by using 7 nodes instead of 5
-  - Redlock lacks encryption; fix with TLS
+  - Redlock uses too few nodes to establish a safe majority, so the fix is to run 7 independent Redis
+    masters instead of 5 to widen the quorum and remove the timing hazard
+  - Redlock transmits lock tokens in plaintext, so an on-path attacker can steal a valid grant; the
+    fix is to wrap all Redlock traffic in mutual TLS between clients and every Redis node
   answer: 1
   explanation: |
     The core issue is timing assumptions: pauses/skew can cause a client to overstay a lock, so two
@@ -1266,11 +1427,14 @@ questions:
     A (token 33) pauses on GC, its lease expires, client B acquires the lock with token 34 and
     writes. Then A wakes and tries to write with token 33. What must the storage resource do?
   options:
-  - Accept A's write because it holds a valid lock reference
-  - Merge A's and B's writes
+  - Accept A's write because token 33 was issued by the same authoritative lock service, so the
+    resource treats any service-signed token as a currently valid lock reference
+  - Merge A's and B's writes into a single combined record, since both carry lock tokens and the
+    resource can reconcile the two versions after the fact
   - Reject A's write because it carries token 33, which is older than the highest token (34) the resource
     has already seen
-  - Elect a new lock holder
+  - Trigger a fresh leader election among the lock-service nodes so a new authoritative holder is
+    chosen before either A's or B's write is allowed to land
   answer: 2
   explanation: |
     The whole point of fencing: the resource remembers the highest token it has accepted (34) and
@@ -1289,9 +1453,12 @@ questions:
     (east-west) and ~80 ms (east-eu). If the leader is in us-east, roughly what dominates
     steady-state commit latency?
   options:
-  - Local disk fsync (~1 ms), since the leader commits alone
-  - The RTT to the farthest follower (eu-west, ~160 ms RTT), since all followers must ack
-  - Zero, because reads are served locally
+  - Local disk fsync (~1 ms), since the us-east leader can commit alone and stream the entry to the
+    other regions asynchronously after acknowledging the client
+  - The RTT to the farthest follower (eu-west, ~160 ms RTT), since every follower in the group must
+    durably ack an entry before the leader is permitted to mark it committed
+  - Effectively zero, because commits are served from the leader's local in-memory state the same way
+    reads are, with replication deferred to a background flush
   - The RTT to the *nearest* follower that completes the majority — here the us-west follower (~35 ms
     one way, so ~70 ms RTT) — because a majority is leader + one follower
   answer: 3
@@ -1313,9 +1480,12 @@ questions:
   options:
   - The 3-node side retains a majority and continues committing; the 2-node minority side cannot commit
     writes (it would violate agreement) and becomes unavailable for writes / read-only
-  - Both partitions elect leaders and continue writing independently
-  - The entire cluster stops until the partition heals
-  - The 2-node side wins because it has the lower node IDs
+  - Both partitions elect their own leaders and continue accepting writes independently, reconciling
+    the two divergent logs by discarding the shorter one once the partition heals
+  - The entire cluster halts and refuses all writes on both sides until the partition heals, since
+    neither side can prove it still holds a majority of the original five nodes
+  - The 2-node side wins and keeps committing because it contains the servers with the lower node IDs,
+    which Raft treats as the tie-breaking authoritative subset during a split
   answer: 0
   explanation: |
     Consensus needs a majority (3 of 5). The majority side keeps making progress; the minority side
@@ -1333,12 +1503,15 @@ questions:
     A single Raft group cannot scale write throughput horizontally by adding more replicas. Why,
     and what is the standard remedy?
   options:
-  - Because more replicas reduce durability; the remedy is fewer replicas
+  - Because adding replicas actually reduces durability by spreading each entry thinner across the
+    group; the remedy is to run fewer replicas so each write is more concentrated and commits faster
   - Because all writes funnel through one leader that must reach a quorum per commit (the leader is the
     bottleneck, and more replicas only enlarge quorums); the remedy is to shard the keyspace into many
     independent Raft groups, each with its own leader
-  - Because Raft uses vector clocks that grow with replicas; the remedy is HLC
-  - Because followers cannot serve reads; the remedy is caching
+  - Because Raft attaches vector clocks to every entry and they grow with the replica count, inflating
+    each AppendEntries message; the remedy is to switch the log to hybrid logical clocks (HLC)
+  - Because followers are forbidden from serving any reads, so all read and write load funnels to the
+    leader; the remedy is to add a read-through cache in front of the leader
   answer: 1
   explanation: |
     A Raft group has a single leader through which every write passes; adding replicas doesn't add
@@ -1357,12 +1530,15 @@ questions:
     stays high even after the original trigger is gone, and the cluster remains stuck. What is this,
     and which guardrails address it?
   options:
-  - A Byzantine fault; fix with PBFT and 3f+1 nodes
-  - A clock-skew bug; fix by tightening NTP
+  - A Byzantine fault in which a subverted node equivocates to peers; fix by moving to PBFT with 3f+1
+    nodes so the honest majority can outvote the malicious replica
+  - A clock-skew bug where drifting node clocks expire leases early; fix by tightening NTP polling and
+    narrowing the configured maximum-offset bound
   - A metastable failure sustained by a self-reinforcing feedback loop (retry amplification + election
     load); guardrails include jittered exponential backoff, circuit breakers, load shedding, and bounded
     queues to break the loop and let the cluster recover
-  - A quorum-intersection violation; fix by using odd node counts
+  - A quorum-intersection violation in which two disjoint majorities have formed; fix by reconfiguring
+    the group to an odd node count so any two quorums are guaranteed to overlap
   answer: 2
   explanation: |
     This is a metastable failure: a feedback loop (retries + repeated elections add load, which
@@ -1381,9 +1557,12 @@ questions:
     To serve linearizable reads without a round trip to a quorum, some systems grant the leader a
     time-bounded "leader lease." What is the correctness risk and how is it bounded?
   options:
-  - There is no risk; leases are always safe
-  - The risk is that reads become eventually consistent; bound it with vector clocks
-  - The risk is unbounded log growth; bound it with snapshots
+  - There is no correctness risk at all; a leader lease is a pure performance optimization that the
+    consensus protocol renders unconditionally safe regardless of clock behavior
+  - The risk is that leased reads silently drop to eventual consistency; you bound it by attaching a
+    vector clock to each read so clients can detect and reject any stale value they receive
+  - The risk is that holding a lease lets the leader's log grow without bound between quorum rounds;
+    you bound it by taking periodic snapshots and compacting the retained prefix
   - A stale leader could serve reads after a new leader was elected; the lease must be shorter than the
     election timeout and clamped by a bounded clock-error assumption, so the old leader stops serving
     before a new one can be elected — trading a clock-bound assumption for read latency
@@ -1405,9 +1584,12 @@ questions:
   options:
   - Agreement (no two correct nodes decide differently), Validity/Integrity (the decided value was proposed),
     and Termination (every correct node eventually decides)
-  - Consistency, Availability, Partition-tolerance
-  - Atomicity, Isolation, Durability
-  - Read-your-writes, Monotonic reads, Monotonic writes
+  - Consistency, Availability, and Partition-tolerance — the three properties of which a distributed
+    system may simultaneously guarantee at most two during a network split
+  - Atomicity, Isolation, and Durability — the transactional properties ensuring each decision commits
+    all-or-nothing and survives crashes once acknowledged
+  - Read-your-writes, Monotonic reads, and Monotonic writes — the per-client ordering guarantees that
+    together ensure every node observes decisions in a consistent session order
   answer: 0
   explanation: |
     Consensus requires agreement, validity (integrity), and termination. The others are the CAP
@@ -1422,10 +1604,13 @@ questions:
   question: |
     What are the three states a Raft server can be in?
   options:
-  - Proposer, Acceptor, Learner
+  - Proposer, Acceptor, and Learner — the roles a node cycles through as it drives, votes on, and
+    records each entry in the replicated log
   - Leader, Candidate, Follower
-  - Primary, Secondary, Arbiter
-  - Coordinator, Participant, Observer
+  - Primary, Secondary, and Arbiter — with the Arbiter casting a tie-breaking vote whenever the group
+    cannot otherwise assemble a majority for a new leader
+  - Coordinator, Participant, and Observer — the coordinator driving each commit round while observers
+    replicate the log without participating in the vote
   answer: 1
   explanation: |
     Raft nodes are Leader, Candidate, or Follower. Proposer/Acceptor/Learner are Paxos roles;
@@ -1439,10 +1624,11 @@ questions:
   question: |
     Two events a and b are "concurrent" in the happens-before relation when:
   options:
-  - They occur at exactly the same wall-clock time
-  - They are produced by the same process
+  - They occur at exactly the same wall-clock instant as measured by two NTP-synchronized node clocks
+  - They are produced by the same process and therefore share that process's local sequence counter
   - Neither a happens-before b nor b happens-before a (there is no causal path between them)
-  - They have the same Lamport timestamp
+  - They are assigned the same Lamport timestamp, which the comparison treats as proof that neither
+    could have causally preceded the other
   answer: 2
   explanation: |
     Concurrency (a ∥ b) means no causal ordering exists in either direction — not that they share a
@@ -1458,9 +1644,12 @@ questions:
   question: |
     Which set of ballpark figures is most defensible for a well-run consensus deployment?
   options:
-  - Local-DC commit ~500 ms; cross-region commit ~1 ns; failover ~1 hour
-  - Commit is always zero latency because writes are async; failover is instantaneous
-  - N = f; quorum = 1; failover ~10 minutes
+  - Local-DC commit ~500 ms; cross-region commit ~1 ns; failover ~1 hour, dominated by the leader
+    replaying its entire log before it can resume serving clients
+  - Commit is always zero latency because every write is acknowledged asynchronously before
+    replication, and leader failover is instantaneous because a standby is always pre-promoted
+  - N = f with quorum = 1, so a single surviving node can always commit; leader failover takes ~10
+    minutes while the group rebuilds its membership table from scratch
   - Local-DC commit ~1-5 ms; cross-region commit ~tens-100+ ms; leader failover ~sub-second; N = 2f+1;
     quorum = ⌊N/2⌋+1
   answer: 3
@@ -1482,9 +1671,12 @@ questions:
   - That a new primary's state reflects all previously-committed transactions and that the prefix/order
     chosen by a primary is preserved across a primary change, so committed order is never reordered by
     leadership changes
-  - That reads are always linearizable on every server
-  - That every message is encrypted end to end
-  - That the counter never overflows 32 bits
+  - That reads are always linearizable on every server, so any follower can answer a client from its
+    local state and still return the most recently committed transaction
+  - That every broadcast message is encrypted end to end between the primary and each follower, so an
+    on-path observer cannot read the transaction payloads in flight
+  - That the low-order 32-bit in-epoch counter of the zxid can never overflow, because the primary
+    resets it to zero at the start of every broadcast round
   answer: 0
   explanation: |
     Primary-order broadcast ensures the total order established by one primary survives a primary
@@ -1503,12 +1695,15 @@ questions:
     single-digit-millisecond local reads across continents. Which approach is realistic, and what
     is the unavoidable trade-off?
   options:
-  - A single leaderless Dynamo cluster with LWW; no trade-off
+  - A single leaderless Dynamo cluster with LWW conflict resolution and quorum reads/writes, which
+    delivers strict serializability and fast local reads simultaneously with no meaningful trade-off
   - 'Spanner-style: TrueTime + commit-wait for external consistency, with data sharded into many consensus
     groups; the unavoidable trade-off is ~few-ms commit-wait latency on writes and expensive time-sync
     hardware, plus write latency bounded by cross-region quorum RTT'
-  - A single global Raft group with all reads on followers; no trade-off
-  - Pure eventual consistency with vector clocks; achieves strict serializability for free
+  - A single global Raft group serving all reads from followers, which gives strict serializability
+    and single-digit-millisecond cross-continent reads together with no trade-off
+  - Pure eventual consistency with vector clocks, which reconstructs a strict-serializable total order
+    for free from the causal metadata once replicas converge
   answer: 1
   explanation: |
     Strict serializability at global scale is the Spanner design point: TrueTime + commit-wait +
@@ -1525,10 +1720,13 @@ questions:
   question: |
     When node i has a local event, how does it update its vector clock V?
   options:
-  - V[j] = V[j] + 1 for all j
-  - V[i] = max over all components
+  - V[j] = V[j] + 1 for all j, advancing every component together so the whole vector stays in step
+    on each local event
+  - V[i] = max over all components, snapping its own entry up to the largest counter currently in the
+    vector before recording the event
   - V[i] = V[i] + 1 (increment only its own component)
-  - V = the received vector unchanged
+  - V = the received vector unchanged, adopting whatever counters last arrived from a peer as the new
+    local vector
   answer: 2
   explanation: |
     A local event increments only the node's own component: V[i] += 1. The max/merge step happens
@@ -1545,9 +1743,12 @@ questions:
     Which workload is the *best* fit for a strongly-consistent consensus system (e.g. etcd/
     ZooKeeper) rather than an eventually-consistent store?
   options:
-  - Storing billions of low-value analytics events at high write throughput
-  - A social feed of likes and reactions
-  - Session/cart state that can be merged across devices
+  - Storing billions of low-value analytics events at high write throughput, where losing or
+    reordering an occasional event has no material impact on the aggregate result
+  - A social feed of likes and reactions, where each counter can increment independently on any
+    replica and converge later without any node having to agree on a single current value
+  - Session/cart state that can be merged across devices, where concurrent additions from different
+    clients commute and reconcile into a union without coordination
   - Service discovery and configuration/metadata that every node must agree on, plus leader election with
     fencing
   answer: 3
@@ -1570,9 +1771,12 @@ questions:
   options:
   - Switch to Hybrid Logical Clocks (HLC), which keep the timestamp within a bounded offset of physical
     time while still respecting happens-before, in O(1) space
-  - Switch to vector clocks
-  - Switch to raw wall-clock timestamps
-  - Switch to TrueTime with commit-wait
+  - Switch to vector clocks, which pin each event's counters close to real time while still detecting
+    concurrency, so the values become directly usable for TTL expiry and human-readable timestamps
+  - Switch to raw wall-clock timestamps, which carry exact physical time and still preserve the
+    happens-before ordering the team relies on as long as NTP keeps the nodes synchronized
+  - Switch to TrueTime with commit-wait, whose GPS-and-atomic-clock intervals give ordering values
+    that track real time without any special hardware beyond a standard NTP daemon
   answer: 0
   explanation: |
     HLC directly solves this: it tracks the max physical time seen (staying within NTP error of
@@ -1592,13 +1796,19 @@ questions:
     ledger adjustments, arguing "quorum reads and writes give us consistency." What is the strongest
     objection?
   options:
-  - Cassandra cannot do quorum reads/writes at all
+  - Cassandra has no concept of tunable quorums — its coordinator only ever writes to a single home
+    replica and reads from that same node, so QUORUM and LOCAL_QUORUM consistency levels do not exist
+    in the protocol, which is exactly why it can never approximate strong consistency for a ledger
   - LWW resolves concurrent writes by wall-clock timestamp, so under clock skew a causally-later adjustment
     can be silently discarded — unacceptable for a ledger; and quorum (R+W>N) is not linearizable, so
     it can't enforce ordering/uniqueness invariants a ledger needs. Use a consensus/serializable store
     instead
-  - Cassandra is too slow for financial workloads
-  - The objection is only about durability, which replication factor solves
+  - Cassandra's write path is far too slow for financial workloads, because every write must
+    synchronously fsync to a majority of replicas in every data center before it is acknowledged,
+    adding hundreds of milliseconds of commit latency that a high-volume ledger simply cannot absorb
+  - The only real objection is durability — a single node could crash before flushing an adjustment —
+    and that is fully eliminated by raising the replication factor to five or more, after which LWW
+    quorum reads and writes become entirely safe and correctly ordered for a financial ledger
   answer: 1
   explanation: |
     The killer issue is LWW's silent-data-loss under clock skew (a real hazard for a ledger where
@@ -1617,10 +1827,10 @@ questions:
     You run a 5-node consensus group and want to know the maximum simultaneous node failures it can
     tolerate while still committing writes.
   options:
-  - 4 failures (only 1 node needed)
-  - 1 failure
+  - 4 failures (a lone surviving node can still commit)
+  - 1 failure (a strict two-thirds supermajority is required)
   - 2 failures (a majority of 3 must remain)
-  - 0 failures (all nodes required)
+  - 0 failures (every one of the 5 nodes must ack each write)
   answer: 2
   explanation: |
     With N=5, quorum = ⌊5/2⌋+1 = 3, so up to 2 nodes can fail and a majority of 3 still commits
@@ -1638,9 +1848,15 @@ questions:
     but wants to stay available during cross-region partitions and avoid consensus on the write
     path. Which consistency model and mechanism fit best?
   options:
-  - Linearizability via a single global Raft leader
-  - Eventual consistency with LWW and no dependency tracking
-  - Strict serializability with TrueTime commit-wait
+  - Linearizability via a single global Raft leader, which keeps the app available under cross-region
+    partitions precisely because the isolated minority side can keep serving local reads and writes and
+    reconcile with the leader later, all without any write-path coordination cost
+  - Eventual consistency with LWW and no dependency tracking, which still guarantees no reader ever sees a
+    reply before its parent comment because the wall-clock timestamps attached to each write reconstruct
+    the exact happens-before order once replicas converge in the background
+  - Strict serializability with TrueTime commit-wait, which is the lightest-weight option here because it
+    imposes no write-path coordination and adds no commit latency, letting every region accept writes
+    locally during a partition while still ordering causally-related operations everywhere
   - Causal consistency, tracking happens-before dependencies (e.g. with vector/dependency metadata) so
     causally-related operations are applied in order everywhere, while concurrent operations may be applied
     in different orders — available under partition without write-path consensus

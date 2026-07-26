@@ -160,6 +160,24 @@ before it is processed, breaking the `O(V+E)` bound and possibly the shortest-pa
 guarantee. For *distances*, track a `dist[]` array; the level of a node is
 `dist[u] + 1` for its unvisited neighbors.
 
+**Worked trace (dist[] fills level by level).** Take the directed graph in the diagram
+below — `adj = {0:[1,2], 1:[3], 2:[3], 3:[4]}` — and BFS from `0`:
+
+| Step | Pop | Queue after pop | Newly reached (dist set) |
+|---|---|---|---|
+| seed | — | `[0]` | `dist[0]=0` |
+| 1 | `0` | `[1, 2]` | `dist[1]=1`, `dist[2]=1` |
+| 2 | `1` | `[2, 3]` | `dist[3]=2` |
+| 3 | `2` | `[3]` | (3 already visited — skip) |
+| 4 | `3` | `[4]` | `dist[4]=3` |
+| 5 | `4` | `[]` | (no neighbors) |
+
+Final `dist = [0, 1, 1, 2, 3]`. Notice `3` is reached via `1` (dist 2) and the later
+edge `2→3` is ignored because `3` was already visited — that "first arrival wins" is
+exactly why the first time BFS touches a vertex it holds the shortest edge-count. The
+`dist` values are literally the ring numbers: everything at distance 1 (`{1,2}`) is
+dequeued before anything at distance 2 (`{3}`).
+
 **Recognition signal for BFS:** "shortest path / fewest steps / minimum moves" in an
 **unweighted** graph or grid; "level order"; "spread simultaneously from multiple
 sources" (multi-source BFS — seed the queue with *all* sources at distance 0, as in
@@ -197,13 +215,40 @@ def dfs(adj, u, visited):
 (the stack can reach depth `V` in a path-shaped graph — beware stack overflow on huge
 graphs, where an iterative stack is safer).
 
+**Iterative DFS (explicit stack).** A common interview ask is "rewrite that recursion
+iteratively." The subtlety: mark visited when you *pop* (not when you push), or a vertex
+can sit on the stack twice; and to match recursive visit order you must push neighbors in
+*reverse* so the first neighbor is popped first (LIFO reverses order).
+
+```python
+def dfs_iter(adj, start):
+    visited = set()
+    stack = [start]
+    while stack:
+        u = stack.pop()
+        if u in visited:            # may have been pushed by two parents
+            continue
+        visited.add(u)              # mark on POP
+        for v in reversed(adj[u]):  # reverse ⇒ same order as recursion
+            if v not in visited:
+                stack.append(v)
+```
+
+On `adj = {0:[1,2], 1:[3], 2:[], 3:[]}` from `0`: push `0`; pop `0`, push `2` then `1`
+(reversed) → stack `[2,1]`; pop `1`, push `3` → `[2,3]`; pop `3` → `[2]`; pop `2`. Visit
+order `0,1,3,2` — identical to the recursive version. Drop the `reversed()` and you'd get
+`0,2,...` instead: still a valid DFS, just a different branch order.
+
 DFS is the tool for:
 - **Connected components** — loop over vertices, and each time you hit an unvisited one,
   run a DFS/BFS that floods its whole component; count the launches.
 - **Cycle detection** — in a *directed* graph, track three colors
   (white = unvisited, gray = on current recursion stack, black = done); an edge to a
   **gray** node is a back edge → cycle. In an *undirected* graph, a visited neighbor
-  that is not the immediate parent means a cycle.
+  that is not the immediate parent means a cycle. (Caveat: the parent check alone breaks
+  on **parallel edges** — two edges between `u` and `v` look like a cycle even in a tree —
+  and a **self-loop** `u→u` is trivially a cycle the parent check misses; track the
+  *edge* used, or an edge id, not just the parent vertex, when those are possible.)
 - **Path existence / all paths** — DFS with backtracking enumerates routes.
 - **Grid flood fill** — treat each cell as a vertex with up/down/left/right edges.
 
@@ -289,6 +334,25 @@ def kahn(adj, V):
 never reached in-degree 0 — they are stuck in a cycle. This is how Course Schedule I
 returns false.
 
+**Worked trace on the build DAG below** (`A→link, B→link, link→test, link→package,
+test→deploy, package→deploy`). Initial in-degrees: `A:0, B:0, link:2, test:1,
+package:1, deploy:2`. Seed the queue with every in-degree-0 vertex → `[A, B]`.
+
+| Pop | Order so far | Decrements | Newly 0 → enqueue | Queue after |
+|---|---|---|---|---|
+| `A` | A | link 2→1 | — | `[B]` |
+| `B` | A,B | link 1→0 | link | `[link]` |
+| `link` | A,B,link | test 1→0, package 1→0 | test, package | `[test, package]` |
+| `test` | A,B,link,test | deploy 2→1 | — | `[package]` |
+| `package` | A,B,link,test,package | deploy 1→0 | deploy | `[deploy]` |
+| `deploy` | A,B,link,test,package,deploy | — | — | `[]` |
+
+Result: `A, B, link, test, package, deploy` (length 6 = V, so no cycle). Where do
+alternate valid orders branch? Any moment the queue holds >1 vertex, popping order is a
+free choice: `[A,B]` could start `B,A,…`; `[test,package]` could emit `package,test,…`.
+All are valid topo orders — the queue captures exactly the "no unmet dependency yet"
+frontier.
+
 ### DFS post-order (reverse finishing times)
 
 Run DFS; when a vertex *finishes* (all descendants done), push it onto a stack. The
@@ -311,6 +375,37 @@ def topo_dfs(adj, V):
         if color[u] == WHITE: dfs(u)
     return order[::-1]           # reverse
 ```
+
+**Worked trace on the same build DAG.** Vertices in order `A, B, link, test, package,
+deploy`; start DFS at `A`:
+
+```
+dfs(A) →  dfs(link) →  dfs(test) →  dfs(deploy)  finishes → push deploy
+                                    ← test        finishes → push test
+                       dfs(package) [deploy already BLACK, skip] → push package
+          ← link       finishes → push link
+← A       finishes → push A
+dfs(B)    [link already BLACK, skip] → push B
+```
+
+Finishing (push) order: `[deploy, test, package, link, A, B]`. **Reverse it** →
+`[B, A, link, package, test, deploy]` — a valid topo order (B and A before link, link
+before test/package, both before deploy). Why reverse? `deploy` is a sink, so it *finishes
+first* (nothing left to recurse into) but must come *last* in the ordering; the deepest-to-
+finish is the last dependency, so reversing finish-order puts prerequisites first. Note
+this differs from Kahn's `A,B,link,test,package,deploy` yet is equally valid.
+
+**Cycle catch (gray back-edge), tiny example** `0→1→2→0`:
+
+```
+dfs(0): color[0]=GRAY;  → dfs(1): color[1]=GRAY; → dfs(2): color[2]=GRAY;
+        edge 2→0: color[0]==GRAY  ⇒ back edge ⇒ raise "cycle"
+```
+
+`0` is still GRAY (on the recursion stack) when `2→0` is examined — that is the exact
+signal of a back edge into an ancestor. A BLACK neighbor (already finished, off the stack)
+would be a harmless cross/forward edge, *not* a cycle — which is why two colors are needed,
+not one visited flag.
 
 | | Kahn (BFS) | DFS post-order |
 |---|---|---|
@@ -345,7 +440,11 @@ BFS only handles unit weights. For weighted shortest paths:
 - **Bellman-Ford** — handles negative edges and detects negative cycles; `O(V·E)`.
 - **Floyd-Warshall** — all-pairs shortest path on a matrix; `O(V³)`.
 - **0-1 BFS** — edges of weight 0 or 1: use a **deque**, push-front for 0-weight,
-  push-back for 1-weight; `O(V + E)`.
+  push-back for 1-weight; `O(V + E)`. *Why push-front works:* a 0-weight edge doesn't
+  increase distance, so its target belongs at the *current* frontier (front of the deque);
+  a 1-weight edge steps to the next level (back). This keeps the deque monotonically
+  non-decreasing in distance — a 2-bucket stand-in for Dijkstra's heap, without the
+  `log V` factor.
 
 These are covered in depth in the dedicated shortest-path topic; know that "weighted +
 non-negative + shortest" ⇒ reach for Dijkstra's heap-based BFS.
@@ -408,6 +507,14 @@ Master the traversal template on these and most graph interviews become mechanic
   assumes unit weights. Switch to Dijkstra.
 - **"How do you turn Course Schedule into detecting *which* course causes the deadlock?"**
   — After Kahn's, the vertices still with in-degree > 0 are exactly those on cycles.
+- **"BFS solves Word Ladder — can you make it faster?"** — Use **bidirectional BFS**.
+  When both the start and target are known and edges are reversible (undirected), run BFS
+  alternately from *each* end, always expanding the smaller frontier, and stop when the two
+  frontiers meet. Intuition on the cost: a one-directional search to depth `d` with
+  branching factor `b` visits `~b^d` nodes; two searches meeting in the middle each go to
+  depth `d/2`, so `b^(d/2) + b^(d/2)` — for `b=10, d=6` that's `10⁶` vs `2·10³`, a
+  ~500× cut. Requires an explicit target and reversible edges (won't help on a pure
+  directed reachability query).
 
 ## References
 

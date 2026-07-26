@@ -53,6 +53,18 @@ flowchart TD
     H -- No, record & assert after --> J[Spy]
 ```
 
+> [!NOTE]
+> The "set expectations up front" vs "record then assert after" split above is a
+> *framework-era* distinction, not a law about mocks. Classic frameworks (EasyMock, jMock)
+> used a **record → replay → verify** cycle: you declared the expected calls *before* exercising
+> the SUT, and verification happened implicitly at replay. **Mockito deliberately unified the
+> model** around **arrange → act → verify**: you create a plain `mock(...)`, exercise the SUT,
+> then call `verify(...)` *after the fact*. So a Mockito "mock" still does behavior verification —
+> it just expresses expectations *after* the act rather than up front. That is why every Mockito
+> example below (and the `## Mocks` section, titled "verified after the fact") arranges, acts,
+> then verifies: the taxonomy's Mock/Spy line is about *intent* (assert on interactions), not
+> about *when* you write the assertion.
+
 > [!INTERVIEW]
 > "What is the difference between a mock and a stub?" is the single most common question
 > on this topic. Answer: a **stub** provides canned answers so the SUT can run; you verify

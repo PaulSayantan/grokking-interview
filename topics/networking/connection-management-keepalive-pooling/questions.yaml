@@ -28,10 +28,10 @@ questions:
       Why does a brand-new TCP connection not immediately deliver a large response at full
       speed even after the handshake completes?
     options:
-      - "Because TLS is still negotiating in the background"
+      - "Because TLS keeps renegotiating session keys in the background for the first few segments"
       - "Because TCP starts in slow start with a small congestion window that grows over several RTTs"
-      - "Because DNS must be re-resolved for each segment"
-      - "Because the receive window is always 1 byte at first"
+      - "Because DNS must be re-resolved for every individual segment before the packet can be sent"
+      - "Because the receiver advertises a fixed 1-byte window until its buffer is fully drained"
     answer: 1
     explanation: |
       TCP slow start (RFC 5681) begins with a small congestion window (modern stacks use an
@@ -45,10 +45,10 @@ questions:
     question: |
       What is the modern default TCP initial congestion window recommended by RFC 6928?
     options:
-      - "1 MSS"
-      - "2 MSS"
+      - "1 MSS (~1.5 KB), the original RFC 2581 default"
+      - "2 MSS (~3 KB), as specified by the older RFC 3390"
       - "10 MSS (~14 KB)"
-      - "4 MSS"
+      - "4 MSS (~5.7 KB), the value used by Windows XP stacks"
     answer: 2
     explanation: |
       RFC 6928 raised the initial window to 10 MSS (roughly 14 KB), letting a fresh
@@ -99,9 +99,9 @@ questions:
       Besides skipping the handshakes, why is a reused ("warm") connection often faster for
       large transfers than a brand-new one?
     options:
-      - "It uses a larger MSS than new connections"
+      - "It negotiates a larger MSS than new connections are permitted to use"
       - "Its congestion window has already grown past slow start"
-      - "It bypasses TCP checksums"
+      - "It skips per-segment TCP checksum computation once it is warm"
       - "It is exempt from the receiver's flow-control window"
     answer: 1
     explanation: |
@@ -117,10 +117,10 @@ questions:
       In HTTP/1.1, what is the default behavior for the TCP connection after a response is
       sent?
     options:
-      - "The connection is closed after every response"
-      - "The connection is upgraded to HTTP/2 automatically"
+      - "The connection is torn down after every response, requiring a fresh handshake each time"
+      - "The connection is transparently upgraded to HTTP/2 as soon as the first response completes"
       - "The connection stays open (persistent) unless a party sends Connection: close"
-      - "The connection is closed only for POST requests"
+      - "The connection is closed only for POST requests, but stays open for GET and HEAD"
     answer: 2
     explanation: |
       HTTP/1.1 (RFC 9112) made persistent connections the default. Reuse is automatic; a peer
@@ -154,9 +154,9 @@ questions:
       hop?
     options:
       - "Because it is a hop-by-hop header that applies only to the single connection between adjacent parties"
-      - "Because it is end-to-end and only the origin may read it"
-      - "Because forwarding it would corrupt Content-Length"
-      - "Because it must be renamed to X-Connection first"
+      - "Because it is a strict end-to-end header that only the true origin server is permitted to read"
+      - "Because forwarding it recomputes the Content-Length and corrupts the framing of the body"
+      - "Because the spec requires it be rewritten to the X-Connection form before any forwarding"
     answer: 0
     explanation: |
       `Connection` (and any header it names) is hop-by-hop: it governs only the single TCP hop
@@ -171,9 +171,9 @@ questions:
       Reusing an HTTP/1.1 connection requires the receiver to know where each response body
       ends. Which mechanisms provide that framing?
     options:
-      - "Only closing the connection"
+      - "Only a FIN from the sender, since bodies are never explicitly length-delimited"
       - "Content-Length or Transfer-Encoding: chunked"
-      - "The Date header timestamp"
+      - "The Date header timestamp, which marks the exact instant the body ends"
       - "A mandatory trailing empty line after every byte"
     answer: 1
     explanation: |
@@ -188,10 +188,10 @@ questions:
     question: |
       What is the status of the `Connection` header in HTTP/2?
     options:
-      - "Required on every request"
-      - "Optional but recommended"
+      - "Required on every request to signal stream lifetime to the peer"
+      - "Optional but recommended for backward compatibility with proxies"
       - "Forbidden — connection management is handled by the protocol itself"
-      - "Replaced by a Connection2 frame"
+      - "Replaced by a dedicated Connection2 frame sent on stream 0"
     answer: 2
     explanation: |
       HTTP/2 (RFC 9113) forbids connection-specific/hop-by-hop headers like `Connection`.
@@ -205,9 +205,9 @@ questions:
     question: |
       What is a client-side connection pool?
     options:
-      - "A server-side queue of pending requests"
-      - "A DNS cache for resolved hostnames"
-      - "A buffer that stores response bodies for replay"
+      - "A server-side queue that holds pending requests until a worker thread is free"
+      - "A DNS cache that stores resolved hostnames so lookups can be skipped on reuse"
+      - "A buffer that stores prior response bodies so they can be replayed on retry"
       - "A cache of open, reusable connections keyed by destination that clients borrow and return"
     answer: 3
     explanation: |
@@ -257,10 +257,10 @@ questions:
     question: |
       What is the main symptom of a connection pool that is sized too SMALL for the load?
     options:
-      - "Excessive idle sockets consuming memory"
-      - "TLS certificates expire faster"
+      - "Excessive idle sockets pile up and consume memory and file descriptors"
+      - "TLS certificates on the pooled connections expire and rotate far faster"
       - "Requests block waiting to borrow a connection, causing latency spikes"
-      - "The server closes connections more aggressively"
+      - "The server begins closing the pooled connections far more aggressively"
     answer: 2
     explanation: |
       Too few connections means requests queue for an available connection, adding latency —
@@ -274,9 +274,9 @@ questions:
     question: |
       Connections in a pool are typically keyed by which attributes?
     options:
-      - "Only the destination IP address"
-      - "The HTTP method of the last request"
-      - "The client's ephemeral source port"
+      - "Only the destination IP address the connection currently points at"
+      - "The HTTP method of the last request served on the connection"
+      - "The client's ephemeral source port chosen for the connection"
       - "Scheme + host + port (and effectively TLS config for HTTPS)"
     answer: 3
     explanation: |
@@ -293,9 +293,9 @@ questions:
       reuse?
     options:
       - "Because the server, LB, or NAT may have silently closed the idle connection, so a borrowed one may be dead"
-      - "To re-run the TLS handshake on every borrow"
-      - "To re-resolve DNS for every request"
-      - "Because Content-Length changes between requests"
+      - "To force a fresh TLS handshake on every borrow so the cipher suite stays current"
+      - "To re-resolve DNS on every request in case the destination IP address has changed"
+      - "Because the response Content-Length is renegotiated between successive requests"
     answer: 0
     explanation: |
       Idle connections can be closed out-of-band by the server, a load balancer, or a NAT that
@@ -309,10 +309,10 @@ questions:
     question: |
       What does HTTP/1.1 pipelining allow a client to do?
     options:
-      - "Open unlimited parallel TCP connections"
+      - "Open an unlimited number of parallel TCP connections to the same origin"
       - "Send multiple requests back-to-back without waiting for each response"
-      - "Compress request headers with HPACK"
-      - "Receive responses in any order the server chooses"
+      - "Compress request headers with HPACK to shrink each request on the wire"
+      - "Receive responses in any order the server chooses, decoupled from request order"
     answer: 1
     explanation: |
       Pipelining lets a client send several requests on one connection without waiting for
@@ -325,10 +325,10 @@ questions:
     question: |
       What fundamental limitation causes head-of-line blocking with HTTP/1.1 pipelining?
     options:
-      - "Requests must be encrypted individually"
-      - "Each request opens its own TCP connection"
+      - "Each pipelined request must be encrypted under its own separate TLS record"
+      - "Each pipelined request is forced onto its own dedicated TCP connection"
       - "Responses must be returned in the same order the requests were sent"
-      - "Headers cannot be compressed"
+      - "Request and response headers cannot be compressed until HTTP/2 arrives"
     answer: 2
     explanation: |
       Pipelined responses must come back in FIFO order. A slow first response blocks all the
@@ -341,9 +341,9 @@ questions:
     question: |
       Which of the following is a real reason HTTP/1.1 pipelining failed in practice?
     options:
-      - "It required TLS 1.3, which was not yet available"
-      - "It could only be used with UDP transport"
-      - "It doubled the number of TCP connections needed"
+      - "It required TLS 1.3 with mandatory 0-RTT early data, which was not standardized until years later"
+      - "It could only operate over UDP transport, which most corporate firewalls silently blocked"
+      - "It doubled the number of TCP connections each origin had to keep open, overwhelming servers"
       - "Buggy intermediaries mishandled pipelined requests, and retrying non-idempotent requests after failure is unsafe"
     answer: 3
     explanation: |
@@ -359,9 +359,9 @@ questions:
       How does HTTP/2 multiplexing improve on HTTP/1.1 pipelining?
     options:
       - "It carries many independent streams whose responses can be interleaved and returned in any order"
-      - "It opens more TCP connections per origin"
-      - "It forces all responses to be returned strictly in order but faster"
-      - "It compresses bodies instead of headers"
+      - "It opens a substantially larger pool of parallel TCP connections per origin"
+      - "It still forces every response to be returned strictly in request order, just faster"
+      - "It compresses response bodies with gzip instead of compressing the headers"
     answer: 0
     explanation: |
       HTTP/2 (RFC 9113) multiplexes many independent streams over one connection as
@@ -376,10 +376,10 @@ questions:
       HTTP/2 removes application-layer head-of-line blocking. What kind of head-of-line
       blocking can it still suffer?
     options:
-      - "DNS-layer HOL blocking"
+      - "DNS-layer HOL blocking, where one slow lookup stalls every stream"
       - "TCP-layer HOL blocking — a single lost TCP segment stalls all streams"
-      - "TLS-layer HOL blocking on every record"
-      - "None; HTTP/2 eliminates all HOL blocking"
+      - "TLS-layer HOL blocking that stalls decryption on every record boundary"
+      - "None at all; HTTP/2 multiplexing eliminates every form of HOL blocking"
     answer: 1
     explanation: |
       Because all HTTP/2 streams share one TCP connection, a lost TCP segment stalls delivery
@@ -411,9 +411,9 @@ questions:
     question: |
       What problem was Nagle's algorithm (RFC 896) designed to solve?
     options:
-      - "Encrypting small packets"
-      - "Resolving DNS faster"
-      - "Preventing TCP sequence-number wraparound"
+      - "Encrypting small packets before they leave the sender's kernel buffer"
+      - "Resolving DNS names faster by caching answers on the local socket"
+      - "Preventing TCP sequence-number wraparound on long-lived high-speed flows"
       - "Reducing the number of tiny packets ('tinygrams') from apps that write a few bytes at a time"
     answer: 3
     explanation: |
@@ -429,9 +429,9 @@ questions:
       What does setting the `TCP_NODELAY` socket option do?
     options:
       - "Disables Nagle's algorithm so small segments are sent immediately"
-      - "Enables Nagle's algorithm"
-      - "Disables delayed ACK on the receiver"
-      - "Enables TCP keepalive probes"
+      - "Enables Nagle's algorithm so writes are coalesced into full segments"
+      - "Disables the receiver's delayed-ACK timer so every segment is acked at once"
+      - "Enables periodic TCP keepalive probes on the idle connection"
     answer: 0
     explanation: |
       TCP_NODELAY turns off Nagle's algorithm, sending small segments right away. It is common
@@ -445,10 +445,10 @@ questions:
       What is the classic pathological interaction that can add ~200 ms of latency to small
       request/response exchanges?
     options:
-      - "Slow start combined with a large initial window"
+      - "Slow start combined with an unusually large initial congestion window"
       - "Nagle's algorithm interacting with TCP delayed ACK"
-      - "TLS session resumption failing repeatedly"
-      - "DNS negative caching"
+      - "TLS session resumption failing and falling back to a full handshake"
+      - "DNS negative caching returning stale NXDOMAIN answers"
     answer: 1
     explanation: |
       Nagle withholds a small final segment waiting for an ACK while delayed ACK (RFC 1122)
@@ -463,10 +463,10 @@ questions:
       For an application that already batches each request into a single full write, what is
       the effect of Nagle's algorithm?
     options:
-      - "It significantly reduces bandwidth usage"
-      - "It improves throughput dramatically"
+      - "It significantly reduces bandwidth usage by dropping redundant ACK packets"
+      - "It improves throughput dramatically by batching many responses together"
       - "It only adds latency and provides no benefit, so TCP_NODELAY is preferred"
-      - "It is required for correct framing"
+      - "It is required for correct message framing on persistent connections"
     answer: 2
     explanation: |
       Nagle helps only chatty apps that emit many tiny writes. If your app already writes whole
@@ -479,9 +479,9 @@ questions:
     question: |
       What is the effect of TCP_CORK / TCP_NOPUSH, in contrast to TCP_NODELAY?
     options:
-      - "It sends every byte immediately, like TCP_NODELAY"
-      - "It disables the receive window"
-      - "It forces the connection to close after each write"
+      - "It sends every byte the instant the app writes it, exactly like TCP_NODELAY"
+      - "It disables the receiver's advertised flow-control window entirely"
+      - "It forces the connection to close and reopen after each individual write"
       - "It aggressively coalesces writes until a full segment forms or the cork is released"
     answer: 3
     explanation: |
@@ -498,9 +498,9 @@ questions:
       correct?
     options:
       - "TCP keepalive detects dead peers at the transport layer; HTTP keep-alive reuses a connection at the application layer"
-      - "Both are application-layer features of HTTP"
-      - "HTTP keep-alive sends periodic TCP probe packets"
-      - "TCP keepalive is enabled by the Connection header"
+      - "Both are application-layer features negotiated in the HTTP request headers"
+      - "HTTP keep-alive sends periodic empty TCP probe packets to check liveness"
+      - "TCP keepalive is switched on by the HTTP Connection header on each request"
     answer: 0
     explanation: |
       TCP keepalive (SO_KEEPALIVE) is a transport-layer liveness probe for idle connections.
@@ -514,10 +514,10 @@ questions:
     question: |
       Which socket option enables TCP keepalive probes on an idle connection?
     options:
-      - "TCP_NODELAY"
+      - "TCP_NODELAY, which also governs idle-connection probing"
       - "SO_KEEPALIVE"
-      - "SO_REUSEADDR"
-      - "SO_LINGER"
+      - "SO_REUSEADDR, which allows rebinding a recently used local port"
+      - "SO_LINGER, which controls how long close() blocks for unsent data"
     answer: 1
     explanation: |
       SO_KEEPALIVE turns on TCP's periodic keepalive probes, which detect whether an idle
@@ -530,10 +530,10 @@ questions:
     question: |
       What is notable about the DEFAULT timing of TCP keepalive on typical systems?
     options:
-      - "It probes every second"
-      - "It never probes unless data is flowing"
+      - "It probes roughly once every second the connection stays idle"
+      - "It never probes at all unless application data is actively flowing"
       - "It waits about 2 hours of idle before sending the first probe"
-      - "It probes only during the handshake"
+      - "It probes only during the initial three-way handshake, never afterward"
     answer: 2
     explanation: |
       The classic default (tcp_keepalive_time) waits about 2 hours of idle before the first
@@ -547,9 +547,9 @@ questions:
     question: |
       Does enabling HTTP keep-alive cause TCP keepalive probes to be sent on the connection?
     options:
-      - "Yes, HTTP keep-alive turns on TCP probes automatically"
-      - "Only for HTTPS connections"
-      - "Only if Content-Length is omitted"
+      - "Yes, enabling HTTP keep-alive automatically turns on the SO_KEEPALIVE probes underneath"
+      - "Only for HTTPS connections, where the TLS layer schedules the probes for you"
+      - "Only if Content-Length is omitted, since the socket then needs probing to detect the end"
       - "No, they are independent; HTTP keep-alive just leaves the socket open for reuse and sends no probes"
     answer: 3
     explanation: |
@@ -565,9 +565,9 @@ questions:
       Why do servers close keep-alive connections after an idle timeout?
     options:
       - "To reclaim resources rather than hold thousands of idle sockets indefinitely"
-      - "To force clients to re-authenticate"
-      - "Because HTTP forbids connections older than 60 seconds"
-      - "To rotate TLS keys on every request"
+      - "To force clients to re-authenticate with fresh credentials on the next request"
+      - "Because the HTTP spec forbids any single connection from living longer than 60 seconds"
+      - "To rotate the TLS session keys, which the standard mandates on every new request"
     answer: 0
     explanation: |
       Holding idle sockets consumes memory, file descriptors, and connection slots. Servers
@@ -580,10 +580,10 @@ questions:
     question: |
       What does the response header `Keep-Alive: timeout=5, max=100` advertise?
     options:
-      - "That the connection will be closed after 5 requests"
+      - "That the connection will be forcibly closed after exactly 5 requests, ignoring idle time"
       - "That the server allows ~5 seconds idle and up to ~100 requests per connection"
-      - "That the client must send a request every 100 ms"
-      - "That TLS resumption is valid for 5 minutes"
+      - "That the client must send at least one request every 100 ms or be dropped"
+      - "That a resumed TLS session on this connection stays valid for 5 more minutes"
     answer: 1
     explanation: |
       The Keep-Alive header advertises the idle timeout (timeout, in seconds) and the maximum
@@ -597,10 +597,10 @@ questions:
     question: |
       What is the classic keep-alive race condition on connection reuse?
     options:
-      - "Two clients try to use the same connection simultaneously"
-      - "The DNS record changes between requests"
+      - "Two separate clients try to borrow and send on the exact same pooled connection simultaneously"
+      - "The DNS record for the destination changes between two successive requests on the connection"
       - "The server/LB closes an idle connection at the same moment the client sends a request on it, so the request fails"
-      - "The congestion window resets to zero mid-request"
+      - "The congestion window resets to zero part-way through sending the request body"
     answer: 2
     explanation: |
       If the server or load balancer decides to close an idle connection just as the client
@@ -615,9 +615,9 @@ questions:
       To minimize failed reuses, how should idle timeouts be ordered along the path from
       client to load balancer to server?
     options:
-      - "LB timeout < server timeout < client timeout"
-      - "All three should be identical"
-      - "server timeout < client timeout < LB timeout"
+      - "LB idle timeout < server keep-alive timeout < client timeout, so the LB retires first"
+      - "All three timeouts should be configured to exactly the same value on every hop"
+      - "server keep-alive timeout < client timeout < LB idle timeout, so the server retires first"
       - "client timeout < server keep-alive timeout < LB idle timeout"
     answer: 3
     explanation: |
@@ -634,9 +634,9 @@ questions:
       endpoints think it is alive?
     options:
       - "It may silently drop idle flow state after its own timeout, so the mapping is gone"
-      - "It re-encrypts the traffic and breaks TLS"
-      - "It changes the HTTP method"
-      - "It forces the connection into slow start"
+      - "It transparently re-encrypts the payload under its own certificate, breaking the client's TLS session"
+      - "It silently rewrites the request's HTTP method from GET to POST as it forwards packets"
+      - "It resets the sender's congestion window and forces the connection back into TCP slow start"
     answer: 0
     explanation: |
       NATs and firewalls track flow state and expire idle mappings after a timeout. Once the
@@ -651,10 +651,10 @@ questions:
       What is the biggest latency benefit of reusing the exact same TCP+TLS connection for a
       subsequent request?
     options:
-      - "It compresses the response body automatically"
+      - "It automatically enables gzip compression on the response body, halving transfer time"
       - "The request pays zero setup — no handshake, no key exchange — and rides a warm cwnd"
-      - "It guarantees the response is cached"
-      - "It halves the MTU"
+      - "It guarantees the response is served from the origin's cache rather than recomputed"
+      - "It doubles the negotiated MSS, so each segment carries twice the payload bytes"
     answer: 1
     explanation: |
       Full reuse of the same connection means subsequent requests skip both handshakes
@@ -669,10 +669,10 @@ questions:
       TLS session resumption on a NEW connection primarily saves what, compared to a full
       handshake?
     options:
-      - "It skips the TCP handshake"
-      - "It removes the need for certificates entirely"
+      - "It skips the TCP three-way handshake as well, saving that round trip on every new connection"
+      - "It removes the need for the server to present a certificate at all on the resumed connection"
       - "It avoids the full TLS handshake by reusing prior TLS state (cutting RTTs and expensive key exchange)"
-      - "It disables encryption for that session"
+      - "It disables record-layer encryption for the resumed session, trading confidentiality for speed"
     answer: 2
     explanation: |
       Resumption (session IDs/tickets in TLS 1.2, PSK in TLS 1.3) reuses previously negotiated
@@ -686,9 +686,9 @@ questions:
     question: |
       What does TLS 1.3 0-RTT resumption allow the client to do?
     options:
-      - "Skip the TCP handshake as well as TLS"
-      - "Negotiate a brand-new certificate faster"
-      - "Reuse the server's private key"
+      - "Skip the TCP three-way handshake as well as the TLS exchange, saving both round trips"
+      - "Negotiate and validate a brand-new server certificate in a single accelerated round trip"
+      - "Reuse the server's long-term private key directly, avoiding any fresh key-exchange math"
       - "Send application data ('early data') in its very first flight, alongside the ClientHello"
     answer: 3
     explanation: |
@@ -704,9 +704,9 @@ questions:
       Why must TLS 1.3 0-RTT early data be restricted to idempotent, replay-safe requests?
     options:
       - "Because an attacker can capture and replay the first flight, so non-idempotent operations could be duplicated"
-      - "Because 0-RTT data is sent unencrypted"
-      - "Because 0-RTT breaks Content-Length"
-      - "Because early data cannot be larger than one packet"
+      - "Because 0-RTT early data is transmitted in cleartext before the handshake keys are established"
+      - "Because 0-RTT framing omits Content-Length, so the server cannot delimit the request body"
+      - "Because TLS caps early data at a single packet, truncating any request larger than one MTU"
     answer: 0
     explanation: |
       0-RTT early data has no anti-replay guarantee at the TLS layer — a captured first flight
@@ -720,10 +720,10 @@ questions:
     question: |
       How does QUIC (used by HTTP/3) change connection setup compared to TCP+TLS?
     options:
-      - "It removes encryption to save a round trip"
+      - "It strips out the encryption layer entirely to shave off one setup round trip"
       - "It folds the transport and TLS 1.3 handshakes together, so fresh is 1-RTT and resumed can be 0-RTT"
-      - "It requires a separate DNS lookup for TLS"
-      - "It always needs two round trips regardless of resumption"
+      - "It requires an extra dedicated DNS lookup to fetch the TLS parameters before connecting"
+      - "It always costs a fixed two round trips to establish, whether or not the session is resumed"
     answer: 1
     explanation: |
       QUIC (RFC 9000) integrates the transport handshake with TLS 1.3, combining connection and
@@ -736,10 +736,10 @@ questions:
     question: |
       In TLS 1.2, which two mechanisms enable session resumption?
     options:
-      - "Cookies and ETags"
-      - "HSTS and OCSP stapling"
+      - "HTTP cookies and ETag validators, replayed by the client to short-circuit the handshake"
+      - "HSTS preload entries and OCSP stapling, which cache the trust decision across connections"
       - "Session IDs (server-side cache) and session tickets (RFC 5077, client-stored encrypted state)"
-      - "SNI and ALPN"
+      - "The SNI hostname extension and the ALPN protocol list echoed from the prior ClientHello"
     answer: 2
     explanation: |
       TLS 1.2 offers session IDs (the server caches the session state) and session tickets
@@ -754,9 +754,9 @@ questions:
       Compared to HTTP/1.1, why does an HTTP/2 client typically need far FEWER connections to
       a given origin?
     options:
-      - "Because HTTP/2 forbids TLS"
-      - "Because HTTP/2 responses are always cached"
-      - "Because HTTP/2 uses UDP"
+      - "Because HTTP/2 forbids TLS, so each connection is far cheaper to open and hold open"
+      - "Because HTTP/2 responses are always served from cache, so few origin connections are needed"
+      - "Because HTTP/2 runs over UDP, which lets one socket fan out to many destinations"
       - "Because a single HTTP/2 connection multiplexes many concurrent streams"
     answer: 3
     explanation: |
@@ -773,9 +773,9 @@ questions:
       instead of pooling. Which set of symptoms best matches this mistake?
     options:
       - "High latency from repeated handshakes/slow start, high CPU from TLS, and possible source-port/FD exhaustion"
-      - "Lower CPU usage and fewer file descriptors than pooling"
-      - "Perfect throughput because each request gets a dedicated connection"
-      - "Reduced server load because connections are short-lived"
+      - "Lower CPU usage and a smaller file-descriptor footprint than a pooled client would incur"
+      - "Ideal throughput, since every request rides its own dedicated, uncontended fresh connection"
+      - "Reduced server-side load, because each short-lived connection is torn down right after use"
     answer: 0
     explanation: |
       Per-request connections repeatedly pay handshake and slow-start cost, burn CPU on TLS key
@@ -790,10 +790,10 @@ questions:
       A client borrows a pooled connection and its GET fails immediately with a connection
       reset. What is the appropriate, safe behavior?
     options:
-      - "Give up; the request can never succeed"
+      - "Give up and surface the error to the caller, since a reset means the request can never succeed"
       - "Retry the idempotent GET on a fresh connection, since the peer likely closed the idle connection"
-      - "Retry on the same dead connection repeatedly"
-      - "Convert the GET to a POST and retry"
+      - "Keep retrying on the same reset connection until the socket eventually recovers on its own"
+      - "Convert the GET into a POST before retrying, so the server treats it as a brand-new request"
     answer: 1
     explanation: |
       A reset on a reused idle connection usually means the peer closed it out-of-band. Because
@@ -827,9 +827,9 @@ questions:
       often has no warm connection, so it must open new ones. Which technique most reduces the
       per-connection crypto latency?
     options:
-      - "Disabling TLS entirely"
-      - "Increasing the initial congestion window to 100 MSS"
-      - "Switching all requests to non-idempotent POSTs"
+      - "Disabling TLS entirely so each new connection incurs no cryptographic handshake at all"
+      - "Raising the initial congestion window to 100 MSS so the handshake completes in fewer round trips"
+      - "Switching all requests to non-idempotent POSTs, which the stack sets up more cheaply than GETs"
       - "Using TLS 1.3 session resumption (PSK) so new connections skip the full handshake, ideally 0-RTT for GETs"
     answer: 3
     explanation: |
@@ -845,9 +845,9 @@ questions:
       What is the primary purpose of TCP keepalive probes?
     options:
       - "To detect dead peers and clean up connections that are no longer usable"
-      - "To improve throughput on active connections"
-      - "To compress idle-connection headers"
-      - "To renegotiate TLS keys periodically"
+      - "To improve throughput on active connections by pre-growing their congestion window"
+      - "To compress the headers of idle connections so they consume less memory while parked"
+      - "To periodically renegotiate the TLS session keys so long-lived connections stay secure"
     answer: 0
     explanation: |
       TCP keepalive is about liveness detection and resource cleanup: probing idle connections
@@ -862,10 +862,10 @@ questions:
       Which statement correctly contrasts pipelining and multiplexing regarding response
       ordering?
     options:
-      - "Both require strict FIFO response ordering"
+      - "Both require strict FIFO response ordering, so a slow response blocks the rest in either scheme"
       - "Pipelining requires FIFO ordering; multiplexing allows interleaved, any-order responses"
-      - "Multiplexing requires FIFO ordering; pipelining allows any order"
-      - "Neither imposes any ordering constraint"
+      - "Multiplexing requires strict FIFO ordering, while pipelining is free to return responses in any order"
+      - "Neither imposes any ordering constraint, so responses can freely overtake one another in both"
     answer: 1
     explanation: |
       Pipelining forces responses back in request order (causing HOL blocking), whereas HTTP/2
@@ -901,10 +901,10 @@ questions:
       destinations and is hitting source-port allocation failures. Which mechanism most directly
       raises the usable source-port count?
     options:
-      - "Enabling SO_REUSEADDR on every outbound socket"
+      - "Enabling SO_REUSEADDR on every outbound socket, which lets many connections share one source port"
       - "IP_BIND_ADDRESS_NO_PORT, so the kernel defers source-port selection until connect() and picks a port unique per destination"
-      - "Setting TCP_NODELAY to disable Nagle"
-      - "Lowering the MSS so more connections fit in memory"
+      - "Setting TCP_NODELAY to disable Nagle, freeing the ports that coalesced writes would otherwise hold"
+      - "Lowering the negotiated MSS so each connection uses less memory, leaving room for more source ports"
     answer: 1
     explanation: |
       Normally binding a source address reserves a port immediately, so it must be globally
@@ -940,10 +940,10 @@ questions:
       `ss` on a server shows thousands of sockets stuck in CLOSE_WAIT that never clear. What is
       the most likely root cause?
     options:
-      - "Normal protocol behavior — CLOSE_WAIT clears after 2×MSL like TIME_WAIT"
-      - "The load balancer is sending too many keepalive probes"
+      - "Normal protocol behavior — CLOSE_WAIT clears on its own after 2×MSL, exactly like TIME_WAIT does"
+      - "The load balancer is flooding the server with excessive TCP keepalive probes that pin sockets open"
       - "The application received the peer's FIN but is not calling close() on those sockets — a connection leak"
-      - "The ephemeral port range is exhausted"
+      - "The kernel's ephemeral source-port range is exhausted, so it parks new sockets in CLOSE_WAIT"
     answer: 2
     explanation: |
       CLOSE_WAIT means the peer closed and the local TCP received the FIN, but the socket stays
@@ -959,9 +959,9 @@ questions:
       Why was Linux's `tcp_tw_recycle` removed, whereas `tcp_tw_reuse` remains?
     options:
       - "tcp_tw_recycle keyed on per-source-IP timestamps and dropped connections from clients behind NAT; tcp_tw_reuse safely reuses only for outbound connections using timestamp validation"
-      - "tcp_tw_recycle disabled encryption; tcp_tw_reuse keeps it"
-      - "They are identical; the rename was cosmetic"
-      - "tcp_tw_reuse breaks NAT, so it is the one being phased out"
+      - "tcp_tw_recycle disabled the encryption on TIME_WAIT sockets to speed reuse, while tcp_tw_reuse leaves the record layer intact, which is the only reason recycle was dropped"
+      - "They are functionally identical knobs; the kernel team simply renamed tcp_tw_recycle to tcp_tw_reuse for clarity, so the old name was retired purely as a cosmetic change"
+      - "tcp_tw_reuse is the one being phased out because it silently breaks connectivity for clients behind a NAT, whereas tcp_tw_recycle validates timestamps per-flow and is safe"
     answer: 0
     explanation: |
       tcp_tw_recycle applied per-source-IP timestamp checks, so multiple clients sharing one NAT
@@ -977,10 +977,10 @@ questions:
       Under Happy Eyeballs v2 (RFC 8305), if the A (IPv4) DNS answer arrives before the AAAA
       (IPv6) answer, what does the client do?
     options:
-      - "Immediately connect over IPv4 and ignore IPv6 entirely"
+      - "Immediately connect over IPv4 and abandon the pending IPv6 lookup, since whichever family resolves first is always the one that is chosen"
       - "Wait a short Resolution Delay (default ~50 ms) for the AAAA answer so IPv6 gets a fair chance before starting attempts"
-      - "Abort and restart both DNS queries"
-      - "Wait a full 2 seconds before doing anything"
+      - "Abort both outstanding DNS queries and restart the entire resolution from scratch, throwing away the A answer that had already arrived"
+      - "Wait a full fixed 2 seconds for the AAAA record before taking any action at all, blocking on that hard-coded IPv6 grace period"
     answer: 1
     explanation: |
       RFC 8305 prefers IPv6 when it works. If A arrives first, the client waits a Resolution
@@ -996,10 +996,10 @@ questions:
       users connect instantly. The client uses serial fallback (try IPv6, then IPv4 only after a
       timeout). What is the correct fix?
     options:
-      - "Disable IPv6 on all clients permanently"
-      - "Increase the TCP handshake timeout so IPv6 has more time"
+      - "Permanently disable IPv6 on every client and strip AAAA records at the resolver so connections only ever attempt the IPv4 path"
+      - "Increase the client's TCP handshake timeout to 30 seconds so the broken IPv6 path is eventually given enough time to finally complete"
       - "Implement Happy Eyeballs v2: race families with a ~250 ms Connection Attempt Delay so a broken IPv6 path fails over in ~250 ms instead of a full TCP timeout"
-      - "Switch to UDP so there is no handshake"
+      - "Switch the entire service to UDP so there is no three-way handshake and the IPv6 connection therefore cannot stall on setup"
     answer: 2
     explanation: |
       Serial fallback stalls on the long IPv6 TCP timeout when IPv6 is broken. Happy Eyeballs v2
@@ -1015,10 +1015,10 @@ questions:
       In HTTP/2 (RFC 9113), which frames are subject to flow control, and at what levels does it
       operate?
     options:
-      - "All frame types, at the stream level only"
+      - "Every frame type including SETTINGS and PING, applied strictly at the individual stream level and never aggregated across the connection"
       - "Only DATA frames, at both the stream level and the whole-connection level"
-      - "HEADERS and DATA frames, at the connection level only"
-      - "SETTINGS frames, at the stream level only"
+      - "Both HEADERS and DATA frames together, but only at the whole-connection level, with no separate per-stream window tracked at all"
+      - "Only SETTINGS frames, flow-controlled at the individual stream level so each stream negotiates its own settings window separately"
     answer: 1
     explanation: |
       HTTP/2 flow-controls only DATA frames (control/HEADERS/SETTINGS frames are exempt), and it
@@ -1034,10 +1034,10 @@ questions:
       is much slower than HTTP/1.1 was, even with no packet loss. Windows show the stream
       frequently idle waiting. What is the most likely cause?
     options:
-      - "TCP-layer head-of-line blocking from lost segments"
-      - "HPACK header compression is corrupting the body"
+      - "TCP-layer head-of-line blocking, where a single lost and retransmitted segment stalls delivery of every multiplexed stream on the shared connection"
+      - "HPACK header compression is mis-indexing dynamic-table entries and corrupting the DATA frames as it decompresses the response body"
       - "The default 65,535-octet flow-control window is too small for the bandwidth-delay product, so the stream stalls waiting for WINDOW_UPDATE"
-      - "Nagle's algorithm is buffering the DATA frames"
+      - "Nagle's algorithm is coalescing the outbound DATA frames into full segments and withholding them until an ACK arrives, throttling the transfer"
     answer: 2
     explanation: |
       The default SETTINGS_INITIAL_WINDOW_SIZE is 65,535 octets. On a large bandwidth-delay-product
@@ -1053,10 +1053,10 @@ questions:
       HTTP/2 removes the ~6-connection-per-origin browser limit. What replaces it as the bound on
       how many requests run concurrently on one connection?
     options:
-      - "The TCP receive window size"
-      - "A hard protocol limit of exactly 100 streams"
+      - "The advertised TCP receive window size, which the protocol reinterprets as the maximum number of streams allowed to run at once"
+      - "A hard, non-negotiable protocol constant of exactly 100 streams baked into RFC 9113 that neither peer is permitted to change"
       - "The peer-advertised SETTINGS_MAX_CONCURRENT_STREAMS (spec recommends ≥100)"
-      - "The number of CPU cores on the server"
+      - "The number of physical CPU cores on the server, since each concurrent stream is bound one-to-one to a dedicated core"
     answer: 2
     explanation: |
       Concurrency on one HTTP/2 connection is bounded per-peer by SETTINGS_MAX_CONCURRENT_STREAMS,
@@ -1072,10 +1072,10 @@ questions:
       A server sends RST_STREAM with error code REFUSED_STREAM for a stream carrying a POST. Is it
       safe for the client to automatically retry that POST, and why?
     options:
-      - "No — POST is never safe to retry under any circumstances"
+      - "No — POST is a non-idempotent method, so it is categorically unsafe to retry under any circumstances regardless of what wire signal the server returned"
       - "Yes — REFUSED_STREAM guarantees the server did not start processing the stream, so retrying (even a non-idempotent POST) is safe"
-      - "Only if the POST body is smaller than one DATA frame"
-      - "Yes, but only after re-running the TLS handshake"
+      - "Only if the entire POST body fit within a single DATA frame, since a multi-frame body may have been partially processed before the reset"
+      - "Yes, but only after tearing down the connection and re-running the full TLS handshake, because the resumed stream state would otherwise be corrupt"
     answer: 1
     explanation: |
       REFUSED_STREAM explicitly means the stream was not processed (e.g., over the concurrent-stream
@@ -1092,9 +1092,9 @@ questions:
       INTERNAL_ERROR?
     options:
       - "REFUSED_STREAM guarantees the request was not processed; INTERNAL_ERROR gives no such guarantee, so the request may have taken effect"
-      - "INTERNAL_ERROR only occurs for GET requests"
-      - "REFUSED_STREAM closes the whole connection, forcing a clean retry"
-      - "They are identical; both are always safe to retry"
+      - "INTERNAL_ERROR is only ever emitted in response to GET requests, so it can never accompany a non-idempotent request in the first place"
+      - "REFUSED_STREAM always tears down the entire connection with a GOAWAY, which forces a guaranteed-clean retry on a brand-new connection"
+      - "They are semantically identical error codes, so a request is always equally safe to auto-retry after either one is received"
     answer: 0
     explanation: |
       The safety of an auto-retry hinges on whether the request could have been processed.
@@ -1111,9 +1111,9 @@ questions:
       with Last-Stream-ID set to the maximum (2^31 − 1) before later sending one with the real
       last-stream-id?
     options:
-      - "To immediately abort all in-flight streams"
-      - "To reset all stream IDs back to 1"
-      - "Because the real last-stream-id is unknown until the TCP FIN"
+      - "To immediately abort every in-flight stream at once and force the client to re-issue all of them on a fresh connection from scratch"
+      - "To reset the connection's stream-ID counter back to 1 so the peer can renumber and reopen its outstanding streams cleanly"
+      - "Because the server genuinely cannot know the real highest processed stream-id until the client's TCP FIN arrives and the socket closes"
       - "To tell the peer to stop opening new streams while promising every in-flight stream will still be processed, allowing a clean drain"
     answer: 3
     explanation: |
@@ -1131,9 +1131,9 @@ questions:
       107. What can it conclude about streams 103, 105, and 107?
     options:
       - "They were definitively not processed and are safe to retry on a new connection"
-      - "They completed successfully"
-      - "They must be retried only if they were GETs"
-      - "Their state is unknowable"
+      - "They completed successfully and their responses will still arrive before the connection finishes draining and closes"
+      - "They must be retried only if they were idempotent GETs, since a higher stream-id gives no processing guarantee for other methods"
+      - "Their processing state is fundamentally unknowable, so the client can neither safely retry them nor treat them as done"
     answer: 0
     explanation: |
       GOAWAY's Last-Stream-ID is the highest stream the sender processed or might have processed.
@@ -1151,10 +1151,10 @@ questions:
       connection cannot serve cdn.example.com and returns 421 Misdirected Request. What should the
       client do?
     options:
-      - "Treat 421 as a permanent failure and stop requesting cdn.example.com"
-      - "Downgrade the connection to HTTP/1.1 and retry"
+      - "Treat the 421 as a permanent hard failure for that authority and stop requesting cdn.example.com from the client entirely"
+      - "Downgrade the whole connection from HTTP/2 to HTTP/1.1 and then retry the request over that lower protocol version"
       - "Retry the request on a fresh connection to the correct origin (and stop coalescing it)"
-      - "Ignore the 421 and resend on the same connection"
+      - "Ignore the 421 status and simply resend the identical request on the very same coalesced connection until it eventually succeeds"
     answer: 2
     explanation: |
       421 Misdirected Request means the request was coalesced onto a connection whose server won't
@@ -1170,9 +1170,9 @@ questions:
       Under RFC 9113, which two conditions must both hold before an HTTP/2 client may coalesce
       requests for a different authority onto an existing connection?
     options:
-      - "The two hosts share a common TLD, and the connection is idle"
-      - "Both hosts use the same HTTP method, and the pool has spare capacity"
-      - "The client has visited both hosts before, and cookies match"
+      - "The two hosts share a common top-level domain, and the existing connection is currently idle with no in-flight streams"
+      - "Both hosts are being requested with the same HTTP method, and the connection pool still has spare stream capacity available"
+      - "The client has successfully visited both hosts before on this connection, and their stored cookie jars match exactly"
       - "The connection's TLS certificate is valid for the new host, AND the new host resolves to the same IP address as the existing connection"
     answer: 3
     explanation: |
@@ -1189,9 +1189,9 @@ questions:
       What are the mechanics of an HTTP/2 PING frame (RFC 9113 §6.7)?
     options:
       - "It carries 8 opaque octets; the receiver must echo them back in a PING with the ACK flag set — used for liveness and RTT measurement"
-      - "It carries the current stream ID and must be answered with a SETTINGS frame"
-      - "It carries a 32-bit timestamp the receiver rewrites and forwards"
-      - "It is sent only during the connection preface and never again"
+      - "It carries the current stream ID in its payload and must be answered by the peer with a matching SETTINGS frame to confirm receipt"
+      - "It carries a 32-bit wall-clock timestamp that the receiver rewrites with its own clock and forwards on to the next hop unchanged otherwise"
+      - "It may be sent only once, as part of the initial connection preface handshake, and is never permitted to be sent again afterward"
     answer: 0
     explanation: |
       A PING frame carries 8 opaque octets on stream 0. The receiver MUST reply with a PING that
@@ -1207,10 +1207,10 @@ questions:
       gRPC clients are being disconnected with a GOAWAY carrying ENHANCE_YOUR_CALM and debug data
       "too_many_pings". What is the cause and fix?
     options:
-      - "The server ran out of memory; add more replicas"
-      - "TLS certificates expired; rotate them"
+      - "The server process is running out of heap memory under the ping load; provision additional replicas to spread the connections out"
+      - "The server's TLS certificates silently expired mid-connection, so rotating them to fresh certificates will stop the GOAWAY disconnects"
       - "The client's keepalive PING interval is below the server's PERMIT_KEEPALIVE_TIME (default 5 min); raise the client interval or lower the server's minimum"
-      - "The client is sending too much request data; enable compression"
+      - "The client is streaming too large a volume of request data per RPC; enabling message compression on the channel will resolve the disconnects"
     answer: 2
     explanation: |
       Servers enforce a minimum keepalive interval via PERMIT_KEEPALIVE_TIME (default 5 minutes).
@@ -1227,9 +1227,9 @@ questions:
       What is the primary purpose of gRPC's MAX_CONNECTION_AGE (with MAX_CONNECTION_AGE_GRACE) on
       a server?
     options:
-      - "To cap the size of individual RPC messages"
-      - "To disable TLS after a fixed period"
-      - "To limit the number of concurrent streams per connection"
+      - "To cap the maximum byte size of individual RPC request and response messages allowed on the connection over its lifetime"
+      - "To disable the connection's TLS encryption after a fixed period so long-lived channels stop paying per-message crypto overhead"
+      - "To limit the number of concurrent multiplexed streams a single connection is permitted to carry at any one moment"
       - "To force periodic graceful cycling of long-lived connections (via GOAWAY) so load balancers can rebalance them across backends"
     answer: 3
     explanation: |
@@ -1248,9 +1248,9 @@ questions:
       explains this and what is the best fix?
     options:
       - "The L4 LB pins each long-lived HTTP/2 connection (and all its multiplexed streams) to one backend; use an L7/per-request balancer or churn connections with MAX_CONNECTION_AGE"
-      - "The pods have different CPU limits; make them uniform"
-      - "HTTP/2 flow-control windows are too large; shrink them"
-      - "DNS is caching a single pod IP; disable DNS caching only"
+      - "The busy pods were provisioned with higher CPU limits than the idle ones; making every pod's CPU and memory limits uniform will even out the traffic"
+      - "The HTTP/2 per-stream flow-control windows are configured too large, so a few connections monopolize bandwidth; shrinking the initial window rebalances load"
+      - "The client-side DNS resolver has cached a single pod's IP address; simply disabling DNS caching on the client is enough to spread traffic evenly"
     answer: 0
     explanation: |
       An L4 LB balances connections, not requests. Because gRPC keeps a few long-lived HTTP/2
@@ -1267,10 +1267,10 @@ questions:
       its IP address. Why does the QUIC connection survive when an equivalent TCP connection would
       break?
     options:
-      - "QUIC re-runs the TLS handshake fast enough that the user doesn't notice"
-      - "QUIC uses TCP underneath, which handles roaming natively"
+      - "QUIC silently re-runs the full TLS 1.3 handshake on the new address so quickly, in well under a round trip, that the user never perceives any interruption"
+      - "QUIC actually runs over TCP underneath and inherits TCP's built-in support for roaming across networks, which transparently handles the address change"
       - "QUIC identifies the connection by a Connection ID rather than the 4-tuple, so packets from the new address still map to the same connection"
-      - "The cellular network preserves the old IP address"
+      - "The cellular carrier's network transparently preserves and re-advertises the device's old Wi-Fi IP address, so the 4-tuple never actually changes at all"
     answer: 2
     explanation: |
       QUIC (RFC 9000) keys a connection on a Connection ID carried in the header, decoupling
@@ -1287,9 +1287,9 @@ questions:
       does not immediately send large amounts of data to that address. What safeguard is it
       applying and why?
     options:
-      - "It renegotiates the session ticket to prevent replay"
-      - "It downgrades to HTTP/2 until the address stabilizes"
-      - "It resets the congestion window to the maximum to speed migration"
+      - "It renegotiates a fresh TLS 1.3 session ticket for the new path so that any replayed 0-RTT early data from the old address is rejected as stale"
+      - "It transparently downgrades the connection from HTTP/3 to HTTP/2 over TCP until the peer's new address stabilizes and stops changing"
+      - "It resets the connection's congestion window straight to its maximum configured value to push data to the new address and speed the migration"
       - "It performs path validation (a path challenge/response) and honors an anti-amplification limit, to prevent using the connection as a spoofed-address reflection amplifier"
     answer: 3
     explanation: |
@@ -1307,10 +1307,10 @@ questions:
       is reused for another large transfer — and that transfer starts slowly despite the
       connection being "warm." What is happening?
     options:
-      - "The TLS session expired and had to be renegotiated"
-      - "The receive window shrank to zero during idle"
+      - "The pooled connection's TLS session ticket silently expired during the idle gap, forcing a full mid-connection renegotiation that stalls the transfer until fresh keys are derived"
+      - "The receiver's advertised flow-control window collapsed to zero octets while the connection sat idle, so the sender must block for a fresh window update before it can resume"
       - "With tcp_slow_start_after_idle enabled, the connection's congestion window was reset to the initial window after being idle beyond an RTO, so it must slow-start again"
-      - "The connection silently downgraded to HTTP/1.0"
+      - "The idle connection was transparently downgraded from HTTP/1.1 to legacy HTTP/1.0, which disables persistent reuse and caps the effective transfer throughput"
     answer: 2
     explanation: |
       cwnd is per-connection state that decays when idle. By default (tcp_slow_start_after_idle=1),
@@ -1325,10 +1325,10 @@ questions:
     question: |
       How does BBR differ fundamentally from CUBIC in how it decides sending rate?
     options:
-      - "BBR encrypts congestion signals; CUBIC does not"
+      - "BBR cryptographically signs every congestion signal it exchanges with the peer so intermediaries cannot forge loss events, whereas CUBIC sends its signals entirely in the clear"
       - "BBR models the path's bottleneck bandwidth and RTT directly, rather than treating packet loss as the primary congestion signal the way loss-based CUBIC does"
-      - "BBR only works over UDP; CUBIC only over TCP"
-      - "BBR disables the congestion window entirely"
+      - "BBR can operate only over UDP-based transports such as QUIC, while CUBIC is restricted to running exclusively over classic TCP connections and nothing else"
+      - "BBR removes the congestion window abstraction entirely and instead relies on the receiver's flow-control window alone to bound how much data is placed in flight"
     answer: 1
     explanation: |
       CUBIC is loss-based: it grows cwnd until loss, then backs off, which can under-fill high-BDP
@@ -1344,10 +1344,10 @@ questions:
     question: |
       Per RFC 9110 semantics, which grouping of methods is correct?
     options:
-      - "GET and POST are both safe; PUT is idempotent"
+      - "GET and POST are both safe read-only methods; PUT is idempotent, while DELETE is classified as neither safe nor idempotent"
       - "GET/HEAD are safe; PUT and DELETE are idempotent but not safe; POST is neither safe nor idempotent"
-      - "All methods are idempotent except HEAD"
-      - "DELETE is safe; PUT is neither safe nor idempotent"
+      - "Every HTTP method is idempotent except HEAD, which alone may produce a different result each time it is repeated against the origin"
+      - "DELETE is a safe read-only method, whereas PUT is classified as neither safe nor idempotent because it can create new resources"
     answer: 1
     explanation: |
       Safe methods (GET, HEAD, OPTIONS, TRACE) are read-only. Idempotent methods add PUT and
@@ -1364,9 +1364,9 @@ questions:
       gives no 'not processed' guarantee (e.g., a plain connection reset mid-flight). What is the
       most robust approach?
     options:
-      - "Convert the POST to a PUT so it becomes idempotent automatically"
-      - "Always retry POSTs; duplicate orders are acceptable"
-      - "Place the POST in TLS 1.3 0-RTT early data"
+      - "Convert the order-creating POST into a PUT to a client-generated resource path, since swapping the method automatically confers full idempotency and makes blind retries safe"
+      - "Always retry the POST unconditionally on any connection failure, accepting that occasional duplicate orders are a tolerable cost that reconciliation jobs can clean up later"
+      - "Place the order-creating POST into TLS 1.3 0-RTT early data, since early-data requests carry a built-in anti-replay token that guarantees the server processes them at most once"
       - "Send an application-level idempotency key with the request so the server dedups duplicates, making retries safe regardless of transport signals"
     answer: 3
     explanation: |
@@ -1383,10 +1383,10 @@ questions:
       Which mechanism is a legitimate server-side defense against TLS 1.3 0-RTT early-data replay
       attacks?
     options:
-      - "Encrypting the early data twice"
-      - "Requiring the client to send early data in exactly one packet"
+      - "Encrypting the 0-RTT early data under a second independent AEAD layer so that any captured-and-replayed first flight fails the extra integrity check the server applies"
+      - "Requiring the client to pack all of its 0-RTT early data into exactly one UDP packet, so a replayed flight can be trivially detected and discarded by the receiver"
       - "Single-use session tickets combined with a freshness/strike register that rejects duplicate ClientHellos within a time window"
-      - "Disabling session tickets so resumption is impossible"
+      - "Disabling session tickets entirely so that resumption becomes impossible, which forces every connection through a full handshake and thereby sidesteps early data"
     answer: 2
     explanation: |
       RFC 8446 §8 describes anti-replay defenses: single-use tickets (a replayed flight presents an
@@ -1402,10 +1402,10 @@ questions:
       Because a server MAY reject TLS 1.3 0-RTT early data, what must a compliant client always be
       prepared to do?
     options:
-      - "Fall back to plaintext HTTP"
+      - "Fall back to plaintext HTTP on port 80 and replay the rejected request there, since the server's refusal of early data signals that encryption is unavailable on this path"
       - "Re-send the request as normal 1-RTT data once the handshake completes"
-      - "Abort the connection permanently"
-      - "Downgrade to TLS 1.2"
+      - "Abort the connection permanently and surface a hard error to the caller, because a server that declines early data will decline the same request at 1-RTT as well"
+      - "Downgrade the negotiated protocol to TLS 1.2 and retry, since only the older handshake can carry a request the TLS 1.3 server refused as early data"
     answer: 1
     explanation: |
       0-RTT is best-effort: the server can respond as if the early data were never sent. The client
@@ -1420,10 +1420,10 @@ questions:
     question: |
       What is the purpose of a QUIC server sending a Retry packet during connection establishment?
     options:
-      - "To retransmit a lost handshake packet"
-      - "To renegotiate the cipher suite"
+      - "To retransmit a handshake packet the server believes was lost in flight, restarting the Initial exchange so the dropped cryptographic frames can be delivered reliably"
+      - "To renegotiate the connection's cipher suite mid-handshake when the server rejects every AEAD algorithm the client originally offered in its first Initial packet"
       - "To force the client to prove ownership of its source address (via an echoed token) before the server commits expensive resources, mitigating spoofed-address amplification"
-      - "To migrate the connection to a new Connection ID"
+      - "To migrate the established connection onto a freshly issued Connection ID so that on-path observers can no longer correlate the connection's packets by identifier"
     answer: 2
     explanation: |
       A QUIC Retry packet carries a token the client must echo in a new Initial, proving it can
@@ -1439,9 +1439,9 @@ questions:
       Which statement best contrasts sticky/affinity routing with stateless pooling?
     options:
       - "Affinity routing pins a client to a specific backend (needed for stateful sessions); stateless pooling lets any request go to any backend"
-      - "Stateless pooling requires the client to reconnect on every request; affinity keeps one connection forever"
-      - "Affinity routing only works over UDP; stateless pooling only over TCP"
-      - "They are the same thing described at different layers"
+      - "Stateless pooling forces the client to tear down and reopen a fresh connection on every single request, whereas affinity routing keeps exactly one connection alive forever without reconnecting"
+      - "Affinity routing is only implementable over UDP-based transports, while stateless pooling can be built exclusively on top of connection-oriented TCP and never on UDP"
+      - "They are fundamentally the same mechanism described at two different layers of the stack, so the choice between them is purely a matter of naming convention"
     answer: 0
     explanation: |
       Affinity/sticky routing deliberately sends a given client (or connection) to the same backend,

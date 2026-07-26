@@ -29,10 +29,10 @@ questions:
     Which of the following is a genuine limitation of `java.util.concurrent.Future`
     that `CompletableFuture` was designed to address?
   options:
-  - "Future cannot be submitted to an ExecutorService"
+  - "Future cannot be submitted to an ExecutorService and must instead be run manually on the calling thread"
   - "Future has no way to register a callback or chain further work; you must block on get() or poll isDone()"
-  - "Future cannot represent a result of a generic type"
-  - "Future cannot be cancelled once submitted"
+  - "Future cannot represent a result of a generic type; it is hard-coded to return Object and needs a cast"
+  - "Future cannot be cancelled once submitted, since cancel(boolean) was only introduced back in Java 7"
   answer: 1
   explanation: |
     `Future` offers no completion callback and no composition — you must block on
@@ -65,9 +65,9 @@ questions:
     If you call `CompletableFuture.supplyAsync(supplier)` WITHOUT passing an
     executor, which thread pool runs the supplier?
   options:
-  - "The main thread synchronously"
-  - "A fixed thread pool sized to 10 threads"
-  - "A newly created single-thread executor"
+  - "The main thread, synchronously, before the future is returned"
+  - "A fixed thread pool sized to exactly 10 daemon threads"
+  - "A freshly created single-thread executor for that call"
   - "The common ForkJoinPool (ForkJoinPool.commonPool())"
   answer: 3
   explanation: |
@@ -83,9 +83,9 @@ questions:
     What does `CompletableFuture.completedFuture("x")` do?
   options:
   - "Returns an already-completed future holding \"x\" without using any thread pool"
-  - "Blocks until \"x\" is computed"
-  - "Throws because no Supplier was provided"
-  - "Submits a task to the common pool that returns \"x\""
+  - "Blocks the calling thread until the value \"x\" has been computed"
+  - "Throws IllegalArgumentException because no Supplier was provided"
+  - "Submits a task to the common ForkJoinPool that returns \"x\""
   answer: 0
   explanation: |
     `completedFuture` returns a stage that is already done with the given value —
@@ -116,10 +116,10 @@ questions:
   question: |
     What is the primary behavioral characteristic shared by `get()` and `join()`?
   options:
-  - "Both run the supplier on the common pool"
+  - "Both re-run the supplier again on the common ForkJoinPool"
   - "Both are non-blocking and return immediately"
   - "Both block the calling thread until the future completes"
-  - "Both cancel the future"
+  - "Both cancel the future and discard its pending result"
   answer: 2
   explanation: |
     Both block until completion. The difference is exception style: `get()` throws
@@ -134,8 +134,8 @@ questions:
     When does the function passed to `exceptionally(fn)` run?
   options:
   - "Only when the upstream stage completed successfully"
-  - "Never; it is deprecated"
-  - "Always, on both success and failure"
+  - "Never, because exceptionally has been deprecated for handle"
+  - "Always, running on both the success and failure paths"
   - "Only when the upstream stage completed exceptionally (failed)"
   answer: 3
   explanation: |
@@ -308,9 +308,9 @@ questions:
     On which thread does the `thenApply` lambda most likely run?
   options:
   - "The current (calling) thread, synchronously, because the future is already complete"
-  - "A dedicated timer thread"
-  - "It never runs because the future is already complete"
-  - "A common ForkJoinPool worker thread"
+  - "A dedicated internal timer thread reserved for scheduled completions"
+  - "It never runs at all, since attaching a callback to a completed future is a no-op"
+  - "A common ForkJoinPool worker thread, where callbacks are always dispatched"
   answer: 0
   explanation: |
     When the upstream stage is already complete, a non-async callback like
@@ -325,10 +325,10 @@ questions:
   question: |
     Which statement about `whenComplete((v, ex) -> ...)` is correct?
   options:
-  - "It runs only on success"
+  - "It runs only on the success path and is skipped entirely when the upstream stage fails exceptionally"
   - "It runs on both success and failure but does NOT consume the exception — the returned stage still completes exceptionally"
-  - "It is identical to exceptionally"
-  - "It can replace the failure with a fallback value and recover the chain"
+  - "It is functionally identical to exceptionally, firing only on the failure path to supply a fallback"
+  - "It can replace the failure with a fallback value and fully recover the chain, precisely as handle does"
   answer: 1
   explanation: |
     `whenComplete` is a side-effect observer (logging/cleanup). It runs on both
@@ -343,10 +343,10 @@ questions:
   question: |
     Why is `handle((v, ex) -> ...)` considered the most general exception method?
   options:
-  - "Because it blocks until completion"
-  - "Because it only runs on failure"
+  - "Because it blocks the calling thread until completion and only then applies its recovery function synchronously"
+  - "Because it only runs on the failure path, replacing the thrown exception with a fallback value exactly like exceptionally does"
   - "Because it runs on both success and failure and can return a new value (transforming errors into values or introducing new errors)"
-  - "Because it never wraps exceptions"
+  - "Because it never wraps exceptions in CompletionException and instead rethrows the original checked cause unchanged"
   answer: 2
   explanation: |
     `handle` receives both the value and the throwable, always runs, and returns a
@@ -387,9 +387,9 @@ questions:
     collect results after it completes?
   options:
   - "Chain thenApply on the allOf future and call join() on each original future (safe, since they're already done)"
-  - "Call allOf().get() which returns a List of results"
-  - "Use anyOf instead, which returns the list"
-  - "allOf returns the results directly; no extra step is needed"
+  - "Call allOf().get(), which conveniently blocks and then returns a List holding each input future's result in order"
+  - "Use anyOf instead of allOf, since anyOf aggregates and returns a List of every input future's completed value"
+  - "allOf returns the aggregated results directly as a typed array, so no extra join() step is needed to read them"
   answer: 0
   explanation: |
     `allOf` yields `Void`; you gather results by chaining
@@ -404,10 +404,10 @@ questions:
   question: |
     `CompletableFuture.anyOf(a, b, c)` completes when...
   options:
-  - "all of a, b, c complete successfully"
+  - "all of a, b, and c have completed successfully with a value"
   - "the first of a, b, c completes (whether normally or exceptionally), with that result"
   - "the first of a, b, c completes SUCCESSFULLY, ignoring failures"
-  - "any two of them complete"
+  - "any two of the three inputs have completed, whichever pair settles first"
   answer: 1
   explanation: |
     `anyOf` is "first to settle" — it completes as soon as any input completes,
@@ -421,10 +421,10 @@ questions:
   question: |
     What is the difference in exception handling between `get()` and `join()`?
   options:
-  - "They are identical"
-  - "get() never throws; join() always throws"
+  - "They are identical in every respect, including the exact checked exception types that each of them declares"
+  - "get() never throws any exception and simply returns null on failure, whereas join() always throws on completion"
   - "get() throws checked InterruptedException and ExecutionException; join() throws only the unchecked CompletionException"
-  - "join() throws checked exceptions; get() throws unchecked"
+  - "join() throws the checked InterruptedException while get() throws only the unchecked CompletionException type"
   answer: 2
   explanation: |
     `get()` declares checked `InterruptedException` and `ExecutionException`
@@ -460,8 +460,8 @@ questions:
     `Mono` is:
   options:
   - "CompletableFuture is eager (work starts on creation); Mono is lazy/cold (nothing runs until subscribed)"
-  - "Both are lazy"
-  - "Both are eager"
+  - "Both are lazy/cold, so in each case no computation begins until a terminal subscribe or get call is issued"
+  - "Both are eager, so in each case the underlying work begins the instant the pipeline object is constructed"
   - "CompletableFuture is lazy (nothing runs until subscribe); Mono is eager"
   answer: 0
   explanation: |
@@ -515,9 +515,9 @@ questions:
     Why should blocking I/O work generally NOT be submitted to the default common
     ForkJoinPool?
   options:
-  - "The common pool runs tasks on the main thread"
-  - "Blocking tasks are automatically moved to a new pool"
-  - "The common pool refuses blocking tasks and throws"
+  - "The common pool always runs its submitted tasks synchronously on the caller's main thread, so nothing is gained"
+  - "Blocking tasks are detected by the pool and automatically migrated onto a separate, dynamically grown I/O pool"
+  - "The common pool actively refuses any task that performs blocking I/O and rejects it with a RejectedExecutionException"
   - "The common pool is small (≈ availableProcessors - 1) and shared JVM-wide (also by parallel streams); blocking its few workers can stall unrelated work"
   answer: 3
   explanation: |
@@ -534,9 +534,9 @@ questions:
     What does `getNow(fallback)` do?
   options:
   - "Returns the value if the future is already complete, otherwise returns the fallback immediately without blocking"
-  - "Cancels the future and returns fallback"
-  - "Throws if the future is not yet complete"
-  - "Blocks until the result is available, then returns it"
+  - "Cancels the future with CancellationException and then returns the supplied fallback value to the caller"
+  - "Throws an IllegalStateException immediately if the future has not yet completed with a value or exception"
+  - "Blocks the calling thread until the result becomes available, then returns it and ignores the fallback"
   answer: 0
   explanation: |
     `getNow(valueIfAbsent)` is non-blocking: it returns the completed value if
@@ -550,10 +550,10 @@ questions:
   question: |
     What is the difference between `thenAccept` and `thenRun`?
   options:
-  - "thenAccept ignores the value; thenRun receives it"
+  - "thenAccept ignores the upstream value entirely, while thenRun receives it as a Consumer argument to act on"
   - "thenAccept takes a Consumer<T> (receives the value) and returns CF<Void>; thenRun takes a Runnable (ignores the value) and returns CF<Void>"
-  - "Both return CF<T>"
-  - "thenRun can transform the value; thenAccept cannot"
+  - "Both take a Function and return a value-carrying CompletableFuture<T> holding the transformed upstream result"
+  - "thenRun can transform the value into a new result, whereas thenAccept can only observe it without changing it"
   answer: 1
   explanation: |
     `thenAccept` consumes the value (`Consumer<T>`) and returns
@@ -589,9 +589,9 @@ questions:
     threw `new IllegalStateException("x")`, what is the runtime type of `ex`, and
     how do you reach the original?
   options:
-  - "ex is an ExecutionException; call ex.getCause()"
-  - "ex is always a RuntimeException with no cause"
-  - "ex is the IllegalStateException directly"
+  - "ex is an ExecutionException wrapping the failure; call ex.getCause() to reach the IllegalStateException inside"
+  - "ex is always a bare RuntimeException with a null cause, so the original IllegalStateException is unrecoverable"
+  - "ex is the IllegalStateException handed in directly, with no wrapper type interposed anywhere in the chain"
   - "ex is typically a CompletionException wrapping the cause; call ex.getCause() to get the IllegalStateException"
   answer: 3
   explanation: |
@@ -609,9 +609,9 @@ questions:
     `b` completes exceptionally but `a` and `c` succeed, what happens?
   options:
   - "all completes exceptionally with b's failure; a and c still finish running (they are not cancelled)"
-  - "a and c are cancelled as soon as b fails"
-  - "all blocks forever"
-  - "all completes normally; b's failure is swallowed"
+  - "a and c are immediately cancelled with CancellationException the moment b completes exceptionally"
+  - "all never completes and blocks any joining thread forever, because one input finished exceptionally"
+  - "all completes normally with Void; b's failure is silently swallowed and never observable via join()"
   answer: 0
   explanation: |
     If any input to `allOf` fails, the `allOf` future completes exceptionally. The
@@ -627,10 +627,10 @@ questions:
     `CompletableFuture` chain that blocks with `join()` on a common-pool thread
     deadlock?
   options:
-  - "Because join() is not thread-safe"
+  - "Because join() is not thread-safe and corrupts the pool's shared work-stealing queue when called concurrently"
   - "Because the common pool has parallelism 1; the blocking task occupies the only worker while waiting on another task that also needs that worker to make progress"
-  - "Because join() always spawns a new thread"
-  - "Because single-CPU JVMs disable the common pool"
+  - "Because join() always spawns a brand-new platform thread that immediately contends for the single CPU core"
+  - "Because single-CPU JVMs disable the common ForkJoinPool entirely and silently fall back to caller-runs execution"
   answer: 1
   explanation: |
     Common-pool parallelism defaults to `availableProcessors() - 1`; on a 1-CPU box
@@ -656,10 +656,10 @@ questions:
     }
     ```
   options:
-  - "It deadlocks"
-  - "It reliably prints \"result\" after 500ms"
+  - "It deadlocks, because main waits on the pool while the pool worker waits for main to return control"
+  - "It reliably prints \"result\" after 500ms, since the JVM always blocks on outstanding common-pool tasks at exit"
   - "It may print nothing and exit, because common ForkJoinPool threads are daemon threads that don't keep the JVM alive"
-  - "It throws IllegalStateException"
+  - "It throws IllegalStateException, because thenAccept may not be chained onto a supplyAsync future without an executor"
   answer: 2
   explanation: |
     The common pool's worker threads are daemon threads. If `main` returns before
@@ -676,9 +676,9 @@ questions:
     Netty I/O thread. A downstream `thenApply(fn)` (non-async) does heavy blocking
     work. What is the risk?
   options:
-  - "fn never runs because complete() doesn't trigger callbacks"
-  - "fn runs on the main thread"
-  - "fn runs on the common pool, so no risk"
+  - "fn never runs at all, because manually calling complete() does not trigger any registered dependent callbacks"
+  - "fn runs on the application's main thread, since non-async callbacks are always dispatched back to the launcher"
+  - "fn runs on the common ForkJoinPool automatically, so there is no risk of blocking the Netty I/O event loop"
   - "fn runs on the Netty I/O thread that called complete(), so blocking there can starve the I/O event loop"
   answer: 3
   explanation: |
@@ -696,8 +696,8 @@ questions:
     statement is accurate?
   options:
   - "It was still a preview/incubating API in JDK 21, not final"
-  - "It was removed in JDK 21"
-  - "It has been final since JDK 19"
+  - "It was removed in JDK 21 after being deprecated for removal in JDK 20"
+  - "It has been a stable, final API ever since it first shipped in JDK 19"
   - "It was finalized (made permanent) in JDK 21 alongside virtual threads"
   answer: 0
   explanation: |
@@ -740,10 +740,10 @@ questions:
     What is the difference between `orTimeout(2, SECONDS)` and
     `completeOnTimeout(fallback, 2, SECONDS)` (both Java 9)?
   options:
-  - "Both cancel the underlying supplier"
-  - "orTimeout completes with a fallback value; completeOnTimeout throws"
+  - "Both interrupt and cancel the underlying supplier thread once the specified timeout elapses"
+  - "orTimeout completes with a null fallback value on expiry; completeOnTimeout instead throws a TimeoutException"
   - "orTimeout completes the future exceptionally with TimeoutException if not done in time; completeOnTimeout completes it with a fallback VALUE"
-  - "They are identical"
+  - "They are identical aliases for the same underlying timeout mechanism, differing only in method name"
   answer: 2
   explanation: |
     `orTimeout` fails the future with a `TimeoutException` on expiry (you then
@@ -758,9 +758,9 @@ questions:
     In pipeline design, when should you prefer `thenCompose` over `allOf` /
     `thenCombine`?
   options:
-  - "When you want to ignore all results"
-  - "thenCompose and thenCombine are interchangeable in all cases"
-  - "When the calls are independent and should run in parallel"
+  - "When you want to discard every intermediate result and only run each stage purely for its side effects"
+  - "In all cases, since thenCompose and thenCombine are fully interchangeable and compile to the same bytecode"
+  - "When the calls are fully independent of each other and you want them to fan out and run concurrently in parallel"
   - "When one async call DEPENDS on the result of a previous async call (sequential dependency)"
   answer: 3
   explanation: |
@@ -777,9 +777,9 @@ questions:
     platform thread, harming scalability?
   options:
   - "Blocking inside a synchronized block/method (and native/JNI calls)"
-  - "Calling Thread.sleep"
-  - "Performing socket I/O"
-  - "Using a ReentrantLock"
+  - "Calling Thread.sleep, which busy-waits on the carrier thread and blocks it from unmounting the virtual thread"
+  - "Performing ordinary socket or file I/O, since the JDK cannot intercept blocking channel reads to unmount the thread"
+  - "Acquiring a ReentrantLock, whose park/unpark handshake forcibly keeps the virtual thread bound to its carrier"
   answer: 0
   explanation: |
     Blocking while holding a `synchronized` monitor (and native/JNI frames) pinned
@@ -795,10 +795,10 @@ questions:
     You want the fastest SUCCESSFUL result among three redundant mirrors, ignoring
     ones that fail. Why is a plain `anyOf(m1, m2, m3)` insufficient?
   options:
-  - "anyOf only accepts two arguments"
+  - "anyOf only accepts exactly two future arguments, so passing three mirrors fails to compile at all"
   - "anyOf completes on the first to SETTLE, so if the fastest one fails, anyOf fails too instead of waiting for a slower success"
-  - "anyOf always waits for all three"
-  - "anyOf returns CompletableFuture<Void> with no value"
+  - "anyOf always blocks and waits for all three mirrors to finish before completing with the fastest one"
+  - "anyOf returns a CompletableFuture<Void> that carries no value, so no successful result can be read from it"
   answer: 1
   explanation: |
     `anyOf` is first-to-settle, so a fast failure propagates and you never get the
@@ -813,10 +813,10 @@ questions:
   question: |
     Which statement about `thenCombine` vs `thenCompose` execution is correct?
   options:
-  - "Both always run everything in parallel"
-  - "thenCombine runs the two sources sequentially; thenCompose runs them in parallel"
+  - "Both always run everything in parallel, spawning a fresh worker per stage regardless of any data dependency"
+  - "thenCombine forces its two sources to run one after another, while thenCompose fans them out to run in parallel"
   - "thenCombine runs its two source futures concurrently and merges results; thenCompose is sequential — the second future's work starts only after the first completes"
-  - "Both always run everything sequentially"
+  - "Both always run everything sequentially, blocking each successive stage on the prior stage's completion"
   answer: 2
   explanation: |
     `thenCombine` takes two already-existing futures that typically run concurrently
@@ -832,9 +832,9 @@ questions:
     Which capability do Reactive Streams (Reactor/RxJava/Flow) provide that
     `CompletableFuture` fundamentally does not?
   options:
-  - "Exception handling"
-  - "Timeouts"
-  - "Running work on a thread pool"
+  - "Exception handling, which CompletableFuture entirely lacks and cannot express in any chained stage"
+  - "Configurable operation timeouts, a capability with no equivalent anywhere in the CompletableFuture API"
+  - "The ability to run submitted work on a thread pool, which CompletableFuture cannot delegate to an executor"
   - "Backpressure and handling 0..N values over time (streams)"
   answer: 3
   explanation: |
@@ -852,9 +852,9 @@ questions:
     caller observe that exception?
   options:
   - "It does not propagate to the supplyAsync caller; the returned future completes exceptionally and the error surfaces on join()/get() or via an exception-handling stage"
-  - "It is silently swallowed forever"
-  - "It is thrown on the next thenApply's declaration line"
-  - "supplyAsync itself throws on the calling thread right away"
+  - "It is silently swallowed forever and never surfaces through any join(), get(), or exception-handling stage"
+  - "It is rethrown on the declaration line of the next thenApply, at the moment that stage is attached to the chain"
+  - "supplyAsync itself rethrows it synchronously on the calling thread, before the future reference is ever returned"
   answer: 0
   explanation: |
     `supplyAsync` returns normally; the supplier's exception completes the returned
@@ -924,9 +924,9 @@ questions:
     upstream stage completed SUCCESSFULLY with value `v`, what does the returned
     stage do?
   options:
-  - "Completes with null"
-  - "Retries the action"
-  - "Completes normally with v; the action's exception is ignored"
+  - "Completes normally with a null value, discarding both v and the exception the action threw"
+  - "Automatically retries the whenComplete action once more before giving up and completing with v"
+  - "Completes normally with v; the action's exception is silently ignored and never propagated downstream"
   - "Completes exceptionally with the exception thrown by the whenComplete action"
   answer: 3
   explanation: |
@@ -952,9 +952,9 @@ questions:
     ```
   options:
   - "The callback thread is held blocked waiting on cfB; if cfB needs the same bounded pool to complete, no thread is free to run it — deadlock"
-  - "thenApply cannot return a String"
-  - "It compiles but always returns null"
-  - "join() cannot be called inside a lambda"
+  - "thenApply is declared to return CompletableFuture<Void>, so a lambda producing a String value fails to compile"
+  - "It compiles and runs but the concatenation always evaluates to null because cfB.join() is read before cfB completes"
+  - "join() is statically forbidden inside a lambda body and raises an IllegalStateException the moment it is invoked"
   answer: 0
   explanation: |
     Blocking (`join`) inside a callback occupies a pool worker while waiting for
@@ -970,10 +970,10 @@ questions:
     A senior engineer argues that virtual threads (JDK 21) make `CompletableFuture`
     entirely obsolete. What is the most accurate rebuttal?
   options:
-  - "Correct — CompletableFuture should never be used after JDK 21"
+  - "Correct — CompletableFuture is deprecated for removal from JDK 21 onward and should never be used again"
   - "Virtual threads make blocking sequential code scalable, but CompletableFuture still excels at COMBINING independent async results (allOf/thenCombine) and adapting callback-style APIs; the two are complementary"
-  - "Virtual threads only work with reactive streams, not plain code"
-  - "CompletableFuture is faster than virtual threads for CPU-bound work"
+  - "Virtual threads can only carry reactive-streams pipelines and refuse to run ordinary imperative blocking code"
+  - "CompletableFuture stages execute CPU-bound work strictly faster than virtual threads because they skip the scheduler"
   answer: 1
   explanation: |
     Virtual threads eliminate much callback-style code by making blocking cheap, but
@@ -1017,9 +1017,9 @@ questions:
     Which Java 12 method lets you recover from a failure by supplying ANOTHER
     `CompletionStage` (i.e., a flatMap-style recovery on the error path)?
   options:
-  - "handleAsync"
-  - "whenComplete"
-  - "exceptionally"
+  - "handleAsync, which returns a fresh CompletionStage from the recovery function on the common pool"
+  - "whenComplete, which lets its (v, ex) action return a replacement CompletionStage on the failure path"
+  - "exceptionally, which recovers by returning another CompletionStage that is then flattened into the chain"
   - "exceptionallyCompose"
   answer: 3
   explanation: |
@@ -1037,9 +1037,9 @@ questions:
     and how can it be overridden globally?
   options:
   - "Defaults to availableProcessors() - 1; overridable via the system property java.util.concurrent.ForkJoinPool.common.parallelism"
-  - "Defaults to 1; cannot be changed"
-  - "Equals the number of CompletableFutures created; auto-scales"
-  - "Fixed at 10; overridden via a constructor argument"
+  - "Defaults to exactly 1 worker thread and is permanently hard-coded, so it can never be changed at runtime"
+  - "Equals the current number of live CompletableFuture instances and auto-scales up and down as they are created"
+  - "Fixed at 10 worker threads by default; overridden only by passing a parallelism argument to its constructor"
   answer: 0
   explanation: |
     The common pool's default parallelism is `Runtime.availableProcessors() - 1`.
@@ -1056,10 +1056,10 @@ questions:
     `cfInt` is `CompletableFuture<Integer>` and `cfStr` is
     `CompletableFuture<String>`, why is the result typed `Object`?
   options:
-  - "A bug in the JDK"
+  - "It is a long-standing bug in the JDK's generics inference that a future release is expected to correct"
   - "anyOf accepts heterogeneous futures and cannot know which completes first, so it returns CompletableFuture<Object> holding whichever value settled first"
-  - "Because join() erases all generics to Object"
-  - "Because Integer and String share no common supertype"
+  - "Because join() performs runtime type erasure and downcasts every returned result uniformly to Object"
+  - "Because Integer and String share no common supertype other than Object, so no tighter bound can be inferred"
   answer: 1
   explanation: |
     `anyOf` can be given futures of different types and completes with whichever
@@ -1075,10 +1075,10 @@ questions:
     In a long CF pipeline, why is placing a single `exceptionally`/`handle` near the
     END often preferred over scattering handlers after every stage?
   options:
-  - "Because it forces all stages onto the common pool"
-  - "Because exceptions cannot be caught mid-pipeline"
+  - "Because a single terminal handler forces every stage in the chain onto the common ForkJoinPool, which is the only pool permitted to catch exceptions"
+  - "Because the CompletableFuture API forbids attaching exceptionally or handle anywhere except the final stage, so mid-pipeline catches are impossible"
   - "Because failures short-circuit downstream transformation stages until a handler intervenes, so one terminal funnel cleanly catches errors from any earlier stage"
-  - "Because handle is faster than exceptionally"
+  - "Because handle runs its recovery function several times faster than exceptionally, so consolidating all error logic into one terminal handle cuts latency"
   answer: 2
   explanation: |
     A failure propagates (short-circuits) through subsequent `thenApply`/`thenCompose`
@@ -1121,9 +1121,9 @@ questions:
     Which statement about reusability is correct?
   options:
   - "A CompletableFuture is one-shot (single result), while a reactive publisher (Mono/Flux) can typically be subscribed multiple times, re-running its work"
-  - "Both are one-shot"
-  - "Both can be re-subscribed"
-  - "A CompletableFuture can be re-run many times by re-subscribing"
+  - "Both are strictly one-shot: a CompletableFuture caches its single result, and a Mono/Flux likewise discards its pipeline permanently after the first subscriber consumes it"
+  - "Both can be freely re-subscribed: calling join() again on a CompletableFuture transparently re-executes its original supplier just as re-subscribing to a Mono does"
+  - "A CompletableFuture can be re-run many times simply by attaching a new thenApply stage, which resets its state and recomputes the value from scratch on each call"
   answer: 0
   explanation: |
     A `CompletableFuture` holds a single result and cannot be "re-run" — it's
@@ -1139,10 +1139,10 @@ questions:
     What does `CompletableFuture.delayedExecutor(1, TimeUnit.SECONDS)` (Java 9)
     return?
   options:
-  - "A CompletableFuture that completes after 1 second"
+  - "A CompletableFuture that automatically completes with null exactly 1 second after this call returns"
   - "An Executor that runs submitted tasks after a 1-second delay"
-  - "A ScheduledFuture"
-  - "The number of milliseconds until execution"
+  - "A ScheduledFuture handle that you must poll with get() to trigger execution after the 1-second delay elapses"
+  - "The number of milliseconds until execution, returned as a long you pass into a subsequent scheduling call"
   answer: 1
   explanation: |
     `delayedExecutor` returns an `Executor` that defers execution of submitted tasks

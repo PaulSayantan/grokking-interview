@@ -140,6 +140,17 @@ Worked example — `replicas: 4`, `maxSurge: 25%`, `maxUnavailable: 25%`:
 - The controller may run **up to 5 Pods** total (4 + 1 surge) and keep **at least 3 available**
   (4 − 1 unavailable) at all times.
 
+Because old and new Pods run **simultaneously** during the roll, clients (and the Pods
+themselves) hit a *mix* of both versions for the whole rollout window. That makes
+**N/N+1 compatibility a first-class correctness constraint**: the DB schema, API contracts, and
+message/queue formats must tolerate both the old and new code at once. The standard technique is
+the **expand/contract (parallel-change) migration** — e.g. to rename a column: first *expand*
+(add the new column, write to both, keep reading the old) and ship that; roll out the code that
+reads the new column; only *contract* (drop the old column) in a later release once no running
+Pod references it. A migration that can't be split this way — old and new genuinely cannot
+coexist — is exactly the case `Recreate` exists for (accept a downtime window instead of a
+correctness bug).
+
 Two useful extremes:
 
 - **`maxUnavailable: 0`** (with `maxSurge > 0`): never drop below full capacity — always add new
@@ -215,6 +226,30 @@ sequenceDiagram
 4. Steps 1–3 repeat in waves until the new RS is at full `replicas` and the old RS is at 0.
 5. The old ReplicaSet is retained (scaled to 0) up to `revisionHistoryLimit` for rollback.
 
+**Worked trace — `replicas: 4`, `maxSurge: 25%`, `maxUnavailable: 25%`.** First resolve the
+knobs: `maxSurge = ceil(0.25 × 4) = 1` (rounds **up**), `maxUnavailable = floor(0.25 × 4) = 1`
+(rounds **down**). So the two invariants the controller must honor at *every* step are
+**total Pods ≤ 5** (4 + surge) and **available Pods ≥ 3** (4 − unavailable). Watch `(old, new)`
+march from `(4, 0)` to `(0, 4)`:
+
+| Wave | Action | old | new | total | available |
+|---|---|---|---|---|---|
+| 0 | steady state on old version | 4 | 0 | 4 | 4 |
+| 1a | surge: create 1 new Pod (pending) | 4 | 1 | **5** | 4 |
+| 1b | new Pod passes readiness → scale old −1 | 3 | 1 | 4 | 4 |
+| 2a | surge: +1 new Pod (pending) | 3 | 2 | **5** | 4 |
+| 2b | new Pod Ready → scale old −1 | 2 | 2 | 4 | 4 |
+| 3a | surge: +1 new Pod (pending) | 2 | 3 | **5** | 4 |
+| 3b | new Pod Ready → scale old −1 | 1 | 3 | 4 | 4 |
+| 4a | surge: +1 new Pod (pending) | 1 | 4 | **5** | 4 |
+| 4b | last new Pod Ready → scale old −1 | 0 | 4 | 4 | 4 |
+
+Notice total tops out at exactly **5** on every surge step (never 6) and availability never dips
+below the **3** floor — in fact it holds at 4 here because the controller surges *before* it
+removes an old Pod. A pending (not-yet-Ready) new Pod counts toward the total but **not** toward
+availability, which is exactly why a stuck-`Pending` or crashing new Pod parks the trace at, say,
+`(3, 1)` forever: it can't surge past total 5, and it won't scale old below 3.
+
 The crucial property: **progress on the new RS is what unlocks scale-down of the old RS.** If new
 Pods never become Ready, the old Pods are never removed — the service keeps serving the old
 version and the rollout simply stalls. This is a *safety feature*, not a bug.
@@ -233,8 +268,9 @@ probe mechanics). A Pod that is not `Ready`:
 
 Together this means a broken new version can't take traffic *and* can't displace the healthy old
 version — the rollout pauses safely. **If a Deployment has no readiness probe, a Pod is
-considered Ready the instant its container starts**, so Kubernetes will happily route to a
-process that hasn't finished warming up and will march the rollout forward over a broken build.
+considered Ready as soon as its containers are Running** (with no readiness signal required; if a
+`startupProbe` is defined it must pass first). So Kubernetes will happily route to a process that
+is up but hasn't finished warming up, and will march the rollout forward over a broken build.
 Always define a readiness probe for anything serving traffic.
 
 `minReadySeconds` (default `0`) adds a stabilization delay: a new Pod must stay Ready for this
@@ -250,6 +286,49 @@ rollout proceed prematurely.
 
 ---
 
+## Graceful shutdown: why "Ready" alone isn't zero-downtime
+
+The readiness gate protects the **new** Pods coming up. But a rolling update also **tears old
+Pods down**, and that side has its own race — the reason a rollout can drop requests even though
+every Pod was `Ready`. When the controller deletes an old Pod, **two things happen in parallel,
+not in sequence**:
+
+1. The Pod's endpoint is removed from every EndpointSlice, and that removal must **propagate** to
+   kube-proxy on every node (and to external load balancers / ingress) before they stop sending it
+   traffic. This is eventually consistent and takes some time.
+2. The kubelet sends the container **`SIGTERM`** and starts the `terminationGracePeriodSeconds`
+   clock (default **30s**); if the process hasn't exited when it elapses, it gets `SIGKILL`.
+
+Trace the race with numbers. Say endpoint propagation to all proxies takes ~2s, but your app
+exits *immediately* on `SIGTERM` (say 200ms):
+
+- `t=0.0s` — Pod marked Terminating; endpoint removal begins **and** `SIGTERM` delivered.
+- `t=0.2s` — app process exits, connections refused.
+- `t=0.2s–2.0s` — a proxy that hasn't yet seen the removal **still routes new connections to the
+  dead Pod → connection refused / 502.** Requests are dropped for ~1.8s per Pod, ×4 Pods across
+  the roll.
+
+The fix is to make the container **outlive** the propagation window instead of dying instantly.
+A `preStop` hook that sleeps buys time for endpoints to converge before the app stops accepting
+connections:
+
+```yaml
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 5"]   # let LBs/kube-proxy deregister first
+# and give real in-flight requests time to finish:
+terminationGracePeriodSeconds: 30
+```
+
+`SIGTERM` is only sent **after** `preStop` completes, so the sequence becomes: endpoint removal
+starts → app keeps serving for 5s (proxies converge, no new traffic arrives) → `SIGTERM` → app
+drains in-flight requests and exits, well inside the 30s grace period. Net result: **zero dropped
+requests**. Readiness gating handles ramp-up; `preStop` + grace period handle ramp-down — you need
+**both** for a truthful "zero-downtime" claim.
+
+---
+
 ## progressDeadlineSeconds and detecting a stuck rollout
 
 `progressDeadlineSeconds` (default **600**, i.e. 10 minutes) bounds how long a rollout may go
@@ -262,6 +341,13 @@ type: Progressing
 status: "False"
 reason: ProgressDeadlineExceeded
 ```
+
+One interaction to size correctly: `minReadySeconds` **counts against** the progress window. Each
+wave the controller waits `minReadySeconds` before a Pod counts available, so a healthy-but-slow
+rollout of many waves can consume real time. Keep `progressDeadlineSeconds` comfortably larger
+than the total expected `(startup + minReadySeconds) × waves`, or a perfectly healthy rollout can
+trip `ProgressDeadlineExceeded` just because it's slow. (E.g. `minReadySeconds: 60` across ~4
+waves already eats ~4 minutes of the default 10-minute deadline before any real delay.)
 
 Critically, **exceeding the progress deadline does NOT auto-rollback** by default — it only marks
 the rollout as failed and stops retrying. `kubectl rollout status` will then exit non-zero,
@@ -396,6 +482,29 @@ kubectl autoscale deployment/web --min=3 --max=20 --cpu-percent=70   # creates a
 in flight* (so both old and new ReplicaSets have replicas), the controller distributes the new
 replicas across the existing ReplicaSets **in proportion to their current sizes**, respecting
 `maxSurge`. This avoids dumping all new capacity onto a version that may still be rolling out.
+
+Worked example — `replicas: 10`, `maxSurge: 3`, `maxUnavailable: 2`. You bump the image but the
+new build can't pull, so the rollout **stalls mid-flight** at the surge ceiling:
+
+- old RS = **8**, new RS = **5** → total **13** (that's `replicas 10 + maxSurge 3`, the cap).
+
+Now the HPA scales the Deployment to **15**. Where do the extra replicas go? The controller does
+*not* pour them all into the new RS. It first computes the new ceiling and how many to add:
+
+- new max total = `15 + maxSurge 3` = **18**; current total = **13** → **5 replicas to add**.
+
+Then it apportions those 5 across the RSs by each one's share of the current total, using the
+controller's rule `add = round(rsReplicas × replicasToAdd / currentTotal)` with
+`replicasToAdd = 5`, `currentTotal = 13`:
+
+- old RS: `round(8 × 5 / 13) = round(40/13) = round(3.08) = 3` → **8 + 3 = 11**
+- new RS: `round(5 × 5 / 13) = round(25/13) = round(1.92) = 2` → **5 + 2 = 7**
+
+Check: `3 + 2 = 5` (exactly the replicas we needed to add), new total `11 + 7 = 18`. So the
+old (bigger) RS gets the larger share (3) and the new RS gets 2 — capacity is spread across both
+versions rather than piled onto a build that may never become Ready. When the new image is
+eventually fixed, the normal rolling-update loop drains the old 11 down to 0 and the new RS up to
+the full 15.
 
 > [!WARNING]
 > If an **HPA** targets a Deployment, do **not** also set `.spec.replicas` in your manifest and

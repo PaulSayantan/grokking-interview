@@ -82,12 +82,33 @@ Key decisions to voice:
 - **Per-service pipelines** so services deploy independently (independent deployability
   is the whole point of microservices). Share pipeline logic via templates/reusable
   workflows to avoid drift.
+- **Static analysis in the diagram** (voice the acronyms): **SAST** = static application
+  security testing (scans your source for vulns), **SCA** = software composition analysis
+  (flags known-vulnerable *dependencies*), **SBOM** = software bill of materials (the
+  signed list of everything in the artifact, for supply-chain auditing), **IaC scan** =
+  policy/security checks on Terraform/manifests.
 - **Contract testing** (e.g., Pact) between services so you catch breaking API changes
-  without a slow full-E2E matrix on every commit.
+  without a slow full-E2E matrix on every commit. Concretely, **consumer-driven
+  contracts**: the *consumer* records the requests it makes and responses it expects into
+  a contract; CI replays that contract against the *provider*, so a provider physically
+  can't merge a breaking change without a red contract test — far cheaper than spinning
+  up the full service graph for E2E.
 - **Config vs artifact:** the image is environment-agnostic; environment config and
   secrets are injected at deploy time (12-Factor). Never bake prod secrets into images.
 - **Promotion** is a metadata/deploy operation, not a rebuild — often GitOps: CI updates
   an image tag in a config repo; Argo CD/Flux reconciles it into the cluster.
+
+**How canary + auto-rollback actually work** (interviewers always push on the mechanics
+behind that last diagram box). Route a **small traffic slice** to the new version and
+step it up on a schedule — e.g. **1% → 5% → 25% → 100%**, with a **bake/soak window**
+(say 5–15 min) at each step. During each bake, compare the canary's **SLO signals**
+against the stable baseline: error rate, latency p99, saturation (CPU/mem). Promotion to
+the next step is *gated* on those signals staying healthy (tools like Argo Rollouts or
+Flagger automate this analysis). **Auto-rollback** trips the moment a signal breaches its
+threshold during a bake — traffic snaps back to the stable version, no human needed.
+Gotcha: canary needs **enough traffic to be statistically meaningful** — 1% of a
+low-traffic service may see zero errors purely by chance, so for low-QPS services prefer
+**blue-green** (flip all traffic, keep the old stack warm for instant rollback).
 
 > [!TIP]
 > When they say "microservices," proactively address: independent deployability, the
@@ -153,6 +174,23 @@ sequenceDiagram
   New->>DB: 3. Contract (drop old column) in a LATER release
 ```
 
+**Worked example — rename `users.username` → `users.handle` across 4 releases.**
+The rename is the trap: done in one release it breaks the overlap. Spread over four:
+
+| Release | Migration | App reads | App writes | Rollback-safe? |
+|---|---|---|---|---|
+| **R1 (expand)** | `ALTER TABLE users ADD COLUMN handle VARCHAR NULL` | `username` | `username` | Yes — new column is nullable and untouched by old code |
+| **R2 (dual-write + backfill)** | `UPDATE users SET handle = username WHERE handle IS NULL` (batched) | `username` | **both** `username` + `handle` | Yes — R1 code still works; `handle` is just extra data |
+| **R3 (switch reads)** | none | `handle` | both | Yes — rolling back to R2 still reads a fully-populated `username` |
+| **R4 (contract)** | `ALTER TABLE users DROP COLUMN username` | `handle` | `handle` | **No** — old code needed `username`; roll *forward* only |
+
+Why you can't collapse steps: if R1 and R3 were one release, during the rolling deploy a
+new instance reads `handle` (still `NULL` for existing rows) while an old instance is
+still writing only `username` — the new pods return blanks. Dual-write (R2) plus backfill
+is what makes every row valid in *both* columns before any reader depends on the new one.
+Only R4 is destructive, so it ships alone, after R3 has fully baked and you're confident
+you won't roll back.
+
 > [!WARNING]
 > A migration that is not backward-compatible (drop/rename, `NOT NULL` without default,
 > long table lock) breaks zero-downtime and blocks rollback. Also beware long-running
@@ -202,7 +240,10 @@ State design is where IaC scenarios get deep (details also in the terraform topi
 
 - **Remote state with locking** (e.g., S3 + DynamoDB lock, or Terraform Cloud/`gcs`)
   prevents two concurrent `apply`s from corrupting state. Local state on a laptop does
-  not scale to a team.
+  not scale to a team. (Note: Terraform **1.10+** added native S3 **lockfile-based**
+  locking via `use_lockfile = true`, so the separate DynamoDB lock table is now optional
+  — but the *reason* for locking is unchanged, and DynamoDB remains common in older
+  configs.)
 - **State is sensitive** — it can contain secrets/attributes in plaintext; encrypt the
   backend and restrict access.
 - **Split state** by blast radius and change frequency; huge monolithic state makes
@@ -310,6 +351,24 @@ compliance) so teams don't reinvent or bypass them.
 - **Flaky test management:** quarantine flaky tests so they don't block or erode trust
   (pipeline-level; the testing domain owns the discipline).
 
+**Worked example — turn the 45-minute pipeline into ~12.** First *measure the split*:
+
+```
+queue  10 min → runners idle-wait for capacity
+build   5 min → compile + docker build (cold, no cache)
+test   28 min → single-threaded test suite  ← dominates
+deploy  2 min
+        ------
+        45 min
+```
+
+Test is the bottleneck, not queue — so buying more runners first would waste money.
+Instead: **shard the 28-min suite 7 ways** → ~28 ÷ 7 = **4 min** (runs in parallel);
+**add Docker layer + remote build cache** so the 5-min build hits cache and drops to
+~**1 min**; queue is already small so leave the fleet as-is (a modest autoscale bump
+trims it to ~2 min). New total ≈ 2 + 1 + 4 + 2 = **~9–12 min**, roughly a 4× speedup —
+and it came from targeting the measured constraint, not optimizing everything blindly.
+
 > [!TIP]
 > Diagnose before optimizing: measure where the time goes (queue time vs build vs test
 > vs deploy). Long *queue* time → scale runners. Long *test* time → parallelize/select.
@@ -378,6 +437,25 @@ DR scenarios hinge on two numbers and a tested plan.
 | Warm standby | Minutes | $$$ | Scaled-down full copy running, scale up |
 | Multi-site active/active | Near-zero | $$$$ | Full capacity in ≥2 regions serving live |
 
+**Worked example — RPO is set by your backup/replication cadence.** RPO = how much data
+you can lose = the gap between the failure and the last durable copy. Work it backwards
+from the cadence:
+
+| Data-protection cadence | Worst-case RPO | Why |
+|---|---|---|
+| Nightly snapshot (every 24h) | **up to ~24h** | Fail at 23:59, just before the 00:00 snapshot → lose the whole day |
+| Snapshot every 6h | up to ~6h | Same logic, smaller window |
+| Async cross-region replication (~2s lag) | **~seconds** | Only the in-flight, un-replicated writes are lost |
+| Synchronous replication | ~0 | Write isn't ack'd until the replica has it — paid for in write latency + cost |
+
+The number you pick then *forces a table row*: if the business demands **RPO ≈ 0**,
+nightly backup-and-restore is disqualified — you need at least async replication, which
+in turn pushes you to **warm standby or active/active** (you already have a live replica
+to fail over to). Conversely, an internal tool that tolerates a day of loss can sit
+happily on cheap nightly-backup + restore. Do the same for **RTO**: restoring a 2 TB
+snapshot might take hours (rules out an RTO of minutes), whereas a warm standby is
+already running so failover is a DNS/traffic switch measured in minutes.
+
 - **Runbook:** a step-by-step, *tested* recovery procedure (failover steps, DNS/traffic
   switch, data restore, validation, comms). An untested runbook is a hope, not a plan.
 - **IaC + backups make DR real:** rebuild infra from code in another region, restore
@@ -400,6 +478,22 @@ deep SRE process is upcoming reliability-and-operations — this is the DevOps f
   time. Spend the budget on releasing features; **when the budget is exhausted, gate
   releases** (freeze risky changes, prioritize reliability work). This turns "how much
   risk can we take this month" into a data-driven decision instead of an argument.
+
+  **Worked example — budget in minutes (say this out loud).** A month is
+  30 × 24 × 60 = **43,200 minutes**. Multiply by (1 − SLO):
+
+  | Monthly SLO | Budget | Allowed downtime/month |
+  |---|---|---|
+  | 99.9% | 0.1% × 43,200 | **≈ 43.2 min** |
+  | 99.95% | 0.05% × 43,200 | ≈ 21.6 min |
+  | 99.99% | 0.01% × 43,200 | ≈ 4.3 min |
+
+  Now the burn: at a 99.9% SLO, a single **30-minute** incident spends
+  30 ÷ 43.2 ≈ **69%** of the whole month's budget. With ~13 minutes left, you freeze
+  risky releases for the rest of the month and ship only reliability fixes. Interviewers
+  often follow up on **burn-rate alerting**: page fast when you're burning budget far
+  faster than sustainable — e.g. a **14.4× burn rate sustained over 1 hour** would
+  exhaust a 30-day budget in ~2 days, so it warrants an immediate page.
 - **Change-failure rate** ties strategy to outcome: canary + auto-rollback lowers it.
 - Use these metrics to justify DevOps investment and to pick what to fix next
   (the constraint).

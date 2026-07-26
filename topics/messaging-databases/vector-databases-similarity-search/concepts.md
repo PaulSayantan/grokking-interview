@@ -40,6 +40,15 @@ minimizing L2 equals maximizing dot product equals maximizing cosine. This is wh
 libraries recommend **normalizing embeddings and using dot product** (the cheapest to
 compute — no square roots or norms).
 
+**Worked check (why higher cosine ⇒ smaller L2).** Take unit vectors `a = (1, 0)`.
+- A *farther* neighbor `b = (0.8, 0.6)` (unit: 0.8² + 0.6² = 0.64 + 0.36 = 1).
+  cos = a·b = 0.8. L2² = (1−0.8)² + (0−0.6)² = 0.04 + 0.36 = **0.4** — and `2 − 2·(0.8) = 0.4`. ✓
+- A *closer* neighbor `b' = (0.95, 0.3122)` (unit: 0.95² + 0.3122² ≈ 0.9025 + 0.0975 = 1).
+  cos = 0.95. L2² = (1−0.95)² + 0.3122² = 0.0025 + 0.0975 = **0.1** — and `2 − 2·(0.95) = 0.1`. ✓
+
+Higher cosine (0.95 > 0.8) ⇒ smaller L2² (0.1 < 0.4) ⇒ same ordering. That is the
+monotonic equivalence — you can rank with whichever is cheapest.
+
 - **Cosine** is the default for text embeddings (OpenAI, most sentence-transformers) because
   it ignores magnitude and compares *direction* (topic/meaning) only.
 - **Dot product** is used when magnitude carries signal (e.g. some retrieval models, or when
@@ -83,6 +92,11 @@ recall@k = (# of true top-k neighbors actually returned) / k
 
 Typical production targets are recall@10 of 0.95–0.99. ANN gives up that last few percent
 of recall in exchange for 10–1000× lower latency and lower memory.
+
+For a concrete instance: if the true top-10 for a query are `{a, b, c, d, e, f, g, h, i, j}`
+and the ANN index returns `{a, b, c, d, e, f, g, h, i, z}` — 9 of the true neighbors plus one
+impostor `z` — then recall@10 = 9/10 = **0.9**. (Note recall@k here counts *how many of the
+true top-k came back*, not their exact order.)
 
 > [!KEY-TAKEAWAY]
 > A "vector database" is, at its core, an **ANN index** (HNSW/IVF/PQ/…) wrapped with
@@ -137,6 +151,27 @@ flowchart TB
 - **Search**: start at the top-layer entry point, greedily hop to the neighbor closest to
   the query, descend a layer when no closer neighbor exists, repeat down to L0, then run a
   best-first search on L0 keeping a candidate list of size `ef`.
+
+**Traced search (`ef = 4`, `k = 2`).** Say each node's number below is its distance to the
+query (smaller = closer); we want the 2 closest.
+
+1. **L2 (entry):** start at `entry` (dist 9). Its only neighbor visible here is closer, so
+   we take the descend link down toward L1.
+2. **L1:** land near node with dist 5; its neighbor at dist 3 is closer → hop to it. No L1
+   neighbor is closer than 3, so descend to L0.
+3. **L0 best-first with `ef = 4`:** seed the candidate list with the entry (dist 3). Expand
+   the closest unvisited candidate each step, adding its neighbors, and keep only the **4
+   closest** seen so far (that is what `ef = 4` bounds):
+   - visit dist-3 node → neighbors {2, 6}; list = {2, 3, 6} (all fit in 4).
+   - visit dist-2 node → neighbors {1, 4}; candidates {1, 2, 3, 4, 6} → keep 4 closest = {1, 2, 3, 4}.
+   - visit dist-1 node → neighbors {2 (seen), 5}; adding 5 gives {1, 2, 3, 4, 5} → still keep {1, 2, 3, 4}.
+   - closest unvisited (dist 4) has no neighbor beating the current top; search stops.
+4. **Return top `k = 2`** from the list: the dist-1 and dist-2 nodes.
+
+Why `ef ≥ k`: the candidate list *is* the answer pool, so it must hold at least `k` slots.
+Raising `ef` (say to 8) would have kept nodes 5 and 6 in play longer, exploring more of L0 —
+higher recall (less chance of missing a true neighbor hiding behind a slightly-farther hop)
+at the cost of more distance computations.
 
 **Key parameters:**
 
@@ -360,6 +395,18 @@ both and fuses the results, consistently beating either alone.
   RRF_score(d) = Σ_over_rankers  1 / (k + rank_of_d_in_ranker)      # k ≈ 60
   ```
 
+  **Worked example (k = 60).** Two documents:
+  - **D1** is BM25 rank 1 and vector rank 3: `1/(60+1) + 1/(60+3) = 1/61 + 1/63 = 0.016393 + 0.015873 = 0.032266`.
+  - **D2** is rank 2 in *both* rankers: `1/(60+2) + 1/(60+2) = 1/62 + 1/62 = 0.016129 + 0.016129 = 0.032258`.
+
+  A near-dead-heat (D1 edges D2 by ~0.000008) — being #1 in one list roughly balances being
+  solidly mid-pack in both.
+  Now consider **D3**, which is BM25 rank 1 but *absent* from the vector top list (only one
+  ranker contributes): `1/(60+1) = 0.016393`. Despite topping BM25, D3 (0.016393) loses badly
+  to both D1 and D2 (~0.0323) — appearing in **both** rankers beats a strong showing in only one.
+  That is the whole point: RRF rewards cross-ranker agreement using *ranks*, so an unbounded
+  BM25 score of 200 and a cosine of 0.9 never have to be reconciled on the same scale.
+
 - **Weighted score fusion / convex combination**: `α · normalized_vector_score + (1−α) ·
   normalized_bm25_score` — needs score normalization and a tuned `α`.
 
@@ -399,7 +446,12 @@ sequenceDiagram
 **Ingestion (offline)**: documents are **chunked** (e.g. 200–1000 tokens with overlap),
 each chunk embedded and stored with metadata (source, section, timestamp). **Chunking
 strategy strongly affects quality** — too large dilutes relevance and wastes context; too
-small loses context.
+small loses context. Common strategies: **fixed-token windows with overlap** (e.g. 500 tokens,
+50-token overlap), **recursive/semantic splitting** (break on paragraph/sentence boundaries so
+a chunk is a coherent unit), and **parent-document / small-to-big** (embed small precise chunks
+for retrieval but return their larger parent for context). The **overlap** exists so an answer
+that straddles a boundary isn't cut in half — without it, a sentence split across two chunks
+may match neither well.
 
 **Query (online)**: embed the query **with the same model** used for docs (mismatched models
 = meaningless distances), ANN-retrieve top-k, optionally **re-rank** with a slower

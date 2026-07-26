@@ -60,6 +60,12 @@ flowchart TD
 
 ## Loose Coupling
 
+Think of it as **mailing a letter vs. making a phone call**. A phone call is tight coupling: both
+people must be present at the same moment, each must know the other's number, and if one hangs up
+the conversation dies. Mailing a letter is loose coupling: you drop it in the box and walk away, the
+recipient reads it whenever they're up, and neither of you needs the other online right now. The
+mailbox (broker) absorbs all the assumptions you'd otherwise make about each other.
+
 **Intent.** *How can dependencies between distributed applications — and between the
 components within one application — be minimized?*
 
@@ -124,6 +130,14 @@ Availability, Update Transition Process. **Deep dive:** `microservices-ddd-and-b
 ---
 
 ## Stateless Component
+
+Picture a supermarket checkout. If any open cashier can ring up any customer, the manager can open
+and close lanes at will as the queue grows or shrinks — because everything that matters (the cart,
+the receipt) travels *with the customer*, not inside a specific register. That is a stateless
+component. The opposite — a lane where only *your* cashier knows *your* running total — means you
+can't switch lanes and the whole line collapses if that cashier walks off. Push the "running total"
+out to the customer (request/token) or to a shared ledger (external store) and every lane becomes
+interchangeable.
 
 **Intent.** *How can the elasticity and robustness of an application component be increased?*
 
@@ -328,9 +342,44 @@ Exactly-once delivery is expensive/often impractical at scale, so the pragmatic 
    same input yields the same result (e.g. "set status = SHIPPED" rather than "increment count"),
    so accidental re-execution is a no-op.
 
+**Worked example — the same message delivered twice.** A `ChargeOrder` message arrives with
+`idempotency-key = abc-123`, amount `$10`, starting balance `$100`.
+
+*Approach 1 — deduplication (dedup table).* The handler does a conditional insert of the key before
+doing work:
+
+```
+delivery 1: INSERT key 'abc-123' ... IF attribute_not_exists(key)  → succeeds
+            → run charge: balance 100 → 90
+delivery 2: INSERT key 'abc-123' ... IF attribute_not_exists(key)  → FAILS (key already present)
+            → skip the charge → balance stays 90   ✅
+```
+
+Net effect: charged once, balance `$90`, regardless of how many copies arrive.
+
+*Approach 2 — idempotent semantics (no dedup table).* Design the write so re-running it is a no-op.
+`SET status = 'SHIPPED'` run twice still lands on `SHIPPED`. But a *non-idempotent* write betrays you:
+
+```
+non-idempotent:  balance = balance - 10
+  delivery 1: 100 → 90
+  delivery 2: 90 → 80   ❌ double-charged, customer out $20 for one order
+```
+
+The lesson: `balance = balance - 10` and `count = count + 1` are **not** safe under at-least-once —
+either dedup on the key, or reshape the operation (absolute set, or "apply payment `abc-123`" keyed
+on the payment id) so a replay can't move the number twice.
+
 > [!WARNING]
 > "At-least-once delivery" almost always means your consumers **must** be idempotent. Assuming
 > exactly-once from a broker is a classic production bug.
+
+> [!WARNING]
+> **Dedup is bounded by a retention window.** A dedup table needs a TTL (you can't remember every
+> key forever), and managed dedup is finite: SQS FIFO content-based deduplication only covers a
+> **5-minute** window. A duplicate that arrives *after* the window (a message stuck in a retry
+> backlog, a redrive hours later) is treated as new and re-processed. For correctness that must hold
+> beyond the window, back it with a durable idempotency key in your own datastore.
 
 **Modern equivalent.** SQS message dedup / dedup tables, idempotency keys (Stripe-style
 `Idempotency-Key`), conditional writes (DynamoDB `attribute_not_exists`, optimistic concurrency),
@@ -372,6 +421,17 @@ consistent.
 **transactional outbox** pattern as the common cloud substitute when the broker can't join the DB
 transaction; JMS/Service Bus sessions with transactional receive.
 
+**Why not just use a distributed transaction (2PC)?** Two-phase commit needs every participant to
+speak a shared transaction protocol (XA) and to *hold locks* through the network round-trip of the
+prepare phase; if the coordinator crashes after "prepare" but before "commit," participants stay
+**blocked** holding those locks until it recovers. Worse, commodity cloud queues (SQS, most Pub/Sub)
+simply can't enrol in a DB transaction at all — there's no XA to join. The **transactional outbox**
+is the standard substitute: the processor writes the outbound event into an `outbox` table *in the
+same local DB transaction* as the state change, so both commit or neither does — one ordinary local
+commit, no distributed coordinator. A separate relay then reads the outbox and publishes to the
+broker with at-least-once delivery. You've converted a distributed commit into (local commit) +
+(idempotent relay), which is why outbox always travels with idempotent consumers.
+
 **Trade-offs / when to use.** Gives the strongest processing guarantee and consistency, but requires
 resources that can participate in a transaction and adds coordination cost/latency; distributed
 transactions across heterogeneous cloud services are often impractical (hence outbox + idempotency).
@@ -404,10 +464,52 @@ This guarantees no message is lost to a crashed processor — i.e. **at-least-on
 by construction it can process a message **more than once** (slow worker + timeout expiry), so it
 must be paired with an **Idempotent Processor**.
 
+**Worked example — watch the clock cause a duplicate.** Visibility timeout is set to **30s**; the
+message legitimately takes **45s** to process (a slow-but-not-crashed worker):
+
+```
+t=0s    Worker A receives msg M. Broker hides M for 30s (invisible to others).
+t=30s   Timeout expires. A is still working (only 30 of 45s done) but hasn't acked.
+        → Broker makes M visible again.
+t=31s   Worker B receives the very same M. Now A and B are both processing M.  ⚠️
+t=45s   Worker A finishes, calls DeleteMessage(M) → M removed.
+t=76s   Worker B finishes its copy (started t=31, +45s), calls DeleteMessage(M)
+        → already gone; B's work already ran. The job executed TWICE.
+```
+
+Nobody crashed — a timeout shorter than the real processing time was enough to double-execute. Two
+fixes, usually both: **(a)** set the visibility timeout above the **p99** processing time (e.g. 90s,
+not 30s) so honest slow workers finish before M reappears; **(b)** make the handler **idempotent**
+(dedup on message id / idempotency key) so the second run is a harmless no-op even if the timeout is
+ever exceeded. This is precisely why timeout-based processing is *at-least-once* and must be paired
+with an **Idempotent Processor** — you can shrink the duplicate window but never fully close it.
+
+```mermaid
+sequenceDiagram
+  participant Q as Queue (broker)
+  participant A as Worker A
+  participant B as Worker B
+  A->>Q: receive M (t=0)
+  Note over Q: M hidden for 30s
+  Note over A: processing (needs 45s)
+  Q-->>Q: t=30 timeout expires → M visible again
+  B->>Q: receive M (t=31)
+  Note over B: processing the SAME M
+  A->>Q: DeleteMessage(M) at t=45 (success)
+  Note over B: B still runs to t=76 → work done twice
+```
+
 > [!KEY-TAKEAWAY]
 > This is exactly how SQS/Service-Bus visibility-timeout consumers work: receive → (message hidden)
 > → process → delete. Miss the timeout and the message comes back. Hence "at-least-once, so be
 > idempotent."
+
+> [!WARNING]
+> **Poison messages loop forever.** If a message *always* fails (bad payload, unhandled exception),
+> timeout-based redelivery keeps handing it back indefinitely, burning worker capacity and blocking
+> progress. The remedy is a **dead-letter queue** with a **maxReceiveCount**: after, say, 5 failed
+> receives the broker moves M to the DLQ instead of redelivering, where you can inspect and replay
+> it out of band. Always pair a visibility-timeout consumer with a DLQ.
 
 **Modern equivalent.** SQS visibility timeout + `DeleteMessage` on success; Azure Service Bus peek-lock
 + complete; Google Pub/Sub ack deadline + `ack()`; RabbitMQ consumer ack with redelivery.

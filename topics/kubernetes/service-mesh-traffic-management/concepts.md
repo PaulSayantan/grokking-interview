@@ -103,6 +103,21 @@ actually flows **proxy → proxy**, and the proxies establish mTLS between thems
   gotcha (see warning). Sidecar **upgrades** require restarting every Pod to pick up a new
   proxy version.
 
+**Putting numbers on the cost (why ambient exists):** representative Envoy-sidecar figures
+are roughly **~0.5–2 ms added p50 latency per proxy hop** and **~40–100 MB RAM + a fraction
+of a vCPU per sidecar** (exact values depend on version, traffic, and tuning).
+
+- *Latency:* a single `checkout → payments` call now traverses **two** proxies — Envoy in
+  the checkout Pod (egress) and Envoy in the payments Pod (ingress) — so it adds ~1–4 ms.
+  A 4-service call chain `A → B → C → D` (3 network calls, **6 proxy traversals**) adds
+  roughly **6 × 0.5 ms ≈ 3 ms up to 6 × 2 ms ≈ 12 ms** of pure proxying to the end-to-end
+  latency, before any app work.
+- *Resource:* in a **500-Pod** cluster, sidecars alone cost about
+  `500 × 50 MB ≈ 25 GB RAM` and `500 × 0.1 vCPU ≈ 50 vCPU` sitting there **whether or not a
+  Pod is sending traffic** — the overhead scales per-Pod, so a mostly-idle fleet still pays
+  it. That fixed per-Pod tax is exactly what ambient mode's per-node ztunnel attacks: cost
+  then scales per-**node** (a few hundred of them) instead of per-**Pod** (thousands).
+
 > [!WARNING]
 > Pre-1.28, sidecars were ordinary containers, so two race conditions bit hard: (1) the app
 > could start **before** the proxy was ready and its early calls failed, and (2) in a Job,
@@ -136,9 +151,15 @@ flowchart LR
   subgraph Node2["Node 2"]
     ztB["ztunnel (DaemonSet)"] --> AppB["app Pod B (no sidecar)"]
   end
-  ztA -- "HBONE mTLS overlay" --> WP["waypoint (optional L7 Envoy)"]
-  WP --> ztB
+  ztA -- "L4/mTLS only (no waypoint)" --> ztB
+  ztA -. "L7 policy path (optional)" .-> WP["waypoint (optional L7 Envoy)"]
+  WP -.-> ztB
 ```
+
+Note the two paths: for pure **L4/mTLS** the traffic goes **ztunnel → ztunnel directly**
+over HBONE (no waypoint in the path); the **waypoint is inserted only** for namespaces that
+opt into L7 features. That is the layered-adoption story — you pay for the waypoint hop only
+where you actually need L7.
 
 This gives a **layered adoption path**: start with no mesh, turn on the secure L4 overlay
 (mTLS + identity) with **zero proxies in your Pods**, then add waypoints only where you need
@@ -164,8 +185,12 @@ once separate components (Pilot, Citadel, Galley). Its jobs:
   them into Envoy **xDS** config, and pushes to every proxy.
 - **Certificate authority (Citadel):** acts as the mesh CA. It issues each workload an
   identity-bearing certificate (a **SPIFFE** SVID encoding the service account, e.g.
-  `spiffe://cluster.local/ns/prod/sa/orders`) and **auto-rotates** it (default ~24h). This
-  is what makes automatic mTLS possible with no app involvement.
+  `spiffe://cluster.local/ns/prod/sa/orders`) and **auto-rotates** it (default ~24h). Certs
+  are delivered and rotated to Envoy over the local xDS stream via **SDS (Secret Discovery
+  Service)** — never written to disk — so a new cert is **hot-reloaded with no proxy
+  restart and no dropped connections**. The short ~24h lifetime is a deliberate trade-off:
+  smaller blast radius if a key leaks, at the cost of more frequent signing load on the CA.
+  This is what makes automatic mTLS possible with no app involvement.
 - **Sidecar injection webhook:** the mutating webhook endpoint used to inject proxies.
 
 ```mermaid
@@ -285,6 +310,28 @@ spec:
             paths: ["/charge"]
 ```
 
+**One authenticated call, on the wire** — trace `checkout` calling `POST /charge` on
+`payments` under the policies above:
+
+1. The **checkout app** makes an ordinary `http://payments/charge` call. It knows nothing
+   about certs or mTLS.
+2. The Pod's **iptables** rules (programmed at inject time) transparently redirect that
+   outbound TCP to the **local checkout Envoy** (Envoy A).
+3. Envoy A opens an **mTLS** connection to the payments Pod's Envoy (Envoy B) and presents
+   checkout's client cert — a **SPIFFE SVID** =
+   `spiffe://cluster.local/ns/prod/sa/checkout`, issued by istiod's CA.
+4. Envoy B **verifies** that cert against the mesh CA (is it signed by our trust root, not
+   expired?), then **extracts the principal** `cluster.local/ns/prod/sa/checkout` from it.
+   It checks the request against the `AuthorizationPolicy`: method `POST` + path `/charge`
+   from principal `sa/checkout` → matches the ALLOW rule → **permit**. (A `GET`, or a call
+   from `sa/reporting`, would hit no ALLOW rule and be **denied by default**.)
+5. Envoy B forwards the now-decrypted request as **plaintext over localhost** to the
+   payments app container. The app sees a normal HTTP request; the identity check and
+   decryption already happened beside it.
+
+So "who is calling" is a **cryptographic ServiceAccount identity**, not a spoofable source
+IP — that is the whole point of zero-trust mTLS.
+
 > [!WARNING]
 > Flipping to `mtls.mode: STRICT` **before every client is meshed** breaks traffic instantly
 > — unmeshed clients (or Prometheus scraping app ports, or a non-mesh health checker) send
@@ -367,12 +414,40 @@ spec:
       maxEjectionPercent: 50
 ```
 
+**Tracing that outlier-detection config** — suppose `ratings` has **4** healthy endpoints
+(pods B1–B4) and B3 goes bad:
+
+- **t=0s** – B3 starts returning 5xx. Envoy keeps load-balancing across all 4.
+- **B3 returns its 5th consecutive 5xx.** At the **next `interval` check (every 10s)** Envoy
+  marks B3 an outlier and **ejects** it — removed from the LB pool for `baseEjectionTime`
+  = **30s**. Traffic now spreads across the remaining **3** pods (B1, B2, B4).
+- **maxEjectionPercent: 50** is the safety cap: with 4 endpoints, Envoy will eject **at most
+  `floor(4 × 50%) = 2`** of them at once. Even if a correlated bug makes B1 *and* B4 also
+  start failing, Envoy stops after ejecting 2 total — it keeps ≥2 pods serving rather than
+  ejecting the whole pool and returning `503 no healthy upstream` to everyone.
+- **t≈30s** – B3's ejection expires; Envoy **re-admits** it and sends it live traffic again.
+- **If B3 fails again**, it's re-ejected and the ejection duration **grows**
+  (~`baseEjectionTime × number-of-times-ejected`: 30s → 60s → 90s …), so a persistently sick
+  pod gets quarantined for longer and longer instead of flapping in and out every 30s.
+
 > [!WARNING]
 > **Retry storms / cascading retries:** if every hop in a call chain retries 3×, a failure
 > at the bottom is amplified exponentially up the stack (3×3×3 = 27 attempts), turning a
 > small blip into a self-inflicted outage. Mitigate with **retry budgets** (Linkerd) or a
 > small `attempts` count, and don't stack retries at every layer. Also cap
 > `maxEjectionPercent` so outlier detection can't eject your whole fleet at once.
+
+**Retry budget vs fixed attempts (a common follow-up).** A fixed `attempts: 3` is
+*per-request* and has no idea how the system as a whole is doing: if every request is
+failing, every request still fires its 3 tries, so 1,000 req/s of real load becomes up to
+3,000 req/s hammering an already-sick backend — the retries amplify the outage. A **retry
+budget** instead caps retries as a **percentage of total requests over a window** — e.g.
+"retries may add at most **20%** extra load." Worked out: at 1,000 req/s the mesh allows
+**~200 retries/s** total; once failures push retries past that ceiling, further retries are
+**dropped**, so retrying self-throttles precisely when the system is unhealthy. Relatedly,
+**deadline/timeout propagation** passes a shrinking remaining-time budget down the call
+chain (A gives B 500 ms; by the time B calls C, only ~380 ms is left), so a downstream hop
+never keeps working on a request the caller has already abandoned.
 
 ---
 

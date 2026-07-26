@@ -414,6 +414,13 @@ when failures cross a threshold, the breaker **opens** and fails fast (or falls 
 of hammering a sick service and exhausting threads. **Resilience4j** is the lightweight,
 functional-programming library that replaced the now-EOL **Netflix Hystrix**.
 
+**Intuition first.** Think of the breaker in your home's fuse box. When current (failures)
+spikes, it trips **OPEN** to protect the wiring (your thread pool / connection pool) rather than
+letting the house burn down (a cascading failure). A **CLOSED** breaker is the normal path —
+current flows. Failing *fast* matters because a caller blocked on a dead dependency holds a
+thread and a connection the whole time it waits; a few thousand of those pile up and take the
+*caller* down too. The breaker frees those resources the instant it opens.
+
 **The three main states:**
 
 | State | Behavior | Transition |
@@ -452,6 +459,40 @@ public Order fallback(Long id, Throwable t) { return Order.cached(id); }
   not just exceptions.
 - Fallback method must have the **same signature plus a trailing `Throwable`/exception param**
   and matching return type. You can register `recordExceptions` / `ignoreExceptions`.
+
+**Worked example — the state machine with the config above.** Using
+`sliding-window-type=COUNT_BASED`, `sliding-window-size=10`, `minimum-number-of-calls=5`,
+`failure-rate-threshold=50`, `permitted-number-of-calls-in-half-open-state=3`,
+`wait-duration-in-open-state=10s`. Watch the numbers drive each transition:
+
+| Call | Outcome | Window (F/total) | Rate evaluated? | State after |
+|---|---|---|---|---|
+| 1 | FAIL | 1/1 | no — need ≥ 5 calls | CLOSED |
+| 2 | OK | 1/2 | no | CLOSED |
+| 3 | FAIL | 2/3 | no | CLOSED |
+| 4 | FAIL | 3/4 | no | CLOSED |
+| 5 | OK | 3/5 | **yes → 3/5 = 60% ≥ 50%** | **OPEN** |
+
+- Calls 1–4 can *never* trip the breaker, no matter how many fail — `minimumNumberOfCalls=5`
+  means the failure rate simply isn't computed until 5 calls are recorded. This is the guard
+  against opening on a 1-out-of-1 fluke.
+- On call 5 the window holds 3 failures out of 5 = **60% ≥ 50%**, so the breaker trips **OPEN**.
+- For the next **10 s** every call is rejected instantly with `CallNotPermittedException`
+  (fallback runs) — the dependency gets zero traffic and the caller's threads stay free.
+- After 10 s the breaker doesn't move on its own (default
+  `automaticTransitionFromOpenToHalfOpenEnabled=false`) — the **next call** flips it to
+  **HALF_OPEN**. It admits exactly 3 trial calls. Say they come back OK, FAIL, OK → **1/3 = 33%
+  < 50%**, so the breaker returns to **CLOSED**. Had 2 of the 3 failed (67% ≥ 50%) it would snap
+  back to **OPEN** for another 10 s.
+
+**COUNT_BASED vs TIME_BASED — same `sliding-window-size=10`, very different denominator.**
+Suppose a 1-second burst of 400 calls, of which 40 fail:
+- **COUNT_BASED (last 10 calls):** only the most recent 10 outcomes count. If the last 10 happen
+  to be all failures, rate = 10/10 = 100% → OPEN, even though system-wide only 10% failed.
+- **TIME_BASED (last 10 seconds):** all 400 calls in the window count — rate = 40/400 = 10% <
+  50% → stays CLOSED.
+  Under bursty load a count window reacts to a short unlucky streak; a time window reflects the
+  true rate over the interval. Pick TIME_BASED when call volume swings wildly.
 
 **Advanced gotchas.**
 - Resilience4j is built on **decorators / functional interfaces** and is far lighter than
@@ -532,6 +573,32 @@ resilience4j.thread-pool-bulkhead.instances.orderService:
 resilience4j.timelimiter.instances.orderService:
   timeout-duration: 2s
 ```
+
+**Worked example — the retry backoff sequence.** With `max-attempts=3`, `wait-duration=200ms`,
+`enable-exponential-backoff=true`, `exponential-backoff-multiplier=2`:
+- `max-attempts=3` = **1 initial call + 2 retries** (it is the total, not "retries on top").
+- Waits between attempts: attempt 1 fails → wait **200 ms** → attempt 2 fails → wait
+  **200 × 2 = 400 ms** → attempt 3. Total added latency before giving up ≈ **600 ms** (plus the
+  three call durations).
+- Wall-clock if each call takes 50 ms and all fail: `50 + 200 + 50 + 400 + 50 = 750 ms` before
+  the caller sees the failure.
+- Add `enable-randomized-wait` (jitter) and each wait becomes 200 ms and 400 ms **±** a random
+  fraction, so 1 000 clients that all failed at the same instant don't re-fire in lockstep
+  (that synchronized re-fire is the *thundering herd*). Without jitter, all 1 000 hit the backend
+  again at exactly +200 ms, then +600 ms — recreating the spike that caused the failure.
+
+**Worked example — one rate-limiter cycle.** With `limit-for-period=100`, `limit-refresh-period=1s`,
+`timeout-duration=0`:
+- The limiter grants **100 permits per 1-second cycle**. Requests 1–100 arriving within the same
+  second each take a permit and pass.
+- Request **101** in that same second finds no permit. Because `timeout-duration=0`, it does
+  **not** wait — it fails immediately with `RequestNotPermitted` (map this to HTTP **429**).
+- At the cycle boundary the permit count resets to 100, so the next second's first 100 requests
+  pass again.
+- Change `timeout-duration=250ms`: request 101 now *blocks* up to 250 ms for the next cycle to
+  begin. If the fresh cycle starts within that budget it gets a permit and proceeds; if the wait
+  would exceed 250 ms it fails with `RequestNotPermitted`. This is the knob between "reject
+  instantly" and "briefly queue for the next window".
 
 **Advanced gotchas.**
 - **Rate limiter vs bulkhead:** rate limiter bounds *calls per unit time*; bulkhead bounds
@@ -652,6 +719,33 @@ Order saga (orchestration):
   on failure of any step, run compensations in reverse:
     releaseInventory -> releaseCredit -> rejectOrder
 ```
+
+**Worked example — a failure that fires compensations, with the pivot marked.** Take the order
+saga above and let `reserveInventory` fail (out of stock):
+
+```
+Step 1  createOrder(PENDING)   OK    [compensatable]
+Step 2  reserveCredit          OK    [compensatable]  <- $50 hold placed on the card
+Step 3  reserveInventory       FAIL  (no stock)
+        --- orchestrator now unwinds completed steps in REVERSE ---
+Step 3c (nothing to undo: step 3 never took effect)
+Step 2c releaseCredit          OK    <- $50 hold released
+Step 1c rejectOrder(REJECTED)  OK
+```
+
+Result: no money held, order ends REJECTED, no partial state. Now mark the **pivot**. Say
+`reserveCredit` is the go/no-go commit — once the card is actually *charged* (not just held), the
+saga must complete **forward**. If instead the flow were
+`... → chargeCard (PIVOT) → reserveInventory → shipOrder` and `shipOrder` failed, you would
+**not** run a compensation to un-charge — `shipOrder` is a *retriable* post-pivot step, so the
+orchestrator retries it forward until it succeeds (idempotently). Treating a post-pivot step as
+compensatable is exactly how you end up refunding a customer whose item actually shipped.
+
+The **ABA / late-success race** rides on this same trace: suppose `reserveCredit` is slow, the
+orchestrator times out and fires `releaseCredit`, and *then* the original `reserveCredit`
+finally succeeds — now credit is reserved with no saga tracking it. The `PENDING` semantic lock
+guards this: `releaseCredit` and the late `reserveCredit` both check the order status, and the
+one that finds an inconsistent state (order already REJECTED) becomes a no-op.
 
 **Intermediate & advanced.**
 - **Compensations are semantic, not rollbacks** — you can't "un-send" an email; you send an

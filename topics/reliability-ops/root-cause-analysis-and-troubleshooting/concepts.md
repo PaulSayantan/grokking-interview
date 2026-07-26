@@ -319,7 +319,23 @@ flowchart TD
 FTA shines for **quantifying** reliability: assign each basic event a probability and you can
 compute the top event's probability, and identify **minimal cut sets** (the smallest sets of
 failures that together bring the system down). A cut set of size 1 is a single point of failure and
-your highest-priority fix. It's heavier-weight than 5 Whys — used more for *proactive* design
+your highest-priority fix.
+
+**Worked example — numbers on the tree above.** Give the three basic events per-interval failure
+probabilities: P(payment down) = 0.01, P(primary region fails) = 0.02, P(failover fails) = 0.05.
+
+- The **AND gate** (region loss) needs *both* children: P = 0.02 × 0.05 = **0.001**. Redundancy did
+  its job — the pair is 20× less likely than the primary region failing alone (0.02).
+- The **top OR gate** fires if payment is down *or* the region pair is lost:
+  P(top) = 0.01 + 0.001 − (0.01 × 0.001) ≈ **0.011** (~1.1% per interval).
+- **Minimal cut sets:** `{payment down}` (size 1) and `{primary fails, failover fails}` (size 2).
+  The size-1 set is a **single point of failure**, and the arithmetic proves it dominates: payment
+  alone contributes 0.01 of the 0.011 top probability — ~91% of the risk — while the whole
+  redundant region path contributes only 0.001. So the fix that buys the most availability is
+  removing the *payment* SPOF (add redundancy there), not hardening the already-redundant region
+  path. FTA turns "which fix matters?" from opinion into a ranked number.
+
+It's heavier-weight than 5 Whys — used more for *proactive* design
 review and safety-critical systems than for a 2 a.m. incident — but conceptually it's the rigorous
 form of "what would have to fail for this to happen?"
 
@@ -616,8 +632,25 @@ Rule of thumb: symptom-side, user-facing → RED/golden; resource-side, "what's 
 one signal common to the resource views and the golden set is **Saturation**, and it's the
 **leading indicator** — it climbs *before* errors and severe latency, so it predicts the cliff.
 This ties to **Little's Law** (L = λW): as utilization → 1, queue length and wait time → ∞, so a
-saturating resource forecasts the latency blow-up before it happens (cross-ref cascading-failures;
-the Little's-Law mechanism is worked in the golden-signals section above).
+saturating resource forecasts the latency blow-up before it happens. Concretely, for a simple
+queue the mean wait scales like 1/(1−ρ) in utilization ρ, so going from ρ = 0.5 to 0.9 to 0.99
+multiplies waiting time roughly 2× → 10× → 100× — which is why the last few percent of saturation
+detonate latency and why saturation leads errors (cross-ref cascading-failures).
+
+**Worked example — the saturation cliff in milliseconds.** Take one thread-pool worker whose raw
+service time is 10 ms per request. Mean time-in-system (service + queue wait) scales as
+serviceTime / (1 − ρ):
+
+- ρ = 0.50 (pool half busy): 10 / (1 − 0.50) = 10 / 0.50 = **20 ms**.
+- ρ = 0.90: 10 / (1 − 0.90) = 10 / 0.10 = **100 ms** — utilization rose 1.8×, latency rose 5×.
+- ρ = 0.99: 10 / (1 − 0.99) = 10 / 0.01 = **1000 ms** — the last 9 points of utilization added
+  another 10× on top.
+
+Notice the trap: between ρ = 0.5 and 0.9 latency barely moved on a dashboard's linear scale (20→100
+ms), lulling you — then the same-sized *utilization* step from 0.9 to 0.99 blew latency to a full
+second. That non-linearity is exactly why **saturation is the leading indicator**: the utilization
+metric climbs smoothly and warns you at ρ = 0.9 that you are one small traffic bump from the cliff,
+whereas the latency graph looks "fine" until it suddenly isn't.
 
 ---
 
@@ -661,6 +694,19 @@ for exactly this. The temporal metrics RCA feeds:
 - **MTBF — Mean Time Between Failures.** Reliability of the component over its lifetime;
   Availability ≈ MTBF / (MTBF + MTTR), so cutting MTTR raises availability even if failures
   can't be prevented (cross-ref: nines math in slos-error-budgets).
+
+**Worked example — why cutting MTTR alone buys nines.** Say a service fails on average once a
+month: MTBF = 30 days = 720 hours. Compare two recovery postures with the *same* failure rate:
+
+- MTTR = 6 h (manual diagnosis, hand-rolled recovery): A = 720 / (720 + 6) = **0.99174 → 99.17%**,
+  i.e. (1 − 0.99174) × 8760 ≈ **72 hours of downtime per year**.
+- MTTR = 1 h (SLI alerting + one-click rollback): A = 720 / (720 + 1) = **0.99861 → 99.86%**,
+  i.e. 0.00139 × 8760 ≈ **12 hours per year**.
+
+You never touched MTBF — the thing still breaks once a month — yet cutting MTTR 6×→1× cut annual
+downtime ~6× (72 h → 12 h) and moved you from "two nines" toward "three nines." That is the whole
+argument for investing in fast detection and rollback: *recovery time is a first-class availability
+lever, independent of preventing the break.*
 
 The senior move on "how would you cut MTTD/MTTR for this class of incident?": attack **detection**
 (better SLI-based alerting so you find it in minutes not hours — see observability), **diagnosis**

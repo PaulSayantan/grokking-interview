@@ -86,6 +86,10 @@ ops burden but reduces control and can increase per-unit cost and lock-in.
 
 ## Operational excellence pillar
 
+**Intuition.** Can you deploy, observe, and recover with confidence — and does every incident
+make you better next time? This pillar is about the *machinery around* the workload (pipelines,
+runbooks, dashboards, post-mortems), not the workload itself.
+
 **Definition.** The ability to run and monitor systems to deliver business value and
 continually improve supporting processes and procedures. Design principles: **perform
 operations as code** (IaC via CloudFormation/CDK/Terraform), **make frequent small reversible
@@ -107,6 +111,10 @@ custom metrics/logs ingestion is a real bill line).
 
 ## Security pillar
 
+**Intuition.** Assume breach and shrink the blast radius: prove *who* is acting (identity),
+limit *what* they can touch (least privilege), record *everything* (traceability), and make
+data useless if stolen (encryption). Most incidents are misconfiguration, not broken crypto.
+
 **Definition & principles.** Protect data, systems, and assets. Principles: **implement a
 strong identity foundation** (least privilege, centralized identity, avoid long-lived creds),
 **enable traceability** (CloudTrail, Config, GuardDuty), **apply security at all layers**
@@ -126,6 +134,26 @@ matters. Customer-managed KMS keys give you control, key policies, and rotation 
 add per-key monthly cost and per-request charges; AWS-managed keys are free-ish but you cannot
 control their policy or disable them. Envelope encryption (KMS wraps data keys) is the pattern
 that makes KMS scale — you never bulk-encrypt through KMS directly.
+
+**Worked example — envelope encryption, step by step.** Say you must encrypt a 500 MB object.
+Why not `kms:Encrypt` the whole thing? Because KMS `Encrypt` accepts at most **4 KB** of
+plaintext, is rate-limited (single-digit thousands of req/s per Region, shared), and bills per
+request — streaming 500 MB through it is impossible and would be slow and costly. Instead:
+
+1. **Generate.** Call `GenerateDataKey` against your CMK. KMS returns **two** things: a
+   *plaintext* data key (DEK, e.g., a 256-bit AES key) and the *same* DEK *encrypted* under the
+   CMK (the "wrapped" DEK, a small ciphertext).
+2. **Encrypt locally.** Use the plaintext DEK to AES-encrypt the full 500 MB **on your own
+   compute** — fast, no KMS involved, no size limit.
+3. **Store + discard.** Write the ciphertext object, and store the *encrypted* DEK next to it
+   (in object metadata). Then **wipe the plaintext DEK from memory** — nothing that can decrypt
+   the data is left in the clear at rest.
+4. **Decrypt on read.** Fetch the object + its wrapped DEK, call `kms:Decrypt` **once** on the
+   tiny wrapped DEK to recover the plaintext DEK, then AES-decrypt the 500 MB locally.
+
+So no matter how big the payload, KMS handles only one small fixed-size key per object. That is
+exactly what SSE-KMS on S3 does under the hood, and it's why "why not encrypt everything
+directly with KMS?" has a crisp answer: throughput limits, the 4 KB cap, and per-request cost.
 
 ---
 
@@ -156,9 +184,31 @@ Multi-AZ is the standard reliability floor; multi-Region is for the top nines an
 improve success but can cause retry storms/metastable failures — always add backoff, jitter,
 and circuit breakers.
 
+**Worked example — where the "nines" come from and how to compose them.** This is the
+arithmetic interviewers make you do live, so practice it numbers-in → numbers-out.
+
+1. *Deriving the table.* A year is `365 × 24 = 8,760` hours. "Three nines" (99.9%) means you
+   tolerate `0.1%` downtime: `0.001 × 8,760 h = 8.76 h/yr`. Four nines: `0.0001 × 8,760 h ×
+   60 = 52.6 min/yr`. Five nines: `0.00001 × 8,760 × 60 = 5.26 min/yr`. Now the memorized
+   table isn't magic — you can regenerate any row.
+2. *Components in series (multiply).* A request must pass through an ALB (99.99%), an EC2 tier
+   in an ASG, and RDS Multi-AZ (99.95%). Independent components in the request path multiply:
+   `A_total = 0.9999 × 0.9995 × 0.9999 ≈ 0.99930`, i.e. **99.93%**, or `0.0007 × 8,760 ≈ 6.1
+   h/yr` of downtime. Note the total is **worse than the weakest link** — and the weak link
+   here is RDS at 99.95%. Spending effort hardening the 99.99% ALB is wasted; fix RDS first.
+3. *Redundancy in parallel (the complement rule).* Put `n` independent replicas behind the LB
+   and the tier is down only if **all** fail: `A = 1 − (1 − a)^n`. Three EC2 instances at 99%
+   each: `1 − (0.01)^3 = 1 − 0.000001 = 0.999999` → **six nines (99.9999%)** for that tier.
+   This is why horizontal redundancy is the cheapest reliability lever — the *unavailability*
+   shrinks geometrically, so a few mediocre instances beat one gold-plated one.
+
 ---
 
 ## Performance efficiency pillar
+
+**Intuition.** Match the tool to the access pattern and let the platform scale for you, instead
+of over-provisioning "just in case." The cheapest way to be fast is usually to stop doing work
+(cache, offload to edge, pick the right storage engine) rather than buy a bigger box.
 
 **Definition & principles.** Use computing resources efficiently to meet requirements and
 maintain that efficiency as demand changes. Principles: **democratize advanced tech** (use
@@ -179,6 +229,10 @@ latency and offloads the origin but introduces staleness/invalidation complexity
 ---
 
 ## Cost optimization pillar
+
+**Intuition.** You pay for what you forget to turn off. Winning is mostly attribution
+(tag everything so cost has an owner), right-sizing, and matching how you *buy* capacity to your
+utilization curve — not shaving pennies off a unit price while an idle fleet runs all weekend.
 
 **Definition & principles.** Avoid unnecessary cost. Principles: **implement cloud financial
 management (FinOps)**, **adopt a consumption model** (pay for what you use), **measure overall
@@ -203,6 +257,11 @@ don't need.
 ---
 
 ## Sustainability pillar
+
+**Intuition.** Every idle CPU still burns carbon, so the greenest architecture is a
+well-utilized one — the same instinct as cost optimization, applied to watts instead of dollars.
+Do more useful work per provisioned resource, and lean on efficient hardware and shared
+managed services.
 
 **Definition & principles.** Minimize the environmental impact of running cloud workloads
 (added as the 6th pillar in 2021). Principles: **understand your impact**, **establish
@@ -261,6 +320,26 @@ and session policies.
 **Evaluation logic:** **explicit deny > allow > implicit deny (default)**. Access is granted
 only if some policy allows it AND no policy (including SCP/boundary) denies it. This is the
 #1 IAM interview fact.
+
+**Worked example — trace the SCP-vs-identity scenario.** Question: *"An SCP on the account
+denies `s3:*`, but the role's identity policy explicitly allows `s3:GetObject`. Can the role
+read the object?"* Walk the evaluation as a pipeline; the request starts **denied** and every
+gate must pass:
+
+1. **Implicit deny (start).** No policy has spoken yet → default is DENY.
+2. **Identity policy.** The role policy `Allow s3:GetObject` → flips the running verdict to
+   *allow* (an Allow can only overturn an *implicit* deny, never an explicit one).
+3. **SCP (Organizations boundary).** The SCP `Deny s3:*` is an **explicit deny**. An SCP never
+   grants — it only caps — and explicit deny wins over any allow. → **DENY**.
+4. **Net result: DENY.** The role cannot read the object. The identity Allow is irrelevant
+   once a boundary denies; you must remove/adjust the SCP, because no identity policy can
+   "out-allow" it. This is why SCP misconfigurations produce baffling "access denied" errors
+   that editing the role's own policy will never fix.
+
+Contrast — **cross-account via a resource-based policy.** Account A's role wants `s3:GetObject`
+on a bucket in Account B. Here **both sides must allow**: A's identity policy must allow the
+action *and* B's bucket policy must allow A's principal. (Same-account resource policies are
+OR'd with identity policies; *cross*-account is an AND — each account independently opts in.)
 
 **Best practices:** prefer **IAM roles over long-lived access keys** (roles vend temporary
 STS credentials); don't use the **root** account (enable MFA, lock it away); use **IAM
@@ -372,7 +451,7 @@ The interview trick: translate a generic design into AWS and back. Know the mapp
 | Relational DB | RDS / Aurora | Aurora: storage auto-grows to 128 TB, 15 read replicas |
 | Serverless NoSQL KV | DynamoDB | 400 KB item, single-digit ms, partition 3000 RCU/1000 WCU |
 | In-memory cache | ElastiCache (Redis/Memcached), DAX | |
-| Message queue (buffer) | SQS | standard (near-unlimited TPS, at-least-once, best-effort order) vs FIFO (exactly-once processing, ordered, 300 msg/s or 3000 with batching per API action) |
+| Message queue (buffer) | SQS | standard (near-unlimited TPS, at-least-once, best-effort order) vs FIFO (exactly-once processing, ordered, ~300 msg/s default or 3,000 with batching per API action; **FIFO high-throughput mode** raises this to thousands/s per partition) |
 | Pub/sub fan-out | SNS, EventBridge | EventBridge = event bus + routing + schema registry |
 | Streaming log | Kinesis Data Streams, MSK | shard: 1 MB/s or 1000 rec/s in, 2 MB/s out |
 | Serverless compute | Lambda | 15 min max, 10 GB memory, 10 GB ephemeral /tmp, 6 MB sync payload |
@@ -402,6 +481,39 @@ The interview trick: translate a generic design into AWS and back. Know the mapp
 - ALB vs NLB: **ALB = L7** (content-based routing, TLS, WebSocket) higher latency; **NLB = L4**
   (TCP/UDP, static IP, lowest latency, extreme scale, preserves source IP).
 
+**Worked example — DynamoDB capacity and the hot-partition ceiling.** Workload: read a **5 KB**
+item **8,000 times/s**, eventually consistent. Turn that into capacity units and partitions:
+
+1. **Round item size to read units.** RCUs are billed in **4 KB** blocks, rounded **up**:
+   `ceil(5 / 4) = 2` blocks. So one *strongly*-consistent read of this item costs 2 RCU.
+2. **Apply the consistency discount.** 1 RCU = one strongly-consistent 4 KB read/s = **two**
+   eventually-consistent reads/s. Eventually consistent, so halve: this read costs `2 / 2 = 1
+   RCU` each.
+3. **Total throughput.** `8,000 reads/s × 1 RCU = 8,000 RCU`.
+4. **Partitions.** Each partition caps at **3,000 RCU**. `ceil(8,000 / 3,000) = 3` partitions —
+   *if the load spreads evenly*. DynamoDB distributes by partition-key hash, so with a
+   high-cardinality key (e.g., `userId`) the 8,000 RCU splits ~2,667 per partition: fine.
+5. **The hot-partition trap.** Now suppose 40% of traffic hits one celebrity key:
+   `0.40 × 8,000 = 3,200 RCU` funnels into that **single** partition. 3,200 > 3,000 → that
+   partition throttles (`ProvisionedThroughputExceeded`) even though total table capacity is
+   ample. Fixes: write-shard the hot key (`celeb#0..N`), or front it with DAX. This is the
+   "what breaks first as you scale" answer interviewers fish for.
+
+**Worked example — Lambda concurrency (Little's Law) and the Fargate break-even.** Concurrency
+is just Little's Law: `concurrent executions = arrival rate × avg duration`.
+
+1. **Concurrency.** 500 req/s, each running 200 ms: `500 × 0.2 s = 100` concurrent executions —
+   comfortably under the **1,000** default regional limit, so no throttling. (At 6,000 req/s
+   you'd need 1,200 concurrent and would hit the ceiling → request a limit increase or you get
+   `TooManyRequestsException`.)
+2. **When does always-on Fargate win?** Lambda bills per-request + per GB-second, which is
+   ideal for spiky/low-utilization but adds up under *sustained* load. At a steady 500 req/s,
+   200 ms, 512 MB: `500 × 2.6M s/month ≈ 1.3B` invocations, ~`130M` GB-s → **roughly
+   $2,400/month**. A Fargate fleet sized for the same steady 100-way concurrency runs
+   continuously and costs on the order of **$1,000/month** — cheaper because you pay for
+   provisioned capacity at high utilization instead of per-request. **The break-even is high,
+   steady utilization**: spiky/idle → Lambda; flat and busy → Fargate/EC2 (with Savings Plans).
+
 ---
 
 ## Trade-offs and when to use what
@@ -420,8 +532,10 @@ The interview trick: translate a generic design into AWS and back. Know the mapp
 - **SQS** (queue, point-to-point, buffering, one consumer group) vs **SNS** (pub/sub fan-out,
   push) vs **EventBridge** (event bus, content-based routing, 3rd-party/SaaS integration,
   schema registry) vs **Kinesis** (ordered replayable stream, multiple independent consumers,
-  ordered per-shard, replay window). SQS FIFO for strict ordering + exactly-once processing
-  but capped at 3,000 msg/s; use standard SQS + idempotent consumers for higher scale.
+  ordered per-shard, replay window). SQS FIFO for strict ordering + exactly-once processing;
+  the default is ~3,000 msg/s (with batching), and **FIFO high-throughput mode** lifts that to
+  thousands of msg/s per message-group/partition. For very high scale, still consider standard
+  SQS + idempotent consumers (unbounded throughput) or Kinesis.
 - Common pattern: **SNS → multiple SQS** (fan-out with durable per-consumer buffering).
 
 **Data stores:**
@@ -454,23 +568,65 @@ graceful degradation?)? **Control-plane unavailable** (is your failover statical
 
 ## Common interview follow-up questions
 
-- "You said multi-AZ — walk me through exactly what fails and how the system recovers if
-  `us-east-1a` goes dark. What's the data loss (RPO) and recovery time (RTO)?"
-- "This is single-Region. When would you go multi-Region, and which of the four DR patterns
-  would you pick given a 5-minute RTO and 1-second RPO budget?"
-- "Why DynamoDB over Aurora here? What breaks first as you scale — and what's the hot-partition
-  story?"
-- "SQS or Kinesis for this? What if you need to replay events, or need multiple independent
-  consumers?"
-- "Lambda everywhere — at what traffic level does always-on Fargate/EC2 become cheaper, and why?"
-- "Walk me through IAM policy evaluation. An SCP denies `s3:*` but the role policy allows it —
-  can the role access S3?"
-- "Why separate AWS accounts instead of one? What's the blast-radius argument, and how do you
-  connect them?"
-- "Your design calls CreateXxx APIs during failover. Why is that a static-stability
-  anti-pattern?"
-- "Where does the shared-responsibility line sit for RDS vs EC2 vs Lambda? Who patches the OS?"
-- "How would cell-based architecture and shuffle sharding reduce blast radius here?"
+Each question below is followed by *what a strong answer hits* — use them to self-check.
+
+- **"You said multi-AZ — walk me through exactly what fails and how the system recovers if
+  `us-east-1a` goes dark. What's the RPO/RTO?"**
+  - ELB health checks fail the targets in `1a` and stop routing to them; the ASG detects the
+    shortfall and launches replacements in a healthy AZ (`1b`/`1c`).
+  - RDS Multi-AZ flips DNS to the synchronous standby in another AZ — failover typically
+    **~60–120 s** (seconds on Aurora / Multi-AZ cluster).
+  - **RPO ≈ 0** (standby is synchronous, no committed data lost); **RTO** ≈ the failover window
+    above. Call out that pre-provisioned capacity across AZs is what makes this *statically
+    stable* — no control-plane calls needed mid-incident.
+- **"When would you go multi-Region, and which of the four DR patterns for a 5-min RTO /
+  1-sec RPO budget?"**
+  - Go multi-Region only after confirming multi-AZ can't meet the SLO (regulatory DR, Region
+    blast-radius, global latency). 
+  - 5-min RTO rules out Backup & Restore (hours) and Pilot Light (10s of min); 1-sec RPO needs
+    continuous replication → **Warm Standby** (scaled-down live copy, scale up on failover).
+    Active-active also qualifies but is overkill/expensive for a 5-min RTO.
+- **"Why DynamoDB over Aurora? What breaks first as you scale — the hot-partition story?"**
+  - DynamoDB for known access patterns, single-digit-ms at massive scale, serverless ops;
+    Aurora when you need joins/ad-hoc queries/transactions.
+  - What breaks first: a **hot partition** — skewed keys funnel >3,000 RCU/1,000 WCU into one
+    partition and throttle while the table has spare capacity. Fix: high-cardinality/ write-
+    sharded keys, DAX for hot reads.
+- **"SQS or Kinesis? What about replay or multiple independent consumers?"**
+  - SQS = work queue: a message is consumed and deleted, one logical consumer group, no replay.
+  - Kinesis = ordered, **replayable** log with a retention window; **multiple** independent
+    consumers each read at their own offset (per-shard ordering). Need replay/fan-out to
+    independent readers → Kinesis (or SNS→SQS for durable fan-out without ordering).
+- **"Lambda everywhere — at what traffic does always-on Fargate/EC2 get cheaper?"**
+  - Lambda bills per-request + GB-s: unbeatable for spiky/idle, but per-request cost dominates
+    under sustained load. Break-even is **high, steady utilization** (see the Lambda vs Fargate
+    worked example: ~$2,400/mo Lambda vs ~$1,000/mo Fargate at a flat 500 req/s). Flat & busy →
+    Fargate/EC2 with Savings Plans; bursty → Lambda.
+- **"IAM policy evaluation — SCP denies `s3:*` but the role allows it. Can the role access S3?"**
+  - **No.** Explicit deny > allow > implicit deny; an SCP is a ceiling that only limits, and its
+    explicit deny beats the identity Allow → net DENY (see the traced IAM example). Editing the
+    role policy won't help; you must change the SCP.
+- **"Why separate AWS accounts instead of one? Blast radius, and how do you connect them?"**
+  - The account is the strongest natural isolation/billing/quota boundary: it caps breach blast
+    radius, gives clean cost attribution, and stops one app exhausting another's quotas.
+  - Stitch them with Organizations + OUs/SCPs, Identity Center for humans, cross-account IAM
+    roles for workloads, and Transit Gateway/VPC peering/RAM for networking.
+- **"Your design calls `CreateXxx` APIs during failover — why is that a static-stability
+  anti-pattern?"**
+  - The **control plane** (provisioning) is less reliable and often *correlated* with the very
+    outage you're failing over from. Depending on it mid-incident means failover fails exactly
+    when you need it. Fix: pre-provision standby capacity and shift traffic via data-plane
+    mechanisms (Route 53 health checks), so recovery uses resources that already exist.
+- **"Shared-responsibility line for RDS vs EC2 vs Lambda — who patches the OS?"**
+  - EC2: **you** patch the guest OS (or via SSM Patch Manager). RDS: **AWS** patches OS + DB
+    engine; you own schema/queries/credentials. Lambda: **AWS** owns everything up to the
+    runtime; you own code + IAM + data. In *all* models IAM, data classification, and access
+    control stay yours.
+- **"How would cell-based architecture and shuffle sharding reduce blast radius here?"**
+  - Cells: partition users into independent full-stack copies so a bad deploy/poison-pill hits
+    only one cell, not the fleet. Shuffle sharding: assign each customer a *random subset* of
+    workers so few customers share the exact same set — one abusive/failing tenant degrades
+    only its overlapping shards, not everyone.
 
 ## References
 

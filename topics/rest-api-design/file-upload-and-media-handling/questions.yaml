@@ -47,9 +47,9 @@ questions:
       Beyond the ~33% size increase, what is the other major drawback of sending
       files as base64 strings inside a JSON body?
     options:
-      - "JSON cannot represent string values at all"
-      - "Base64 corrupts binary data"
-      - "It is not supported by any HTTP client"
+      - "JSON parsers cannot represent string values longer than 64 KB, so the encoded file is truncated"
+      - "Base64 silently corrupts binary data in transit unless a per-chunk checksum is attached"
+      - "It is not supported by any mainstream HTTP client library without a custom binary codec plugin"
       - "It typically forces the whole file to be buffered and decoded in memory, defeating streaming"
     answer: 3
     explanation: |
@@ -68,10 +68,10 @@ questions:
       with Content-Type set to the file's own type. What is the main limitation
       of this raw-body approach compared to multipart/form-data?
     options:
-      - "It adds ~33% encoding overhead"
+      - "It adds roughly 33% encoding overhead because the raw body is base64-wrapped first"
       - "It cannot carry accompanying form fields in the same request"
-      - "It cannot be streamed"
-      - "It only works over HTTP/2"
+      - "It cannot be streamed and must be fully buffered in server memory before being stored"
+      - "It only works over HTTP/2 connections because raw bodies require multiplexed frames"
     answer: 1
     explanation: |
       A raw body IS the file, so there is no place for extra form fields — you
@@ -87,10 +87,10 @@ questions:
       Why should an upload handler stream the request body in bounded chunks
       instead of reading the whole file into a byte array?
     options:
-      - "Streaming is required by the HTTP spec for all POSTs"
-      - "Byte arrays cannot hold binary data"
+      - "Streaming is required by the HTTP spec for every POST request that carries a body"
+      - "Byte arrays cannot hold arbitrary binary data because the JVM stores them as UTF-8 text"
       - "Buffering the whole file makes memory use scale with file size, risking out-of-memory failures under concurrency"
-      - "Streaming automatically encrypts the file"
+      - "Streaming automatically encrypts the file with AES as each chunk passes through"
     answer: 2
     explanation: |
       If each request buffers its whole file, memory use is O(file size) per
@@ -106,9 +106,9 @@ questions:
       You must compute a SHA-256 checksum of each uploaded file for integrity.
       How do you do this without buffering the whole file in memory?
     options:
-      - "Read the entire file into a byte array first, then hash it"
-      - "Base64-encode the file so it fits in memory"
-      - "Checksums require the full file in RAM, so buffering is unavoidable"
+      - "Read the entire file into a byte array first, then run the hash over that array"
+      - "Base64-encode the file so its smaller text form fits entirely in memory, then hash it"
+      - "Checksums require random access to the full file in RAM, so buffering it whole is unavoidable"
       - "Feed the bytes through the hash function incrementally as they stream past"
     answer: 3
     explanation: |
@@ -126,9 +126,9 @@ questions:
       storage using a pre-signed URL instead of proxying bytes through your API?
     options:
       - "The large byte stream never transits your app servers, offloading bandwidth and CPU"
-      - "It lets the API scan every byte inline"
-      - "It removes the need for any authentication"
-      - "It stores the file inside your database automatically"
+      - "It lets the API scan every byte inline as the upload passes through the app tier"
+      - "It removes the need for any authentication because the storage bucket becomes public"
+      - "It stores the file inside your primary relational database automatically as a BLOB column"
     answer: 0
     explanation: |
       With a pre-signed URL the client uploads client-to-storage directly, so the
@@ -143,10 +143,10 @@ questions:
     question: |
       A pre-signed upload URL is best described as:
     options:
-      - "A permanent public URL anyone can write to forever"
-      - "A URL that requires the client to hold your root credentials"
+      - "A permanent public URL that anyone on the internet can write to forever with no expiry"
+      - "A URL that requires the client to hold and present your account root credentials on each request"
       - "A short-lived, cryptographically signed URL granting one scoped operation on one object"
-      - "A URL that only works from inside your VPC"
+      - "A URL that only works from inside your VPC and is blocked from the public internet"
     answer: 2
     explanation: |
       A pre-signed URL embeds a signature made with your credentials but is
@@ -161,9 +161,9 @@ questions:
       In a pre-signed direct-to-storage architecture, the API never sees the file
       bytes. How is malware scanning and content validation typically performed?
     options:
-      - "It is impossible, so scanning must be skipped"
-      - "The client is trusted to scan its own file"
-      - "The CDN scans every download on the fly"
+      - "It is impossible without proxying, so malware scanning must simply be skipped entirely"
+      - "The client is trusted to scan its own file locally and report the result to the API"
+      - "The CDN scans every download on the fly and blocks infected bytes at the edge"
       - "Asynchronously — a storage ObjectCreated event triggers a scan/validation job before the file is marked usable"
     answer: 3
     explanation: |
@@ -180,10 +180,10 @@ questions:
       You issue a plain pre-signed PUT URL with no size constraint. What is the
       risk, and what is a common fix?
     options:
-      - "No risk; PUT uploads are always capped at 5 MB"
-      - "The URL will never expire; add a checksum header"
+      - "No risk at all; pre-signed PUT uploads are always hard-capped at 5 MB by the service"
+      - "The URL will never expire on its own; the only fix is to add a checksum header to it"
       - "A client can upload an arbitrarily large object; use a pre-signed POST policy with content-length-range or post-upload checks"
-      - "The object will be public; add base64 encoding"
+      - "The stored object will be world-readable; the fix is to base64-encode the body first"
     answer: 2
     explanation: |
       A pre-signed PUT with no constraint lets the client store an arbitrarily
@@ -201,9 +201,9 @@ questions:
       /complete endpoint after uploading. Why the confirm step?
     options:
       - "To verify the object landed and transition the file's status, avoiding orphaned rows/objects"
-      - "To re-upload the file through the API for scanning"
-      - "Because pre-signed URLs cannot write to storage"
-      - "To convert the file to base64"
+      - "To re-upload the entire file through the API a second time so it can be scanned inline"
+      - "Because pre-signed URLs can only read from storage and cannot actually write the object"
+      - "To convert the uploaded file to a base64 representation before it is served to clients"
     answer: 0
     explanation: |
       The confirm step lets the API verify the object actually exists in storage
@@ -219,9 +219,9 @@ questions:
       When is proxying uploads through your API (client → API → storage) a
       reasonable choice over pre-signed direct upload?
     options:
-      - "For multi-GB video files at high volume"
-      - "Whenever you want to minimize app-tier bandwidth"
-      - "Never; it is always wrong"
+      - "For multi-GB video files uploaded at high volume, since the app tier streams them fastest"
+      - "Whenever you want to minimize app-tier bandwidth and keep instance sizes small"
+      - "Never; proxying uploads through the API is always the wrong architectural choice"
       - "For small files where inline validation/transforms are convenient and throughput is negligible"
     answer: 3
     explanation: |
@@ -238,10 +238,10 @@ questions:
       A downside of proxying uploads through your API is that the file bytes
       traverse the app tier:
     options:
-      - "once, on the way in"
+      - "once, on the way in, then the client is redirected straight to storage"
       - "twice — once inbound from the client and once outbound to storage"
-      - "never, because the API forwards only headers"
-      - "only if the file is larger than 5 GB"
+      - "never, because the API forwards only the request headers and not the body"
+      - "only when the uploaded file happens to be larger than the 5 GB threshold"
     answer: 1
     explanation: |
       When proxying, the app receives the full file from the client and then
@@ -256,10 +256,10 @@ questions:
     question: |
       What problem do resumable upload protocols like tus primarily solve?
     options:
-      - "Encrypting files at rest"
-      - "Compressing files to save bandwidth"
+      - "Encrypting files at rest using a per-chunk key negotiated during the handshake"
+      - "Compressing files on the fly to save upload bandwidth over slow connections"
       - "Letting a large/flaky upload resume from the last acknowledged offset instead of restarting from zero"
-      - "Converting videos to multiple resolutions"
+      - "Converting uploaded videos into multiple resolutions as each chunk arrives"
     answer: 2
     explanation: |
       Resumable protocols chunk the file and track the byte offset the server has
@@ -294,9 +294,9 @@ questions:
       In the S3 multipart upload API, which statement about part sizes and counts
       is correct?
     options:
-      - "Parts can be any size, up to 100 parts total"
-      - "All parts must be exactly 5 MB, up to 1,000 parts"
-      - "Parts must each be under 5 MB, unlimited count"
+      - "Parts can be any size at all, but a single object is limited to at most 100 parts total"
+      - "Every part including the last must be exactly 5 MB, and an object may have up to 1,000 parts"
+      - "Parts must each be strictly under 5 MB, but any object may have an unlimited number of them"
       - "Each part must be at least 5 MB (except the last), and there can be up to 10,000 parts"
     answer: 3
     explanation: |
@@ -313,10 +313,10 @@ questions:
       A team notices growing S3 storage cost from uploads that clients started but
       never finished. What is the correct remediation?
     options:
-      - "Nothing — incomplete multipart parts are free"
-      - "Switch all uploads to base64-in-JSON"
+      - "Nothing — parts of an incomplete multipart upload are stored free until completion"
+      - "Switch all uploads to base64-in-JSON so abandoned parts can never accumulate in the bucket"
       - "Configure an AbortIncompleteMultipartUpload lifecycle rule to clean up abandoned parts"
-      - "Reduce the part size to under 5 MB"
+      - "Reduce the configured part size to under 5 MB so orphaned parts take negligible space"
     answer: 2
     explanation: |
       Uploaded parts of an incomplete multipart upload keep incurring storage cost
@@ -367,9 +367,9 @@ questions:
     question: |
       What is a file's "magic number" in the context of upload validation?
     options:
-      - "A checksum computed over the whole file"
-      - "The file's size in bytes"
-      - "A random ID assigned by the storage system"
+      - "A checksum computed over the whole file to detect accidental corruption in transit"
+      - "The total size of the file in bytes, recorded in the object's storage metadata"
+      - "A random unique identifier the storage system assigns to each object on write"
       - "A signature of leading bytes that identifies the true file format"
     answer: 3
     explanation: |
@@ -388,8 +388,8 @@ questions:
     options:
       - "Allowlist the specific types you accept and reject everything else"
       - "Denylist known-bad extensions and accept everything else"
-      - "Accept any type but rename it to .txt"
-      - "Accept only files under 1 KB"
+      - "Accept any type but rename every upload to a .txt extension before storing it"
+      - "Accept only files smaller than 1 KB so malicious payloads cannot fit inside them"
     answer: 0
     explanation: |
       Allowlisting enumerates exactly the types you support and rejects all others,
@@ -405,9 +405,9 @@ questions:
       dangerous, and what header helps?
     options:
       - "Browsers may MIME-sniff the content and execute embedded script (stored XSS); X-Content-Type-Options: nosniff helps"
-      - "It causes 500 errors; add Retry-After"
-      - "It doubles bandwidth; add Content-Encoding: gzip"
-      - "It breaks caching; add ETag"
+      - "It makes the origin return 500 errors on every download; adding a Retry-After header fixes the failures"
+      - "It silently doubles the response bandwidth; adding Content-Encoding: gzip compresses it back down"
+      - "It permanently breaks CDN and browser caching; adding a strong ETag header restores cache hits"
     answer: 0
     explanation: |
       If the Content-Type is wrong or absent, browsers may sniff the bytes and, for
@@ -459,10 +459,10 @@ questions:
       Why is it insufficient to enforce an upload size limit solely by checking the
       Content-Length header?
     options:
-      - "Content-Length is always encrypted"
-      - "Content-Length is measured in bits, not bytes"
+      - "Content-Length is always encrypted by TLS, so the server cannot read it until the body is fully decrypted"
+      - "Content-Length is measured in bits rather than bytes, so any limit you set is off by a factor of eight"
       - "Content-Length can be absent (chunked transfer) or lie, so you must also enforce the limit while streaming"
-      - "Only proxies can read Content-Length"
+      - "Only reverse proxies can read Content-Length; application frameworks strip the header before your code runs"
     answer: 2
     explanation: |
       A client can omit Content-Length (chunked transfer encoding) or send a false
@@ -478,9 +478,9 @@ questions:
       Where should upload size limits ideally be enforced?
     options:
       - "At multiple layers — reverse proxy/gateway and the application (and content-length-range for pre-signed POST)"
-      - "Only in the application code"
-      - "Only at the CDN"
-      - "Only in the client, to save server work"
+      - "Only in the application code, since the framework is the single place that can reliably count incoming bytes"
+      - "Only at the CDN edge, because it terminates every connection before any traffic reaches the origin servers"
+      - "Only in the client before upload, to save server work by rejecting oversized files without a round trip"
     answer: 0
     explanation: |
       Defense in depth: the reverse proxy/gateway (e.g. nginx client_max_body_size)
@@ -498,9 +498,9 @@ questions:
       way to handle it?
     options:
       - "Keep it in a quarantine bucket/prefix and do not serve it until it passes scanning"
-      - "Serve it immediately; scan later if there are complaints"
-      - "Convert it to base64 and email it to an admin"
-      - "Publish it to the CDN so scanning is faster"
+      - "Serve it to other users immediately and only run a scan later if someone actually files a complaint"
+      - "Convert it to a base64 string and email it to an administrator to review by hand before release"
+      - "Publish it to the CDN edge right away so the scanning step can read it back faster from the cache"
     answer: 0
     explanation: |
       Unscanned files should be quarantined (separate bucket/prefix, status not yet
@@ -515,9 +515,9 @@ questions:
       Why re-encode uploaded images through a trusted imaging library rather than
       storing the original bytes as-is?
     options:
-      - "To make the file larger"
-      - "It is required to compute a checksum"
-      - "Object storage only accepts re-encoded files"
+      - "To increase the file's dimensions and byte size so it looks higher quality to viewers"
+      - "It is a mandatory prerequisite step before any SHA-256 checksum of the image can be computed"
+      - "Object storage services reject raw camera files and only accept images that have been re-encoded"
       - "Re-encoding produces a fresh well-formed image, stripping embedded exploits and inconsistent structures"
     answer: 3
     explanation: |
@@ -534,10 +534,10 @@ questions:
       What is a good reason to strip EXIF metadata from user-uploaded photos before
       serving them?
     options:
-      - "EXIF makes images render slowly"
-      - "EXIF prevents CDN caching"
+      - "EXIF metadata forces the browser to decode images far more slowly on every page render"
+      - "EXIF metadata sets cache-busting flags that stop the CDN from ever caching the image at the edge"
       - "EXIF can contain GPS coordinates (a privacy leak) and historically exploitable/script-bearing fields"
-      - "EXIF doubles the file size"
+      - "EXIF metadata roughly doubles the stored file size because it duplicates the pixel data as a preview"
     answer: 2
     explanation: |
       EXIF frequently embeds the exact GPS location where a photo was taken, which
@@ -553,9 +553,9 @@ questions:
       Why is image/svg+xml a risky "image" type to accept and serve inline?
     options:
       - "SVG is XML that can contain <script> and external references, so serving it inline can enable XSS"
-      - "SVG files are always huge"
-      - "SVG cannot be cached"
-      - "SVG is not a real image format"
+      - "SVG files are always far larger on disk than an equivalent PNG or JPEG of the same picture"
+      - "SVG responses cannot be cached by browsers or CDNs because their content type is not cacheable"
+      - "SVG is not a real image format and no mainstream browser can actually render it without a plugin"
     answer: 0
     explanation: |
       SVG is XML and can embed scripts and external references, so serving a
@@ -573,9 +573,9 @@ questions:
       attack and the fix?
     options:
       - "Path traversal; never use the client filename as a path — generate an opaque key (e.g. UUID) and store the name only as metadata"
-      - "Zip bomb; cap decompression ratio"
-      - "SSRF; block private IP ranges"
-      - "XSS; add nosniff header"
+      - "Zip bomb; cap the maximum decompression ratio and total expanded size before extracting the archive"
+      - "SSRF; block private and link-local IP ranges and re-validate the host after DNS resolution completes"
+      - "Stored XSS; send X-Content-Type-Options: nosniff and serve the file from a separate sandboxed origin"
     answer: 0
     explanation: |
       Using the raw client filename in a filesystem path lets ../ sequences escape
@@ -591,9 +591,9 @@ questions:
       Your service decompresses uploaded archives. How do you defend against a zip
       bomb (a tiny archive that expands to gigabytes)?
     options:
-      - "Only accept archives over 1 GB"
-      - "Decompress everything into RAM to detect the bomb faster"
-      - "Trust the archive's declared uncompressed size"
+      - "Only accept archives larger than 1 GB, on the assumption that real files are big and bombs are tiny"
+      - "Decompress the whole archive into RAM instead of disk so the expanding bomb is detected faster"
+      - "Trust the uncompressed size the archive declares in its header and reject anything above your cap"
       - "Cap the decompressed size, compression ratio, and nesting depth, aborting if limits are exceeded"
     answer: 3
     explanation: |
@@ -611,10 +611,10 @@ questions:
       fetches. An attacker submits http://169.254.169.254/latest/meta-data/. What
       vulnerability is this?
     options:
-      - "Cross-site scripting (XSS)"
-      - "SQL injection"
+      - "Cross-site scripting (XSS) injecting script into the fetched page rendered back to the user"
+      - "SQL injection using the crafted URL string as a payload against the import query builder"
       - "Server-Side Request Forgery (SSRF) reaching the cloud metadata endpoint"
-      - "Path traversal"
+      - "Path traversal escaping the import directory to overwrite files elsewhere on the host"
     answer: 2
     explanation: |
       This is SSRF: the server is tricked into fetching an internal/link-local
@@ -632,9 +632,9 @@ questions:
       before fetching a user-supplied URL. Why can a naive check still be bypassed?
     options:
       - "DNS rebinding — the name can resolve to a safe IP at check time and a private IP at fetch time; you must re-validate the address actually connected to"
-      - "Private IPs are not routable"
-      - "HTTP does not support redirects"
-      - "The metadata endpoint uses HTTPS only"
+      - "Private IP ranges are never routable over the public internet, so any resolved address is inherently safe"
+      - "HTTP clients do not follow redirects by default, so a Location header can never point at an internal host"
+      - "The cloud metadata endpoint is reachable over HTTPS only, so a plain http:// URL check is always sufficient"
     answer: 0
     explanation: |
       With DNS rebinding, the attacker's domain returns an allowed IP during your
@@ -650,9 +650,9 @@ questions:
       What is the standard division of responsibility for storing an uploaded file?
     options:
       - "Store the blob in object storage and the metadata (owner, key, type, size, status) in the database"
-      - "Store both the blob and metadata as a BLOB column in the primary database"
-      - "Store the blob in the database and the metadata in object storage"
-      - "Store everything on the local app-server disk"
+      - "Store both the blob bytes and all of the metadata together as a single BLOB column in the primary database"
+      - "Store the blob bytes in the relational database and keep the queryable metadata as objects in object storage"
+      - "Store the blob and its metadata together on the local app-server disk and serve both from the instance"
     answer: 0
     explanation: |
       The blob goes to object storage (cheap, durable, effectively infinite, CDN-
@@ -668,9 +668,9 @@ questions:
       Why is storing large file blobs directly in a relational database (as BLOB
       columns) generally discouraged?
     options:
-      - "Databases cannot store binary data at all"
-      - "BLOBs are not durable"
-      - "It makes files impossible to query"
+      - "Relational databases cannot store binary data at all, so the blob bytes would be silently truncated on insert"
+      - "BLOB columns are not durable and are dropped from the table whenever the database is restarted or backed up"
+      - "Storing bytes in a BLOB column makes the file's metadata impossible to index or query with ordinary SQL"
       - "It bloats the DB, slows backup/restore, wastes expensive DB storage and buffer-pool memory, and forces every byte through the DB connection"
     answer: 3
     explanation: |
@@ -687,10 +687,10 @@ questions:
       A files table has a status column progressing pending → scanning → ready.
       What is a key operational benefit of this state machine?
     options:
-      - "It encrypts the file"
-      - "It removes the need for object storage"
+      - "It transparently encrypts each stored blob at rest using a key derived from the status column"
+      - "It removes the need for object storage because the status column lets the DB hold the blob bytes safely"
       - "It lets you serve only ready files and makes orphan cleanup tractable (delete pending rows/objects after a TTL)"
-      - "It doubles read throughput"
+      - "It doubles read throughput by letting read replicas serve any row whose status has advanced past pending"
     answer: 2
     explanation: |
       The status field ensures clients only receive files that have passed
@@ -726,9 +726,9 @@ questions:
       requests make this efficient?
     options:
       - "The player requests only the byte range around the new playhead via Range, and the server returns 206 with just those bytes"
-      - "The browser downloads the whole file, then jumps"
-      - "The server transcodes the video on every seek"
-      - "The CDN re-encodes the video to start at that point"
+      - "The browser silently downloads the entire 500 MB file into its buffer first and only then jumps to the requested position"
+      - "The server re-transcodes the whole video on every seek so playback can restart cleanly from the new playhead offset"
+      - "The CDN re-encodes the video at the edge to physically begin at that point before streaming it back to the player"
     answer: 0
     explanation: |
       Video players use Range requests to fetch only the bytes near the current
@@ -760,10 +760,10 @@ questions:
     question: |
       Why put a CDN in front of object storage for media downloads?
     options:
-      - "To validate uploaded file types"
-      - "To store the file metadata"
+      - "To inspect and validate the declared type of every uploaded file as it passes through the edge cache"
+      - "To act as the durable system of record for each file's owner, key, size, and status metadata"
       - "To cache content at edge locations near users, cutting latency and origin egress cost"
-      - "To encrypt the database"
+      - "To transparently encrypt the primary database's blob columns before any object reaches storage"
     answer: 2
     explanation: |
       Reads dominate media workloads. A CDN caches objects at edge locations close
@@ -779,9 +779,9 @@ questions:
       every byte through your app. What is the standard approach?
     options:
       - "Authorize the request in your app, then issue a short-lived signed URL/cookie so the CDN serves the bytes directly"
-      - "Make the object public and hope nobody guesses the URL"
-      - "Base64-encode the video into the JSON response"
-      - "Store the video in the database and stream it from there"
+      - "Make the object publicly readable behind a long random key and rely on nobody ever guessing or sharing the URL"
+      - "Base64-encode the entire video into the JSON response body so the app tier can enforce access on every fetch"
+      - "Store the video as a BLOB in the primary database and stream it out through the app on each authorized request"
     answer: 0
     explanation: |
       The app makes the authorization decision and hands out a short-lived signed
@@ -796,10 +796,10 @@ questions:
       A signed URL for private media is best understood as which kind of
       credential, and what follows from that?
     options:
-      - "A password; it should be reused indefinitely"
+      - "A reusable password; the same signed URL can safely be embedded and reused indefinitely across sessions"
       - "A bearer credential; anyone with the URL can read until it expires, so keep expiry short and scope it to one object"
-      - "A public key; it can be shared freely with no risk"
-      - "A session cookie; it is tied to the user's IP address"
+      - "A public key; it can be shared freely with no risk because the signature reveals nothing exploitable"
+      - "A session cookie; it is cryptographically bound to the requesting user's source IP address and browser"
     answer: 1
     explanation: |
       A signed URL is a bearer credential: possession alone grants access until
@@ -815,9 +815,9 @@ questions:
       For public media served via CDN with long cache lifetimes, how do you make an
       updated file take effect without waiting for caches to expire?
     options:
-      - "Set Cache-Control: no-store on every image"
-      - "Disable the CDN"
-      - "Serve the image as base64 in JSON"
+      - "Set Cache-Control: no-store on every image so edge nodes always refetch the latest bytes from origin"
+      - "Disable the CDN for that path and serve the updated image straight from the origin bucket on every request"
+      - "Serve the image as a base64 string embedded in a JSON response so the app controls exactly when it changes"
       - "Use content-addressed or versioned URLs so a changed file gets a new URL"
     answer: 3
     explanation: |
@@ -854,9 +854,9 @@ questions:
       derivatives are ready?
     options:
       - "By polling a status resource (GET /files/{id}) or receiving a webhook"
-      - "It cannot; it must re-upload the file"
-      - "The connection stays open until transcoding completes"
-      - "It reads the CDN logs"
+      - "It cannot be notified at all; the client must re-upload the original file to trigger a fresh transcoding attempt"
+      - "The original HTTP connection is held open the entire time and streams the derivatives back once transcoding completes"
+      - "It periodically reads the CDN's edge access logs and infers readiness from the first successful derivative fetch"
     answer: 0
     explanation: |
       With async processing the client either polls the file's status resource until
@@ -871,10 +871,10 @@ questions:
       Why should transcoding be done asynchronously in a queue+workers pipeline
       rather than synchronously inside the upload request?
     options:
-      - "Synchronous transcoding is illegal per RFC 9110"
+      - "Synchronous transcoding inside a request handler is explicitly prohibited by RFC 9110's rules on response timing"
       - "Transcoding is slow and CPU-heavy; doing it inline ties up a connection, risks timeouts, and doesn't survive a worker restart"
-      - "Queues transcode faster than CPUs"
-      - "Synchronous transcoding cannot produce thumbnails"
+      - "Message queues perform the transcoding computation itself far faster than a general-purpose CPU ever could"
+      - "Transcoding done synchronously in the request path is structurally unable to emit thumbnails or preview frames"
     answer: 1
     explanation: |
       Transcoding takes seconds to minutes and is CPU-intensive. Running it inline
@@ -890,10 +890,10 @@ questions:
       How should transcoded derivatives (e.g. HLS renditions, thumbnails) typically
       be stored and served?
     options:
-      - "Overwrite the original object with the largest rendition"
-      - "Inline in the database as base64"
+      - "Overwrite the original source object in place with the largest rendition to save storage on redundant copies"
+      - "Inline in the database as base64 strings on the original file's row so every rendition travels with its metadata"
       - "As their own objects with their own metadata rows linked to the original, served through the CDN"
-      - "Only in memory, regenerated on every request"
+      - "Only in memory on the worker, regenerating every rendition on demand each time a client requests one"
     answer: 2
     explanation: |
       Each derivative is stored as its own object with a metadata row linked to the

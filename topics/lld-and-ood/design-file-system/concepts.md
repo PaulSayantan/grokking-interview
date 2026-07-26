@@ -322,6 +322,10 @@ Contract subtleties worth saying out loud:
   every public method funnels through it.
 - `ls` returns names (or lightweight entries), not the node objects, to avoid leaking
   internal references clients could mutate.
+- `find` must return **full/absolute paths**, not bare names. `ls` is scoped to one
+  directory so a bare name is unambiguous, but `find` spans the whole subtree, where the
+  same name can occur in different directories (two `config.txt`); returning `/a/config.txt`
+  vs `/b/config.txt` is what a follow-up open/delete needs to act on.
 
 ## Code Skeleton
 
@@ -450,6 +454,60 @@ public class FileSystem {
 }
 ```
 
+### Worked example: watch the recursion actually run
+
+Reading "`Directory.getSize()` = Σ children" is not the same as watching it evaluate.
+Build this concrete tree:
+
+```
+/docs                     (Directory)
+├── a.txt                 (File, 100 bytes)
+└── img                   (Directory)
+    ├── logo.png          (File, 250 bytes)
+    └── note.md           (File,  30 bytes)
+```
+
+**Trace `getSize("/docs")`.** `resolve("/docs")` returns the `docs` Directory, then
+`docs.getSize()` fires. It is a `Directory`, so it loops its children and sums — but each
+child call is polymorphic, so the recursion dives before it can add:
+
+1. `docs.getSize()` starts `total = 0`, iterates children `{a.txt, img}`.
+2. → `a.txt.getSize()` — a `File`, returns `content.length` = **100**. `total = 100`.
+3. → `img.getSize()` — a `Directory`, so it recurses in turn:
+   - `logo.png.getSize()` = **250**
+   - `note.md.getSize()`  = **30**
+   - `img` returns `250 + 30` = **280**.
+4. Back in `docs`: `total = 100 + 280` = **380**.
+
+`getSize("/docs")` → **380 bytes**. Notice no `instanceof` ever ran: the same
+`child.getSize()` call landed on `File.getSize()` or `Directory.getSize()` by dynamic
+dispatch. That is the Composite payoff made concrete — the caller never asked "file or
+folder?"; the type answered for itself.
+
+**Trace `find("/docs", new GlobStrategy("*.txt"))`.** `"*.txt"` compiles to the regex
+`.*\.txt`. `resolve("/docs").accept(visitor)` runs, and `Directory.accept` visits *self
+first, then each child* (pre-order DFS):
+
+| Step | Node visited | `matches(".*\.txt")`? | `matches` list |
+|---|---|---|---|
+| 1 | `docs` (dir)     | `"docs"` → no  | `[]` |
+| 2 | `a.txt` (file)   | `"a.txt"` → **yes** | `[/docs/a.txt]` |
+| 3 | `img` (dir)      | `"img"` → no   | `[/docs/a.txt]` |
+| 4 | `logo.png` (file)| `"logo.png"` → no | `[/docs/a.txt]` |
+| 5 | `note.md` (file) | `"note.md"` → no | `[/docs/a.txt]` |
+
+Result: `["/docs/a.txt"]`. The match is stored as the **full path**
+(`fullPath` walks `a.txt`'s parent chain back to root), not the bare name `"a.txt"` — so
+if a second `a.txt` lived under `/docs/img`, the two would come back as `/docs/a.txt` and
+`/docs/img/a.txt`, both unambiguous for a follow-up open or delete.
+
+> [!TIP]
+> `node.accept(v)` then calls `v.visit(this)` rather than the client calling
+> `v.visit(node)` directly because of **double dispatch**: the virtual `accept()` picks the
+> *node* type (the node knows at runtime whether it is a `File` or `Directory`; the client
+> does not), and overload resolution then picks the matching `visit(File)` / `visit(Directory)`.
+> Two dispatches — one on the node, one on the argument type — select the exact method.
+
 Visitor + Strategy for search (added without touching File/Directory):
 
 ```java
@@ -458,9 +516,19 @@ public class SearchVisitor implements NodeVisitor {
     private final List<String> matches = new ArrayList<>();
     public SearchVisitor(SearchStrategy strategy) { this.strategy = strategy; }
 
-    @Override public void visit(File f)      { if (strategy.matches(f)) matches.add(f.getName()); }
-    @Override public void visit(Directory d) { if (strategy.matches(d)) matches.add(d.getName()); }
+    @Override public void visit(File f)      { if (strategy.matches(f)) matches.add(fullPath(f)); }
+    @Override public void visit(Directory d) { if (strategy.matches(d)) matches.add(fullPath(d)); }
     public List<String> getMatches() { return matches; }
+
+    // find spans the whole subtree, so a bare name is ambiguous — two "config.txt"
+    // in different directories would collide and be unusable for a follow-up
+    // open/delete. Return the absolute path instead, rebuilt from the parent chain.
+    private String fullPath(FileSystemNode node) {
+        Deque<String> parts = new ArrayDeque<>();
+        for (FileSystemNode n = node; n != null && n.parent != null; n = n.parent)
+            parts.addFirst(n.getName());
+        return "/" + String.join("/", parts);
+    }
 }
 
 public class GlobStrategy implements SearchStrategy {   // e.g. "*.txt"

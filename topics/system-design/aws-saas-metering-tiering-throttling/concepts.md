@@ -312,6 +312,23 @@ returns **HTTP 429 Too Many Requests**.
   high-velocity onboarding.
 - Throttles and quotas are **best-effort targets, not hard guarantees.**
 
+**Worked example — tracing the token bucket (why `burst` ≠ per-second ceiling).**
+Usage plan `rate = 100 RPS`, `burst = 200`. A client has been idle, so the bucket
+is **full at 200 tokens**. It then fires **250 requests in the same instant**:
+
+- Requests 1–200 each take one token → bucket drains 200 → 0. **All 200 succeed.**
+- Requests 201–250 arrive with 0 tokens available → **50 requests get HTTP 429.**
+- The bucket now refills at `rate` = **100 tokens/sec**. After ~1 s → 100 tokens
+  back; after ~2 s → the full 200 restored. So the *sustained* throughput this
+  client can hold is **100 RPS** (the refill rate); the **200** is only the
+  one-time cushion for a spike on top of steady state.
+
+Contrast with a steady 100 RPS stream: tokens are consumed and refilled at the same
+rate, the bucket never empties, and **nothing is throttled** — even though 100 × 60
+= 6,000 requests flow in a minute. That is the distinction students miss: `burst`
+governs the size of an instantaneous spike; `rate` governs how fast you can go
+forever.
+
 **Per-tenant / per-tier pattern:** create **one usage plan per tier** (with that
 tier's rate + burst + **quota**, e.g. "1,000,000 requests/month"), and attach an
 **API key per tenant** to the appropriate plan. The tenant's key identifies them;
@@ -349,6 +366,17 @@ exports/day for basic tier," "10 concurrent jobs," "1 GB upload/hour" — enforc
 - **ElastiCache (Redis):** `INCR`/`INCRBY` with `EXPIRE` for high-throughput
   token-bucket or fixed/sliding-window counters where DynamoDB write cost or latency is
   too high. Redis handles very high counter QPS cheaply but is not as durable.
+
+> [!WARNING]
+> **Fixed-window counters allow a 2× burst at the seam** — the classic
+> distributed-rate-limit follow-up. With a per-minute limit of 100 (`INCR` + `EXPIRE`
+> keyed by the minute), a client can send 100 requests at **00:59.9** and another 100
+> at **01:00.1** — **200 requests inside ~0.2 s**, because the counter resets on the
+> window boundary. Mitigate with a **sliding-window log** (store per-request
+> timestamps, count those within the trailing 60 s — exact but memory-heavy) or a
+> **sliding-window counter** (weight the previous window's count by how much of it
+> still overlaps — approximate but cheap). The trade-off is precision vs memory: pick
+> the log only when the seam burst genuinely matters.
 
 ```mermaid
 flowchart LR
@@ -438,6 +466,15 @@ flowchart LR
   metered SaaS.
 - Alternatives/complements: **EventBridge** for event routing; **CloudWatch Embedded
   Metric Format (EMF)** to emit metrics-as-logs with tenant dimensions.
+- **Exactly-once vs at-least-once (the "don't double-charge" follow-up).** Kinesis,
+  Firehose, and EventBridge all deliver **at-least-once**, so a retried or replayed
+  usage event can be counted twice — and for *billing*-relevant events that means
+  **over-charging a tenant**. Make aggregation **idempotent**: stamp each event with a
+  unique `eventId` (UUID) and dedupe on it at the aggregation step, or aggregate into
+  **idempotent per-period totals** (e.g. an upsert of "tenant T, 2026-07, 41,000 API
+  calls" that a replay simply re-writes to the same value rather than adding). This
+  rigor is required only on the billing path; **insight-only metering** can tolerate a
+  little double-counting because approximate load numbers are fine.
 
 > [!WARNING]
 > Never meter **synchronously on the hot path** into your billing system — it couples
@@ -509,6 +546,25 @@ Tenant Costs in SaaS Environments*):
     layer** that records per-tenant read/write activity.
 - **Convert proportion → dollars** by correlating each tenant's consumption
   percentage against the **actual CUR dollars** for that shared resource.
+
+**Worked example — apportioning a shared bill (compute vs storage).** Say CUR
+reports the shared Lambda fleet cost **$4,000** of GB-seconds this month. Your
+tenant-stamped metrics say total consumption was **4.0M GB-s**, split: Tenant A
+**1.2M**, Tenant B **0.6M**, everyone else **2.2M**. Apportion by share:
+
+- Tenant A: 1.2M / 4.0M = **30%** → 0.30 × $4,000 = **$1,200**
+- Tenant B: 0.6M / 4.0M = **15%** → 0.15 × $4,000 = **$600**
+- Others: 2.2M / 4.0M = **55%** → 0.55 × $4,000 = **$2,200** (sums back to $4,000 ✓)
+
+Now the point the guidance hammers: **storage needs its own strategy — you cannot
+reuse the compute percentages.** For the shared S3 bucket, apportion by *bytes
+stored*, not GB-seconds of compute. If Tenant A holds **300 GB of the 1 TB**
+(1,024 GB — use 1,000 for the mental model) in the bucket, A gets **~30% of the S3
+line item** — a number that has nothing to do with A's 30% compute share; it just
+happened to land near it here. A batch-heavy tenant can be 5% of compute but 40% of
+storage. Run size-based apportionment for the storage-size line, throughput-based
+(reads/writes via the common DAL) for the IOPS line, and request/GB-s share for
+compute — three separate percentages against three separate CUR line items.
 
 > [!KEY-TAKEAWAY]
 > The **"good enough" principle**: unless the number directly drives an invoice, aim
@@ -584,6 +640,14 @@ verified 2026-07.
   **DynamoDB noisy-neighbor mechanism**: a hot `tenantId` partition throttles at
   3,000 RCU / 1,000 WCU *regardless of table capacity* → mitigate with **write-sharding**
   (suffix the tenant key), good key design, on-demand + adaptive capacity.
+  **Worked example:** tenant `T42` needs ~4,000 WCU but a single partition key caps
+  at 1,000 WCU → it throttles. Fix: pick shard count = ⌈expected peak WCU / 1,000⌉ =
+  ⌈4,000 / 1,000⌉ = **4** (use **10** for headroom), and write to a *suffixed* key
+  `PK = "T42#" + (hash(itemId) % 10)`. That spreads T42 across up to 10 logical
+  partitions → up to **10 × 1,000 = 10,000 WCU** of write headroom. The cost: a read
+  can no longer target one key — you must **query all 10 suffixes (`T42#0`…`T42#9`)
+  and merge** (scatter-gather), so you pay read amplification and lose single-key
+  strong-read simplicity. Shard only the tenants that are actually hot.
 - **Per-table: 40,000 RCU + 40,000 WCU** (adjustable); **per-account: 80,000 RCU +
   80,000 WCU** (provisioned). **2,500 tables/Region default → 10,000 max.**
   **20 GSIs/table, 5 LSIs/table.**

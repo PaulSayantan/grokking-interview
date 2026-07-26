@@ -19,6 +19,22 @@ A Java thread moves through a fixed set of states, enumerated by `Thread.State` 
 | `TIMED_WAITING` | Waiting for a bounded time | `sleep(ms)`, `wait(ms)`, `join(ms)`, `park` with timeout |
 | `TERMINATED` | `run()` has completed (normally or via exception) | thread finished |
 
+```mermaid
+stateDiagram-v2
+    [*] --> NEW: new Thread()
+    NEW --> RUNNABLE: start()
+    RUNNABLE --> BLOCKED: contend for monitor
+    BLOCKED --> RUNNABLE: lock acquired
+    RUNNABLE --> WAITING: wait() / join() / park()
+    WAITING --> BLOCKED: notified, re-acquire monitor
+    RUNNABLE --> TIMED_WAITING: sleep(ms) / wait(ms) / join(ms)
+    TIMED_WAITING --> RUNNABLE: timeout / notified
+    RUNNABLE --> TERMINATED: run() returns
+    TERMINATED --> [*]
+```
+
+Note the `WAITING → BLOCKED → RUNNABLE` path: a notified thread cannot run until it *re-acquires* the monitor it released in `wait()`, so it passes through `BLOCKED` first.
+
 Key beginner points:
 - **`RUNNABLE` does not distinguish "running on a CPU" from "ready to run."** The JVM does not expose a separate `RUNNING` state; the OS scheduler decides who actually runs. A thread blocked on I/O (e.g., a socket read) is *also* reported as `RUNNABLE`, not `BLOCKED`, because `BLOCKED` specifically means waiting for a Java monitor lock.
 - **`start()` can be called only once.** Calling `start()` on a thread that has already been started (or terminated) throws `IllegalThreadStateException`. Calling `run()` directly does *not* start a new thread — it just executes `run()` on the current thread.
@@ -74,6 +90,8 @@ Gotcha: `Executors.callable(Runnable)` adapts a `Runnable` into a `Callable` tha
 
 ## Runnable vs Thread vs Callable execution model
 
+*Orientation: the previous section defined the **task** abstractions (`Runnable`/`Callable`); this one covers the **execution machinery** that runs them — `ExecutorService`, `Future`, `CompletableFuture`, and the `ThreadPoolExecutor` internals underneath the `Executors` factories.*
+
 `ExecutorService` (Java 5) decouples task submission from thread management and is the recommended replacement for manual `new Thread()`.
 
 ```java
@@ -92,6 +110,28 @@ try {
 - Always shut pools down; non-daemon pool threads keep the JVM alive.
 - **`CompletableFuture` (Java 8)** extends the model with composition (`thenApply`, `thenCompose`, `thenCombine`, `allOf`) and is the go-to for async pipelines, unlike a plain `Future` which only offers a blocking `get()` and `cancel()`.
 
+**Under the hood: `ThreadPoolExecutor` parameters.** The `Executors.newXxx` factories are just presets over one class, `ThreadPoolExecutor`. Its knobs:
+
+| Parameter | Role |
+|---|---|
+| `corePoolSize` | threads kept alive even when idle |
+| `maximumPoolSize` | hard ceiling on threads |
+| `workQueue` | where tasks wait when all core threads are busy |
+| `keepAliveTime` | how long *non-core* idle threads survive before being reaped |
+| `RejectedExecutionHandler` | what to do when queue is full **and** `maxPoolSize` is reached |
+
+Submission logic (the part that trips people up): a new task starts a **core** thread until `corePoolSize` is reached; after that it goes to the **queue**; only when the queue is *full* does the pool create threads up to `maximumPoolSize`; only when that also fails does the **rejection policy** fire. The four built-in policies: `AbortPolicy` (default — throws `RejectedExecutionException`), `CallerRunsPolicy` (runs the task on the submitting thread, providing natural backpressure), `DiscardPolicy` (silently drops it), `DiscardOldestPolicy` (drops the oldest queued task).
+
+> [!WARNING]
+> `Executors.newFixedThreadPool(n)` uses an **unbounded** `LinkedBlockingQueue`. Because the queue never fills, the pool never grows past `n` and the rejection policy never fires — but a burst of slow tasks queues **without limit** and can OOM the heap. For production, prefer an explicit `new ThreadPoolExecutor(...)` with a **bounded** queue and `CallerRunsPolicy` so overload pushes back on producers instead of exhausting memory. `newCachedThreadPool` has the opposite risk: `maxPoolSize = Integer.MAX_VALUE`, so a burst can spawn thousands of threads.
+
+**Worked example — sizing the pool.** Use `N = Ncpu × U × (1 + W/C)`, where `U` is target CPU utilization (0–1), `W` is time spent waiting (I/O, locks), and `C` is time spent computing.
+
+- *CPU-bound* job on an 8-core box: tasks barely wait, so `W/C ≈ 0`. `N = 8 × 1.0 × (1 + 0) = 8`. In practice size to `Ncpu + 1 = 9` so one extra thread covers the occasional page fault. More threads than cores here just adds context-switching overhead with no throughput gain.
+- *I/O-bound* job on the same 8 cores where each task spends **90%** of its time waiting on the network and 10% computing: `W/C = 90/10 = 9`. `N = 8 × 1.0 × (1 + 9) = 80` threads. The wait time is "free" CPU you fill with other tasks — hence far more threads than cores.
+
+The formula is why virtual threads (JDK 21) are transformative for I/O-bound work: instead of hand-tuning to ~80 platform threads, you spawn one cheap virtual thread per task and let the scheduler unmount them while they wait.
+
 ---
 
 ## Race conditions, deadlock, livelock, and starvation
@@ -106,7 +146,14 @@ count++;   // NOT atomic: read count, add 1, write count — two threads can int
 
 Two threads can both read `count == 5`, both compute `6`, both write `6` — one increment is lost. Fixes: `synchronized`, `AtomicInteger`, or a lock.
 
-**Deadlock** — two or more threads each hold a lock the other needs, so none can proceed. Requires all four Coffman conditions: mutual exclusion, hold-and-wait, no preemption, and circular wait.
+**Deadlock** — two or more threads each hold a lock the other needs, so none can proceed. Requires **all four** Coffman conditions simultaneously (break any one and deadlock is impossible):
+
+- **Mutual exclusion** — a resource is held exclusively; only one thread at a time.
+- **Hold-and-wait** — a thread holds one resource while waiting for another.
+- **No preemption** — a resource can't be forcibly taken; the holder must release it voluntarily.
+- **Circular wait** — a cycle of threads each waiting on the next (A waits on B's lock, B waits on A's).
+
+Which prevention attacks which condition: **global lock ordering** (always acquire lock1 before lock2) removes **circular wait** — it's the standard fix. `tryLock(timeout)` from `ReentrantLock` introduces **preemption** (a waiter gives up) and breaks **hold-and-wait** (release what you hold and retry). Acquiring all locks at once, or using a single coarse lock, also kills hold-and-wait.
 
 ```java
 // Thread A: synchronized(lock1) { synchronized(lock2) {...} }
@@ -153,6 +200,25 @@ Why a `while` loop:
 
 `notifyAll` vs `notify`: prefer `notifyAll` unless you can prove a single, uniform waiter set — `notify` can wake the "wrong" thread and cause a missed-signal hang. A **missed signal** also occurs if `notify` runs before the consumer calls `wait` (the notification is lost because notifications aren't queued) — the condition-loop pattern plus holding the lock during the state change prevents this.
 
+**Worked example — how a missed signal happens, and how the lock + loop fix it.** Suppose the state change and the wait are *not* serialized by a lock (imagine `wait`/`notify` without the surrounding `synchronized`):
+
+| step | Producer | Consumer | outcome |
+|---|---|---|---|
+| t1 | sets `ready = true` | | condition now true |
+| t2 | calls `notify()` | (hasn't reached `wait()` yet) | **notification lost** — no one is waiting |
+| t3 | | calls `wait()` | **blocks forever** — the signal already came and went |
+
+The signal is dropped because `notify` has no memory: it wakes a *currently* waiting thread or does nothing. Now the correct pattern, where the shared monitor serializes t1–t3 and the consumer re-checks under the lock:
+
+| step | Producer | Consumer | outcome |
+|---|---|---|---|
+| t1 | | acquires lock, checks `while(!ready)` → true | about to wait |
+| t2 | *blocked* — can't enter `synchronized` while consumer holds lock | `wait()` **atomically releases lock** and parks | consumer waiting, lock free |
+| t3 | acquires lock; `ready = true`; `notify()` | | consumer woken |
+| t4 | releases lock | re-acquires lock, re-checks `while(!ready)` → false → proceeds | correct |
+
+If the producer instead runs *entirely before* the consumer: the consumer's very first `while(!ready)` check sees `true` and **never waits at all** — the loop guard catches the already-satisfied condition. Holding the lock during the state change guarantees the check-and-wait is one indivisible step, so no signal can slip between them.
+
 Modern alternative: `java.util.concurrent.locks.Condition` (via `ReentrantLock.newCondition()`, Java 5) gives multiple wait-sets per lock (`await`/`signal`/`signalAll`), so producers and consumers can wait on separate conditions — cleaner than a single object monitor.
 
 ---
@@ -185,6 +251,35 @@ A class is **thread-safe** if it behaves correctly when accessed from multiple t
 2. **Immutability** — an immutable object (all fields `final`, no mutation after construction, no leaked `this`) is inherently thread-safe. `final` fields have special JMM publication guarantees. Records (final in **JDK 16**) and `String` are examples.
 3. **Synchronization** — guard *all* accesses (reads and writes) to shared mutable state with the *same* lock (`synchronized` or `Lock`). Consistency requires a documented locking policy.
 4. **Atomic variables** — `AtomicInteger`, `AtomicLong`, `AtomicReference`, adders (`LongAdder`, Java 8) use lock-free CAS (compare-and-swap) for single-variable atomicity.
+
+> [!KEY-TAKEAWAY]
+> **What CAS actually does, and how `incrementAndGet` uses it.** A compare-and-swap is a single hardware instruction (`LOCK CMPXCHG` on x86) that atomically says: *"if the current value equals `expected`, set it to `next` and report success; otherwise change nothing and report failure."* No lock is taken — the thread just retries on failure. `AtomicInteger.incrementAndGet()` is a retry loop over CAS:
+>
+> ```java
+> int incrementAndGet() {
+>     int old, next;
+>     do {
+>         old  = get();          // read current value
+>         next = old + 1;        // compute new value
+>     } while (!compareAndSet(old, next));   // publish only if unchanged since read
+>     return next;
+> }
+> ```
+>
+> **Worked interleaving** — two threads both increment a counter starting at `5`, with the classic lost-update timing that breaks `count++`:
+>
+> | step | Thread A | Thread B | actual value in memory |
+> |---|---|---|---|
+> | t1 | `old=get()` → **5** | | 5 |
+> | t2 | | `old=get()` → **5** | 5 |
+> | t3 | `next=6`; `CAS(5,6)` → mem is 5 → **succeeds**, sets 6 | | **6** |
+> | t4 | | `next=6`; `CAS(5,6)` → mem is **6**, not 5 → **fails** | 6 |
+> | t5 | | retry: `old=get()` → **6** | 6 |
+> | t6 | | `next=7`; `CAS(6,7)` → mem is 6 → **succeeds** | **7** |
+>
+> Both increments land (`5 → 7`); no update is lost. Contrast with plain `count++`, where B's stale read of `5` would have overwritten A's `6` with another `6`. CAS turns the lost update into a cheap retry.
+>
+> **ABA problem:** CAS only checks the *value*, not whether it changed and changed back. If the value goes `A → B → A` between a thread's read and its CAS, the CAS still succeeds even though state churned underneath. Fix with `AtomicStampedReference` (attaches a version counter) when identity of intervening changes matters. Under very high contention, `LongAdder` beats `AtomicLong` by spreading updates across per-thread cells (fewer failed CAS retries), summing them only on `sum()`.
 5. **Concurrent collections** — `ConcurrentHashMap`, `CopyOnWriteArrayList`, `ConcurrentLinkedQueue`, `BlockingQueue` implementations replace externally synchronized collections and scale far better than `Collections.synchronizedXxx` or legacy `Vector`/`Hashtable`.
 
 Tables of collection choices:
@@ -200,6 +295,26 @@ Advanced gotchas:
 - **Compound actions aren't atomic even on thread-safe objects.** `if (!map.containsKey(k)) map.put(k, v);` is a race on a `ConcurrentHashMap`; use `putIfAbsent`/`computeIfAbsent`.
 - **`Collections.synchronizedList` requires manual synchronization while iterating** (client-side locking on the returned collection).
 - `volatile` provides visibility/ordering but **not** atomicity for compound operations — it's not a substitute for locking on `count++`.
+
+**Double-checked locking (DCL) — a classic that ties together `volatile` + safe publication + reordering.** The goal: lazily create a singleton, but avoid locking on every access after it exists.
+
+```java
+class Holder {
+    private static volatile Holder instance;   // volatile is MANDATORY
+    static Holder get() {
+        if (instance == null) {                 // 1st check — no lock (fast path)
+            synchronized (Holder.class) {
+                if (instance == null) {         // 2nd check — under lock
+                    instance = new Holder();
+                }
+            }
+        }
+        return instance;
+    }
+}
+```
+
+Why the field **must** be `volatile`: `instance = new Holder()` is not atomic — it is (a) allocate memory, (b) run the constructor, (c) publish the reference to `instance`. Without `volatile`, the JVM may reorder to (a)(c)(b): the reference becomes non-null **before** the object is constructed. A second thread on the fast path then sees `instance != null`, skips the lock, and returns a **partially-constructed object** (fields still at defaults). `volatile` forbids that reordering and publishes the fully-built object. This is exactly why pre-Java-5 DCL was broken — the old JMM gave `volatile` no such ordering guarantee. (Simpler alternative: the initialization-on-demand holder idiom, which relies on class-init locking instead.)
 
 ---
 
@@ -229,6 +344,37 @@ volatile boolean running = true;   // without volatile, the reader loop may neve
 public void run() { while (running) { /* work */ } }
 public void stop() { running = false; }
 ```
+
+**Worked example — why reordering corrupts a "flag + data" handoff.** This is the concrete hazard the "ordering" bullet describes. Two shared fields, both default-initialized (`data = 0`, `ready = false`):
+
+```java
+int data = 0;
+boolean ready = false;            // NOT volatile (the bug)
+
+// Thread A (producer)                 // Thread B (consumer)
+data  = 42;   // (A1)                   while (!ready) { }    // (B1) spin
+ready = true; // (A2)                   int x = data;         // (B2) read
+```
+
+You *expect* B to print `42`. But there is **no happens-before edge** between A's writes and B's reads, so two things can bite you:
+
+1. **Reordering.** The compiler/CPU may reorder A1 and A2 (they're independent within A's own thread — "as-if-serial" only protects A's *own* view). B then observes the sequence `ready=true` **before** `data=42`.
+2. **Stale cache.** Even without reordering, A's write to `data` may still sit in A's store buffer / cache line when B reads it.
+
+Trace of the broken interleaving:
+
+| step | who | action | `data` visible to B | `ready` visible to B |
+|---|---|---|---|---|
+| t1 | A | `ready = true` (reordered ahead) | `0` | `true` |
+| t2 | B | `!ready` is false → exits loop | `0` | `true` |
+| t3 | B | `x = data` → reads **`0`**, not `42` | `0` | `true` |
+| t4 | A | `data = 42` (too late) | 42 | true |
+
+B prints `0`. **The fix is one keyword** — make the flag `volatile boolean ready`:
+
+- A write to a `volatile` happens-before every subsequent read of it (the edge in the list above). So B reading `ready == true` at B1 now happens-*after* A's `ready = true` at A2.
+- `data = 42` (A1) is *program-order before* A2, and B's `x = data` (B2) is program-order after B1. By **transitivity**: A1 → A2 → B1 → B2, so A1 happens-before B2. B is now guaranteed to read `42`.
+- As a bonus, the volatile write acts as a store fence that forbids the A1/A2 reordering. One `volatile` on the *flag* safely publishes the *data* written before it.
 
 Advanced: `final` fields get a special **freeze** guarantee — if an object is properly constructed (no `this` escapes during construction), any thread that sees a reference to it is guaranteed to see the correctly initialized `final` fields, with no synchronization. This underpins safe publication of immutable objects and String's thread safety.
 

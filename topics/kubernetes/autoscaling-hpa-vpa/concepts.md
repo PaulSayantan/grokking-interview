@@ -221,6 +221,15 @@ worsen latency. `autoscaling/v2` exposes a **`behavior`** block to control the *
 - **`stabilizationWindowSeconds`** — the controller considers the recommendations over the window
   and picks the value that avoids reversing direction. Default **scaleDown = 300s** (slow down
   scale-in to avoid killing pods you'll immediately need), **scaleUp = 0s** (react fast).
+
+  **Worked example — the window picking the safe value.** You're currently at 6 replicas. Over the
+  last 300s the raw algorithm recommended, one sample per sync: `[6, 4, 3, 5, 4]`. With a 300s
+  **scaleDown** stabilization window the controller takes the **maximum** recommendation in the
+  window = **6**, so it does **not** scale in at all this cycle — the transient dip to 3 is ignored.
+  Only once the *whole* window has stayed low (e.g. every sample ≤ 4) does the max fall and the
+  Deployment scales down — which is why a brief lull won't cost you pods you'd immediately need
+  back. (Scale-up uses the **minimum** over its window, but the default window is 0s, so scale-up
+  reacts to the newest sample immediately.)
 - **`policies`** cap how fast replicas change (by `Pods` count or `Percent`); `selectPolicy`
   (`Max`/`Min`/`Disabled`) chooses among them. `scaleDown: {selectPolicy: Disabled}` freezes
   scale-in entirely.
@@ -266,6 +275,28 @@ spec:
 VPA is well suited to workloads where you can't easily reason about size (batch jobs, stateful
 services) and to killing the toil of hand-tuning requests. Its recommendations are also useful in
 **`Off`** mode purely as advice.
+
+**Worked example — reading a recommendation.** Say a container is deployed with
+`requests: cpu 200m, memory 512Mi` and `limits: cpu 400m, memory 1Gi` (a 2× request:limit ratio).
+The Recommender watches real usage for a few days and emits a triad, visible in
+`kubectl describe vpa web-vpa`:
+
+```
+Recommendation:
+  Container Recommendations:
+    Container Name:  web
+    Lower Bound:    cpu: 300m   memory: 700Mi   # below this, Pod is under-provisioned
+    Target:         cpu: 450m   memory: 900Mi   # what a new Pod would be sized to
+    Upper Bound:    cpu: 800m   memory: 1400Mi  # above this, Pod is over-provisioned
+```
+
+Read it as: **target** is the recommended request; the **lower/upper bounds** define a comfort
+band. The Updater only disrupts a running Pod when its *current* request falls **outside** that
+band — here a Pod requesting `200m` is below the `300m` lower bound, so it's evicted and recreated
+at the `450m` target; a Pod already requesting `500m` sits inside `[300m, 800m]` and is left alone
+(no needless churn). When VPA rewrites the request it **preserves the request:limit ratio**: the
+new `450m` request keeps the 2× ratio, so the limit is rewritten to `900m` (and memory `900Mi`
+request → `1800Mi` limit).
 
 ## VPA update modes & in-place resize
 
@@ -319,10 +350,19 @@ enough and whose Pods can move elsewhere.
   **scheduling pressure**, i.e. Pending Pods.
 - **Scale-down trigger:** a node's utilization is below a threshold (default ~50%) for a period
   (`--scale-down-unneeded-time`, default **10 min**) and its Pods can be rescheduled — it's
-  drained and removed.
+  drained and removed. "Utilization" here means **sum of Pod *requests* ÷ node allocatable**, not
+  live CPU/memory — the same requests-not-usage rule as scale-up.
 - CA respects PDBs, `node.kubernetes.io/...` taints, and won't evict Pods it can't reschedule
   (kube-system without PDB, Pods with local storage, Pods with restrictive affinity) unless
   annotated `cluster-autoscaler.kubernetes.io/safe-to-evict: "true"`.
+
+**Worked example — is this node unneeded?** A node has **4 CPU allocatable** and hosts Pods that
+*request* 1.5 CPU total (say 3 Pods requesting 500m each). Utilization = `1.5 / 4 = 37.5%`, which
+is **below the 50% threshold**. If those 3 Pods can fit on other nodes and none is un-evictable,
+then after `scale-down-unneeded-time` (10 min of staying under threshold) CA cordons, drains, and
+deletes the node. The trap: if those Pods are only *using* 100m each (0.3 CPU, ~7.5% real usage)
+but still *requesting* 500m, the node reads as 37.5% and CA acts on the **request** figure — it
+neither knows nor cares that live usage is a fraction of that.
 
 > [!WARNING]
 > CA scales on **requests, not usage**. A node full of Pods that *request* a lot but *use* little
@@ -442,16 +482,56 @@ spec:
       lagThreshold: "100"                  # ~1 replica per 100 messages of lag
 ```
 
+**Worked example — lag → replicas.** KEDA feeds total consumer lag to the HPA as an
+`AverageValue` external metric with the target set to `lagThreshold`, so the HPA's formula
+reduces to `desiredReplicas = ceil(totalLag / lagThreshold)`, clamped to `maxReplicaCount`:
+
+| Consumer lag | `ceil(lag / 100)` | After clamp to max 50 |
+|---|---|---|
+| 250 messages | `ceil(250/100) = 3` | 3 |
+| 5,000 messages | `ceil(5000/100) = 50` | 50 |
+| 8,000 messages | `ceil(8000/100) = 80` | **50** (capped) |
+
+So `maxReplicaCount: 50` matters precisely when lag runs away: at 8,000 messages the math
+*wants* 80 pods but you're pinned at 50, and lag will keep growing until consumers catch up —
+a signal to raise the cap (if partitions allow) or speed up each consumer. Note a Kafka topic
+also can't usefully scale past its **partition count**: 50 replicas on a 12-partition topic
+leaves 38 pods idle, so KEDA additionally caps at partitions unless `allowIdleConsumers` is set.
+
 ## KEDA scale-to-zero & the two-track model
 
 KEDA's headline feature is **true scale-to-zero**. HPA alone **cannot** scale a Deployment to 0
-replicas (`minReplicas` must be ≥1 for resource metrics, and with 0 pods there'd be no metric).
-KEDA solves this with a **two-track** model:
+replicas by default (`minReplicas` must be ≥1 for resource metrics, and with 0 pods there'd be no
+metric). *(Strictly: the alpha **`HPAScaleToZero`** feature gate does permit `minReplicas: 0` for
+object/external metrics — a good "is that always true?" follow-up — but it's off by default, and
+KEDA remains the production-standard path.)* KEDA solves this with a **two-track** model:
 
 - **0 → 1 (activation):** the **keda-operator** watches the event source directly. When there's work
   (e.g. queue depth crosses the **activation threshold**), it scales the Deployment from 0 to 1,
   then hands off to the HPA. When the source is idle for `cooldownPeriod`, KEDA scales back to 0.
 - **1 → N:** delegated to the **HPA** KEDA created, using the scaler's value as an external metric.
+
+The activation threshold is a **separate field** from `lagThreshold` — for the Kafka scaler it's
+`activationLagThreshold` (default `0`). Keep the two straight: `activationLagThreshold` governs the
+**0↔1** wake-up that only the operator can do; `lagThreshold` governs the **1→N** math the HPA does
+(the `ceil(lag/lagThreshold)` above). The HPA is blind to a 0-replica Deployment (no pods → no
+metric), which is exactly why activation lives in the operator.
+
+```yaml
+  triggers:
+  - type: kafka
+    metadata:
+      topic: orders
+      lagThreshold: "100"                  # 1 -> N (HPA): desired = ceil(lag / 100)
+      activationLagThreshold: "5"          # 0 -> 1 (operator): wake up once lag > 5
+```
+
+**Worked example — the wake-up trace.** Deployment is idle at **0** replicas. A single message
+arrives, lag = 1. Since `1 <= activationLagThreshold (5)`, KEDA stays at 0 — deliberately, so a
+lone straggler doesn't pay the cold-start tax. Lag climbs to 6 (`6 > 5`): the operator scales
+**0 → 1**. Now that a pod exists the HPA takes over, and if lag keeps climbing to 450 it computes
+`ceil(450/100) = 5` replicas. Later the topic drains to lag 0; after `cooldownPeriod` (300s) of
+staying idle, KEDA scales **1 → 0** again.
 
 ```mermaid
 sequenceDiagram

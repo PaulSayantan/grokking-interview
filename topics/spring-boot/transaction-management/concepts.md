@@ -118,6 +118,20 @@ Flow on every call to a transactional method:
 **The core consequence:** self-invocation and non-public methods bypass the
 interceptor (see the trap subtopic below).
 
+```mermaid
+flowchart LR
+    Caller -->|external call| Proxy
+    Proxy --> Interceptor[TransactionInterceptor]
+    Interceptor -->|begin / commit / rollback| Target[target bean method]
+    Target -.->|this.other&#40;&#41; self-invocation| Target2[other method, SAME bean]
+    style Target2 stroke-dasharray: 5 5
+```
+
+External calls go `Caller → Proxy → TransactionInterceptor → target`, so the
+transaction advice runs. A self-invocation (`this.other()`, dashed) stays inside
+the target object and never re-enters the proxy — the interceptor is skipped and
+`other()`'s `@Transactional` is silently ignored.
+
 **Advanced internals:** the transaction context (connection, `TransactionStatus`)
 is bound to the current thread via `TransactionSynchronizationManager`
 (a set of `ThreadLocal`s). That's how a `@Transactional` method and the JDBC
@@ -183,6 +197,12 @@ When a REQUIRED method *joins*, `commit()` on the inner status is essentially a
 **no-op** — only the outermost `commit()` (the one that owns the new
 transaction) actually commits to the database.
 
+**Mental model:** think of REQUIRED like a nested `try/finally` reference
+counter. Only the outermost frame that opened the physical transaction actually
+talks to the DB; each inner `commit()` just decrements the participation count.
+`isNewTransaction()` is `true` for exactly one participant — the outermost — and
+that is the only one whose `commit()` reaches the database.
+
 ---
 
 ## Propagation
@@ -225,6 +245,33 @@ when the transaction manager supports it. Also, propagation is evaluated by the
 proxy — so an inner `REQUIRES_NEW` method called via `this.` from the same bean
 gets **no new transaction at all** (self-invocation trap).
 
+**Worked example — same code, three propagations, three DB states.** Both
+methods are on *separate beans* (so the proxy is honored), and `inner()` always
+throws after its write:
+
+```java
+@Transactional                       // outer is REQUIRED
+public void outer() {
+    repo.insert(A);                  // writes row A
+    try { other.inner(); }           // inner writes row B, then throws
+    catch (RuntimeException e) { /* swallowed */ }
+}
+```
+
+Trace the committed rows after `outer()` returns, per `inner()`'s propagation:
+
+| `inner()` propagation | What happens on inner's throw | Row A | Row B |
+|---|---|---|---|
+| **REQUIRED** | Inner joins outer's tx; its throw marks the *shared* tx rollback-only. Swallowing the exception does **not** un-poison it — outer's commit throws `UnexpectedRollbackException`. | **not committed** | not committed |
+| **REQUIRES_NEW** | Inner runs in a suspended-outer, independent physical tx; its throw rolls back only that inner tx. Outer catches, continues, commits. | **committed** | rolled back |
+| **NESTED** | Inner ran after a savepoint in outer's tx; its throw rolls back **to the savepoint** (undoing B only). Outer catches and commits the rest. | **committed** | rolled back |
+
+The trap most people miss is row A under **REQUIRED**: even though `outer()`
+caught the exception, the transaction was already flagged rollback-only, so
+A dies too and the commit itself fails. REQUIRES_NEW and NESTED both let A
+survive — the difference is that NESTED's B-rollback shares outer's connection
+(a savepoint), while REQUIRES_NEW's B-rollback used a second connection.
+
 ---
 
 ## Isolation levels & anomalies
@@ -242,6 +289,44 @@ database's default" (e.g. `READ_COMMITTED` for PostgreSQL/Oracle/SQL Server,
 - **Phantom read** — you run a range query (`WHERE age > 30`), another tx commits
   an *insert/delete* matching that predicate, you re-run the query and rows
   appear/disappear.
+
+**Worked timelines (why the table is what it is).** Read time top-to-bottom;
+each row is one step. Account row starts at `balance = 100`.
+
+*Dirty read* (only possible below READ_COMMITTED):
+
+| Step | T1 | T2 |
+|---|---|---|
+| 1 | — | `UPDATE balance = 150` (**not committed**) |
+| 2 | `SELECT balance` → **150** | — |
+| 3 | — | `ROLLBACK` (balance back to 100) |
+
+T1 acted on `150`, a value that never officially existed. READ_COMMITTED stops
+this because T1 at step 2 would only see committed data (still `100`).
+
+*Non-repeatable read* (possible at READ_COMMITTED, stopped by REPEATABLE_READ):
+
+| Step | T1 | T2 |
+|---|---|---|
+| 1 | `SELECT balance` → **100** | — |
+| 2 | — | `UPDATE balance = 150; COMMIT` |
+| 3 | `SELECT balance` → **150** | — |
+
+Same row, same T1, two different answers. REPEATABLE_READ pins T1 to its
+snapshot, so step 3 still returns `100`.
+
+*Phantom read* (survives REPEATABLE_READ per the SQL standard). Table `users`
+holds 2 rows with `age > 30`:
+
+| Step | T1 | T2 |
+|---|---|---|
+| 1 | `SELECT count(*) WHERE age>30` → **2** | — |
+| 2 | — | `INSERT age=40; COMMIT` |
+| 3 | `SELECT count(*) WHERE age>30` → **3** | — |
+
+The *set* of matching rows changed (a new row appeared), not a value in a row
+T1 already read — that is why a per-row snapshot can miss it and only
+SERIALIZABLE (range/predicate locks) reliably prevents it.
 
 **Which level prevents which:**
 
@@ -354,6 +439,16 @@ underlying default (usually none).
 Use it to bound worst-case lock-holding time so a stuck transaction doesn't pin
 connections/locks forever.
 
+> [!WARNING]
+> `timeout` is checked **cooperatively**, at the next resource interaction, and
+> is largely delegated to the JDBC statement query-timeout. A `@Transactional(timeout = 2)`
+> method that spends 30s in a pure in-memory computation (no DB round-trip)
+> blows past the 2s without interruption, because there is no checkpoint to
+> enforce it. Likewise a driver that ignores `Statement.setQueryTimeout` on a
+> single long query can exceed it. For a hard ceiling, pair the transaction
+> timeout with a JDBC socket/statement timeout (and a DB-side
+> `statement_timeout`) so a wedged statement is actually killed.
+
 ---
 
 ## The self-invocation / private method trap (proxy bypass)
@@ -462,6 +557,33 @@ version; if zero rows match, someone else changed it first and Hibernate throws
 No DB locks are held between read and write — great for low-contention, high-read
 workloads. The failure surfaces at **flush/commit**, so you must handle it there
 (often with a retry).
+
+**Worked lost-update race.** Row starts as `id=1, qty=10, version=5`. Two txns
+both want to decrement `qty`:
+
+| Step | T1 | T2 | Row in DB |
+|---|---|---|---|
+| 1 | `SELECT` → qty=10, version=5 | — | qty=10, v5 |
+| 2 | — | `SELECT` → qty=10, version=5 | qty=10, v5 |
+| 3 | `UPDATE ... SET qty=9, version=6 WHERE id=1 AND version=5` → **1 row**, COMMIT | — | qty=9, **v6** |
+| 4 | — | `UPDATE ... SET qty=9, version=6 WHERE id=1 AND version=5` → **0 rows** | qty=9, v6 |
+
+At step 4 the `WHERE version=5` matches nothing (the row is now v6), so
+Hibernate sees `0` rows affected and throws
+`ObjectOptimisticLockingFailureException` at flush. Without the version column
+T2's blind `SET qty=9` would have silently overwritten T1's decrement — both
+sold one unit but qty only dropped by one (the lost update). The version check
+converts a silent data-corruption into a loud, retryable failure:
+
+```java
+for (int attempt = 0; attempt < MAX; attempt++) {
+    try { decrement(id); return; }               // re-read + re-apply inside
+    catch (ObjectOptimisticLockingFailureException e) { /* reload, retry */ }
+}
+```
+
+On retry T2 re-reads (qty=9, version=6), decrements to `qty=8, version=7`, and
+the `WHERE version=6` now matches — the final DB state is the correct `qty=8`.
 
 **Pessimistic locking** — acquire a DB row lock up front:
 `@Lock(LockModeType.PESSIMISTIC_WRITE)` on a query method (issues `SELECT ... FOR

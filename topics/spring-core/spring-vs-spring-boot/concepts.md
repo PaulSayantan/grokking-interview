@@ -100,6 +100,24 @@ Practical consequences:
 - Define your own `DataSource` bean and Boot backs off, leaving yours in place.
 - You can inspect what fired with the `--debug` flag or the Actuator `conditions` endpoint (the "Auto-configuration Report"), and disable specific ones via `@SpringBootApplication(exclude = DataSourceAutoConfiguration.class)` or the `spring.autoconfigure.exclude` property.
 
+**Worked example — tracing `DataSourceAutoConfiguration` condition by condition.** Say your `pom.xml` has `spring-boot-starter-data-jpa` and `com.h2database:h2`, and you wrote **no** `DataSource` bean. When Boot processes `DataSourceAutoConfiguration`:
+
+| Condition on the auto-config | Evaluated against | Result |
+|---|---|---|
+| `@ConditionalOnClass({ DataSource.class, EmbeddedDatabaseType.class })` | classpath — both present (JDBC + H2) | **PASS** |
+| `@ConditionalOnMissingBean(DataSource.class)` | beans registered so far — none of that type (auto-config runs last, saw no user bean) | **PASS** |
+
+→ Both pass, so Boot registers an embedded H2 `DataSource` (and downstream, the `EntityManagerFactory` + `JpaTransactionManager`). Net result: a working datasource with zero configuration.
+
+Now change **one** thing — add your own bean:
+
+```java
+@Bean
+DataSource dataSource() { return myCustomPool(); }
+```
+
+Re-run the same trace. `@ConditionalOnClass` still **passes** (H2 is still on the classpath). But because user configuration is processed *before* auto-configuration, your `dataSource` bean is already registered when the condition is checked, so `@ConditionalOnMissingBean(DataSource.class)` now **FAILS** → the whole auto-config *backs off* and leaves your pool in place. This is the exact mechanism behind "your explicit bean always wins": the outcome flipped only because one condition flipped, not because of any special-casing.
+
 The Spring Framework itself has **no auto-configuration** — this is purely a Boot feature.
 
 **Gotcha — `@ConditionalOnMissingBean` is order-sensitive.** Conditions are evaluated *at the point the bean definition is processed*, against the beans registered *so far*. Because auto-configuration is guaranteed to run after user configuration, your `@Configuration`/`@Bean` beans and component-scanned beans are already registered when the auto-config condition is checked, so it backs off correctly. But if you place a `@ConditionalOnMissingBean` on your *own* `@Bean` method and another of your own `@Bean` methods (in a different user config class) also produces that type, the outcome depends on config-class processing order — user-vs-user ordering is **not** guaranteed the way user-vs-auto-config is. Rely on `@ConditionalOnMissingBean` only for the "back off in favour of a user bean" auto-configuration pattern, not for arbitrating between two user beans.
@@ -109,6 +127,12 @@ The Spring Framework itself has **no auto-configuration** — this is purely a B
 ## Auto-configuration ordering and internals
 
 Auto-configuration is more than "a list of `@Configuration` classes." Understanding the machinery answers a lot of senior follow-ups.
+
+Before the terms fly, the intuition behind each mechanism — each one exists to solve one specific problem:
+
+- **Deferred import selector** = "process auto-config *last*." It exists so auto-configuration can see every user bean already registered before it decides whether to back off. Register it eagerly and `@ConditionalOnMissingBean` would fire too early and clobber your beans.
+- **The phase split (`PARSE_CONFIGURATION` vs `REGISTER_BEAN`)** = "do the cheap check first." A classpath check (`@ConditionalOnClass`) is nearly free; a bean-existence check needs bean definitions registered and is costlier. Splitting phases lets a failed classpath check discard an entire auto-config before any expensive bean check runs.
+- **`proxyBeanMethods = false`** = "skip the CGLIB proxy we don't need." Auto-config classes rarely call one `@Bean` method from another, so Boot turns off the proxy to speed startup — at the cost that if you *do* make such a call it returns a new instance, not the singleton.
 
 - **`@EnableAutoConfiguration` imports a `DeferredImportSelector`** (`AutoConfigurationImportSelector`). A *deferred* import selector is processed **after** all `@Configuration`-class (regular component) parsing is complete — this is the mechanism that guarantees auto-configuration is registered *last* and can therefore see user beans.
 - **`@AutoConfiguration`** (Boot 2.7+) is a specialized `@Configuration(proxyBeanMethods = false)` used to *declare* an auto-configuration class, and it carries `before`/`after` attributes. Auto-config classes are listed in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
@@ -235,6 +259,25 @@ Boot did not invent externalized configuration or profiles — Spring's `Environ
 
 **Property source precedence (a classic trap).** Boot merges many property sources into one `Environment`, and *later-listed sources do not always win* — there is a fixed precedence order. Roughly (highest wins): devtools settings, `@TestPropertySource`, command-line args, `SPRING_APPLICATION_JSON`, servlet params, JNDI, Java system properties, OS environment variables, profile-specific `application-{profile}.properties`, then plain `application.properties`, then `@PropertySource`, then defaults. Two implications interviewers probe: (1) an OS env var **overrides** a value in `application.yml`; (2) `application-prod.yml` overrides plain `application.yml` but is itself overridden by command-line args and system properties.
 
+**Worked example — resolving `server.port` when four sources disagree.** The `prod` profile is active and the *same* key is set four ways:
+
+| Source | Value | Precedence rank (1 = highest wins) |
+|---|---|---|
+| Command line: `--server.port=6060` | 6060 | 1 |
+| OS env var: `SERVER_PORT=7070` | 7070 | 2 |
+| `application-prod.yml` (profile-specific) | 9090 | 3 |
+| `application.yml` (plain) | 8080 | 4 |
+
+Boot merges these into one `Environment` and asks the *highest-precedence* source that has the key. Walking down the ranks: rank 1 (command line) has it → resolution stops immediately. **Resolved `server.port` = 6060.** The app binds to port 6060.
+
+To confirm you understand the *ordering* (not just "last one wins"), replay it removing the top source each time:
+
+- Drop `--server.port` → env var `SERVER_PORT=7070` wins → **7070**.
+- Also drop the env var → `application-prod.yml` wins → **9090**.
+- Also drop the prod file (or deactivate the profile) → plain `application.yml` → **8080**.
+
+Note the classic trap: `application-prod.yml` outranks `application.yml`, but *both* lose to the env var and the command line — profile-specific files are near the *bottom*, not the top.
+
 **`@ConfigurationProperties` vs `@Value`.** `@Value("${...}")` is resolved by Spring's `PropertySourcesPlaceholderConfigurer`, supports SpEL, but is *not* relaxed-bound and fails fast per-field. `@ConfigurationProperties` does **relaxed binding** (`my.userName`, `my.user-name`, `MY_USER_NAME` all bind), supports nested objects, validation (`@Validated` + JSR-380), and type conversion, but does not support SpEL. For structured, validated config prefer `@ConfigurationProperties`; `@Value` is for one-off scalars.
 
 **Relaxed binding and environment variables.** Because env vars cannot contain dots or dashes, Boot canonicalizes them: `spring.datasource.url` binds from `SPRING_DATASOURCE_URL`. This only works for `@ConfigurationProperties`-style binding, which is why a property that binds fine from YAML may appear "missing" when supplied as an env var to a `@Value` field.
@@ -283,6 +326,8 @@ Situations where **plain Spring (without Boot)** may still be appropriate:
 - **Learning/teaching**, where writing configuration by hand builds a clearer mental model of what Boot automates.
 
 Even then you are still using the **Spring Framework**; the choice is really "with Boot's conventions" vs "configuring Spring myself." And Boot always lets you drop down to plain Spring config when its opinions don't fit — you are never locked out of the underlying framework.
+
+The modern counter-argument an interviewer often raises here is **cold start and footprint**: "isn't Boot too heavy for FaaS/Lambda?" Historically Boot's JVM startup and memory overhead did hurt in serverless, where every cold start pays the bootstrap cost. But the answer today is *not* "drop Boot" — it's the AOT/native path covered in the *Spring Boot 3, AOT, and native images* section below: Boot 3's **AOT processing + GraalVM native image** compile the same application to a native executable with millisecond startup and low memory, and Spring's **functional bean registration** avoids reflection-heavy scanning. So the trade-off has shifted from "plain Spring vs Boot for serverless" to "JVM Boot vs AOT/native Boot."
 
 ## Common failure modes and why apps break
 

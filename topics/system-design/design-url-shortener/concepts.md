@@ -157,7 +157,10 @@ with its own analytics).
 new URL gets the next integer; Base62-encode it to get the short key. No collisions ever,
 because integers are unique by construction.
 
-**How it works.** `id = counter++; key = base62(id)`. `base62(125) = "cb"`, etc. A single
+**How it works.** `id = counter++; key = base62(id)`. Worked example with the standard
+`[0-9a-zA-Z]` alphabet (index 0–9 → `0`–`9`, 10 → `a`, …, 61 → `Z`): `125 = 2×62 + 1`, so
+the digits are `[2, 1]` → chars `2` then `1` → `base62(125) = "21"`. (The bigger the counter,
+the longer the key: it grows one char every time you cross a power of 62.) A single
 counter is a bottleneck and SPOF, so you distribute it:
 
 - **Ranged/segmented counters**: each app server requests a *block* of IDs (e.g. 1,000 at

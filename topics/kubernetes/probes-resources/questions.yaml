@@ -12,7 +12,7 @@ questions:
   options:
   - "Liveness restarts the container, readiness removes the Pod from Service endpoints"
   - "Liveness removes the Pod from Service endpoints, readiness restarts the container"
-  - "Both restart the container, but at different intervals"
+  - "Both restart the container, but liveness uses a shorter default interval than readiness"
   - "Both remove the Pod from endpoints, but readiness also logs an event"
   answer: 0
   explanation: |
@@ -29,11 +29,11 @@ questions:
     deploy. The Deployment has a liveness probe but no readiness probe. What is the
     most likely cause?
   options:
-  - "The liveness probe is failing and restarting the container"
-  - "The container image is corrupt"
+  - "The liveness probe keeps failing and restarting the container, so requests land during one of those brief restart windows"
+  - "The container image is corrupt, so only some replicas pulled a complete layer set and a fraction of requests hit broken Pods"
   - "With no readiness probe, the Pod joins Service endpoints as soon as the container runs, before the
     app can serve"
-  - "The Service selector does not match the Pod labels"
+  - "The Service selector does not fully match the Pod labels, so only some Pods are ever added to the Service's EndpointSlices"
   answer: 2
   explanation: |
     "Running" means the container process is up, not that the app is ready. Without a
@@ -48,10 +48,10 @@ questions:
     What does the kubelet do when a container's liveness probe fails failureThreshold
     consecutive times?
   options:
-  - "Removes the Pod from Service endpoints"
-  - "Deletes and recreates the entire Pod"
+  - "Removes the Pod's IP from the Service endpoints so it stops receiving traffic"
+  - "Deletes and recreates the entire Pod object on a freshly selected node"
   - "Kills the container, which is then restarted according to the Pod's restartPolicy"
-  - "Marks the node as NotReady"
+  - "Marks the node as NotReady and drains its remaining Pods to healthy nodes"
   answer: 2
   explanation: |
     A failing liveness probe causes the kubelet to kill just that container; the Pod's
@@ -65,11 +65,11 @@ questions:
   question: |
     What is the primary purpose of a startup probe?
   options:
-  - "To load-balance traffic across replicas during startup"
+  - "To load-balance incoming traffic evenly across all replicas while they are still starting up"
   - "To protect slow-starting containers by disabling liveness and readiness probes until the app has
     booted"
-  - "To warm up the container image cache on the node"
-  - "To verify the container image signature before start"
+  - "To warm up the container image layer cache on the node so later restarts start faster"
+  - "To verify the container image signature and digest against the registry before the process starts"
   answer: 1
   explanation: |
     While a startup probe runs, liveness and readiness probes are disabled. This lets a
@@ -102,8 +102,8 @@ questions:
   options:
   - "It is OOMKilled (terminated) and restarted per restartPolicy"
   - "It is throttled and slowed down but keeps running"
-  - "The memory request is automatically raised"
-  - "The Pod is evicted from the node immediately"
+  - "The container's memory request is automatically raised to match its current usage"
+  - "The Pod is evicted from the node immediately by the kubelet under memory pressure"
   answer: 0
   explanation: |
     Memory is incompressible — you cannot slow memory usage. Exceeding the memory limit
@@ -117,9 +117,9 @@ questions:
   question: |
     What happens when a container tries to exceed its CPU limit?
   options:
-  - "It is OOMKilled"
-  - "The Pod is evicted"
-  - "The container is restarted"
+  - "It is OOMKilled (exit 137) and then restarted per the Pod's restartPolicy"
+  - "The Pod is evicted from the node under CPU pressure by the kubelet"
+  - "The container is restarted in place the moment it exceeds the CPU limit"
   - "It is throttled by the kernel (CFS) — slowed but not killed"
   answer: 3
   explanation: |
@@ -151,10 +151,10 @@ questions:
   question: |
     What is required for a Pod to be classified as Guaranteed QoS?
   options:
-  - "At least one container has a CPU or memory request"
-  - "The Pod has a high PriorityClass"
+  - "At least one container has a CPU or memory request set, even if no limits are given"
+  - "The Pod is assigned a high PriorityClass value above the cluster default"
   - "Every container has CPU and memory requests and limits set, with request equal to limit for both"
-  - "Every container has memory limits but no CPU limits"
+  - "Every container has memory requests and limits set but leaves CPU unbounded"
   answer: 2
   explanation: |
     Guaranteed requires that, for every container, both CPU and memory have requests and
@@ -169,9 +169,9 @@ questions:
     Why is it dangerous to make a liveness probe check a downstream dependency such as a
     database?
   options:
-  - "Liveness probes cannot make network calls"
-  - "It would make the Pod Guaranteed QoS"
-  - "The scheduler would refuse to place the Pod"
+  - "Liveness probes are not permitted to open outbound network connections to other services"
+  - "Adding a dependency check would silently promote the Pod to Guaranteed QoS"
+  - "The scheduler would refuse to place the Pod until the database dependency is reachable"
   - "A dependency blip fails liveness on every replica at once, restarting them all and amplifying the
     outage"
   answer: 3
@@ -188,9 +188,9 @@ questions:
     For an httpGet probe, which HTTP response status codes are considered a success?
   options:
   - "Codes greater than or equal to 200 and less than 400"
-  - "Only 200"
-  - "Any code less than 500"
-  - "Codes 200 through 299 only"
+  - "Only a plain 200 OK response is treated as a success"
+  - "Any status code strictly less than 500 counts as a success"
+  - "Only codes in the 200 through 299 range count as a success"
   answer: 0
   explanation: |
     An httpGet probe succeeds when the response status is >= 200 and < 400. So 2xx and 3xx
@@ -222,9 +222,9 @@ questions:
     first fix?
   options:
   - "Raise timeoutSeconds and/or failureThreshold so momentary pauses don't count as failures"
-  - "Lower periodSeconds so failures are detected faster"
-  - "Switch the probe from httpGet to exec"
-  - "Remove the liveness probe entirely"
+  - "Lower periodSeconds so probe failures are detected and acted on faster"
+  - "Switch the probe from httpGet to an exec command that checks the JVM heap"
+  - "Remove the liveness probe entirely so the container can never be restarted"
   answer: 0
   explanation: |
     The default timeoutSeconds is 1, which a GC pause can exceed; three misses restart the
@@ -239,10 +239,10 @@ questions:
     A container CrashLoopBackOffs right after every deploy: it takes ~80s to boot but its
     liveness probe has initialDelaySeconds of 10. What is the cleanest fix?
   options:
-  - "Set initialDelaySeconds to 300 on the liveness probe"
-  - "Remove the liveness probe"
+  - "Set initialDelaySeconds to 300 on the liveness probe to cover the slow boot"
+  - "Remove the liveness probe so nothing can ever restart the slow-booting container"
   - "Add a startup probe with a generous failureThreshold x periodSeconds budget"
-  - "Switch to a tcpSocket liveness probe"
+  - "Switch to a tcpSocket liveness probe that only checks the listening port"
   answer: 2
   explanation: |
     A large liveness initialDelay also delays detecting real runtime hangs. A startup probe
@@ -274,10 +274,10 @@ questions:
     A Pod stays Pending with a FailedScheduling event: "0/5 nodes are available:
     Insufficient cpu." The nodes' actual CPU usage is low. What is happening?
   options:
-  - "The Pod's CPU limit exceeds the node's CPU capacity"
+  - "The Pod's CPU limit exceeds the raw CPU capacity of every node in the cluster"
   - "No node has enough unreserved allocatable CPU to satisfy the Pod's CPU request"
-  - "The liveness probe is failing before scheduling"
-  - "The container image is too large for the node disk"
+  - "The liveness probe is failing and blocking the Pod before it can be scheduled"
+  - "The container image is too large to fit on the available node disk space"
   answer: 1
   explanation: |
     Scheduling bins against requests and allocatable capacity, not live usage. If the sum
@@ -292,10 +292,10 @@ questions:
     A namespace has a ResourceQuota specifying requests.cpu and requests.memory. A developer
     applies a Deployment whose containers set no requests. What happens?
   options:
-  - "The Pods are admitted with zero requests"
-  - "The quota is automatically increased"
+  - "The Pods are admitted with zero requests and allowed to consume unlimited resources"
+  - "The namespace quota is automatically increased to accommodate the new Pods"
   - "The Pods are rejected unless requests are specified (or a LimitRange supplies defaults)"
-  - "The Pods are admitted but marked BestEffort"
+  - "The Pods are admitted but silently marked BestEffort and exempted from the quota"
   answer: 2
   explanation: |
     When a ResourceQuota constrains requests.* or limits.*, every Pod in the namespace must
@@ -312,7 +312,7 @@ questions:
   - "Injects a request into containers that don't specify one"
   - "Sets the maximum request a container may ask for"
   - "Sets the total request budget for the namespace"
-  - "Forces all Pods into Guaranteed QoS"
+  - "Forces every Pod in the namespace into the Guaranteed QoS class"
   answer: 0
   explanation: |
     LimitRange.defaultRequest supplies a request to any container that omits one (and
@@ -326,7 +326,7 @@ questions:
   question: |
     What does a tcpSocket probe actually verify?
   options:
-  - "That an HTTP endpoint returns 200"
+  - "That an HTTP endpoint returns a 200 OK status"
   - "That a command inside the container exits 0"
   - "That the gRPC health service reports SERVING"
   - "That a TCP connection to the port can be opened"
@@ -344,10 +344,10 @@ questions:
     A container specifies only a memory limit of 512Mi and no memory request. What memory
     request does Kubernetes assign?
   options:
-  - "0"
+  - "0 (an omitted request is treated as zero)"
   - "512Mi (request defaults to equal the limit)"
-  - "256Mi (half the limit)"
-  - "The node's allocatable memory"
+  - "256Mi (defaults to half the stated limit)"
+  - "The node's total allocatable memory capacity"
   answer: 1
   explanation: |
     If you set a limit but no request, Kubernetes defaults the request to equal the limit.
@@ -361,10 +361,10 @@ questions:
     What is the key difference between an OOMKilled container (from a limit) and a
     node-pressure eviction?
   options:
-  - "OOMKilled deletes the Pod; eviction only restarts a container"
-  - "They are the same event with different names"
+  - "OOMKilled deletes the whole Pod object; eviction only restarts a single container in place"
+  - "They are the same underlying kernel event exposed under two different status names"
   - "OOMKilled restarts just the offending container in place; eviction terminates whole Pods by QoS order"
-  - "OOMKilled only happens to BestEffort Pods"
+  - "OOMKilled only happens to BestEffort Pods, since Guaranteed Pods are exempt from the OOM killer"
   answer: 2
   explanation: |
     An OOMKilled from a memory limit is per-container: the kernel kills that container
@@ -379,9 +379,9 @@ questions:
   question: |
     Which statement about QoS class and PriorityClass is correct?
   options:
-  - "QoS class determines which Pods the scheduler preempts"
-  - "Guaranteed QoS Pods are never preempted"
-  - "QoS and PriorityClass are two names for the same value"
+  - "QoS class alone determines which Pods the scheduler picks to preempt for a pending Pod"
+  - "Guaranteed QoS Pods are exempt from preemption regardless of their PriorityClass value"
+  - "QoS and PriorityClass are two different names for the exact same underlying Pod value"
   - "PriorityClass drives preemption; QoS drives node-pressure eviction — they are different mechanisms"
   answer: 3
   explanation: |
@@ -397,9 +397,9 @@ questions:
     Why can't a Pod request 100% of a node's raw memory capacity?
   options:
   - "The scheduler bins against allocatable = capacity minus kube/system reserved and the eviction threshold"
-  - "The scheduler always leaves 50% free"
-  - "Limits are capped at 90% of capacity by default"
-  - "Memory requests are rounded down to the nearest Gi"
+  - "The scheduler always holds back a fixed 50% of every node's memory as a safety buffer"
+  - "Container memory limits are hard-capped at 90% of node capacity by an admission default"
+  - "Memory requests are silently rounded down to the nearest whole Gi before scheduling"
   answer: 0
   explanation: |
     The scheduler uses a node's allocatable resources, which is capacity minus reservations
@@ -413,10 +413,10 @@ questions:
   question: |
     What is a real downside of using frequent exec probes on a busy node?
   options:
-  - "exec probes cannot return failure"
+  - "exec probes can only report success and have no mechanism to signal a failure result"
   - "Each probe forks a process inside the container every period, adding CPU overhead at scale"
-  - "exec probes bypass the container's namespace"
-  - "exec probes require the Pod to be Guaranteed QoS"
+  - "exec probes run on the host and bypass the container's mount and network namespace"
+  - "exec probes require the Pod to be classified as Guaranteed QoS before they will run"
   answer: 1
   explanation: |
     An exec probe runs a command inside the container each period. With many Pods and short
@@ -431,9 +431,9 @@ questions:
     Do HTTP liveness/readiness probes travel through the Service or Ingress?
   options:
   - "No, the kubelet probes the Pod IP directly from the node, bypassing Service/Ingress"
-  - "Yes, they go through the Service's ClusterIP"
-  - "Yes, but only readiness probes use the Service"
-  - "Only when the probe uses scheme HTTPS"
+  - "Yes, every probe is routed through the target Service's ClusterIP and kube-proxy"
+  - "Yes, but only readiness probes traverse the Service while liveness hits the Pod IP"
+  - "Only when the probe is configured with the HTTPS scheme rather than plain HTTP"
   answer: 0
   explanation: |
     The kubelet issues probes from the node directly against the Pod IP and container port,
@@ -447,9 +447,9 @@ questions:
   question: |
     Which statement about successThreshold is correct?
   options:
-  - "It must be greater than 1 for all probes"
-  - "It applies only to exec probes"
-  - "It sets how many failures trigger a restart"
+  - "It must be set greater than 1 for every probe type or the Pod is rejected"
+  - "It applies only to exec probes and is ignored by httpGet and tcpSocket probes"
+  - "It sets how many consecutive failures must occur before a container is restarted"
   - "It must be 1 for liveness and startup probes, but may be greater than 1 for readiness"
   answer: 3
   explanation: |
@@ -464,11 +464,11 @@ questions:
   question: |
     How does a readiness probe affect a Deployment's rolling update?
   options:
-  - "It has no effect on rollouts"
-  - "It makes the rollout skip health checks entirely"
+  - "It has no effect on rollouts, which count only container start and image pull"
+  - "It makes the rollout skip all health checks and cut over instantly to new Pods"
   - "A new Pod isn't counted as available until its readiness probe passes, so the rollout won't scale
     down old Pods prematurely"
-  - "It forces maxUnavailable to 0"
+  - "It forces the rollout's maxUnavailable field to 0 for the duration of the update"
   answer: 2
   explanation: |
     A rolling update waits for new Pods to become available, and availability requires the
@@ -482,10 +482,10 @@ questions:
   question: |
     Which is true about gRPC probes in modern Kubernetes?
   options:
-  - "They are still behind an alpha feature gate"
+  - "They are still gated behind the alpha GRPCContainerProbe feature flag, off by default"
   - "They reached GA (stable) in v1.27 and require the app to implement the gRPC Health Checking Protocol"
-  - "They require a sidecar to translate to HTTP"
-  - "They only work for readiness, not liveness"
+  - "They require a sidecar container to translate the gRPC health call into HTTP"
+  - "They only work for readiness checks and cannot be configured as liveness probes"
   answer: 1
   explanation: |
     Native gRPC probes went GA in Kubernetes v1.27 (GRPCContainerProbe on by default). The
@@ -501,10 +501,10 @@ questions:
     Roughly how long after container start, in the worst case, before a container that is
     hung from the beginning is killed?
   options:
-  - "20 seconds"
-  - "35 seconds"
+  - "About 20 seconds (just one periodSeconds interval)"
+  - "About 35 seconds (initialDelaySeconds plus one period)"
   - "About 75 seconds (15 + 3 x 20)"
-  - "300 seconds"
+  - "About 300 seconds (the maximum back-off cap applies)"
   answer: 2
   explanation: |
     First probe at ~15s, then every 20s; three consecutive failures trigger the kill. Worst
@@ -518,9 +518,9 @@ questions:
     What does a CPU request of "500m" mean?
   options:
   - "Half of one CPU core (500 millicores)"
-  - "500 megabytes of memory"
-  - "500 milliseconds of CPU time per second"
-  - "500 CPU cores"
+  - "500 megabytes of memory reserved for the container"
+  - "500 milliseconds of absolute CPU time granted per second"
+  - "500 full CPU cores dedicated to the container"
   answer: 0
   explanation: |
     CPU is measured in cores/millicores: 1 = one core, 1000m = one core, so 500m = half a
@@ -534,9 +534,9 @@ questions:
     A Pod has one container with a memory request of 128Mi and no limits, and no CPU
     request or limit. What QoS class is it?
   options:
-  - "Guaranteed"
-  - "BestEffort"
-  - "Invalid — it will be rejected"
+  - "Guaranteed, because a memory request is set on the container"
+  - "BestEffort, because CPU is left completely unspecified"
+  - "Invalid — a Pod with partial requests is rejected at admission"
   - "Burstable"
   answer: 3
   explanation: |
@@ -551,10 +551,10 @@ questions:
   question: |
     Besides CPU/memory totals, what else can a ResourceQuota limit?
   options:
-  - "Only CPU and memory — nothing else"
+  - "Only CPU and memory totals — no other resource types are supported"
   - "Object counts such as pods, services, configmaps, and count/<resource>"
-  - "The container image registry"
-  - "Probe intervals across the namespace"
+  - "The container image registry that Pods in the namespace may pull from"
+  - "The probe interval and timeout values used by Pods across the namespace"
   answer: 1
   explanation: |
     ResourceQuota can cap aggregate compute (requests/limits) AND object counts (pods,
@@ -568,10 +568,10 @@ questions:
   question: |
     Why is overcommitting CPU limits generally safer than overcommitting memory limits?
   options:
-  - "CPU limits are ignored by the kernel"
-  - "Memory is always reserved 1:1 at schedule time"
+  - "CPU limits are ignored by the kernel and never actually enforced at runtime"
+  - "Memory is always physically reserved 1:1 with the request at schedule time"
   - "CPU is compressible (over-usage throttles), while memory over-usage causes OOM kills and eviction"
-  - "CPU requests are not counted for scheduling"
+  - "CPU requests are not counted by the scheduler when placing Pods on nodes"
   answer: 2
   explanation: |
     Because CPU is compressible, contention just throttles Pods — no crash. Memory is
@@ -585,9 +585,9 @@ questions:
   question: |
     Why should liveness and readiness probes generally use DIFFERENT endpoints?
   options:
-  - "Kubernetes forbids sharing an endpoint between probes"
-  - "Different endpoints make probes run faster"
-  - "Readiness endpoints must return 500 to pass"
+  - "Kubernetes rejects a Pod spec that points two probes at the same endpoint path"
+  - "Serving probes from different endpoints lets the kubelet run them in parallel and faster"
+  - "Readiness endpoints must return a 500 status code in order to be counted as passing"
   - "If they share an endpoint, shedding traffic (readiness fail) also fails liveness and needlessly restarts
     the container"
   answer: 3
@@ -620,11 +620,11 @@ questions:
   question: |
     What does the CrashLoopBackOff status indicate?
   options:
-  - "The Pod is being scheduled"
+  - "The Pod is still being scheduled and waiting for a node assignment"
   - "A container keeps failing/restarting, and the kubelet is applying an increasing back-off delay between
     restarts"
-  - "The node is out of disk"
-  - "The readiness probe removed the Pod from endpoints"
+  - "The node has run out of disk and cannot pull the container image"
+  - "The readiness probe removed the Pod from Service endpoints for traffic"
   answer: 1
   explanation: |
     CrashLoopBackOff means a container repeatedly starts and dies (crash, failed liveness,
@@ -640,9 +640,9 @@ questions:
     endpoints. Which setting best reduces the flapping when re-adding the Pod?
   options:
   - "Increase successThreshold above 1 to require several consecutive passes before re-adding"
-  - "Lower failureThreshold to 1"
-  - "Set initialDelaySeconds to 0"
-  - "Switch to a liveness probe"
+  - "Lower failureThreshold to 1 so the Pod is pulled from endpoints after a single failed check"
+  - "Set initialDelaySeconds to 0 so the probe starts checking the instant the container launches"
+  - "Switch to a liveness probe so a failing check restarts the container instead of shedding traffic"
   answer: 0
   explanation: |
     Readiness allows successThreshold > 1. Requiring several consecutive successes before
@@ -655,11 +655,11 @@ questions:
   question: |
     How does QoS influence the Linux kernel's own OOM killer on a node?
   options:
-  - "QoS has no effect at the kernel level"
-  - "Guaranteed Pods are exempt from the kernel OOM killer entirely"
+  - "QoS has no effect at the kernel level; the OOM killer picks purely by each process's resident set size"
+  - "Guaranteed Pods are exempt from the kernel OOM killer entirely, so their containers are never reaped on memory pressure"
   - "The kubelet sets oom_score_adj so BestEffort/over-request containers are more likely to be killed
     first in a kernel OOM"
-  - "The kernel evicts whole nodes, not containers"
+  - "The kernel evicts whole nodes rather than containers, cordoning the machine until memory frees up"
   answer: 2
   explanation: |
     The kubelet applies oom_score_adj per container based on QoS: BestEffort and
@@ -673,9 +673,9 @@ questions:
   question: |
     Which of these is a job of a LimitRange (not a ResourceQuota)?
   options:
-  - "Cap the total memory requested across all Pods in the namespace"
-  - "Limit the number of Services in the namespace"
-  - "Restrict which nodes Pods schedule onto"
+  - "Cap the total memory requested across all Pods in the namespace as a single aggregate ceiling"
+  - "Limit the number of Services that may be created within the namespace before admission rejects more"
+  - "Restrict which nodes Pods schedule onto by injecting nodeSelector and affinity terms at admission"
   - "Enforce per-container min/max values and inject default requests/limits"
   answer: 3
   explanation: |
@@ -711,9 +711,9 @@ questions:
   options:
   - "A running process is a weak proxy for health — an app can be deadlocked or not ready while the PID
     is alive"
-  - "Probes are only for logging"
-  - "Probes replace the need for a restartPolicy"
-  - "The kubelet cannot detect process exit without probes"
+  - "Probes exist only to emit health events into the cluster log stream for later auditing, not to drive any action"
+  - "Probes fully replace the need for a restartPolicy, taking over container restart decisions from the kubelet"
+  - "The kubelet has no way to notice a process exiting on its own and depends entirely on probes to detect it"
   answer: 0
   explanation: |
     "Process running" doesn't mean "app healthy." A deadlocked or still-warming app has a
@@ -728,10 +728,10 @@ questions:
     Given a container with requests {cpu: 500m, memory: 256Mi} and limits {cpu: 500m,
     memory: 512Mi}, what QoS class results and why?
   options:
-  - "BestEffort — CPU and memory differ"
-  - "Guaranteed — requests and limits are both set"
+  - "BestEffort — because the CPU and memory values differ, the Pod is treated as having no requests at all"
+  - "Guaranteed — requests and limits are both set on the container, which is all the class requires"
   - "Burstable — memory request (256Mi) does not equal its limit (512Mi)"
-  - "Guaranteed — CPU request equals its limit"
+  - "Guaranteed — the CPU request equals its limit, and CPU alone is what decides the Guaranteed class"
   answer: 2
   explanation: |
     Guaranteed requires request == limit for BOTH cpu and memory on every container. Here
@@ -745,9 +745,9 @@ questions:
     A latency-sensitive service shows periodic p99 spikes but never crashes, and metrics
     show high CPU CFS throttling. What is the most likely cause?
   options:
-  - "The memory limit is too low"
-  - "The readiness probe is failing"
-  - "The node is out of disk"
+  - "The memory limit is too low, so the container is repeatedly OOMKilled and restarted mid-request"
+  - "The readiness probe is failing intermittently and pulling the Pod out of Service endpoints during spikes"
+  - "The node is out of disk, forcing the kubelet to throttle the Pod's writes and stall responses"
   - "The CPU limit is too low, so the kernel throttles the container during bursts"
   answer: 3
   explanation: |
@@ -763,10 +763,10 @@ questions:
     A node reports actual CPU usage of 20% yet the scheduler places no new Pods on it,
     leaving them Pending. What is the explanation?
   options:
-  - "The node is cordoned automatically at 20% usage"
+  - "The node is cordoned automatically once its measured CPU usage crosses a 20% low-utilization floor"
   - "Existing Pods' CPU REQUESTS already sum to the node's allocatable, even though usage is low"
-  - "The scheduler only uses nodes above 50% usage"
-  - "The Pods' liveness probes are failing"
+  - "The scheduler will only place Pods on nodes whose live CPU usage is already above 50% for bin-packing"
+  - "The Pods' liveness probes are failing, and a failing liveness check blocks scheduling onto any node"
   answer: 1
   explanation: |
     Scheduling is request-based. If placed Pods' requests already consume the node's
@@ -780,10 +780,10 @@ questions:
   question: |
     When a readiness probe fails, does the container get restarted?
   options:
-  - "Yes, immediately"
-  - "Yes, but only after 3 failures"
+  - "Yes, the container is restarted immediately on the first failed readiness check"
+  - "Yes, but only after failureThreshold consecutive readiness failures have accumulated"
   - "No — only the Pod's IP is removed from Service endpoints; the container keeps running"
-  - "Only if there is no liveness probe"
+  - "Only if there is no liveness probe defined, in which case readiness takes over restart duty"
   answer: 2
   explanation: |
     Readiness never restarts. On failure the endpoints controller removes the Pod IP from
@@ -797,9 +797,9 @@ questions:
   question: |
     Which statement about QoS class mutability is correct?
   options:
-  - "QoS can be changed at runtime with kubectl edit"
-  - "QoS changes automatically as usage changes"
-  - "QoS is recalculated on every probe success"
+  - "QoS can be changed at runtime by editing the Pod's qosClass field with kubectl edit"
+  - "QoS changes automatically as a container's live CPU and memory usage rises and falls"
+  - "QoS is recalculated by the kubelet on every successful probe and updated on the Pod status"
   - "QoS is set at Pod creation and is immutable; an in-place resize that would change the class is rejected"
   answer: 3
   explanation: |
@@ -815,9 +815,9 @@ questions:
     probe should gate whether it receives traffic during that warm-up?
   options:
   - "Readiness probe"
-  - "Liveness probe"
-  - "A CPU limit"
-  - "A ResourceQuota"
+  - "Liveness probe, which restarts the container until the cache finishes warming up"
+  - "A CPU limit sized so the container cannot serve traffic until the cache is fully loaded"
+  - "A ResourceQuota that withholds the Pod from endpoints for the first 30 seconds of its life"
   answer: 0
   explanation: |
     Readiness governs endpoint membership: it should fail during warm-up so no traffic is
@@ -832,10 +832,10 @@ questions:
     Two Burstable Pods are on a node under memory pressure. Pod A is using memory below its
     request; Pod B is using well above its request. Which is more likely to be evicted?
   options:
-  - "Pod A, because it uses less memory"
+  - "Pod A, because using less memory ranks it as the cheapest Pod for the kubelet to reclaim first"
   - "Pod B, because Pods exceeding their requests are ranked as eviction candidates first"
-  - "Neither — Burstable Pods are never evicted"
-  - "Whichever was scheduled first"
+  - "Neither — Burstable Pods are exempt from node-pressure eviction and only BestEffort ones are removed"
+  - "Whichever was scheduled first, since the kubelet evicts in oldest-Pod-first order under pressure"
   answer: 1
   explanation: |
     Node-pressure eviction targets Pods exceeding their requests, ranked by how far over

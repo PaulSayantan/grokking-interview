@@ -118,6 +118,23 @@ HOTP(K, C) = Truncate( HMAC-SHA-1(K, C) )   mod 10^Digits
   bytes at that offset, mask the top bit (to stay a positive 31-bit integer), then
   `mod 10^Digits` to get a 6–8 digit code.
 
+**Worked example — derive one code (RFC 4226 reference vector).** Take the RFC's test
+secret `K = "12345678901234567890"` (20 ASCII bytes) and counter `C = 0`:
+
+1. `C = 0` as an 8-byte big-endian value → `00 00 00 00 00 00 00 00`.
+2. `HMAC-SHA-1(K, C)` = the 20-byte MAC
+   `cc 93 cf 18 50 8d 94 93 4c 64 b6 5d 8b a7 66 7f b7 cd e4 b0`.
+3. **Dynamic truncation.** Last byte = `0xb0`; its low 4 bits `0xb0 & 0x0f = 0x0` → **offset
+   = 0**. Read the 4 bytes starting at offset 0: `cc 93 cf 18`.
+4. **Mask the top bit** (`& 0x7fffffff`) so it's a positive 31-bit int: `cc → cc & 0x7f =
+   0x4c`, giving `4c 93 cf 18` = **1,284,755,224**.
+5. **`mod 10^6`** → `1284755224 mod 1000000` = **755224**. That is the 6-digit code — and it
+   matches RFC 4226's published vector exactly.
+
+The masking step exists so the code is identical on 32-bit and 64-bit, signed and unsigned
+platforms (no sign-bit surprises); the offset step exists so an attacker who sees codes can't
+predict *which* 4 bytes are used without the secret.
+
 The counter is the catch: token and server counters must stay in sync. Because a user may
 generate codes that never reach the server (fat-fingered, cancelled), servers accept a
 **look-ahead window** of `s` future counters. This desync fragility is exactly why the
@@ -152,12 +169,28 @@ previous and next 30s window) — a total acceptance window of about 90 seconds.
 recommends *at most one step* of tolerance and warns each extra step widens the attack
 surface.
 
+**Worked example — step number and the ±1 window.** Say the login lands at Unix time
+`1700000000` with defaults `T0 = 0`, `X = 30`:
+
+- `T = floor((1700000000 − 0) / 30) = floor(56666666.67) = **56666666**`. Both the app and
+  the server compute this same integer from the clock, then feed it into HOTP exactly as
+  above: `TOTP = HOTP(K, 56666666)`.
+- With ±1 tolerance the verifier accepts the code for **three** candidate steps —
+  `T−1 = 56666665`, `T = 56666666`, `T+1 = 56666667` — spanning `[1699999950, 1700000040)`,
+  i.e. a **90-second** acceptance band. Each step increment past ±1 adds another 30s the
+  attacker's relayed code stays live, which is why RFC 6238 caps tolerance at one step.
+
 Server-side musts:
 - **Reject reuse within a step:** once a code for step `T` is accepted, record it and
   refuse the same code again — otherwise an eavesdropper replays it within the 30s window.
 - **Rate-limit attempts:** a 6-digit code is 1-in-1,000,000; without throttling, and with a
   ±1 window, online brute force becomes feasible over time. RFC 4226 requires
-  throttling/lockout.
+  throttling/lockout. *Make it visceral:* the ±1 window means **3** of the 10⁶ codes are
+  accepted at any instant, so a single guess hits with probability `3/1,000,000 ≈ 1 in
+  333,000`. Unthrottled at `N = 50` guesses/sec, expected time-to-hit is about
+  `1,000,000 / (3 × 50) ≈ 6,700 s ≈ 1.9 hours` — trivial. NIST's **≤100 consecutive
+  failures** cap holds the attacker's success probability to `100 × 3/10⁶ ≈ 0.03%` before
+  lockout, which is exactly why that cap matters.
 
 > [!INTERVIEW]
 > Two favorite gotchas: (1) TOTP's secret is a **shared symmetric secret** — the *server*
@@ -390,6 +423,23 @@ proxy **relays every request/response to the real site in real time**:
 4. The attacker imports that cookie into their own browser and is **fully logged in** — MFA
    already satisfied. No password re-entry, no second factor, nothing to re-solve.
 
+```mermaid
+sequenceDiagram
+    participant V as Victim
+    participant P as AiTM proxy<br/>(login-microsoft.com)
+    participant R as Real site (RP)
+    V->>P: username + password
+    P->>R: relays username + password
+    R->>P: prompt for 2nd factor (TOTP/push)
+    P->>V: relays prompt
+    V->>P: enters OTP / approves
+    P->>R: relays OTP / approval
+    R->>P: issues session cookie / tokens
+    Note over P: proxy CAPTURES the cookie
+    P->>V: shows "logged in" page
+    Note over P,R: attacker imports cookie → fully authenticated,<br/>MFA already satisfied
+```
+
 This is why AiTM connects *authentication* to *session management*: the payoff is a stolen
 **authenticated session**, not the password. Number-matching does **not** help — the proxy
 simply shows the victim the number it received from the real site. TOTP/push/SMS all fall.
@@ -452,6 +502,44 @@ A resource server accepts a DPoP token only if the proof is signed by the key wh
 thumbprint matches `cnf.jkt` **and** `ath` matches the presented token **and** `htm`/`htu`
 match the actual request. A thief with the token but not the private key cannot mint a valid
 proof.
+
+**Worked example — one request, three checks.** The client calls
+`GET https://api.example.com/resource` holding access token
+`AT-eyJhbGciOiJFUzI1NiJ9.demo` (bound at issue time with `token_type: DPoP` and a `cnf`
+claim `{"jkt":"0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"}`). It sends two headers:
+
+```
+Authorization: DPoP AT-eyJhbGciOiJFUzI1NiJ9.demo
+DPoP: <proof JWT>          # decoded below
+```
+
+```jsonc
+// proof JWT header
+{ "typ": "dpop+jwt", "alg": "ES256",
+  "jwk": { "kty":"EC", "crv":"P-256",
+           "x":"l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs",
+           "y":"9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA" } }
+// proof JWT claims
+{ "htm":"GET", "htu":"https://api.example.com/resource",
+  "iat":1700000000, "jti":"e1f2...96bit",
+  "ath":"QyKv6jBp6M41UnFRaKPUEbeT58mQ0dDOditFY7LMoNI" }
+```
+
+The resource server runs three checks:
+
+1. **Key binding.** Compute the JWK thumbprint (base64url SHA-256 of the canonical JWK) of
+   the `jwk` in the proof header → `0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I`. It equals
+   the token's `cnf.jkt`. ✅ (And verify the proof's signature with that same `jwk`.)
+2. **Token binding.** Compute base64url SHA-256 of the presented access token string →
+   `QyKv6jBp6M41UnFRaKPUEbeT58mQ0dDOditFY7LMoNI`. It equals the proof's `ath`. ✅
+3. **Request binding.** `htm == "GET"` and `htu == "https://api.example.com/resource"` match
+   the actual method and URI; `iat` is fresh and `jti` unseen. ✅ → **serve the resource.**
+
+**Now the AiTM thief** who exfiltrated the access token replays it from their own machine.
+They can't pass step 1: they don't hold the EC **private** key, so they cannot produce a
+proof whose `jwk` thumbprint equals `cnf.jkt` *and* carries a valid signature. Swapping in
+their own key pair changes the thumbprint, so `jkt(jwk) ≠ cnf.jkt` and validation fails at
+step 1. The stolen bearer string is inert — that is the whole point of sender-constraining.
 
 **mTLS-bound tokens (RFC 8705).** The token's `cnf` carries **`x5t#S256`** = the SHA-256
 thumbprint of the **client TLS certificate**. The token is usable only over a mutual-TLS

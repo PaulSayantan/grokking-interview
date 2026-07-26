@@ -218,6 +218,61 @@ sequenceDiagram
   SVC-->>U: Response;
 ```
 
+**What the enforcement actually looks like** — trace tenant `T42` through all
+three layers:
+
+*(1) The `AssumeRole` call that stamps the tenant onto the credentials* — the
+service passes `TenantID` as a **session tag**, so the identity of the temporary
+credentials now carries the tenant:
+
+```python
+sts.assume_role(
+    RoleArn="arn:aws:iam::111122223333:role/tenant-data-access",
+    RoleSessionName="req-abc123",
+    Tags=[{"Key": "TenantID", "Value": "T42"}],   # <-- session tag
+)
+```
+
+*(2) The IAM policy on that role* — **one** policy serves every tenant, because
+the tenant value is read from the session tag at request time:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+  "Resource": "arn:aws:dynamodb:*:*:table/AppData",
+  "Condition": {
+    "ForAllValues:StringLike": {
+      "dynamodb:LeadingKeys": ["TENANT#${aws:PrincipalTag/TenantID}#*"]
+    }
+  }
+}
+```
+
+At request time `${aws:PrincipalTag/TenantID}` resolves to `T42`, so the
+condition effectively becomes `dynamodb:LeadingKeys` must start with
+`TENANT#T42#`. A `Query` for `PK = "TENANT#T99#order-1"` with these credentials is
+**denied by DynamoDB itself** — the application never gets a chance to leak
+another tenant's items, even if a developer forgot a filter.
+
+*(3) The Postgres equivalent — Row-Level Security (RLS)* for the relational pool
+model, set up once and then enforced on every statement:
+
+```sql
+ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON orders
+  USING (tenant_id = current_setting('app.tenant_id'));
+
+-- per request, before running any tenant query:
+SET app.tenant_id = 'T42';
+```
+
+Now a plain `SELECT * FROM orders` — with **no** `WHERE tenant_id` clause —
+silently returns only `T42` rows, because the database appends the predicate. In
+all three layers the tenant value lands in a place the request *cannot* rewrite (a
+session tag, a resolved principal tag, a session variable), not in hand-written
+query text.
+
 See [`aws-security-iam-deep-dive`](../aws-security-iam-deep-dive/concepts.md) for
 the ABAC/STS mechanics in depth.
 
@@ -327,6 +382,16 @@ bottlenecks."
 > non-adjustable **4 custom domains per Region** quota is a hard wall for giving
 > thousands of tenants vanity login domains.
 
+**Gotcha — a user who belongs to more than one tenant** (a common B2B follow-up:
+a consultant or MSP admin spanning several client orgs). The token must carry the
+**active** tenant — a single `custom:tenantId` claim for the tenant the user is
+currently acting as — not a list of every tenant they can access. Do **not** stuff
+all of a user's tenant memberships into the JWT: it bloats the token, and it goes
+stale the moment membership changes (the token is valid until it expires).
+**Switching tenant** means minting a new token for the new active tenant — a
+re-auth or a token exchange against the membership store — so isolation is always
+driven by exactly one authoritative tenant claim per request.
+
 See [`aws-security-kms-secrets-cognito-waf`](../aws-security-kms-secrets-cognito-waf/concepts.md)
 for Cognito internals.
 
@@ -427,6 +492,25 @@ pooling/multiplexing. Schema-per-tenant multiplies schema objects; DB-per-tenant
 multiplies instances and cost. See
 [`aws-databases-rds-aurora`](../aws-databases-rds-aurora/concepts.md).
 
+**Worked example — "40,000 RCU table, one tenant still throttled":** the shared
+table `AppData` is provisioned for **40,000 RCU**. Tenant `T42` all keys on the
+prefix `TENANT#T42#...`, so every one of T42's items hashes to the **same
+partition key** and lands on **one physical partition**. That partition is capped
+at **~3,000 RCU**. T42 drives **5,000 RCU** of reads:
+
+- Partition ceiling = 3,000 RCU → 3,000 RCU served.
+- Remaining 5,000 − 3,000 = **2,000 RCU throttled** (HTTP 400
+  `ProvisionedThroughputExceededException`) — even though the table has
+  40,000 − 5,000 = **35,000 RCU of unused headroom**. The table isn't the
+  bottleneck; the single partition is.
+
+*The fix, quantified:* write-shard the key into `TENANT#T42#<0-9>` (10 suffixes).
+The 5,000 RCU now spreads across up to 10 partitions ≈ **500 RCU each**, well
+under the 3,000 ceiling → nothing throttles. (Reads must now fan out across the 10
+shards.) Or move T42 to a **silo table**, giving it its own 40,000 RCU and its own
+partition budget. On-demand mode + adaptive capacity soften transient spikes but
+do **not** raise the ~3,000 RCU per-partition physical ceiling.
+
 > [!TIP]
 > A hot-tenant DynamoDB problem is a **partition-key design** problem. If one
 > tenant's `TENANT#<id>` prefix concentrates all traffic on one physical
@@ -457,6 +541,23 @@ noisy-neighbor containment **at the edge**. Throttled requests receive **HTTP 42
 Too Many Requests**. Throttle values are best-effort **targets**, not hard
 ceilings. See [`aws-api-layer-apigateway-appsync`](../aws-api-layer-apigateway-appsync/concepts.md).
 
+**Worked example — token bucket with `rate=100`, `burst=200`:** the bucket holds
+at most 200 tokens (burst) and refills at 100 tokens/sec (rate). One token is
+spent per request.
+
+- *Idle then spike:* the bucket is full at 200 tokens. A tenant fires **200
+  requests in one instant** → all 200 pass (drains the bucket to 0). That is the
+  burst allowance — a short spike above the steady rate is absorbed.
+- *Immediately after:* the bucket is empty; it refills at 100/sec. So the next
+  second the tenant can do at most ~100 requests. Sustained throughput settles to
+  the **rate = 100 RPS**; burst only buys a one-time cushion, not a higher
+  long-run rate.
+- *Sustained 150 RPS load:* refill adds 100 tokens/sec but the client spends 150 →
+  net **−50 tokens/sec**. Starting full (200), the bucket empties in 200 / 50 =
+  **4 seconds**; after that ~50 RPS get **429**ed every second (100 served, 50
+  rejected) until the client backs off to ≤100 RPS. Burst delays the throttling by
+  4 seconds; it does not prevent it.
+
 **Metering.** Capture tenant-level usage/load ("Tenant Activity and
 Consumption") to feed scaling decisions *and* billing. Emit tenant-tagged metrics
 (**CloudWatch EMF** with a `TenantId` dimension, or Kinesis/Firehose aggregation
@@ -476,6 +577,14 @@ pricing alongside subscription.
   **application-level metering** and proportional allocation (attribute by consumed
   RCU/WCU, invocations, request counts). For containers, enable **Split Cost
   Allocation Data** in the CUR for pod-level cost.
+
+  *Worked example — proportional allocation:* one shared DynamoDB table bills
+  **$1,000** for the month. AWS cannot tell you who drove it — the tag is on the
+  table, not the item. But your application metered consumed capacity per
+  `TenantId`: tenant A = 60%, B = 30%, C = 10% of total RCU/WCU. Allocate the bill
+  by those fractions: A = 0.60 × $1,000 = **$600**, B = 0.30 × $1,000 = **$300**,
+  C = 0.10 × $1,000 = **$100** (sums to $1,000). The metering data — not a cost
+  tag — is what makes chargeback possible in the pool model.
 
 Limits: 50 user-defined tags per resource; tag keys are case-sensitive in the CUR
 (enforce `TenantId` consistently); enforce with **Organizations tag policies /

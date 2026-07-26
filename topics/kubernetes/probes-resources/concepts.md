@@ -86,7 +86,12 @@ Key semantics:
   running). The Pod object is not recreated; the container is restarted in place, incrementing
   `RESTARTS` in `kubectl get pod`.
 - Repeated liveness kills produce **`CrashLoopBackOff`**: the kubelet applies an exponential back-off
-  (capped at 5 minutes) between restart attempts.
+  between restart attempts. The delay **starts at 10s and doubles each time** — `10s → 20s → 40s →
+  80s → 160s → 300s` — then **caps at 300s (5 min)** and stays there. Worked trace: a container that
+  keeps failing waits 10s before restart #1, 20s before #2, 40s before #3, and so on, so it takes
+  roughly `10+20+40+80+160 ≈ 5m` of cumulative waiting to reach the cap. Crucially, the back-off
+  **resets to 10s once the container runs healthy for ~10 minutes** — so a Pod that briefly succeeds
+  then fails again does *not* resume at the 5-min cap; it starts the ladder over from 10s.
 - `successThreshold` **must be 1** for a liveness probe (a single success is enough to consider it
   passing again).
 
@@ -131,6 +136,15 @@ Notes:
   "available" (and won't proceed to scale down old Pods, subject to `maxUnavailable`) until its
   readiness probe passes. No readiness probe → the rollout treats Pods as available the moment they
   run, which can route traffic to not-yet-ready Pods.
+
+> [!INTERVIEW]
+> **The shutdown race (zero-downtime follow-up).** On `kubectl delete`/rollout, the kubelet sends
+> `SIGTERM` **at the same time** the endpoints controller removes the Pod's IP from EndpointSlices —
+> these run in **parallel**, not in sequence. So a load balancer can still send a request to a Pod
+> that has already begun terminating → dropped connections. The standard fix is a `preStop` hook that
+> `sleep`s a few seconds: the container keeps serving in-flight/just-arrived traffic while the
+> endpoint removal propagates, *then* the app shuts down. Note probes stop mattering here — during
+> termination it's the endpoint removal (plus preStop), not a readiness flip, that drains traffic.
 
 ---
 
@@ -325,6 +339,29 @@ flowchart LR
     end
 ```
 
+**Worked example — what `cpu: 500m` actually does to a busy thread.** CPU limits are enforced by the
+Linux CFS **bandwidth controller**, which works in fixed windows called the **CFS period** (default
+**100ms**). Your limit becomes a **quota per period**: `quota = limit × period`.
+
+- `limit: 500m` = 0.5 core → quota = `0.5 × 100ms` = **50ms of CPU time per 100ms window**.
+- A single thread that wants to run flat-out gets to run for 50ms, then the kernel **throttles** it
+  (parks it) for the remaining 50ms of the window — so it makes progress at **half wall-clock speed**.
+
+Now trace a request that needs **200ms of actual CPU compute** (e.g. a heavy handler):
+
+| CFS window | runs | throttled | compute done (cumulative) |
+|---|---|---|---|
+| 0–100ms   | 0–50ms   | 50–100ms  | 50ms |
+| 100–200ms | 100–150ms | 150–200ms | 100ms |
+| 200–300ms | 200–250ms | 250–300ms | 150ms |
+| 300–400ms | 300–350ms | —         | **200ms → done at 350ms** |
+
+So a job that would take 200ms unthrottled finishes at **~350ms** wall time — the extra ~150ms is
+pure throttling latency, with **no crash** and no error, which is exactly why CPU throttling is such
+a sneaky cause of p99 latency. (The clean "half-speed → 2× = 400ms" heuristic is close; the real
+number is a touch better because CFS hands you the full 50ms quota at the *start* of each window.)
+Watch `container_cpu_cfs_throttled_periods` / `_throttled_seconds_total` to catch this.
+
 Consequences for tuning:
 
 - A too-low **memory limit** causes intermittent `OOMKilled` under load spikes — often mistaken for a
@@ -358,6 +395,33 @@ resources:
   limits:   { cpu: "500m", memory: "256Mi" }
 ```
 
+**Worked example — trace the class on a 2-container Pod.** The Guaranteed bar is strict: it needs
+`request == limit` for **both** CPU **and** memory on **every** container. Miss it anywhere and the
+whole Pod drops a tier. Take:
+
+```yaml
+containers:
+- name: api        # A
+  resources:
+    requests: { cpu: "500m", memory: "256Mi" }
+    limits:   { cpu: "500m", memory: "256Mi" }
+- name: sidecar    # B
+  resources:
+    requests: { cpu: "100m", memory: "64Mi" }
+    limits:   { cpu: "200m" }          # note: NO memory limit
+```
+
+Step through the rules:
+1. Container **A**: cpu req==limit (500m==500m) ✓, mem req==limit (256Mi==256Mi) ✓ → A alone would be Guaranteed.
+2. Container **B**: cpu req(100m) ≠ limit(200m) ✗, and memory has a request but **no limit** ✗.
+3. Guaranteed requires *every* container to pass → B fails → the Pod is **not Guaranteed**.
+4. Is any request/limit set at all? Yes (both containers set something) → **not BestEffort**.
+5. Therefore the whole Pod is **Burstable**.
+
+The lesson students trip on: A being perfectly Guaranteed-shaped doesn't matter — one loose sidecar
+(a missing memory limit, or cpu limit > request) pulls the **entire Pod** down to Burstable. To make
+it Guaranteed, B must set `memory` limit == request and `cpu` limit == request too.
+
 Details:
 
 - Only CPU and memory count toward QoS. Requesting other resources doesn't change the class.
@@ -389,6 +453,12 @@ Nuances:
 
 - Only Pods **exceeding their requests** are prime candidates; a Burstable Pod living within its
   request is treated more like Guaranteed for pressure-eviction ranking.
+- **Why over-request ranks worst (the intuition):** the kubelet scores candidates by roughly
+  **usage minus request** — how much you're consuming *beyond what you promised*. A Pod that
+  requested 128Mi but is using 1Gi (over by ~900Mi) is a worse offender than one that requested 1Gi
+  and uses 1.1Gi (over by ~100Mi), so the first is evicted first even though both exceed their
+  request. This is precisely why **honest requests are your best defense**: promise what you actually
+  need and your `usage − request` stays small, keeping you near the bottom of the kill list.
 - Node-pressure eviction terminates the **whole Pod** (all containers); the controller (e.g.
   Deployment) may reschedule a replacement elsewhere. This differs from a **limit** `OOMKilled`, which
   restarts just the offending container in place.
@@ -492,6 +562,32 @@ flowchart LR
     EV --> Alloc[Allocatable]
     Alloc --> Sched[Scheduler fits Pod requests here]
 ```
+
+**Worked example — "why is my Pod `Pending`?" with real numbers.** Take a node with raw **capacity
+4 cores / 16Gi**. The kubelet carves off reservations before the scheduler ever sees it:
+
+| Deduction | CPU | Memory |
+|---|---|---|
+| Raw capacity | 4000m | 16384Mi |
+| `--kube-reserved` | −500m | −1024Mi |
+| `--system-reserved` | −500m | −1024Mi |
+| `--eviction-hard` (memory) | −0 | −256Mi |
+| **Allocatable** | **3000m** | **14080Mi** |
+
+So the scheduler has only **3000m** CPU to bin against, not 4000m. Now suppose three Pods are already
+placed, each **requesting 1 core** (`1000m`):
+
+- Requested so far = `3 × 1000m` = **3000m** → allocatable CPU is **fully committed** (3000m − 3000m = 0m free).
+
+A new Pod arrives requesting **1500m** CPU:
+
+- Free = `3000m − 3000m` = **0m**; need 1500m → **doesn't fit** → Pod stays **`Pending`** with a
+  `FailedScheduling` event ("0/1 nodes are available: Insufficient cpu").
+
+The trap the arithmetic exposes: this happens **even if the three existing Pods are near-idle** and the
+node's *actual* CPU usage is ~5%. Scheduling is pure request accounting — **limits and live usage are
+irrelevant** to the fit decision. The fixes: lower the new Pod's request, add node capacity, or free a
+request elsewhere.
 
 ---
 

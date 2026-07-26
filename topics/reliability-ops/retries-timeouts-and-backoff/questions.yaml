@@ -13,7 +13,7 @@ questions:
       - "To convert an unbounded hang into a fast, bounded failure the caller can handle"
       - "To reduce the total number of TCP connections a service opens"
       - "To guarantee the downstream service responds within its SLA"
-      - "To encrypt the connection before sending data"
+      - "To encrypt the connection with TLS 1.3 before any request bytes are sent"
     answer: 0
     explanation: |
       A timeout bounds how long you wait. Without it, a slow dependency holds your
@@ -30,10 +30,10 @@ questions:
       Many network client libraries, if you do not configure a timeout, will
       by default wait roughly:
     options:
-      - "1 second"
-      - "The value of the server's SLA"
+      - "1 second (the common HTTP client connect default)"
+      - "Exactly the value advertised in the server's published SLA"
       - "Effectively forever (until an OS-level TCP timeout much later)"
-      - "100 milliseconds"
+      - "100 milliseconds, matching the typical load-balancer idle setting"
     answer: 2
     explanation: |
       The most common production reliability bug: no timeout is set, so the client
@@ -49,9 +49,9 @@ questions:
       timeout?
     options:
       - "Connect bounds establishing the TCP/TLS connection; read bounds waiting for the response after the request is sent"
-      - "They are two names for the same setting"
-      - "Connect applies to GETs; read applies to POSTs"
-      - "Connect is measured in bytes; read is measured in seconds"
+      - "They are two names for the same underlying socket setting, just exposed by different client libraries"
+      - "Connect applies only to idempotent GET requests, while read applies only to POST and PUT requests"
+      - "Connect is measured in bytes transferred, whereas read is measured in elapsed wall-clock seconds"
     answer: 0
     explanation: |
       The connect timeout bounds the handshake (a slow connect usually means the host
@@ -67,10 +67,10 @@ questions:
       What is the recommended way to choose a read-timeout value for a
       downstream call?
     options:
-      - "Pick a safe round number like 30 seconds"
-      - "Set it to the mean latency of the dependency"
+      - "Pick a safe round number like 30 seconds so you never cut off a slow response"
+      - "Set it to the mean (average) latency of the dependency measured over the last hour"
       - "Set it just above the dependency's measured p99/p99.9 latency, with some headroom"
-      - "Set it equal to your own service's SLA"
+      - "Set it equal to your own service's published end-to-end SLA target"
     answer: 2
     explanation: |
       Measure the dependency's tail latency (p99/p99.9) under load and set the
@@ -84,10 +84,10 @@ questions:
     question: |
       What is the main risk of setting a timeout that is too short?
     options:
-      - "Threads and connections pile up and exhaust the pool"
+      - "Threads and connections pile up and exhaust the pool because callers keep waiting on the slow dependency"
       - "You abandon requests that would have succeeded, turning tail latency into errors (and added load if you retry)"
-      - "The connection is never encrypted"
-      - "The downstream service ignores the request entirely"
+      - "The connection is never encrypted, exposing request payloads in plaintext on the wire"
+      - "The downstream service silently ignores the request entirely and never even begins processing it"
     answer: 1
     explanation: |
       Too short and you cut off requests in the normal slow tail that would have
@@ -103,9 +103,9 @@ questions:
       Why are propagated deadlines generally preferred over relative timeouts for
       calls that cross multiple service boundaries?
     options:
-      - "Deadlines use less network bandwidth than timeouts"
-      - "Relative timeouts are not supported by TCP"
-      - "Deadlines automatically retry failed calls"
+      - "Deadlines use markedly less network bandwidth because they omit the per-hop timeout headers"
+      - "Relative timeouts are not supported by the TCP stack and require a custom transport layer"
+      - "Deadlines automatically retry failed calls on the caller's behalf without extra configuration"
       - "A deadline is an absolute finish-by time each hop can honour, so no hop wastes work on a request the caller already gave up on"
     answer: 3
     explanation: |
@@ -121,10 +121,10 @@ questions:
     question: |
       In a call chain A → B → C, how should the timeouts relate to each other?
     options:
-      - "They should all be identical for consistency"
+      - "They should all be set to the identical value so the chain behaves consistently end to end"
       - "Inner timeouts should be shorter than outer timeouts (C < B < A)"
       - "Inner timeouts should be longer than outer timeouts (C > B > A)"
-      - "Only the outermost call (A) needs a timeout"
+      - "Only the outermost call (A) needs a timeout; inner hops inherit it automatically"
     answer: 1
     explanation: |
       Timeouts must shrink going down the chain: each callee's timeout must be shorter
@@ -140,9 +140,9 @@ questions:
       A service receives a request whose propagated deadline has already passed.
       What is the correct "deadline-aware" behaviour?
     options:
-      - "Process it normally — the client may still want the result"
-      - "Retry it immediately with a fresh deadline"
-      - "Queue it until the deadline is reset"
+      - "Process it normally — the client may still want the result once it eventually returns"
+      - "Retry it immediately with a fresh deadline computed from the current server clock"
+      - "Queue it until the caller sends a request to reset the expired deadline"
       - "Fail fast without doing the work, since no one is waiting for the result"
     answer: 3
     explanation: |
@@ -157,10 +157,10 @@ questions:
     question: |
       A retry is only worthwhile when the failure is:
     options:
-      - "A validation error (HTTP 400)"
-      - "A permanent authorization failure (HTTP 403)"
+      - "A validation error (HTTP 400) caused by a malformed request body"
+      - "A permanent authorization failure (HTTP 403) on an expired credential"
       - "Transient — likely to resolve itself on a subsequent attempt"
-      - "A business-logic rejection like 'insufficient funds'"
+      - "A business-logic rejection like 'insufficient funds' on a transfer"
     answer: 2
     explanation: |
       Retries are insurance against transient failures (brief blips, resets, a node
@@ -176,9 +176,9 @@ questions:
       safe to retry automatically?
     options:
       - "It must be idempotent (or made idempotent)"
-      - "It must be a read-only GET"
-      - "It must complete in under 100 ms"
-      - "It must return JSON"
+      - "It must be a read-only GET with no request body of any kind"
+      - "It must complete in under 100 ms so the retry stays within budget"
+      - "It must return a JSON response rather than a binary or streaming body"
     answer: 0
     explanation: |
       The two conditions for a safe retry are that the failure is transient AND the
@@ -230,9 +230,9 @@ questions:
       Your client receives HTTP 429 Too Many Requests. What is the correct
       response?
     options:
-      - "Retry immediately since the request was valid"
-      - "Escalate to an on-call engineer immediately"
-      - "Switch to a non-idempotent version of the request"
+      - "Retry immediately since the request itself was valid and well-formed"
+      - "Escalate to an on-call engineer immediately and stop sending traffic"
+      - "Switch to a non-idempotent version of the request to bypass the limit"
       - "Honour the Retry-After header and back off at least that long"
     answer: 3
     explanation: |
@@ -249,9 +249,9 @@ questions:
       than unbounded?
     options:
       - "Unbounded retries can turn one failure into an infinite loop and amplify load indefinitely"
-      - "Unbounded retries violate the HTTP spec"
-      - "Capping retries encrypts the traffic"
-      - "Cloud providers charge per retry attempt"
+      - "Unbounded retries violate the HTTP/1.1 specification's mandatory attempt ceiling"
+      - "Capping the retry count is what enables transport-layer encryption of the traffic"
+      - "Cloud providers bill a per-attempt surcharge once retries exceed three per request"
     answer: 0
     explanation: |
       An unbounded retry loop against a persistently failing dependency never stops,
@@ -265,10 +265,10 @@ questions:
     question: |
       What is a "retry storm" (thundering herd)?
     options:
-      - "A gradual increase in retries as traffic grows over months"
+      - "A gradual increase in retries as organic traffic grows steadily over months"
       - "Many clients timing out at roughly the same moment and all retrying at once, amplifying load on a weakened dependency"
-      - "A single client retrying a request thousands of times"
-      - "Retries triggered by a scheduled cron job"
+      - "A single misbehaving client retrying one request thousands of times in a tight loop"
+      - "Retries that are triggered on a fixed schedule by a periodic cron job at midnight"
     answer: 1
     explanation: |
       When a dependency slows/fails, clients time out synchronously and retry in a
@@ -282,10 +282,10 @@ questions:
     question: |
       A "metastable failure" driven by retries is characterized by which property?
     options:
-      - "It only occurs during scheduled maintenance windows"
-      - "The system self-heals the instant the original trigger disappears"
+      - "It only occurs during scheduled maintenance windows when capacity is intentionally reduced"
+      - "The system self-heals the instant the original trigger disappears, needing no operator action"
       - "The retry load sustains the outage even after the original trigger is gone, so recovery often requires reducing load below normal"
-      - "It is caused solely by hardware faults"
+      - "It is caused solely by hardware faults such as a failed disk or NIC on a single host"
     answer: 2
     explanation: |
       In a metastable failure, a small trigger tips the system into a collapsed state
@@ -302,10 +302,10 @@ questions:
       configured for up to 3 additional retries. In the worst case, roughly how much
       load does the dependency now see?
     options:
-      - "About X (retries don't add load)"
-      - "About 2X"
+      - "About X, because retries reuse the same connection and add no new load"
+      - "About 2X, since a client sends only one extra attempt when the first fails"
       - "About 4X (the original request plus up to 3 retries)"
-      - "About X / 3"
+      - "About X / 3, as the retry budget divides the load evenly across attempts"
     answer: 2
     explanation: |
       One primary attempt plus up to 3 retries = up to 4 attempts per request, so a
@@ -320,10 +320,10 @@ questions:
       Why is retrying immediately with no delay (no backoff) usually the worst retry
       strategy under load?
     options:
-      - "It uses too much CPU on the client"
+      - "It uses too much CPU on the client by spinning in a tight retry loop"
       - "It re-hammers a struggling dependency instantly, maximizing the thundering-herd effect"
-      - "It violates the TCP protocol"
-      - "It always causes a 400 error"
+      - "It violates the TCP protocol's mandatory inter-request spacing requirement"
+      - "It always causes the server to respond with a 400 Bad Request error"
     answer: 1
     explanation: |
       Immediate retries pile straight back onto a dependency that is already
@@ -338,9 +338,9 @@ questions:
       The standard capped exponential-backoff delay for retry attempt `n` (0-based)
       is:
     options:
-      - "delay = base + n"
-      - "delay = base / 2^n"
-      - "delay = cap * n"
+      - "delay = min(cap, base + n)"
+      - "delay = max(base, cap / 2^n)"
+      - "delay = min(cap, cap * n)"
       - "delay = min(cap, base * 2^n)"
     answer: 3
     explanation: |
@@ -372,8 +372,8 @@ questions:
       Why must exponential backoff include a cap (ceiling) on the delay?
     options:
       - "To keep the delay from growing without bound into minutes or hours"
-      - "Because 2^n cannot be computed for large n"
-      - "To make retries encrypted"
+      - "Because 2^n overflows a signed 64-bit integer once n exceeds about 63 attempts"
+      - "To ensure each retry attempt is encrypted with TLS before being resent"
       - "Because the HTTP spec forbids delays over 1 second"
     answer: 0
     explanation: |
@@ -388,9 +388,9 @@ questions:
       Why does exponential backoff *alone* (without jitter) fail to fully prevent a
       thundering herd?
     options:
-      - "Because it makes the delays too long"
-      - "Because 2^n eventually overflows"
-      - "It only works for idempotent operations"
+      - "Because the exponential growth makes the delays so long that clients abandon the request before the dependency ever recovers"
+      - "Because 2^n eventually overflows the delay variable, wrapping around to a tiny wait that hammers the dependency again"
+      - "It only works for idempotent operations, so any non-idempotent write skips the backoff path and retries immediately"
       - "It spreads one client's retries over time but leaves different clients that failed together still synchronized, retrying in waves"
     answer: 3
     explanation: |
@@ -405,10 +405,10 @@ questions:
     question: |
       What does adding jitter to backoff accomplish?
     options:
-      - "It encrypts the retry payload"
-      - "It guarantees every retry succeeds"
+      - "It encrypts the retry payload so intercepted attempts cannot be replayed by an attacker on the wire"
+      - "It guarantees every retry eventually succeeds by rescheduling it until the dependency returns a 2xx response"
       - "It randomizes retry timing so clients that failed together de-synchronize, smoothing spiky retry waves into a flat load"
-      - "It increases the number of retries allowed"
+      - "It increases the number of retries allowed per request by granting extra attempts drawn from a shared jitter pool"
     answer: 2
     explanation: |
       Jitter adds controlled randomness to the delay so clients retry at different
@@ -442,9 +442,9 @@ questions:
       guarantee?
     options:
       - "A minimum wait (at least temp/2), while still spreading the timing"
-      - "That retries happen instantly"
-      - "That the delay never exceeds base"
-      - "That no two clients ever collide"
+      - "That retries happen instantly, because the temp/2 term is subtracted rather than added to the wait"
+      - "That the delay never exceeds the base value, clamping every attempt to the initial interval"
+      - "That no two clients ever collide, because the random half is drawn from disjoint per-client ranges"
     answer: 0
     explanation: |
       Equal jitter keeps half the delay fixed (temp/2) and randomizes the other half,
@@ -459,10 +459,10 @@ questions:
       "Decorrelated jitter" is defined as delay = min(cap, random(base,
       prev_delay * 3)). What is distinctive about it?
     options:
-      - "It ignores the cap entirely"
+      - "It ignores the cap entirely, letting the delay climb without any ceiling on repeated failures"
       - "It seeds the next delay from the previous delay, so it grows well and spreads widely without unbounded growth"
-      - "It always returns the same value"
-      - "It requires the operation to be non-idempotent"
+      - "It always returns the same fixed value, behaving identically to constant backoff on every attempt"
+      - "It requires the operation to be non-idempotent, so it applies only to write requests that mutate state"
     answer: 1
     explanation: |
       Decorrelated jitter uses the previous delay to seed the next (random between base
@@ -477,10 +477,10 @@ questions:
       What is often cited as the single cheapest, highest-impact change to a
       retrying client?
     options:
-      - "Increasing the max retry count to 10"
+      - "Increasing the max retry count to 10 so more transient blips get a second chance"
       - "Adding full jitter to exponential backoff"
-      - "Removing all timeouts"
-      - "Switching from HTTP to gRPC"
+      - "Removing all timeouts so slow-but-succeeding calls are never cut off early"
+      - "Switching the transport from HTTP to gRPC to get built-in retry semantics"
     answer: 1
     explanation: |
       Adding full jitter costs one random() call and prevents the synchronized-wave
@@ -493,9 +493,9 @@ questions:
     question: |
       A retry budget caps retries as what?
     options:
-      - "A fixed number per hour regardless of traffic"
-      - "One retry per unique user"
-      - "The number of CPU cores available"
+      - "A fixed absolute number of retries per hour, enforced regardless of how much traffic the client sends"
+      - "One retry per unique authenticated user, tracked by a per-principal counter in the request context"
+      - "A ceiling equal to the number of CPU cores available on the client host, one in-flight retry per core"
       - "A fraction of the underlying request rate (e.g. retries may add at most ~10% on top of primary traffic)"
     answer: 3
     explanation: |
@@ -512,9 +512,9 @@ questions:
       failing and the bucket empties?
     options:
       - "Retries are suppressed — the client returns the error immediately instead of retrying"
-      - "Retries continue but with longer backoff"
-      - "The bucket automatically doubles in size"
-      - "All primary requests are also blocked"
+      - "Retries continue as before but each one waits a proportionally longer backoff interval"
+      - "The bucket automatically doubles its capacity to absorb the elevated failure rate"
+      - "All primary first-attempt requests are also blocked until the bucket refills above zero"
     answer: 0
     explanation: |
       Each successful request refills tokens; each retry spends one. When the failure
@@ -530,9 +530,9 @@ questions:
       still needed?
     options:
       - "Backoff and jitter fix retry timing but not retry volume; at high failure rates every request still retries, so the budget caps the total fraction"
-      - "Retry budgets replace the need for timeouts"
-      - "Jitter only works for reads, so a budget is needed for writes"
-      - "A budget makes backoff unnecessary"
+      - "Retry budgets replace the need for timeouts, since a drained bucket bounds how long any call can wait"
+      - "Jitter only works for read requests, so a separate budget is required to cover write requests safely"
+      - "A budget makes backoff unnecessary because token refill already paces the interval between attempts"
     answer: 0
     explanation: |
       Backoff and jitter fix *when* retries land; a budget fixes *how many*. If 100% of
@@ -566,10 +566,10 @@ questions:
     question: |
       What is Google's SRE guidance on where to place retries in a layered system?
     options:
-      - "Retry at every layer for maximum resilience"
+      - "Retry independently at every layer for maximum resilience, so each hop absorbs its own transient failures"
       - "Retry at a single level of the stack; intermediate layers fail fast and propagate the error"
-      - "Only retry at the database layer"
-      - "Never retry anywhere; rely solely on timeouts"
+      - "Only retry at the database layer, since that is where the persistent state actually lives"
+      - "Never retry anywhere; rely solely on aggressive timeouts and let the client resubmit manually"
     answer: 1
     explanation: |
       Because retries multiply as R^D, you should retry at only one level — usually the
@@ -584,9 +584,9 @@ questions:
       If you must retry at multiple levels of a stack, what technique helps prevent
       the multiplication of retries?
     options:
-      - "Increase the max attempts at each level"
-      - "Remove all timeouts so retries have more time"
-      - "Retry only non-idempotent operations"
+      - "Increase the max attempts at each level so a failure is more likely to clear before it propagates up"
+      - "Remove all timeouts so retries have more time to complete before the budget at each layer expires"
+      - "Retry only non-idempotent operations, on the assumption that reads are cheap enough to re-issue freely"
       - "Use retry budgets at each level and have lower levels signal 'already retried, don't retry me' (e.g. a response header)"
     answer: 3
     explanation: |
@@ -603,9 +603,9 @@ questions:
       responsibility?
     options:
       - "Backoff+jitter handles transient per-request failures; the circuit breaker handles sustained dependency-wide failures by failing fast"
-      - "They are redundant; you only need one"
-      - "The circuit breaker handles timeouts; retries handle connection errors"
-      - "Backoff is for reads; the circuit breaker is for writes"
+      - "They are fully redundant mechanisms; you only need one because either can cover the other's failure cases"
+      - "The circuit breaker handles read (socket) timeouts, while retries handle connection-reset and DNS errors"
+      - "Backoff applies only to read requests, while the circuit breaker applies only to state-mutating writes"
     answer: 0
     explanation: |
       They are complementary. Backoff+jitter smooths transient, per-request retries.
@@ -622,9 +622,9 @@ questions:
       exhausted its retry attempts?
     options:
       - "It is routed to a dead-letter queue (DLQ) for manual/offline handling so it doesn't block the pipeline"
-      - "It is deleted silently"
-      - "It is retried forever"
-      - "It is converted to a synchronous HTTP call"
+      - "It is deleted silently once the attempt counter is exhausted, freeing the queue slot immediately"
+      - "It is retried forever on a fixed schedule until the consumer eventually accepts and acknowledges it"
+      - "It is converted to a synchronous HTTP call to the producer so the failure surfaces to the caller inline"
     answer: 0
     explanation: |
       Async systems use delayed retry queues, and after N attempts route the message to
@@ -639,9 +639,9 @@ questions:
       A dependency is responding slowly but is NOT returning errors. Should you retry
       the slow calls?
     options:
-      - "Yes — retrying often gets a faster response"
-      - "Yes, but only for non-idempotent writes"
-      - "Yes, with zero backoff to save time"
+      - "Yes — retrying usually lands on a less-loaded connection and returns a faster response the second time"
+      - "Yes, but only for non-idempotent writes, since reads are already safe to leave hanging on the slow path"
+      - "Yes, with zero backoff so the retry races ahead of the slow original and whichever returns first wins"
       - "Usually no — retrying a slow dependency adds load and makes it slower; time out fast, consider a fallback, and let a breaker trip"
     answer: 3
     explanation: |
@@ -659,7 +659,7 @@ questions:
     options:
       - "timeout(retry(circuitBreaker(call)))"
       - "circuitBreaker(timeLimiter(retry(call)))"
-      - "Order does not matter"
+      - "Order does not matter; the three decorators commute and produce identical behaviour"
       - "retry(circuitBreaker(timeLimiter(call)))"
     answer: 3
     explanation: |
@@ -675,10 +675,10 @@ questions:
     question: |
       Nygard's "slow is the new down" observation means:
     options:
-      - "Slow databases should be replaced with faster ones"
+      - "Slow databases should be swapped for faster in-memory stores before any timeout tuning is worthwhile"
       - "A slow dependency propagates upstream as resource (thread/connection) exhaustion, not as an explicit error"
-      - "Latency metrics are more important than error metrics"
-      - "Down services always recover slowly"
+      - "Latency percentiles should always be alarmed on more aggressively than error-rate metrics in a dashboard"
+      - "A downed service always recovers more slowly than one that is merely returning errors under load"
     answer: 1
     explanation: |
       A downstream that is slow (not erroring) is often more dangerous than one that is
@@ -711,10 +711,10 @@ questions:
       Why is the well-meaning advice "just add a retry, it improves reliability" a
       trap in a large microservice system?
     options:
-      - "Retries are computationally expensive on modern CPUs"
+      - "Retries burn so much CPU on modern cores that the added compute cost outweighs any availability gain"
       - "Each local retry seems reasonable, but the composition across many layers/teams becomes a load bomb (R^D); retry policy is a system-level concern"
-      - "Retries always require idempotency keys, which are hard to build"
-      - "The HTTP spec limits retries to one per connection"
+      - "Retries always require idempotency keys, and those keys are prohibitively hard to build and store correctly"
+      - "The HTTP/1.1 specification permits at most one retry per persistent connection before it must be closed"
     answer: 1
     explanation: |
       A per-call retry looks locally harmless, but every team adding one composes into
@@ -728,10 +728,10 @@ questions:
     question: |
       Which of the following is the best candidate for an automatic retry?
     options:
-      - "HTTP 401 Unauthorized"
-      - "HTTP 404 Not Found"
+      - "HTTP 401 Unauthorized returned because the presented credential has expired"
+      - "HTTP 404 Not Found returned for a resource that was never created in this account"
       - "A connection reset (ECONNRESET) on an idempotent GET"
-      - "A business rejection: 'account closed'"
+      - "A business rejection stating 'account closed' on a funds-transfer request"
     answer: 2
     explanation: |
       A connection reset on an idempotent GET is a transient, safe-to-repeat failure —
@@ -747,10 +747,10 @@ questions:
       latency spike, the payments service goes fully down and stays down longer than
       before. Which combination of changes best prevents recurrence?
     options:
-      - "Increase the retry count and reduce all timeouts to 10 ms"
+      - "Raise the retry count to 5 and cut every timeout to 10 ms so failed calls are re-issued sooner"
       - "Add exponential backoff with full jitter, a retry budget, and a circuit breaker; retry at only one layer"
-      - "Remove timeouts so retries have more time to succeed"
-      - "Retry with fixed backoff at every layer of the stack"
+      - "Remove the per-attempt timeouts entirely so slow retries always have room to complete"
+      - "Retry with a fixed 200 ms backoff at every layer of the stack for consistent behaviour"
     answer: 1
     explanation: |
       The symptom is a retry-storm/metastable failure. The fix is the full stack:
@@ -766,9 +766,9 @@ questions:
       When a dependency is genuinely down, why does an open circuit breaker help even
       if your retries already use good backoff and jitter?
     options:
-      - "It re-encrypts the traffic"
-      - "It automatically fixes the dependency"
-      - "It increases the retry budget"
+      - "It re-encrypts the in-flight traffic so the abandoned attempts cannot be replayed"
+      - "It automatically repairs the failing dependency once the breaker transitions to open"
+      - "It grants the client a larger retry budget while the dependency stays unavailable"
       - "It skips the attempt entirely and fails fast, avoiding wasted latency budget on every request and giving the dependency room to recover"
     answer: 3
     explanation: |
@@ -785,9 +785,9 @@ questions:
       What is a retry, in the reliability sense?
     options:
       - "Re-issuing a failed request in the hope that the failure was transient"
-      - "Increasing the timeout after a failure"
-      - "Logging a failure for later analysis"
-      - "Switching to a backup region"
+      - "Increasing the per-attempt timeout after each failure so the next call waits longer"
+      - "Logging a failed request to a structured store for later offline analysis"
+      - "Switching over to a backup region the moment the primary call returns an error"
     answer: 0
     explanation: |
       A retry re-issues a failed request, betting the failure was transient (a blip,
@@ -802,10 +802,10 @@ questions:
       Compared with fixed (constant) backoff, what advantage does exponential backoff
       offer for a persistently failing dependency?
     options:
-      - "It guarantees the request eventually succeeds"
+      - "It guarantees the request eventually succeeds once enough attempts have been made"
       - "It rapidly increases the delay so it stops hammering a persistently failing dependency, while still retrying transient blips quickly early on"
-      - "It removes the need for a timeout"
-      - "It uses fewer bytes on the wire"
+      - "It removes the need for a per-attempt timeout because the growing delay bounds the wait"
+      - "It uses fewer bytes on the wire by compressing the headers of each retried request"
     answer: 1
     explanation: |
       Fixed backoff waits the same delay every time, so clients keep re-colliding at a
@@ -821,9 +821,9 @@ questions:
       From a reliability standpoint, server-side load shedding / rate limiting is best
       described as which counterpart to client-side backoff?
     options:
-      - "An unrelated security control with no reliability role"
-      - "A replacement for timeouts on the client"
-      - "A way to increase the retry budget"
+      - "An unrelated security control that guards against credential abuse and plays no reliability role"
+      - "A drop-in replacement for client-side timeouts once the server enforces its own request ceiling"
+      - "A mechanism that raises the client's retry budget in proportion to the server's spare capacity"
       - "The server-side dual of client backoff — the server sheds excess load to protect itself, complementing clients that back off"
     answer: 3
     explanation: |
@@ -840,10 +840,10 @@ questions:
       What triggers a hedged request, and how does that differ from what triggers
       a retry?
     options:
-      - "A hedge fires on a 4xx error; a retry fires on a 5xx error"
-      - "A hedge and a retry both fire only after the first attempt returns an error"
+      - "A hedge fires on any 4xx client error while a retry fires only on a 5xx server error, so they never overlap"
+      - "A hedge and a retry both fire only after the first attempt has fully returned an error to the caller"
       - "A hedge fires on slowness (the first attempt crossing a high latency percentile) by launching a second copy in parallel; a retry fires reactively after a failure"
-      - "A hedge fires on a full connection pool; a retry fires on a timeout"
+      - "A hedge fires when the connection pool saturates while a retry fires whenever a per-attempt timeout elapses"
     answer: 2
     explanation: |
       Retries are reactive to failure — you wait for an attempt to fail, then try again
@@ -861,9 +861,9 @@ questions:
       percentile produced roughly which result?
     options:
       - "Cut 99.9th-percentile latency from ~1800 ms to ~74 ms while adding only ~2% more requests"
-      - "Doubled throughput but tripled the request count"
-      - "Eliminated all tail latency at the cost of 100% extra requests"
-      - "Reduced mean latency by 50% with no change to the tail"
+      - "Doubled read throughput while tripling the total request count sent to the cluster"
+      - "Eliminated essentially all tail latency but at the cost of roughly 100% extra requests"
+      - "Reduced the mean latency by about 50% while leaving the 99.9th-percentile tail unchanged"
     answer: 0
     explanation: |
       Because only the slow ~5% of requests are hedged, the extra load is tiny (~2%),
@@ -877,9 +877,9 @@ questions:
     question: |
       Which statement best captures the difference between hedging and retrying?
     options:
-      - "Hedging is only for writes; retrying is only for reads"
-      - "Hedging uses more backoff than retrying"
-      - "They are the same technique with different names"
+      - "Hedging applies only to write operations, while retrying applies only to read operations"
+      - "Hedging waits a longer exponential backoff between copies than retrying does between attempts"
+      - "They are fundamentally the same technique, just given two different names by different vendors"
       - "Hedging is parallel/speculative and attacks tail latency; retrying is sequential/reactive and attacks availability (transient errors)"
     answer: 3
     explanation: |
@@ -895,10 +895,10 @@ questions:
     question: |
       How does a "tied request" reduce the duplicated work that plain hedging can cause?
     options:
-      - "It disables the second replica until the first fails"
+      - "It keeps the second replica disabled and only enables it once the first attempt has failed outright"
       - "The request is enqueued at two servers, each tagged with the other's identity; when one starts executing it sends a cancellation to its tie, so only the brief queue-crossing window is redundant"
-      - "It sends the request to a single server but with double priority"
-      - "It retries only idempotent operations and skips writes"
+      - "It sends the request to just one server but stamps it with double scheduling priority so it jumps the queue"
+      - "It hedges only idempotent read operations and quietly skips any write that mutates state"
     answer: 1
     explanation: |
       Tied requests enqueue at two servers simultaneously; the moment one dequeues and
@@ -914,10 +914,10 @@ questions:
       In gRPC service config, what is the relationship between a method's retryPolicy
       and its hedgingPolicy?
     options:
-      - "They must always be configured together"
-      - "hedgingPolicy is just an alias for retryPolicy"
+      - "They must always be configured together, since gRPC requires both blocks to be present on a method"
+      - "hedgingPolicy is simply an alias for retryPolicy and expands to the identical wire configuration"
       - "They are mutually exclusive on a single method — a call is either retried or hedged, not both"
-      - "hedgingPolicy only applies after retryPolicy exhausts its attempts"
+      - "hedgingPolicy only takes effect after retryPolicy has already exhausted all of its configured attempts"
     answer: 2
     explanation: |
       gRPC lets you configure at most one of retryPolicy or hedgingPolicy per method; they
@@ -932,9 +932,9 @@ questions:
       In a gRPC hedgingPolicy, what does setting hedgingDelay to "0s" do?
     options:
       - "Fires all hedge copies at once (pure speculation), rather than waiting a delay before sending the next copy"
-      - "Disables hedging entirely"
-      - "Waits indefinitely before hedging"
-      - "Converts the hedge into a retry"
+      - "Disables hedging entirely and silently falls back to the method's plain retryPolicy instead"
+      - "Waits indefinitely before hedging, so the second copy is effectively never sent in practice"
+      - "Converts the hedgingPolicy into a reactive retryPolicy that fires only after the first attempt fails"
     answer: 0
     explanation: |
       hedgingDelay is how long to wait before sending the next copy. A positive delay is
@@ -949,9 +949,9 @@ questions:
     question: |
       Why is active cancellation the necessary complement to deadline propagation?
     options:
-      - "Cancellation encrypts the abandoned request"
-      - "Deadline propagation already stops all downstream work, so cancellation is redundant"
-      - "Cancellation increases the retry budget"
+      - "Cancellation encrypts the abandoned request so its orphaned payload cannot be replayed later"
+      - "Deadline propagation already halts all downstream work automatically, which makes an explicit cancel redundant"
+      - "Cancellation raises the caller's retry budget so the freed capacity can be spent on more attempts"
       - "Deadline propagation only tells a hop how much time is left; without an explicit cancel, an abandoned or hedge-losing call keeps burning CPU/threads/connections for a result nobody will read"
     answer: 3
     explanation: |
@@ -968,10 +968,10 @@ questions:
       What happens to hedging's cost if winners do NOT cancel the outstanding losing
       copies?
     options:
-      - "Nothing — the losers are free"
+      - "Nothing changes — the losing copies cost nothing because only the winner's result is ever read"
       - "The duplicated work for the slow tail becomes permanent, so hedging turns into a steady load multiplier instead of a ~few-percent overhead"
-      - "The retry budget automatically compensates"
-      - "The losers are converted into retries"
+      - "The retry budget automatically compensates by reclaiming the tokens spent on the losing copies"
+      - "The losing copies are transparently converted into ordinary sequential retries of the same request"
     answer: 1
     explanation: |
       Hedging stays cheap (~2%) precisely because the winner cancels the loser. Without
@@ -986,10 +986,10 @@ questions:
       By Little's Law (L = λ × W), how does adding a timeout protect a thread/connection
       pool?
     options:
-      - "It reduces the arrival rate λ directly"
-      - "It has no effect on concurrency; it only affects error rates"
+      - "It reduces the arrival rate λ directly by refusing new connections at the socket layer once the timeout fires"
+      - "It has no effect on concurrency at all; it merely converts slow successes into logged error responses without touching in-flight counts"
       - "A timeout caps W (time in system), which caps L (in-flight concurrency); without a timeout W is unbounded, so L grows until the pool is exhausted"
-      - "It increases the pool size proportionally to latency"
+      - "It dynamically grows the thread/connection pool in proportion to the measured latency so more calls fit"
     answer: 2
     explanation: |
       L (concurrent in-flight requests) equals arrival rate λ times time-in-system W. A
@@ -1007,9 +1007,9 @@ questions:
       what does a 250 ms timeout change it to?
     options:
       - "~1000 concurrent with no timeout; ~125 concurrent with the 250 ms timeout"
-      - "~10 concurrent either way"
-      - "~500 concurrent with no timeout; ~500 with the timeout"
-      - "~2000 concurrent with no timeout; ~1000 with the timeout"
+      - "~10 concurrent either way, because Little's Law depends only on the pool size"
+      - "~500 concurrent with no timeout; ~500 with the timeout, since W cancels out of the formula"
+      - "~2000 concurrent with no timeout; ~1000 with the timeout, doubling for each retry attempt"
     answer: 0
     explanation: |
       L = λ·W. No timeout: 500 × 2 s = 1000 concurrent calls. With a 250 ms timeout:
@@ -1024,10 +1024,10 @@ questions:
     question: |
       What are the defaults of the AWS SDK "standard" retry mode?
     options:
-      - "10 total attempts with no backoff cap"
-      - "1 attempt only (no retries)"
+      - "10 total attempts with linear backoff and no ceiling, retrying every 4xx and 5xx status code"
+      - "1 attempt only (no retries), leaving all retry logic to the calling application code"
       - "3 total attempts, exponential backoff base 2, max backoff 20 s, retrying 500/502/503/504 plus throttling errors"
-      - "5 total attempts with fixed 1 s backoff"
+      - "5 total attempts with a fixed 1 s backoff between each, retrying only 503 Service Unavailable"
     answer: 2
     explanation: |
       Standard mode uses 3 total attempts, exponential backoff (base 2) capped at a 20 s
@@ -1043,9 +1043,9 @@ questions:
       Your AWS SDK client stops retrying partway through an outage even though
       max_attempts was not reached. What is the most likely cause?
     options:
-      - "The connection pool was resized automatically"
-      - "The SDK silently switched to legacy mode"
-      - "DNS resolution failed, disabling retries"
+      - "The connection pool was automatically resized downward, capping the number of in-flight retries it can hold"
+      - "The SDK silently switched to legacy retry mode, which disables retries after the first transient failure"
+      - "DNS resolution for the endpoint failed midway, which the SDK treats as a permanent error that disables retries"
       - "The retry-quota token bucket (starts at 500; a retry costs 5, a timeout error costs 10) emptied, so retries are suppressed — a client-side circuit breaker on retries"
     answer: 3
     explanation: |
@@ -1061,10 +1061,10 @@ questions:
     question: |
       In gRPC's retryThrottling { maxTokens, tokenRatio }, when do retries stop?
     options:
-      - "Only when the bucket reaches exactly zero tokens"
+      - "Only when the bucket reaches exactly zero tokens, after every failed RPC has subtracted its full tokenRatio"
       - "When token_count drops to maxTokens/2 or below (the half threshold); each failed RPC subtracts 1 and each success adds tokenRatio"
-      - "After a fixed number of RPCs regardless of success"
-      - "When tokenRatio exceeds maxTokens"
+      - "After a fixed number of RPCs equal to maxTokens have completed, regardless of whether they succeeded or failed"
+      - "When tokenRatio exceeds maxTokens, at which point the bucket is considered structurally overfilled and locks"
     answer: 1
     explanation: |
       gRPC throttles retries once token_count ≤ maxTokens/2 — the half threshold, not
@@ -1099,10 +1099,10 @@ questions:
       a broad failure can inflate load to just under 3×. Adding which budget brings that
       growth down to about 1.1×?
     options:
-      - "A global rate limit of 1000 req/s"
+      - "A global rate limit of 1000 req/s applied uniformly across the whole fleet regardless of failure rate"
       - "A per-client budget that stops retrying once retries/requests ≥ 10%"
-      - "A per-datacenter budget of 50% retries"
-      - "Doubling the per-request budget to 6 attempts"
+      - "A per-datacenter budget that permits retries to reach 50% of that datacenter's total request volume"
+      - "Doubling the per-request budget to 6 attempts so each request gets more chances to succeed"
     answer: 1
     explanation: |
       The per-request budget (3 attempts) alone permits up to ~3× amplification under
@@ -1118,10 +1118,10 @@ questions:
       Per Google SRE, how should a backend distinguish a single-task overload from a
       whole-datacenter overload in what it returns to clients?
     options:
-      - "Return HTTP 200 in both cases and log the difference"
-      - "Return the same retryable error in both cases and rely on backoff"
+      - "Return HTTP 200 in both cases and log the overload difference to a metric for offline capacity analysis"
+      - "Return the same retryable error in both cases and rely on exponential backoff with jitter to sort out the difference"
       - "A single overloaded task returns a normal retryable error (try another task); a datacenter-wide overload returns a distinct non-retryable 'overloaded; don't retry' status so clients stop escalating load"
-      - "Always return 'don't retry' when any task is overloaded"
+      - "Always return the non-retryable 'don't retry' status the moment any single task in the pool reports overload"
     answer: 2
     explanation: |
       If only one task is overloaded, a retryable error is correct — the client just hits a
@@ -1137,9 +1137,9 @@ questions:
       What is the purpose of embedding a retry-attempt counter (0, incremented per retry,
       capped at 2) in request metadata across a call graph?
     options:
-      - "To bill customers per retry"
-      - "To encrypt the request path"
-      - "To replace the need for timeouts"
+      - "To bill customers per retry attempt by tallying the counter at the API gateway"
+      - "To encrypt the request path so intermediate hops cannot inspect the payload"
+      - "To replace the need for per-attempt timeouts once the counter reaches its cap"
       - "So backends can keep histograms of retry attempts and detect/limit widespread retrying before it multiplies through the layers"
     answer: 3
     explanation: |
@@ -1158,9 +1158,9 @@ questions:
       effect?
     options:
       - "An atomic insert / unique constraint / lock on the key so exactly one wins the 'first' slot and the other observes in-progress"
-      - "Sleeping 100 ms before processing each request"
-      - "Trusting the client to send only one request"
-      - "Returning 429 to whichever arrives second"
+      - "Sleeping a random 100 ms before processing each request so the two writes naturally stagger apart"
+      - "Trusting the client to serialize its own retries and never send the same key twice concurrently"
+      - "Returning HTTP 429 Too Many Requests to whichever request happens to arrive at the server second"
     answer: 0
     explanation: |
       The concurrent-retry race is the crux of server-side idempotency: without an atomic
@@ -1176,10 +1176,10 @@ questions:
       Why is "exactly-once delivery" considered an illusion, and what do systems build
       instead?
     options:
-      - "It is achievable only over TCP, which most systems avoid"
+      - "It is achievable only over a raw TCP connection, which most distributed systems deliberately avoid using"
       - "The network can always lose an ack and force a resend, so systems build at-least-once delivery plus idempotent processing = effectively-once"
-      - "It requires two-phase commit, which is always used in practice"
-      - "It is achievable with a large enough retry budget"
+      - "It requires a two-phase commit across every hop, which is in fact always used in practice for message delivery"
+      - "It is fully achievable simply by provisioning a large enough per-client retry budget to cover every failure"
     answer: 1
     explanation: |
       Because an acknowledgement can be lost, the sender may always have to resend, so true
@@ -1195,10 +1195,10 @@ questions:
       Which HTTP methods are naturally idempotent, and which typically needs an
       idempotency key to be safely retried?
     options:
-      - "POST is naturally idempotent; PUT needs a key"
-      - "All methods are naturally idempotent"
+      - "POST is naturally idempotent because it echoes the request body; PUT is the one that needs a key"
+      - "All HTTP methods are naturally idempotent, so an idempotency key is never strictly required"
       - "PUT and DELETE are naturally idempotent by HTTP semantics; POST is not and typically needs an idempotency key"
-      - "GET needs a key; PUT and DELETE do not"
+      - "GET needs a key to be safely repeated; PUT and DELETE can be replayed freely without one"
     answer: 2
     explanation: |
       PUT (set resource to a value) and DELETE (remove it) land in the same state no matter
@@ -1214,9 +1214,9 @@ questions:
       A non-idempotent write gets a read timeout. The underlying error "looks" transient.
       What is the correct rule?
     options:
-      - "Always retry — transient-looking errors are safe"
-      - "Never make writes retryable under any circumstances"
-      - "Retry only if the response was a 5xx"
+      - "Always retry it, because any error that looks transient is by definition safe to repeat on a write"
+      - "Never make any write operation retryable under any circumstances, even with an idempotency key in place"
+      - "Retry it only if the response carried a 5xx status code, since 5xx always means the write did not commit"
       - "The outcome is ambiguous (the write may have committed server-side), so it is not safe to retry without an idempotency key — 'looks transient' must not override 'not safe to repeat'"
     answer: 3
     explanation: |
@@ -1233,9 +1233,9 @@ questions:
       is the hidden failure mode, and the fix?
     options:
       - "Clients all wake at the identical server-suggested instant, forming a fresh synchronized herd; the fix is to add jitter on top of the honored delay"
-      - "Retry-After is ignored by browsers, so nothing happens"
-      - "Honoring Retry-After disables backoff permanently"
-      - "The server's clock drifts, so the delay is meaningless"
+      - "Retry-After is silently ignored by all major browser HTTP stacks, so honoring it has no observable effect"
+      - "Honoring the Retry-After header permanently disables the client's exponential backoff for the rest of the session"
+      - "The server's clock drifts relative to the client's, so the Retry-After delay is computed against the wrong epoch"
     answer: 0
     explanation: |
       Retry-After sets a delay floor, but if every client obeys the exact same instant they
@@ -1249,10 +1249,10 @@ questions:
     question: |
       Between HTTP 408 Request Timeout and 409 Conflict, which is generally retryable as-is?
     options:
-      - "409, because conflicts always resolve on the next attempt"
+      - "409, because a conflict is always cleared by the time the very next identical attempt arrives at the server"
       - "408 is retryable (the server didn't receive a complete request in time); 409 usually is not without changing/re-reading state first"
-      - "Both are always retryable"
-      - "Neither is ever retryable"
+      - "Both are always retryable as-is, since each carries a status code in the retryable 4xx timeout family"
+      - "Neither is ever retryable, because any 4xx status code signals a permanent client-side error by definition"
     answer: 1
     explanation: |
       408 signals the server timed out waiting for the request, so resending is reasonable.
@@ -1268,10 +1268,10 @@ questions:
       Per Marc Brooker's "What is Backoff For?", with many competing clients, which
       statement is most accurate?
     options:
-      - "Backoff alone fully solves fleet-wide contention"
-      - "Neither backoff nor jitter helps with many clients"
+      - "Backoff alone fully solves fleet-wide contention, so jitter adds nothing once delays grow exponentially"
+      - "Neither backoff nor jitter helps once many clients are involved; only a hard global rate limit does"
       - "With many clients, backoff alone barely helps — jitter does the real de-synchronizing work; backoff mainly limits a single client's self-inflicted load"
-      - "Jitter is only needed for a single client"
+      - "Jitter is only ever needed for a single client retrying alone; a large fleet is naturally de-synchronized"
     answer: 2
     explanation: |
       Across many clients that failed together, backoff still leaves them synchronized
@@ -1287,9 +1287,9 @@ questions:
       Why can independent client-side circuit breakers on retries make a PARTIAL outage
       worse, and what is the safer knob?
     options:
-      - "They encrypt too much traffic; disable TLS"
-      - "They only trip on 4xx, ignoring 5xx"
-      - "They increase timeouts globally"
+      - "They encrypt too much of the traffic during the outage; the safer knob is to disable TLS on retry attempts"
+      - "They only ever trip on 4xx client errors while ignoring the 5xx server errors that a partial outage produces"
+      - "They quietly increase per-attempt timeouts fleet-wide, so each abandoned call ties up a connection longer"
       - "Each client trips independently on its own observed failures, so a fleet collectively over-reacts (can shed at ~half the true failure rate); prefer a retry-only budget/breaker that still allows first-try traffic"
     answer: 3
     explanation: |
@@ -1307,9 +1307,9 @@ questions:
       clients environment?
     options:
       - "Each fresh client's bucket starts full and the process dies before the bucket drains, so the budget never accumulates enough state to throttle"
-      - "Token buckets are illegal in serverless runtimes"
-      - "Serverless functions cannot make network calls"
-      - "The bucket drains too fast and blocks all traffic instantly"
+      - "Token buckets are explicitly disallowed by serverless runtimes, which strip out any in-memory rate-limiting state on cold start"
+      - "Serverless functions are sandboxed from making outbound network calls, so there are no retries for a budget to gate in the first place"
+      - "The shared bucket drains far too fast under concurrent invocations and instantly blocks all primary first-try traffic"
     answer: 0
     explanation: |
       A per-process token bucket needs a lifetime long enough to observe failures and drain.
@@ -1325,10 +1325,10 @@ questions:
       The AWS DynamoDB us-east-1 event of 20 Sep 2015 is a canonical example of which
       failure mode?
     options:
-      - "A pure hardware failure with no software feedback loop"
+      - "A pure hardware failure — a failed storage-node disk controller — that cleared the moment the faulty unit was swapped, with no software feedback loop of any kind"
       - "A metastable collapse: storage servers retrying failed metadata-service lookups sustained the outage via a retry feedback loop even after the trigger passed, requiring load reduction to recover"
-      - "A DNS misconfiguration fixed by flushing caches"
-      - "A certificate expiry that blocked all TLS handshakes"
+      - "A DNS misconfiguration in the region's zone that resolved lookups to stale endpoints, cleared within minutes by flushing the resolver caches fleet-wide"
+      - "An expired TLS certificate on the metadata service that blocked every handshake until operators rotated and redeployed the new cert across the fleet"
     answer: 1
     explanation: |
       A brief metadata-service latency spike caused storage servers' membership lookups to
@@ -1344,10 +1344,10 @@ questions:
       In Envoy's retry model, what does the per-try timeout control, and how does it relate
       to the overall route timeout?
     options:
-      - "It is the same as the route timeout, just renamed"
-      - "It caps the total number of retries, not time"
+      - "It is the same value as the route timeout, just exposed under a second name so per-cluster and per-route configs can reference it independently"
+      - "It caps the total number of retry attempts rather than any duration, deriving the wait purely from the configured retry-back-off interval"
       - "It bounds each individual attempt separately, while the route timeout bounds the whole request including all attempts"
-      - "It only applies to gRPC, never HTTP"
+      - "It applies exclusively to gRPC upstreams and is silently ignored for plain HTTP routes, which fall back to the route timeout alone"
     answer: 2
     explanation: |
       Envoy's per-try timeout bounds a single attempt; the overall route timeout bounds the
@@ -1363,9 +1363,9 @@ questions:
       Per Bronson et al., "Metastable Failures in Distributed Systems" (HotOS 2021), what
       distinguishes a "trigger" from a "sustaining effect," and what does recovery require?
     options:
-      - "Trigger and sustaining effect are the same; recovery just needs a restart"
-      - "The sustaining effect is always a hardware fault; recovery needs new hardware"
-      - "The trigger is a slow rollout; the sustaining effect is a config file; recovery needs a rollback"
+      - "Trigger and sustaining effect are two names for the identical perturbation, so recovery needs nothing more than a rolling restart of the affected tasks to clear the collapsed state"
+      - "The sustaining effect is always a physical hardware fault such as a degraded disk or NIC, so recovery invariably requires provisioning and cutting over to replacement hardware"
+      - "The trigger is a slow binary rollout and the sustaining effect is a bad config file left on disk, so recovery is simply a matter of rolling back to the previous known-good deployment"
       - "The trigger tips the system over; the sustaining effect (often retries / work amplification) keeps it collapsed, so recovery requires removing the sustaining feedback, not just the trigger"
     answer: 3
     explanation: |

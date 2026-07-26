@@ -106,6 +106,30 @@ import` (bring existing resources under management).
 > guarantees you execute exactly what a human reviewed — no window for the world to change
 > between plan and apply.
 
+**Worked example — reading a real plan.** Suppose `aws_instance.web` currently runs on
+`ami-0aaa111`, and you edit the HCL to point at a newer image `ami-0bbb222`. Because the AMI
+of an EC2 instance can't be swapped in place, that attribute **forces replacement**, so the
+plan shows the `-/+` action, not `~`:
+
+```text
+  # aws_instance.web must be replaced
+-/+ resource "aws_instance" "web" {
+      ~ ami           = "ami-0aaa111" -> "ami-0bbb222" # forces replacement
+      ~ id            = "i-0abc123"   -> (known after apply)
+      ~ private_ip    = "10.0.1.15"   -> (known after apply)
+        instance_type = "t3.micro"
+        tags          = { "Name" = "web" }
+        # (unchanged attributes hidden)
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+```
+
+Read it right-to-left: the `# forces replacement` comment on `ami` is what turned a would-be
+in-place edit into a destroy-then-create. `id`/`private_ip` become `(known after apply)`
+because the new instance doesn't exist yet. Compare: editing only `tags` would show a `~`
+line and `Plan: 0 to add, 1 to change, 0 to destroy` — an in-place update, no downtime.
+
 ---
 
 ## HCL, providers, resources, and data sources
@@ -152,6 +176,56 @@ data "aws_ami" "al2" {            # a DATA SOURCE: reads existing/external info 
 **Gotcha.** Don't confuse a `resource` (managed, mutable by Terraform) with a `data` source
 (observed, never mutated). Using a data source to "look up" something you actually want
 Terraform to own is a common mistake — Terraform won't create or protect it.
+
+### `count` vs `for_each` — and the index-shift trap
+
+Both create multiple instances of a resource, but they **address** those instances
+differently, and that difference is one of the most-probed senior Terraform questions.
+
+- **`count`** produces a **positional list**: `resource.name[0]`, `[1]`, `[2]`. The address
+  is the index, so it's tied to *position* in the list, not identity.
+- **`for_each`** produces a **map keyed by a string**: `resource.name["alpha"]`,
+  `["beta"]`. The address is the key, so it's tied to *identity*.
+
+**Worked example — the index shift.** You manage three buckets with `count`:
+
+```hcl
+variable "buckets" { default = ["logs", "media", "backups"] }
+resource "aws_s3_bucket" "b" {
+  count  = length(var.buckets)
+  bucket = var.buckets[count.index]
+}
+```
+
+Terraform records: `b[0]=logs`, `b[1]=media`, `b[2]=backups`. Now you delete `"media"` from
+the middle, leaving `["logs", "backups"]`. Terraform re-indexes by position:
+
+| Address | Before | After | Plan action |
+|---|---|---|---|
+| `b[0]` | logs | logs | no change |
+| `b[1]` | media | **backups** | **destroy + recreate** (bucket renamed media→backups) |
+| `b[2]` | backups | *(gone)* | **destroy** |
+
+So removing ONE bucket from the middle destroys and recreates `backups` too — because `b[1]`
+now maps to a different real object. `Plan: 1 to add, 0 to change, 2 to destroy.` On live
+data that's an outage.
+
+Now the same change with `for_each` keyed by name:
+
+```hcl
+resource "aws_s3_bucket" "b" {
+  for_each = toset(["logs", "media", "backups"])
+  bucket   = each.key
+}
+```
+
+Addresses are `b["logs"]`, `b["media"]`, `b["backups"]`. Delete `"media"` and only
+`b["media"]` is destroyed — `logs` and `backups` are untouched: `Plan: 0 to add, 0 to
+change, 1 to destroy.` The keys are stable, so removing one doesn't disturb the others.
+
+**Rule of thumb:** use `count` for N *identical* copies or an on/off toggle
+(`count = var.enabled ? 1 : 0`); use `for_each` keyed by a stable identifier whenever the
+instances are *distinct* things you'll add to or remove from over time.
 
 ---
 
@@ -205,6 +279,36 @@ mapping each config resource to its real-world object ID and last-known attribut
 **Desired state (HCL) vs state file vs real world** are three distinct things. `plan`
 reconciles all three: it refreshes state from the real world, then diffs against your HCL.
 
+**What state actually looks like.** A trimmed `terraform.tfstate` entry for `aws_instance.web`
+makes the "config → real object" binding concrete:
+
+```json
+{
+  "resources": [
+    {
+      "type": "aws_instance",
+      "name": "web",
+      "instances": [
+        {
+          "attributes": {
+            "id": "i-0abc123",
+            "ami": "ami-0aaa111",
+            "instance_type": "t3.micro",
+            "private_ip": "10.0.1.15",
+            "tags": { "Name": "web" }
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+The config only ever said `aws_instance.web`; AWS only ever knew `i-0abc123`. This
+`type`+`name` → `attributes.id` mapping is the binding — it's how Terraform knows *which*
+real instance your `web` block owns, and it's why losing state means Terraform can no longer
+find `i-0abc123` and would try to create a fresh one.
+
 > [!WARNING]
 > State is **precious**. Losing it means Terraform "forgets" what it manages and may try to
 > recreate everything. Never hand-edit `terraform.tfstate`; use `terraform state`
@@ -240,6 +344,13 @@ terraform {
 - **Encryption at rest** and access control via IAM/bucket policy.
 - **Versioning** (S3 versioning) so you can recover a corrupted/old state.
 - Keeps sensitive attributes off individual laptops.
+
+**Gotcha — backends can't use variables.** The `backend` block is read at `init`, before
+variables/locals are evaluated, so `bucket = var.state_bucket` fails. Parameterize per
+environment with **partial backend config**: leave the values out of the block and pass them
+at init time — `terraform init -backend-config=prod.backend.hcl` (or repeated
+`-backend-config=key=value`). This is a natural fit with the directory-per-env pattern
+below, where each env's folder has its own `*.backend.hcl` pointing at a distinct state key.
 
 Related: `terraform_remote_state` is a *data source* to read another config's outputs —
 one common way to share values (e.g. VPC ID) across separately-managed stacks.
@@ -479,6 +590,33 @@ import {
 it (in the classic command) — if your HCL doesn't match the imported resource, the next
 plan will show changes. Import maps a real object into state; it never modifies the resource.
 
+### Refactoring safely: `moved` blocks, `state mv`, and `-replace`
+
+Terraform identifies a resource **by its address**. So when you *rename* a resource or move
+it into a module, the old address vanishes and a new one appears — and plan reads that as
+"destroy the old thing, create a new thing," even though it's the same live object. Renaming
+`aws_instance.web` to `aws_instance.frontend` naively yields `Plan: 1 to add, 1 to destroy`
+of *production* infra.
+
+Two ways to tell Terraform "same object, new address":
+
+- **`moved` block** (Terraform 1.1+, declarative, preferred) — commit it alongside the
+  rename so anyone applying gets the state rewrite automatically:
+  ```hcl
+  moved {
+    from = aws_instance.web
+    to   = aws_instance.frontend
+  }
+  ```
+  Plan then shows a *move* (`aws_instance.web has moved to aws_instance.frontend`) and
+  `Plan: 0 to add, 0 to change, 0 to destroy`.
+- **`terraform state mv aws_instance.web aws_instance.frontend`** — the imperative one-off
+  equivalent; rewrites state directly without a committed record.
+
+Separately, to *deliberately* force one resource to be recreated (e.g. a corrupted box),
+use **`terraform apply -replace=aws_instance.web`** — the modern successor to the deprecated
+`terraform taint`.
+
 ---
 
 ## Immutable vs mutable infrastructure
@@ -496,6 +634,26 @@ and blue-green/rolling deployments (see the `deployment-strategies` topic).
 Terraform's `-/+` (replace) action and `lifecycle { create_before_destroy = true }` support
 the immutable pattern; Ansible-style in-place patching is the mutable pattern.
 
+**Replace ordering — the gotcha interviewers push on.** When a change forces replacement,
+the *order* of the two operations matters:
+
+- **Default = destroy-then-create.** Terraform tears down the old resource first, then
+  builds the new one. There's a **downtime window** between them — the service is gone until
+  the replacement is up.
+- **`create_before_destroy = true` flips it:** build the new resource, cut over, *then*
+  destroy the old — no gap. But now two instances of the resource are briefly alive at once,
+  so any uniquely-named attribute **collides**. Example: an `aws_launch_configuration` with
+  a hardcoded `name = "web"` fails ("already exists") because the new one can't take a name
+  the old one still holds. The fix is `name_prefix = "web-"` (Terraform appends a unique
+  suffix) instead of a fixed `name`.
+- **`prevent_destroy = true`** is a guardrail, not an ordering knob: any plan that *would*
+  destroy the resource **errors out** instead of proceeding. Use it on stateful/irreplaceable
+  things (a prod database) so a stray `terraform destroy` or a forces-replacement edit can't
+  silently wipe them.
+
+When to use which: `create_before_destroy` for stateless things you want replaced with zero
+downtime; `prevent_destroy` for stateful things you never want auto-destroyed.
+
 ---
 
 ## Terraform vs Pulumi, CloudFormation, and CDK
@@ -506,7 +664,7 @@ the immutable pattern; Ansible-style in-place patching is the mutable pattern.
 | **OpenTofu** | HCL | Multi-cloud | Same as Terraform | Open-source fork after Terraform's BUSL license change (2023) |
 | **Pulumi** | Real languages (TS, Python, Go, C#) | Multi-cloud | Own state (Pulumi service/self-managed) | Full programming-language power, loops/abstractions |
 | **AWS CloudFormation** | YAML/JSON templates | **AWS only** | Managed by AWS (stacks; no state file you own) | Native AWS; drift detection & rollback built in |
-| **AWS CDK** | Real languages (TS, Python, …) | AWS (synthesizes to CloudFormation) | Via CloudFormation | Imperative code → declarative CFN templates |
+| **AWS CDK** | Real languages (TS, Python, …) | AWS (synthesizes to CloudFormation) | Via CloudFormation | General-purpose language builds a declarative construct tree → synthesizes to CFN |
 
 **Key distinctions to state in an interview:**
 
@@ -517,7 +675,10 @@ the immutable pattern; Ansible-style in-place patching is the mutable pattern.
 - **Pulumi/CDK use general-purpose languages** (great for complex logic/abstraction) vs
   Terraform's purpose-built HCL (simpler, more constrained, more declarative).
 - **OpenTofu** is the Linux Foundation open-source fork created after HashiCorp relicensed
-  Terraform to BUSL; drop-in compatible for most configs.
+  Terraform to BUSL. Compatibility is strongest for baseline HCL as of the 2023 fork; the two
+  have since **diverged** (OpenTofu added state encryption, early variable evaluation, and
+  provider `for_each`; Terraform 1.6+ evolved separately), so "drop-in" holds for common
+  configs but not universally.
 
 ---
 

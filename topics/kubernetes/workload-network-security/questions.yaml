@@ -54,11 +54,14 @@ questions:
     An interviewer asks you to distinguish RBAC, NetworkPolicy, and securityContext.
     Which mapping is correct?
   options:
-  - RBAC guards Pod network traffic, NetworkPolicy guards the API, securityContext guards nodes
+  - RBAC guards Pod-to-Pod network traffic, NetworkPolicy authorizes calls to the Kubernetes API, and securityContext
+    guards which nodes a Pod runs on
   - RBAC guards the Kubernetes API, NetworkPolicy guards Pod-to-Pod network traffic, securityContext guards
     the node/kernel from the container
-  - All three enforce the same thing at different times in the request lifecycle
-  - RBAC and NetworkPolicy are identical; securityContext is just their UI
+  - All three enforce the same authorization decision, just applied at different stages of the API request
+    lifecycle by separate components
+  - RBAC and NetworkPolicy are two names for the same L3/L4 policy engine, and securityContext is just the
+    UI used to configure them both
   answer: 1
   explanation: |
     They are orthogonal layers: RBAC = control-plane authorization (who can call the API),
@@ -75,9 +78,9 @@ questions:
   question: |
     What does setting `securityContext.runAsNonRoot: true` on a container do?
   options:
-  - Automatically assigns a random non-zero UID to the container
-  - Removes all Linux capabilities from the container
-  - Makes the root filesystem read-only
+  - Automatically assigns the container a random non-zero UID in the 10000-60000 range at startup
+  - Strips every Linux capability from the container the same way capabilities.drop ALL would
+  - Mounts the container's root filesystem as read-only to block writes to any system path
   - Causes the kubelet to refuse to start the container if its effective user is UID 0 (root)
   answer: 3
   explanation: |
@@ -96,10 +99,10 @@ questions:
     A Pod sets `runAsNonRoot: true` but no `runAsUser`, and the image's default user is
     root. What happens when the Pod is scheduled?
   options:
-  - The Pod is rejected at admission time before scheduling
-  - It runs fine because Kubernetes picks UID 1000 automatically
+  - The Pod is rejected by an admission controller at admission time, before it is ever scheduled to a node
+  - It runs fine because Kubernetes silently falls back to the default UID 1000 whenever runAsUser is unset
   - The container fails to start (CreateContainerConfigError) because the image would run as root
-  - It runs as root but logs a warning
+  - It starts and runs as root but records a warning annotation in the kubelet event log
   answer: 2
   explanation: |
     runAsNonRoot only asserts the requirement — it does not choose a non-root UID. With a
@@ -119,9 +122,10 @@ questions:
     application container?
   options:
   - drop ["ALL"] and then add back only the specific capabilities needed (e.g. NET_BIND_SERVICE)
-  - Add ALL capabilities so the app never lacks permission
-  - 'Set privileged: true which handles capabilities automatically'
-  - Leave capabilities unset because containers have none by default
+  - Explicitly add the full set of Linux capabilities so the application can never fail on a permission check
+  - Set privileged true, which grants and manages the container's capability set automatically for you
+  - Leave the capabilities field unset, since application containers are granted an empty capability set by
+    default
   answer: 0
   explanation: |
     Least privilege: drop ALL capabilities then add back only what the workload genuinely
@@ -137,11 +141,11 @@ questions:
   question: |
     What does `allowPrivilegeEscalation: false` enforce?
   options:
-  - It prevents the Pod from being scheduled on control-plane nodes
+  - It adds a taint toleration rule that prevents the Pod from being scheduled onto control-plane nodes
   - It sets the no_new_privs bit so a process cannot gain more privileges than its parent (e.g. via setuid
     binaries)
-  - It blocks the container from making any network egress
-  - It forces the container to run as UID 0
+  - It installs an egress firewall rule that blocks the container from opening any outbound network connection
+  - It overrides the image's user and forces every process in the container to run as root (UID 0)
   answer: 1
   explanation: |
     allowPrivilegeEscalation: false sets the Linux no_new_privs flag, so a child process
@@ -159,9 +163,10 @@ questions:
     /tmp. What is the correct approach?
   options:
   - Mount a writable emptyDir volume at /tmp while keeping the root filesystem read-only
-  - Remove readOnlyRootFilesystem because it is incompatible with any file writes
-  - 'Set privileged: true so writes are allowed'
-  - Add the SYS_ADMIN capability
+  - Remove readOnlyRootFilesystem entirely, since it is fundamentally incompatible with an app that writes
+    any file at runtime
+  - Set privileged true so the kernel permits writes to the otherwise read-only root filesystem
+  - Add the SYS_ADMIN capability, which re-enables write access to mounted filesystems
   answer: 0
   explanation: |
     A read-only root filesystem blocks tampering and dropping tools, but apps often need
@@ -180,9 +185,10 @@ questions:
   options:
   - It grants the container nearly all host capabilities and device access, effectively making it root
     on the node
-  - It slightly increases container startup latency
-  - It disables the container's network entirely
-  - It forces the Pod onto a single node, reducing availability
+  - It measurably increases container startup latency because the runtime must load extra security modules
+  - It disables the container's network namespace entirely, cutting off all pod-to-pod and egress traffic
+  - It pins the Pod to a single dedicated node for its whole lifetime, reducing scheduling flexibility and
+    availability
   answer: 0
   explanation: |
     A privileged container gets essentially full control of the node — all capabilities, host
@@ -199,10 +205,10 @@ questions:
   question: |
     What is the effect of `seccompProfile.type: RuntimeDefault`?
   options:
-  - It disables all system calls, sandboxing the container completely
-  - It runs the container in a separate VM
+  - It blocks every system call outright, fully sandboxing the container so no syscalls reach the host kernel
+  - It launches the container inside a separate lightweight virtual machine for hardware-level isolation
   - It applies the container runtime's default syscall filter, blocking dangerous/obscure syscalls
-  - It encrypts the container's memory
+  - It transparently encrypts the container's process memory pages to defend against host memory scraping
   answer: 2
   explanation: |
     seccomp filters which syscalls a process may make. RuntimeDefault applies the container
@@ -221,10 +227,10 @@ questions:
     A field is set both at the Pod level (`spec.securityContext`) and the container level
     (`spec.containers[*].securityContext`). Which value applies to that container?
   options:
-  - The Pod-level value always wins
+  - The Pod-level value always wins because it is applied last, after each container's own settings
   - The container-level value overrides the Pod-level value for that container
-  - Both are ignored and the API server rejects the Pod
-  - They are averaged
+  - Both settings are discarded and the API server rejects the Pod for having a conflicting securityContext
+  - The two values are merged field-by-field into an averaged effective setting for the container
   answer: 1
   explanation: |
     Pod-level securityContext sets defaults for all containers; where a container-level
@@ -261,9 +267,9 @@ questions:
     Which of the following is DISALLOWED by the Baseline Pod Security Standard?
   options:
   - Using hostPath volumes and host namespaces (hostNetwork/hostPID/hostIPC)
-  - Running as a non-root user
-  - Setting resource limits
-  - Mounting a ConfigMap
+  - Running the container's processes as a non-root user via runAsUser or runAsNonRoot
+  - Declaring CPU and memory resource limits on the container spec
+  - Mounting configuration data into the Pod from a ConfigMap volume
   answer: 0
   explanation: |
     Baseline blocks known privilege escalations: no privileged containers, no host namespaces
@@ -281,9 +287,9 @@ questions:
   question: |
     Which set of settings is REQUIRED by the Restricted profile but NOT by Baseline?
   options:
-  - 'hostNetwork: true and privileged: true'
-  - Only that the image be pulled from a private registry
-  - A minimum of 3 replicas
+  - Enabling hostNetwork true together with privileged true on every container in the Pod
+  - Only that the container image be pulled from a private, authenticated registry rather than a public one
+  - A minimum of 3 replicas backed by a PodDisruptionBudget for high availability
   - 'runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities.drop ["ALL"], and an explicit non-Unconfined
     seccompProfile'
   answer: 3
@@ -346,9 +352,9 @@ questions:
     What built-in mechanism replaced the removed PodSecurityPolicy (PSP)?
   options:
   - Pod Security Admission (PSA), a built-in admission controller enforcing the Pod Security Standards
-  - OPA Gatekeeper, which is now bundled with Kubernetes
-  - NetworkPolicy
-  - The SecurityContextConstraints object
+  - OPA Gatekeeper, which now ships bundled inside Kubernetes as the default policy engine
+  - NetworkPolicy objects extended with a new podSecurity ingress rule type
+  - The SecurityContextConstraints object promoted from OpenShift into upstream Kubernetes
   answer: 0
   explanation: |
     PSP was deprecated in v1.21 and removed in v1.25. Its built-in replacement is Pod Security
@@ -386,10 +392,10 @@ questions:
     How do you configure Pod Security Admission to enforce the "baseline" profile on a
     namespace?
   options:
-  - Create a PodSecurityPolicy object referencing baseline
+  - Create a PodSecurityPolicy object referencing the baseline ruleset
   - Apply the namespace label pod-security.kubernetes.io/enforce=baseline
-  - 'Set spec.securityProfile: baseline on every Pod'
-  - Install a Kyverno ClusterPolicy named baseline
+  - 'Set spec.securityProfile: baseline on every Pod in the namespace'
+  - Install a Kyverno ClusterPolicy named baseline in that namespace
   answer: 1
   explanation: |
     PSA is configured purely with namespace labels: pod-security.kubernetes.io/<MODE>=<LEVEL>,
@@ -409,9 +415,9 @@ questions:
     whose Pod template violates Restricted. `kubectl apply` succeeds, but the Deployment shows
     0/3 ready replicas. Why?
   options:
-  - The image failed to pull
-  - The namespace ran out of quota
-  - Restricted requires exactly 1 replica
+  - The container image reference failed to pull because Restricted blocks all public-registry images by default
+  - The namespace ran out of its ResourceQuota, so the scheduler silently held every replica in Pending
+  - The Restricted profile caps a Deployment at exactly 1 replica, so the other two are refused as excess
   - enforce mode is applied to Pods, not to workload controllers, so the Deployment is accepted but its
     ReplicaSet cannot create Pods
   answer: 3
@@ -434,9 +440,9 @@ questions:
   options:
   - Set warn=restricted and audit=restricted first to discover violations, then flip enforce=restricted
     once workloads are clean
-  - Immediately set enforce=restricted and fix Pods as they crash
-  - Delete the namespace and recreate it with Restricted
-  - Disable PSA, migrate, then re-enable it
+  - Immediately set enforce=restricted and fix each violating Pod reactively as it crash-loops in production
+  - Delete the namespace and recreate it with the restricted label so all existing workloads re-admit cleanly
+  - Disable PSA cluster-wide, migrate every workload, then re-enable enforcement once the namespace is quiet
   answer: 0
   explanation: |
     Because warn/audit are non-blocking and are evaluated on workload templates, you first set
@@ -452,9 +458,9 @@ questions:
   question: |
     What does the label `pod-security.kubernetes.io/enforce-version: v1.30` do?
   options:
-  - Requires all Pods to run Kubernetes 1.30 kubelets
-  - Rejects any Pod created before v1.30
-  - Enables PSA only on v1.30 nodes
+  - Requires every node scheduling Pods in the namespace to run a Kubernetes v1.30 kubelet or newer
+  - Rejects any Pod object whose creationTimestamp predates the v1.30 release cutoff date
+  - Enables Pod Security Admission only on the subset of nodes reporting v1.30 in their kubelet version
   - Pins the enforced policy rules to those that shipped in Kubernetes v1.30, so enforcement stays stable
     across cluster upgrades
   answer: 3
@@ -473,10 +479,10 @@ questions:
     In a cluster with a policy-capable CNI but no NetworkPolicy objects defined, what is the
     default Pod-to-Pod connectivity?
   options:
-  - All Pod-to-Pod traffic is denied by default
+  - All Pod-to-Pod traffic is denied by default until an explicit allow-policy is created for each pair
   - 'Pods are non-isolated: all ingress and egress traffic is allowed'
-  - Only same-namespace traffic is allowed
-  - Only traffic through a Service is allowed
+  - Only traffic between Pods in the same namespace is allowed; cross-namespace flows are dropped by default
+  - Only traffic routed through a Service ClusterIP is allowed; direct Pod-IP connections are blocked
   answer: 1
   explanation: |
     By default Pods are non-isolated — the flat network model allows all ingress and egress.
@@ -493,9 +499,9 @@ questions:
     When does a Pod become "deny-by-default" for ingress?
   options:
   - The moment any NetworkPolicy selects that Pod and lists Ingress in policyTypes
-  - Only if a policy named "default-deny" exists
-  - As soon as the cluster has at least one NetworkPolicy anywhere
-  - Never — ingress is always allowed
+  - Only if a policy explicitly named "default-deny" exists in that Pod's namespace
+  - As soon as the cluster has at least one NetworkPolicy object defined anywhere, in any namespace
+  - Never — Pod ingress remains permanently allowed and cannot be restricted by NetworkPolicy
   answer: 0
   explanation: |
     A Pod is isolated for ingress only once some NetworkPolicy selects it AND includes Ingress
@@ -515,9 +521,9 @@ questions:
     being blocked at all. What is the most likely cause?
   options:
   - Your CNI plugin does not implement NetworkPolicy, so the object is accepted but silently not enforced
-  - The policy YAML is syntactically invalid
-  - NetworkPolicies only work after a node reboot
-  - You must also create a matching Service
+  - The policy YAML is syntactically invalid, so the API server stored it as an inert unparsed placeholder
+  - NetworkPolicies take effect only after every node in the cluster has been drained and rebooted once
+  - You must also create a matching Service so kube-proxy can attach the policy to that Service's endpoints
   answer: 0
   explanation: |
     NetworkPolicy is enforced by the CNI plugin, not the API server. Plugins like plain flannel
@@ -535,10 +541,10 @@ questions:
     Two NetworkPolicies both select the same Pod for ingress: policy A allows traffic from
     frontend, policy B allows traffic from monitoring. What traffic can reach the Pod?
   options:
-  - Only traffic matching both A and B (the intersection)
-  - Neither, because two policies conflict
+  - Only traffic matching both A and B at once (the intersection), so frontend traffic alone is dropped
+  - Neither source can reach it, because two policies selecting one Pod are treated as a hard conflict
   - Traffic from frontend OR monitoring — policies are additive (union)
-  - Whichever policy was created last
+  - Only whichever policy was created last wins, so the earlier policy's allow-rule is silently overridden
   answer: 2
   explanation: |
     NetworkPolicies are purely additive and never conflict; the allowed set is the union of all
@@ -556,10 +562,10 @@ questions:
     namespace with a default-deny-ingress policy). For the connection to succeed, what must be
     true?
   options:
-  - Only A's egress policy needs to allow it
+  - Only A's egress policy needs to allow it; B's ingress rules are bypassed once egress is permitted
   - Both A's egress rules AND B's ingress rules must allow the connection
-  - Only B's ingress policy needs to allow it
-  - Neither — deny-by-default cannot be overridden
+  - Only B's ingress policy needs to allow it, because the destination side always has final authority
+  - Neither — once both namespaces are deny-by-default, the flow can never be re-enabled by any allow-rule
   answer: 1
   explanation: |
     When both endpoints are isolated in the relevant direction, the source's egress policy AND
@@ -576,9 +582,9 @@ questions:
   question: |
     Which of these can a standard Kubernetes NetworkPolicy (networking.k8s.io/v1) NOT do?
   options:
-  - Restrict traffic by destination TCP port
-  - Allow traffic only from Pods with a given label
-  - Allow traffic from a specific ipBlock CIDR
+  - Restrict inbound traffic to a specific destination TCP port such as 5432 while denying all others
+  - Allow ingress only from Pods carrying a given label selector, such as role=frontend in the namespace
+  - Allow traffic from a specific ipBlock CIDR range while excluding an inner range via an except clause
   - Filter based on HTTP request path (L7) or log allowed/denied connections
   answer: 3
   explanation: |
@@ -614,9 +620,9 @@ questions:
   question: |
     Which NetworkPolicy creates a default-deny-all-ingress rule for every Pod in a namespace?
   options:
-  - A policy with podSelector matching a single Pod and an allow-all ingress rule
-  - A policy with policyTypes [Egress] only
-  - Deleting all Services in the namespace
+  - A policy with a podSelector matching a single Pod plus a broad allow-all ingress rule for the namespace
+  - A policy that lists policyTypes [Egress] only, which implicitly denies all ingress for selected Pods
+  - Deleting all Services in the namespace so Pods lose their stable ingress entry points entirely
   - 'A policy with `podSelector: {}` and `policyTypes: [Ingress]` and no ingress rules'
   answer: 3
   explanation: |
@@ -645,8 +651,8 @@ questions:
   options:
   - Pods with role=client in ANY namespace, OR any Pod in team=alice namespaces
   - Only Pods with role=client that ALSO live in a namespace labeled team=alice (intersection)
-  - All Pods in the local namespace
-  - All Pods with role=client in the local namespace only
+  - All Pods in the policy's own local namespace, since a combined selector collapses to a namespace-wide allow
+  - All Pods labeled role=client but restricted to the policy's own local namespace, ignoring the team label
   answer: 1
   explanation: |
     Because namespaceSelector and podSelector are under the SAME list item (one dash), they are
@@ -672,10 +678,10 @@ questions:
     ```
     What changes compared to putting them under one item?
   options:
-  - Nothing; whitespace never matters in YAML
-  - It becomes invalid and is rejected
+  - Nothing changes; list-item indentation is cosmetic and never alters NetworkPolicy peer semantics
+  - It becomes structurally invalid and the API server rejects the policy with a schema validation error
   - 'It becomes an OR: any Pod in team=alice namespaces, OR Pods labeled role=client in the local namespace'
-  - It now requires BOTH the namespace and pod to match plus an ipBlock
+  - It now requires BOTH the namespace and pod to match AND additionally an ipBlock CIDR peer to be present
   answer: 2
   explanation: |
     Separate list items are ORed. This allows ALL Pods from team=alice namespaces, OR Pods
@@ -753,9 +759,9 @@ questions:
   question: |
     How do you make the API server store Secrets encrypted in etcd?
   options:
-  - 'Set encrypted: true on each Secret object'
-  - Enable a NetworkPolicy protecting etcd
-  - Turn on Pod Security Admission
+  - 'Set encrypted: true in the metadata of each Secret object so the API server encrypts it on write'
+  - Enable a NetworkPolicy that fronts etcd, so all Secret reads and writes are encrypted over the wire
+  - Turn on Pod Security Admission with the restricted profile, which encrypts Secret data as a side effect
   - Configure the API server with an EncryptionConfiguration via --encryption-provider-config
   answer: 3
   explanation: |
@@ -777,9 +783,12 @@ questions:
   options:
   - Because the first provider encrypts new writes while all listed providers can decrypt; identity is
     plaintext, so putting it first would disable encryption
-  - Because identity is the strongest encryption and should be the default
-  - Because identity only works on the last node
-  - Order does not matter
+  - Because identity is AES-256-GCM, the strongest available provider, and Kubernetes mandates it as
+    the cluster-wide default for etcd encryption
+  - Because the identity provider can only decrypt data that was written by the node currently holding
+    the etcd leader lease
+  - Because provider order is purely cosmetic; the API server always picks whichever listed provider
+    has a valid key at write time
   answer: 0
   explanation: |
     The first provider in the list is used to encrypt new writes; every provider can decrypt.
@@ -798,9 +807,12 @@ questions:
     You just enabled encryption at rest for Secrets. Are the Secrets that already existed in
     etcd now encrypted?
   options:
-  - Yes, enabling encryption retroactively rewrites all data
-  - Yes, but only after a control-plane reboot
-  - No, and there is no way to encrypt existing Secrets
+  - Yes, enabling encryption triggers a background job that retroactively re-encrypts every existing
+    object stored in etcd
+  - Yes, but only once the control-plane nodes are rebooted, which flushes and re-persists etcd through
+    the new provider
+  - No, and there is no supported path to encrypt already-persisted Secrets short of restoring from a
+    fresh cluster backup
   - No — existing Secrets stay as they were; you must rewrite them (e.g. kubectl get secrets -A -o json
     | kubectl replace -f -) to encrypt them
   answer: 3
@@ -820,11 +832,14 @@ questions:
     Why is the KMS provider generally preferred over the local aescbc provider for encryption
     at rest?
   options:
-  - It is faster
+  - It is significantly faster because encryption is offloaded to a dedicated hardware co-processor on
+    each control-plane node
   - With KMS (envelope encryption), the data-encryption keys are wrapped by an external key manager rather
     than stored in a plaintext file on the control-plane node
-  - It removes the need for RBAC on Secrets
-  - It encrypts Pod memory as well
+  - It removes the need to configure RBAC on Secrets, since the KMS key policy fully governs who can read
+    the decrypted values
+  - It additionally encrypts each Pod's process memory pages at runtime to defend against host-level memory
+    scraping attacks
   answer: 1
   explanation: |
     The aescbc provider keeps the encryption key in the config file on the control-plane node —
@@ -842,8 +857,8 @@ questions:
     Pod Security Admission cannot express a rule like "only allow images from
     registry.corp.io". What is the standard way to enforce such custom policy?
   options:
-  - Edit the API server source code
-  - Add a NetworkPolicy
+  - Patch and recompile the kube-apiserver source code to add a built-in registry allow-list check
+  - Add a NetworkPolicy egress rule that blocks pulls from every registry except registry.corp.io
   - Use a policy engine (Kyverno or OPA Gatekeeper) as a validating/mutating admission webhook
   - Set it in each Pod's securityContext
   answer: 2
@@ -864,9 +879,10 @@ questions:
     What is a key difference between Kyverno and OPA Gatekeeper?
   options:
   - Kyverno policies are written in YAML (Kubernetes-native CRs) while Gatekeeper uses the Rego language
-  - Kyverno runs in the kernel; Gatekeeper runs in userspace
-  - Gatekeeper cannot validate resources
-  - Kyverno only works on AWS
+  - Kyverno runs as an eBPF program inside the Linux kernel, while Gatekeeper runs as an ordinary
+    userspace admission webhook
+  - Gatekeeper can only mutate incoming resources and is architecturally unable to validate or reject them
+  - Kyverno is a proprietary component that functions only on AWS EKS clusters and not on other providers
   answer: 0
   explanation: |
     Both are admission-webhook policy engines. Kyverno expresses policies in Kubernetes-native
@@ -883,11 +899,14 @@ questions:
   question: |
     Why do teams commonly write an admission policy to block the `:latest` image tag?
   options:
-  - :latest images are always larger
-  - Kubernetes cannot pull :latest images
+  - :latest images are always physically larger on disk because they bundle every historical layer of
+    the repository
+  - Kubernetes cannot pull :latest images at all unless imagePullPolicy is explicitly set to Always on
+    every container
   - :latest is mutable and non-pinned, making rollouts non-reproducible and allowing new/malicious content
     to be pulled under the same tag
-  - :latest disables liveness probes
+  - :latest silently disables liveness and readiness probes, so failing containers are never restarted by
+    the kubelet
   answer: 2
   explanation: |
     :latest is a mutable tag — the same reference can resolve to different content over time,
@@ -907,11 +926,14 @@ questions:
     A validating admission webhook is configured with `failurePolicy: Fail`. The webhook
     backend becomes unavailable. What is the impact?
   options:
-  - Nothing; requests bypass the webhook automatically
+  - Nothing; matching requests transparently bypass the unreachable webhook and are admitted as if it
+    had approved them
   - All API writes matching the webhook are blocked until the webhook recovers, potentially causing a
     self-inflicted outage
-  - Only reads are blocked
-  - 'The cluster silently downgrades to failurePolicy: Ignore'
+  - Only read (get/list/watch) requests matching the webhook's rules are blocked, while all write requests
+    continue to be admitted normally
+  - 'The API server detects the outage and silently downgrades the configuration to failurePolicy: Ignore
+    until the backend is healthy again'
   answer: 1
   explanation: |
     With failurePolicy: Fail, if the webhook can't be reached the API server rejects matching
@@ -929,9 +951,12 @@ questions:
   question: |
     Where in the API request handling do admission webhooks (like Kyverno/Gatekeeper) run?
   options:
-  - Before authentication
-  - Only after the object is already persisted in etcd
-  - Inside the kubelet on each node
+  - Before authentication, so the webhook can inspect and reject anonymous requests before any identity
+    is established
+  - Only after the object has already been persisted to etcd, acting as an asynchronous post-write audit
+    of stored resources
+  - Inside the kubelet on each worker node, evaluated locally just before the container runtime starts
+    the Pod
   - After authentication and authorization, at the admission stage (after built-in controllers like PSA)
   answer: 3
   explanation: |
@@ -970,9 +995,12 @@ questions:
   question: |
     How is container image signature verification typically enforced in a Kubernetes cluster?
   options:
-  - The kubelet refuses unsigned images by default
-  - NetworkPolicy blocks pulls of unsigned images
-  - etcd encryption verifies signatures
+  - The kubelet validates every image's cosign signature at pull time and refuses unsigned images by
+    default on all worker nodes
+  - A NetworkPolicy egress rule inspects the registry response and blocks the pull whenever the image
+    lacks a valid signature
+  - Enabling etcd encryption at rest transparently verifies each image signature before the manifest is
+    persisted to the datastore
   - An admission policy (e.g. Kyverno verifyImages, or Gatekeeper + ratify) verifies the cosign/Sigstore
     signature before allowing the Pod
   answer: 3
@@ -992,11 +1020,14 @@ questions:
   question: |
     Where does image CVE scanning fit relative to Kubernetes?
   options:
-  - Kubernetes scans every image automatically at pull time
+  - The kubelet automatically scans every image layer for known CVEs at pull time and refuses images
+    above a built-in severity threshold
   - Scanning happens in CI and/or at admission (Trivy, Grype); Kubernetes itself just gates admission
     on the result
-  - Scanning is a NetworkPolicy feature
-  - Scanning replaces the need for RBAC
+  - Scanning is a built-in NetworkPolicy feature that inspects registry traffic and drops pulls of
+    images with unpatched vulnerabilities
+  - Scanning provides equivalent protection to RBAC, so a cluster with image scanning enabled no longer
+    needs API-level authorization rules
   answer: 1
   explanation: |
     Kubernetes does not scan images itself. Scanners like Trivy or Grype run in CI or as an
@@ -1016,10 +1047,11 @@ questions:
     immediately crashes trying to write its PID file to /var/run. The team wants to keep the
     read-only rootfs. What is the best fix?
   options:
-  - 'Set privileged: true'
-  - Remove runAsNonRoot
+  - Set privileged true, which grants the container write access to the otherwise read-only root filesystem
+  - Remove runAsNonRoot so the process runs as UID 0, which the kernel exempts from the read-only mount flag
   - Mount a writable emptyDir at /var/run (and any other required write paths), keeping the rootfs read-only
-  - Switch the container to hostPath at /
+  - Switch the container's root mount to a hostPath at / so writes land directly on the underlying node
+    disk
   answer: 2
   explanation: |
     Read-only rootfs is a valuable hardening control; the right fix is to provide writable
@@ -1041,9 +1073,12 @@ questions:
   options:
   - Egress to the cluster DNS (kube-dns/CoreDNS on UDP/TCP 53) is now blocked; add an egress rule allowing
     traffic to the kube-system DNS Pods/port
-  - DNS is unrelated to NetworkPolicy; the CNI is broken
-  - You must disable the policy entirely
-  - Add runAsNonRoot to the Pods
+  - DNS resolution is unrelated to NetworkPolicy; the symptom means the CNI plugin's overlay network
+    has crashed and must be restarted
+  - You must disable the egress policy entirely, because NetworkPolicy has no supported way to permit
+    DNS while still denying other egress
+  - Add runAsNonRoot to the Pods, since CoreDNS refuses to answer queries from containers that run as
+    the root user
   answer: 0
   explanation: |
     A default-deny-egress policy also blocks DNS queries to CoreDNS. You must add an explicit
@@ -1063,10 +1098,13 @@ questions:
     A namespace enforces the `restricted` profile. A developer submits a Pod with
     `securityContext.privileged: true`. What happens?
   options:
-  - The Pod is admitted with a warning
-  - The privileged flag is silently set to false
+  - The Pod is admitted and runs privileged, but PSA records a warning annotation in the namespace's
+    audit log for later review
+  - The API server silently mutates the privileged flag to false and admits the now-compliant Pod without
+    notifying the developer
   - The Pod is rejected — privileged is not even allowed under Baseline, let alone Restricted
-  - The Pod runs but privileged is ignored
+  - The Pod is admitted and starts normally, but the container runtime ignores the privileged flag and
+    strips its extra host capabilities
   answer: 2
   explanation: |
     Privileged containers are blocked already at the Baseline level, so under enforce=restricted
@@ -1084,10 +1122,10 @@ questions:
   question: |
     Besides encryption at rest, what other control is essential for protecting Secrets?
   options:
-  - Storing them in ConfigMaps instead
+  - Moving the sensitive values out of Secrets and into ConfigMaps instead
   - Restricting who can get/list Secrets via RBAC (least privilege)
-  - Base64-encoding them twice
-  - Putting them in environment variables only
+  - Base64-encoding the values a second time before storing them
+  - Injecting them only as container environment variables rather than files
   answer: 1
   explanation: |
     Encryption at rest protects Secrets in etcd; RBAC protects the API path. Anyone with
@@ -1105,9 +1143,12 @@ questions:
     You have web, api, and db tiers. You want: web reachable from an ingress controller, api
     reachable only from web, db reachable only from api. What NetworkPolicy strategy fits?
   options:
-  - One giant allow-all policy in the namespace
-  - Rely on RBAC to segment the tiers
-  - Put each tier in privileged mode
+  - A single namespace-wide allow-all ingress policy, relying on each tier's application code to reject
+    connections from the wrong upstream
+  - Rely on RBAC role bindings scoped per tier to segment which Pods may open connections to which other
+    Pods
+  - Put each tier's Pods in privileged mode so the container runtime can enforce per-tier traffic isolation
+    at the kernel level
   - A default-deny-ingress baseline, then per-tier ingress policies whose from selectors match only the
     allowed upstream tier's Pods (and ports)
   answer: 3
@@ -1130,9 +1171,12 @@ questions:
   options:
   - The apply succeeds and the developer sees a warning message, because warn is non-blocking and is evaluated
     on the workload template
-  - The apply is rejected
-  - Nothing at all
-  - The namespace is deleted
+  - The apply is rejected outright, because warn mode blocks any workload whose Pod template violates
+    the named profile
+  - Nothing at all appears; warn mode only records the violation as an annotation in the audit log for
+    cluster operators
+  - The namespace is automatically relabeled to the privileged profile so the violating Deployment can
+    be admitted
   answer: 0
   explanation: |
     warn mode allows the resource but returns a user-facing warning. Unlike enforce, warn (and
@@ -1151,9 +1195,9 @@ questions:
     An app under the Restricted profile must listen on port 80. It drops ALL capabilities and
     runs as non-root, but fails to bind port 80. What is the compliant fix?
   options:
-  - 'Set privileged: true'
-  - Run as root
-  - Remove the drop ALL setting
+  - Set privileged true, which lets the non-root process bind any port including those below 1024
+  - Run the container as root (UID 0), since only root is exempt from the privileged-port restriction
+  - Remove the drop ALL capabilities setting so the container keeps its full default capability set
   - Add the NET_BIND_SERVICE capability (the one addition Restricted permits) or have the app listen on
     a high port and expose 80 via the Service
   answer: 3

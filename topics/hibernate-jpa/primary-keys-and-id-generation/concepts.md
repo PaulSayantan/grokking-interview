@@ -314,11 +314,17 @@ flowchart TD
 create sequence book_seq start with 1 increment by 50
 ```
 
-- **pooled**: `nextval` returns the **top** of the block. First call returns `50`; that
-  reserves ids `1..50` (handed out below the boundary). Next call returns `100`, reserving
-  `51..100`, and so on.
-- **pooled-lo**: `nextval` returns the **bottom** (lo) of the block. First call returns `1`,
-  reserving `1..50`; next returns `51`, reserving `51..100`.
+- **pooled**: `nextval` returns the **top** of the block; the optimizer serves ids
+  `nextval − allocationSize + 1 .. nextval`. With this DDL the sequence yields `1, 51, 101,
+  151, …`, so in steady state a `nextval` of `101` serves ids `52..101`, the next `nextval`
+  of `151` serves `102..151`, and so on. (First-block edge case: because the `start with`
+  value `1` is *below* `allocationSize`, Hibernate detects the small initial value and serves
+  a short first block starting at `1` rather than handing out ids below the start value — so
+  you never see zero/negative ids. Don't memorize "first call returns 50"; memorize
+  "returned value = top of the reserved block.")
+- **pooled-lo**: `nextval` returns the **bottom** (lo) of the block; it serves
+  `nextval .. nextval + allocationSize − 1`. First call returns `1`, reserving `1..50`; next
+  returns `51`, reserving `51..100`.
 
 Default optimizer selection: Hibernate uses **`pooled`** when `allocationSize > 1`, `none`
 when `allocationSize == 1`. You can switch the default flavor with
@@ -926,7 +932,9 @@ construction:
 - Jakarta Persistence 3.1 / 3.2 Specification — `@Id`, `@GeneratedValue`, `GenerationType`
   (incl. `UUID`), `@SequenceGenerator`, `@TableGenerator` (`jakarta.persistence.*`).
 - Hibernate ORM 6/7 User Guide — Identifiers chapter: identity, sequence, table generators;
-  optimizers (hi-lo, pooled, pooled-lo); `@UuidGenerator` and `Style` (`RANDOM` = v4,
+  optimizers (hi-lo, pooled, pooled-lo — `pooled` interprets the sequence value as the
+  *top* of the reserved block, serving `nextval − allocationSize + 1 .. nextval`, per
+  `org.hibernate.id.enhanced.PooledOptimizer`); `@UuidGenerator` and `Style` (`RANDOM` = v4,
   `TIME` = v1-style, `AUTO` = `RANDOM`); `@IdGeneratorType`; the `Generator` /
   `BeforeExecutionGenerator` / `OnExecutionGenerator` SPI; `@NaturalId` and
   `Session.byNaturalId`/`bySimpleNaturalId`; `@MapsId` derived identity;

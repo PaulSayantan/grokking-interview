@@ -84,6 +84,14 @@ Index sizing for the trie / suggestion store:
 - Avg query length ~20 bytes + top-k (say 5) suggestions × ~20 bytes + weights ≈
   ~150 bytes/entry ⇒ 100M × 150 B = **~15 GB**. Fits in RAM on a modest fleet;
   shard for headroom and replication.
+- **Caveat — this is a lower bound.** It counts one top-k list per *terminal*
+  query, but the read optimization in the trie section caches a top-k list at
+  *every internal prefix node* too ("c", "ca", "cat", …). Those internal nodes
+  roughly equal the number of distinct prefixes, and each carries its own
+  5-suggestion cache (~100 B). Empirically that adds a **~1.5-3× multiplier**, so
+  budget **~25-45 GB** for a trie that precomputes top-k everywhere. If you store
+  top-k only at terminals and DFS on internal misses, you stay near 15 GB but pay
+  it back in read latency — the classic precompute-vs-compute trade again.
 
 Full-text index sizing (inverted index):
 
@@ -172,6 +180,35 @@ occurrence of a word adds little over the 3rd) and **document-length
 normalization** (the b parameter, default 0.75 — a term in a short doc counts
 more than in a long one). IDF down-weights common words and boosts rare ones.
 Typical defaults: k1 ∈ [1.2, 2.0], b = 0.75.
+
+Worked example — score the query **"quick fox"** against two docs. Corpus of
+**N = 10** docs, average length **avgdl = 10** terms, `k1 = 1.2`, `b = 0.75`.
+Term document-frequencies: `df("quick") = 1` (rare), `df("fox") = 3` (common).
+
+The BM25 term score is `IDF · f·(k1+1) / ( f + k1·(1 − b + b·|D|/avgdl) )`,
+with `IDF = ln( (N − df + 0.5)/(df + 0.5) + 1 )`.
+
+- `IDF("quick") = ln((10−1+0.5)/(1+0.5) + 1) = ln(6.33 + 1) = ln(7.33) ≈ 1.99`
+- `IDF("fox")   = ln((10−3+0.5)/(3+0.5) + 1) = ln(2.14 + 1) = ln(3.14) ≈ 1.15`
+
+**Doc A** — short, `|D| = 5`: "quick"×2, "fox"×1. Length factor
+`1 − 0.75 + 0.75·(5/10) = 0.625`, so `k1·factor = 1.2·0.625 = 0.75`.
+- quick: `1.99 · [2·2.2 / (2 + 0.75)] = 1.99 · (4.4/2.75) = 1.99 · 1.60 = 3.19`
+- fox:   `1.15 · [1·2.2 / (1 + 0.75)] = 1.15 · (2.2/1.75) = 1.15 · 1.26 = 1.44`
+- **Doc A total ≈ 4.63**
+
+**Doc B** — long, `|D| = 20`: "quick"×5, "fox"×1. Length factor
+`1 − 0.75 + 0.75·(20/10) = 1.75`, so `k1·factor = 1.2·1.75 = 2.1`.
+- quick: `1.99 · [5·2.2 / (5 + 2.1)] = 1.99 · (11/7.1) = 1.99 · 1.55 = 3.09`
+- fox:   `1.15 · [1·2.2 / (1 + 2.1)] = 1.15 · (2.2/3.1) = 1.15 · 0.71 = 0.81`
+- **Doc B total ≈ 3.90**
+
+Doc A wins (**4.63 > 3.90**) even though Doc B contains "quick" *five* times to
+A's two. That is exactly the two BM25 ideas in numbers: (1) **saturation** — the
+tf factor is capped at `k1+1 = 2.2` no matter how large `f` grows, so going 2→5
+occurrences only moved quick's factor 1.60→1.55 (the length penalty), not
+linearly; (2) **length normalization** — the long doc's `|D|/avgdl = 2` inflated
+its denominator, so each occurrence in B is worth less than one in the short A.
 
 **Learning to Rank (LTR):** a model (GBDT like LambdaMART, or a neural ranker)
 combines many features — BM25 score, freshness, click-through rate,
@@ -263,6 +300,21 @@ Alternative / complementary data structures:
   require updating top-k lists all the way up the prefix path. Pick precompute
   for read-heavy autocomplete (the default); pick on-the-fly only for tiny/rarely
   queried tries.
+
+  Worked example — one update, many touched nodes. Suppose "cat" was ranked below
+  the top-5 and its frequency jumps **4000 → 9000** (it just went viral). The
+  update must walk the *entire prefix path* and re-evaluate the cached top-k at
+  each ancestor: **"cat" → "ca" → "c" → (root)** — that is `len("cat") + 1 = 4`
+  nodes. At each node it re-merges "cat"'s new weight against that node's current
+  top-k (an O(k) compare/insert). Trace the root's list `["the"(50000),
+  "and"(30000), "you"(12000), "car"(6000), "can"(5000)]`: with weight 9000, "cat"
+  now beats "car"(6000) and "can"(5000), so the list becomes `["the", "and",
+  "you", "cat"(9000), "car"(6000)]` — "can" is evicted. Cost is
+  **O(prefix_length × k)** per single-item change — cheap for one word, but a busy
+  stream of updates means constant top-k churn on the hot high-fan-out nodes near
+  the root (every popular word touches "c", the root, etc.). That contention is
+  precisely why NRT incremental top-k is hard and many systems prefer a periodic
+  batch rebuild + atomic swap instead.
 - *Trie (array children) vs TST vs radix vs FST:* trades memory vs build cost vs
   update flexibility. FST is smallest and fastest to read but effectively
   immutable (rebuild to change); plain trie is easiest to mutate incrementally
@@ -367,7 +419,10 @@ Personalization at scale:
 - Serve a **global** cached list, then **re-rank client-side or in a thin layer**
   with the user's personal signals — keeps the expensive global computation
   cacheable while still personalizing. Fully per-user precomputed lists don't
-  scale (N_users × N_prefixes).
+  scale (N_users × N_prefixes): **100M users × 100M prefixes = 10^16 entries** —
+  at even 150 B each that is ~1.5 exabytes, obviously infeasible. So you cache
+  *one global list per prefix* (100M entries, the ~15 GB from the capacity
+  section) and re-rank only the ~5-10 items it returns per user at request time.
 
 **Trade-offs:**
 - *Shard by prefix vs by hash of full query:* prefix sharding gives cache/locality
@@ -455,6 +510,10 @@ Intuition: users typo ("teh", "recieve") and expect the system to recover
 ("did you mean...") or just work. Correction happens by finding dictionary terms
 within a small **edit distance** (Levenshtein: insert/delete/substitute; the
 **Damerau-Levenshtein** variant adds transposition of adjacent characters).
+Concretely, `Levenshtein("teh","the") = 2` (delete the first "e", then insert an
+"e" after "h" — two ops), but `Damerau-Levenshtein("teh","the") = 1` (one adjacent
+swap of "e"↔"h"). Since transposition is the single most common human typo,
+Damerau's one-op view keeps the candidate set small and catches it cheaply.
 
 Techniques, cheapest to richest:
 - **Edit-distance / Levenshtein automaton:** Lucene builds a DFA that accepts all
@@ -467,6 +526,18 @@ Techniques, cheapest to richest:
 - **SymSpell:** precompute deletes of dictionary terms into a hash map — extremely
   fast (orders of magnitude faster than BK-tree) at the cost of large precomputed
   storage. Modern default for high-throughput spell correction.
+
+  Worked example — why "only deletes" works. Index the dictionary word **"cat"**
+  by generating its distance-1 *deletes* and mapping each back to the original:
+  `{"at" → cat, "ct" → cat, "ca" → cat, "cat" → cat}`. At query time the user
+  types the typo **"cot"**; generate *its* deletes too:
+  `{"ot", "ct", "co", "cot"}`. Look each up in the map — **"ct" hits the bucket
+  pointing to "cat"**, so "cat" surfaces as a candidate with a single hash probe,
+  never scanning the dictionary. Verify the real distance once: `cat ↔ cot` = 1
+  (substitute a→o). The trick: a substitution ("a"→"o") is caught because *both*
+  sides delete the differing letter and meet at the common remainder "ct" — so
+  you only ever generate deletes (cheap), not the full insert/substitute/transpose
+  edit set (expensive), symmetrically on dictionary and query.
 - **Context / phrase correction:** Elasticsearch's **phrase suggester** uses an
   n-gram language model to pick corrections that fit the whole phrase (co-occurrence
   and frequency), not just per-token nearest words — "did you mean" quality.
@@ -520,6 +591,14 @@ slow, so we approximate:
 - **HNSW** (Hierarchical Navigable Small World): a layered proximity graph; greedy
   navigation from top layer down. Excellent recall/latency, high memory, the
   de-facto default (used by pgvector, Weaviate, Qdrant, Elasticsearch, Lucene).
+  *Why the layering makes it fast (log-ish):* think of a **skip-list over vector
+  space**. The sparse top layers are express highways — a handful of nodes with
+  long-range links — so a few greedy hops cover enormous distance and land you
+  near the right region cheaply. You then drop into progressively denser lower
+  layers (more local roads) for fine-grained search, greedily hopping to the
+  nearest neighbor at each layer until the bottom layer pins the true nearest.
+  Long jumps first, small steps last — that hierarchy is what turns a linear scan
+  of billions of vectors into roughly logarithmic hops.
 - **IVF** (inverted file): cluster vectors, search only the nearest clusters —
   lower memory, tune nprobe for recall vs speed.
 - **PQ** (product quantization): compress vectors to save memory at some recall
@@ -530,6 +609,25 @@ slow, so we approximate:
 with **Reciprocal Rank Fusion (RRF)** or a learned weighting. This captures both
 exact matches (IDs, rare tokens, names) and semantic matches (synonyms, intent),
 covering each other's blind spots.
+
+RRF fuses two ranked lists using only the *rank position* (not the raw,
+incomparable BM25 and cosine scores): `RRF(d) = Σ_i 1/(k + rank_i(d))`, summing
+over each list `i` the document appears in, with `k ≈ 60` (a smoothing constant
+that keeps a single #1 finish from dominating).
+
+Worked example — three docs, fused with `k = 60`:
+
+| Doc | BM25 rank | Vector rank | RRF score                                   |
+|-----|-----------|-------------|---------------------------------------------|
+| D1  | 1         | 30          | `1/61 + 1/90 = 0.01639 + 0.01111 = 0.02750` |
+| D2  | 3         | 2           | `1/63 + 1/62 = 0.01587 + 0.01613 = 0.03200` |
+| D3  | 2         | 50          | `1/62 + 1/110 = 0.01613 + 0.00909 = 0.02522`|
+
+Fused order: **D2 (0.03200) > D1 (0.02750) > D3 (0.02522)**. D1 topped BM25 and
+D3 was #2, yet **D2 wins** because it ranked *decently in both* lists (3rd and
+2nd) while D1/D3 were near the bottom of the vector list. That is the whole point
+of RRF: it rewards consensus across retrievers over a single spectacular finish,
+so a doc both lexically and semantically relevant floats to the top.
 
 Semantic autocomplete: beyond prefix trie, embeddings enable "suggest by intent"
 (typing "cheap flights to warm places" suggests destinations), and LLMs power

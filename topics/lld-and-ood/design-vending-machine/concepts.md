@@ -66,6 +66,11 @@ Key modeling decisions to narrate:
   you're designing for.)
 - **`Coin` is an enum, not a class hierarchy.** Denominations are a fixed closed set with data
   (value), not varying behavior — an enum is the honest model.
+- **Change granularity is bounded by the smallest coin.** With `NICKEL(5)` as the minimum
+  denomination, both prices and every possible change amount must be multiples of 5 — a
+  `priceCents = 63` or a `changeDue = 3` can *never* be satisfied. Treat "prices are multiples
+  of the smallest coin" as a validation invariant (reject `setPrice(63)`), or add a `PENNY(1)`
+  if the spec needs 1¢ granularity. Saying this out loud pre-empts the "make 3¢ change" trap.
 
 ## Class Diagram
 
@@ -149,7 +154,8 @@ Relationship notes worth saying aloud:
 - `VendingMachine` **composes** `Inventory` and `CashRegister` — they have no life outside the
   machine (composition, filled diamond).
 - `VendingMachine` holds a *reference* to its current `State` (aggregation-like arrow); the
-  state instances themselves are shared flyweights, not owned parts.
+  state instances themselves are shared flyweights (one immutable instance reused everywhere),
+  not owned parts.
 - `Slot` **references** a `Product` — products are catalog data that can outlive any slot.
 
 ## State Machine
@@ -364,6 +370,8 @@ public class VendingMachine {
     // context mutators used by states
     void setState(State s)   { this.currentState = s; }
     void addBalance(Coin c)  { balanceCents += c.getValueCents(); register.accept(c); }
+                             // coins merge into the float immediately; cancel() refunds
+                             // equivalent value, not the exact coins — see escrow note in edge cases
     void resetBalance()      { balanceCents = 0; }
     // getters: getIdleState, getHasMoneyState, getDispensingState,
     //          getInventory, getRegister, getBalanceCents, getSelectedSlot ...
@@ -392,6 +400,24 @@ public class GreedyChangeStrategy implements ChangeStrategy {
 
 The tell that the pattern is working: `VendingMachine`'s public methods contain **zero**
 `if`/`switch` on machine status — all conditional behavior lives inside states.
+
+### Worked example: trace one full purchase
+
+Interviewers love "walk me through inserting 3 quarters and buying a 60¢ item." Trace the
+state and balance at every step (float starts with plenty of dimes and nickels):
+
+| Step | Call | State before → after | `balanceCents` | Notes |
+|---|---|---|---|---|
+| 1 | `insertCoin(QUARTER)` | Idle → HasMoney | 0 → 25 | `IdleState` bumps balance, flips state |
+| 2 | `insertCoin(QUARTER)` | HasMoney → HasMoney | 25 → 50 | `HasMoneyState` just accumulates |
+| 3 | `insertCoin(QUARTER)` | HasMoney → HasMoney | 50 → 75 | |
+| 4 | `selectProduct("A3")` | HasMoney → Dispensing | 75 | slot in stock ✓; 75 ≥ 60 ✓; `changeDue = 75 − 60 = 15`; `canMakeChange(15)` ✓ → transition, then `dispense()` |
+| 5 | *(auto)* `dispense()` | Dispensing → Idle | 75 → 0 | deduct A3; `makeChange(15)`; release product; return change; reset |
+
+The `makeChange(15)` in step 5 runs greedy over `{DOLLAR, QUARTER, DIME, NICKEL}`:
+`15/100 = 0` dollars → `15/25 = 0` quarters → `15/10 = 1` dime (remainder `5`) →
+`5/5 = 1` nickel (remainder `0`). Result: **`[DIME, NICKEL]` = 15¢ returned**, machine back
+in `Idle` with balance `0`. Every guard was checked *before* the irreversible dispense.
 
 ## Extensibility
 
@@ -434,7 +460,30 @@ locking is over-engineering here; saying *why* it's over-engineering scores poin
   dispensing (you can't un-dispense a soda). Policy options: reject the sale and refund, or
   display "exact change only" mode when the float is low. Note the subtlety: a correct
   `canMakeChange` must respect the *limited* float — plain greedy arithmetic can say "yes"
-  when the actual coins say "no".
+  when the actual coins say "no". The honest implementation just *attempts* `makeChange` on a
+  copy of the float and reports whether it succeeded:
+
+  ```java
+  public boolean canMakeChange(int cents) {
+      try { strategy.makeChange(cents, new HashMap<>(coinFloat)); return true; }  // copy: no mutation
+      catch (InsufficientChangeException e) { return false; }
+  }
+  ```
+
+  **Worked example — total cash is not the same as makeable change.** Say `changeDue = 30`
+  and the float is `{DOLLAR:5, QUARTER:0, DIME:0, NICKEL:0}` — $5.00 of cash sitting in the
+  register. Greedy tries `30/100 = 0` dollars (a dollar overshoots), then quarters `= 0`,
+  dimes `= 0`, nickels `= 0`; amount left is still `30 ≠ 0`, so it throws →
+  `canMakeChange(30)` returns **false** and the sale is rejected *before* dispensing. The
+  drawer holds far more than 30¢, but not in coins that compose 30¢.
+
+  **Sharper — greedy fails when DP would succeed.** `changeDue = 30`, float
+  `{QUARTER:1, DIME:3, NICKEL:0}`. Greedy grabs the quarter first (largest that fits),
+  remainder `5`; now only dimes are left and `5/10 = 0`, so amount stays `5 ≠ 0` → it throws.
+  Yet `DIME×3 = 30` was sitting right there. Greedy's commitment to the quarter is a dead end;
+  a DP/backtracking strategy explores past it and finds `[DIME, DIME, DIME]`. This is exactly
+  why `ChangeStrategy` is a swappable seam — a market with awkward float can drop in the DP
+  variant without touching the state machine.
 - **Cancel mid-transaction** — refund the session's balance; legal in `HasMoney`, a no-op in
   `Idle`, rejected in `Dispensing` (product already committed). Subtlety worth naming: the
   skeleton refunds *equivalent value* from the register float (`makeChange(balance)`), which
@@ -449,7 +498,8 @@ locking is over-engineering here; saying *why* it's over-engineering scores poin
   real machines deduct *after* the drop sensor fires; model a `DispenseFailed` path that
   refunds and flags maintenance.
 - **Power failure mid-transaction** — persist a small snapshot (state name, balance,
-  selected slot) to non-volatile storage after each transition (a Memento, journaled); on
+  selected slot) to non-volatile storage after each transition (a Memento — a captured state
+  snapshot — journaled); on
   boot, restore or refund-and-reset. Mention it, don't build it.
 - **Session timeout** — money inserted, user walks away: a timer fires `cancel()` after N
   minutes, refunding and returning to `Idle`.

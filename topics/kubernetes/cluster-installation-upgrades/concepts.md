@@ -404,8 +404,13 @@ sudo kubeadm reset                                                # undo kubeadm
   you must also stop the kubelet / `kubeadm reset` to truly remove it.
 
 The **node controller** also manages lifecycle automatically: if a node stops heartbeating, it's
-marked `NotReady`, and after `--pod-eviction-timeout` the Pods are marked for deletion and
-rescheduled — but that's an *involuntary* path and does **not** respect PDBs.
+marked `NotReady`, and the controller applies the `NoExecute` taints
+`node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable`. Pods that don't tolerate
+those taints are then evicted after their `tolerationSeconds` (default **300s**, set cluster-wide
+via `--default-not-ready-toleration-seconds` / `--default-unreachable-toleration-seconds`) and
+rescheduled — but that's an *involuntary* path and does **not** respect PDBs. (The older
+`--pod-eviction-timeout` kube-controller-manager flag is legacy — taint-based eviction, GA since
+v1.18, is the live mechanism.)
 
 ---
 
@@ -513,6 +518,8 @@ moved to stable groups.
   https://kubernetes.io/docs/concepts/workloads/pods/disruptions/
 - Kubernetes docs — Deprecated API Migration Guide:
   https://kubernetes.io/docs/reference/using-api/deprecation-guide/
+- Kubernetes docs — Taint-based eviction & node conditions (NoExecute taints, tolerationSeconds):
+  https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/#taint-based-evictions
 - Kubernetes docs — Install Tools (kind, minikube, kubeadm):
   https://kubernetes.io/docs/tasks/tools/ and https://k3s.io/
 - Velero docs — Backup & restore, cluster migration:

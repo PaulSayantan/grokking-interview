@@ -385,10 +385,12 @@ the SAP demux key. Being able to recite `EtherType → Protocol → port` is a s
 
 This cross-layer relationship is one of the richest senior debugging topics.
 
-- **MTU (Maximum Transmission Unit)** is an **L2/L3** limit: the largest **IP payload** a
-  link will carry in one unfragmented frame. Standard Ethernet MTU = **1500 B**. The
-  Ethernet **frame** is then 1518 B (14 B header + 1500 payload + 4 B FCS), or **1522 B**
-  with an 802.1Q VLAN tag. **Jumbo frames** raise the MTU to ~**9000 B** (data-center /
+- **MTU (Maximum Transmission Unit)** is an **L2/L3** limit: the largest **IP packet**
+  (the whole L3 PDU — IP header *plus* payload) a link will carry in one unfragmented
+  frame. Standard Ethernet MTU = **1500 B**, so of that 1500 B the IPv4 header takes 20 B
+  and the **IP payload** maxes at 1480 B (TCP then loses another 20 B, leaving MSS =
+  1460 B — see below). The Ethernet **frame** is then 1518 B (14 B header + 1500 payload
+  + 4 B FCS), or **1522 B** with an 802.1Q VLAN tag. **Jumbo frames** raise the MTU to ~**9000 B** (data-center /
   storage networks).
 - **MSS (Maximum Segment Size)** is an **L4/TCP** value = MTU − IP header − TCP header. For
   IPv4: 1500 − 20 − 20 = **1460 B**. For IPv6 (40 B base header): 1500 − 40 − 20 =

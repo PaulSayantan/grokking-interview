@@ -178,6 +178,19 @@ excluded from the ready set, so it receives no Service traffic.
   EndpointSlices are now the source of truth kube-proxy consumes; the old `Endpoints` API is
   effectively deprecated in favor of them.
 
+**Worked example — why slicing matters.** Take a Service with **3,000 ready Pods**. At the
+100-endpoints-per-slice default that shards into `ceil(3000 / 100) = 30` EndpointSlices.
+Now one Pod fails its readiness probe and drops out:
+
+- **EndpointSlice model:** only the *one* slice holding that endpoint is rewritten and
+  reshipped — a ~100-endpoint object (a few KB). The other 29 slices are untouched. Cost of
+  the change is **O(one slice)**, independent of the 3,000 total.
+- **Legacy `Endpoints` model:** the single object held **all 3,000** entries, so any single
+  Pod flapping rewrote the entire ~3,000-entry object and the API server pushed the whole
+  thing to **every node's** kube-proxy — **O(all endpoints)** work on every change. During a
+  rolling update where dozens of Pods churn per second, that is a firehose of full-object
+  updates to the whole cluster. Slicing turns each change from cluster-wide O(N) into O(1) slice.
+
 ```bash
 kubectl get endpointslices -l kubernetes.io/service-name=payments
 kubectl describe endpointslice payments-abc12
@@ -389,6 +402,24 @@ Name resolution and search domains:
 > a well-known source of DNS latency. Fixes: use a trailing dot (`api.stripe.com.`) to force
 > an absolute lookup, tune `dnsConfig.options ndots`, or enable **NodeLocal DNSCache**.
 
+**Worked example — tracing `api.stripe.com` from a Pod in namespace `prod`.** The name has
+**2 dots**, which is `< 5`, so the resolver treats it as *not yet fully qualified* and walks
+the search list (`prod.svc.cluster.local`, `svc.cluster.local`, `cluster.local`) **first**,
+appending each suffix before trying the bare name:
+
+| Attempt | Query sent | Result |
+|---|---|---|
+| 1 | `api.stripe.com.prod.svc.cluster.local` | NXDOMAIN |
+| 2 | `api.stripe.com.svc.cluster.local` | NXDOMAIN |
+| 3 | `api.stripe.com.cluster.local` | NXDOMAIN |
+| 4 | `api.stripe.com` (absolute) | **resolves** |
+
+That is **3 wasted round trips to CoreDNS** before the 4th, correct query — and with dual-stack
+each attempt is often an A *and* AAAA lookup, doubling the wasted queries. Now add the
+trailing dot: `api.stripe.com.` has a trailing empty label, so the resolver treats it as
+already absolute and skips the search list entirely — **exactly one lookup**, no NXDOMAIN
+storm. That single character is why the trailing-dot fix works.
+
 ## kube-proxy and Service VIPs (iptables vs IPVS vs nftables)
 
 A ClusterIP is virtual — nothing actually listens on it. **kube-proxy**, a DaemonSet on
@@ -414,6 +445,27 @@ Key facts:
   hop through a central proxy.
 - Some CNIs (notably **Cilium** with eBPF) can **replace kube-proxy** entirely, implementing
   Service load balancing in eBPF.
+
+**When does iptables mode actually hurt? (order-of-magnitude anchor.)** iptables rules are a
+**linear chain** — roughly a handful of rules *per Service* plus a rule *per endpoint*. Take a
+cluster with **~5,000 Services** averaging **~10 endpoints** each: that is on the order of
+`5,000 × 10 = 50,000` endpoint rules, and with the per-Service DNAT/mark/masquerade scaffolding
+the total climbs into the **hundreds of thousands of rules**. Because kube-proxy rewrites the
+table as a unit, a full resync after an endpoint change can take **seconds to tens of seconds**,
+and new-connection setup latency creeps up as the kernel walks longer chains. That climbing
+resync/reload time is the practical trigger to switch to **IPVS** (hash-table, O(1)-ish lookup)
+or **nftables/eBPF** — roughly once you are in the **thousands of Services / tens of thousands
+of endpoints** range. "Small cluster: iptables is fine; large cluster with slow rule-sync:
+move to IPVS/nftables" is the crisp interview answer.
+
+> [!WARNING]
+> kube-proxy's DNAT relies on the kernel **conntrack** table to remember each connection so
+> reply packets can be un-DNAT'd back to the VIP. That table is bounded by `nf_conntrack_max`.
+> Under very high connection churn (short-lived connections, connection storms) or UDP-heavy
+> traffic (chatty DNS), the table can fill — you see **`nf_conntrack: table full, dropping
+> packet`** in kernel logs and connections get dropped/reset. This is a failure mode *distinct*
+> from empty endpoints or a broken CNI: the Service and Pods are healthy, the kernel is simply
+> out of connection-tracking slots.
 
 ```bash
 kubectl -n kube-system get ds kube-proxy
@@ -490,6 +542,20 @@ spec:
 > disappears), doesn't balance well behind shared NATs, and shouldn't be a substitute for
 > making your app **stateless** (externalize session state to Redis/DB). Reach for it only for
 > genuinely sticky protocols where L7 affinity isn't available.
+
+> [!WARNING]
+> **The #1 gRPC/HTTP-2 gotcha.** Because a Service load-balances at **L4 — per TCP
+> connection**, not per request, the balancing decision happens **once, at connection setup**.
+> HTTP/2 and gRPC deliberately open **one long-lived connection** and multiplex thousands of
+> requests over it, so every one of those requests is pinned to the **same backend Pod** that
+> the initial SYN was DNAT'd to. Concretely: a client holds one gRPC channel to Pod-A and
+> fires 10,000 RPCs — all 10,000 hit **Pod-A**. Now you scale the Deployment from 3 to 6
+> replicas: kube-proxy only picks a backend for *new* connections, so the 3 new Pods sit
+> **idle** while the 3 original Pods stay hot. Scaling up does **not** rebalance existing
+> connections. Fixes: **client-side load balancing** (the client resolves all Pod IPs — via a
+> **headless Service** — and round-robins RPCs itself), or put an **L7 proxy / service mesh**
+> (Envoy, Linkerd) in the path that load-balances **per request** by terminating and
+> re-multiplexing HTTP/2. This is the practical payoff of the L4-vs-L7 distinction.
 
 ## Traffic policies and topology-aware routing
 

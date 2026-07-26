@@ -116,6 +116,22 @@ WebSocket push. Trying to hold the connection open is the classic wrong answer.
   the product of every hop's availability. Prefer async whenever the caller does not
   truly need the result inline.
 
+**Worked example — the availability tax of a sync chain.** Say a request fans through
+**5 synchronous hops** (edge → BFF → Orders → Pricing → Inventory), each a solid
+**99.9%** available. Because a sync chain fails if *any* hop fails, availability
+multiplies:
+
+```
+0.999^5 = 0.999 × 0.999 × 0.999 × 0.999 × 0.999 ≈ 0.99501  → 99.50%
+```
+
+Turn that into downtime. One 99.9% hop is down `0.1% × 8760 h/yr ≈ 8.76 h/yr`. The
+5-hop chain at 99.50% is down `(1 − 0.99501) × 8760 ≈ 0.499% × 8760 ≈ 43.7 h/yr` —
+roughly **5× the downtime of a single hop**, just from stacking dependencies. Async
+breaks the multiplication: if Inventory is down, the queue buffers the event and the
+caller still gets its 200, so a downstream outage no longer subtracts from the
+caller's availability.
+
 ---
 
 ## Asynchronous communication with SQS, SNS, EventBridge and Kinesis
@@ -166,6 +182,28 @@ flowchart LR
   multiple independent consumers reading the same records (analytics + real-time +
   audit off one stream). Use when you need ordering at scale, replay, or fan-in of
   millions of events/s.
+
+**Worked example — sizing Kinesis shards (check BOTH constraints).** You ingest
+**8,000 records/s** of **2 KB** events. A shard caps at **1,000 rec/s** *and*
+**1 MB/s** ingest — you must satisfy the *tighter* of the two:
+
+- Record-count bound: `8,000 rec/s ÷ 1,000 rec/s = 8 shards`.
+- Throughput bound: `8,000 × 2 KB = 16,000 KB/s ≈ 15.6 MB/s`, so `15.6 ÷ 1 = 16 shards`.
+
+The **MB/s constraint binds** → you need **16 shards**, not 8. A common mistake is
+sizing on record count alone and under-provisioning 2×, then hitting
+`ProvisionedThroughputExceeded` on the "extra" bytes. (Shrink the payload — say 2 KB →
+0.5 KB — and now `4 MB/s → 4 shards` vs `8 shards` by count, so record-count binds
+instead. Always compute both.)
+
+**Worked example — SQS FIFO at 5,000 msg/s.** FIFO's baseline is **300 msg/s** per API
+action. Naive single sends: `5,000 ÷ 300 ≈ 16.7×` over the limit → throttled. Batch
+10 messages per `SendMessageBatch` call: `300 calls/s × 10 = 3,000 msg/s` — better, but
+still short of 5,000. So the real answer is **enable high-throughput mode** (per-
+partition limits, thousands/s), or question whether you truly need strict global
+ordering — if ordering is only needed per account, a `MessageGroupId` per account
+plus Standard-queue-like parallelism is cheaper than forcing everything through one
+FIFO throat.
 
 **Trade-offs.**
 - *SNS+SQS vs EventBridge:* SNS+SQS is a lower-latency, dead-simple, durable fan-out
@@ -296,6 +334,33 @@ model compensation as explicit `Catch` transitions that run undo steps.
 For a saga, **Standard** is usually right: durable, exactly-once, up to a year,
 full visual audit of where each order is and why it failed — invaluable in support.
 
+**Worked example — a traced saga that fails at Ship.** Order #A17: 2 units of SKU-9,
+total $50. Watch the `order.status` field and the concrete calls at each hop:
+
+| Step | Action | Result | `order.status` |
+|---|---|---|---|
+| 1 | `CreateOrder(#A17, 2×SKU-9, $50)` | order row written | `PENDING` |
+| 2 | `ReserveInventory(SKU-9, qty=2)` | 2 units held | `RESERVED` |
+| 3 | `ChargePayment($50, card=…)` | auth OK, $50 captured | `CHARGED` |
+| 4 | `Ship(#A17)` | **✗ carrier API 500** | `SHIP_FAILED` |
+
+Step 4 throws, so Step Functions' `Catch` on the Ship state transitions into the
+compensation branch and runs the undos **in reverse order of what completed** (steps
+3 then 2 — step 1 just needs a status flip, not an external undo):
+
+| Comp | Action | Effect | `order.status` |
+|---|---|---|---|
+| C1 | `RefundPayment($50)` | undoes the step-3 charge → customer billed $0 net | `COMPENSATING` |
+| C2 | `ReleaseInventory(SKU-9, qty=2)` | returns the 2 held units to available stock | `COMPENSATING` |
+| C3 | `MarkOrderFailed(#A17)` | terminal state | `FAILED` |
+
+Net effect at the business level: **nothing durable happened** — no charge, no held
+stock, order clearly `FAILED` — even though there was never a rollback. Two details an
+interviewer probes: (1) each compensation must be **idempotent** (a retried
+`RefundPayment` must not double-refund — key it on order id + step), and (2) you order
+steps so the **hardest thing to compensate runs last** (here Ship is un-doable, so it
+goes at the end; you never charge *after* an irreversible ship).
+
 **Trade-offs.**
 - *Gain:* centralized, visible logic (you can *see* the workflow and every failed
   execution), built-in retries/timeouts/compensation wiring, easy to reason about and
@@ -388,6 +453,14 @@ flowchart TD
   relay on relational stores.
 - *Gotcha:* DynamoDB Streams retention is **24 h** — if the relay Lambda is broken for
   longer, you lose records; use a DLQ on the Lambda and alarms on iterator age.
+- *Gotcha (schema coupling):* a pure DynamoDB-Streams "outbox" publishes the **raw item
+  change**, not a curated domain event — so your event contract leaks your storage
+  model, and every consumer couples to your table's attribute shape. Rename a column or
+  change the item layout and you break subscribers. Two fixes: transform the raw record
+  into a clean domain event inside the relay Lambda, or write an **explicit outbox
+  item/table** in the same transaction whose shape *is* the event contract. The
+  explicit outbox costs one extra write but decouples event schema from state schema —
+  worth it once external teams consume your events.
 
 ---
 
@@ -406,6 +479,42 @@ processing the same message twice has the same effect as once.
   Store the result/response keyed by that id and return it on retries.
 - **AWS Lambda Powertools Idempotency** — a library that does exactly this with a
   DynamoDB backing table, TTL, and in-progress locking.
+
+**Worked example — a double-delivered charge, deduped.** The message carries
+`Idempotency-Key: chg-77`, amount $50. The handler tries to claim the key with a
+conditional write *before* doing the charge:
+
+```python
+try:
+    ddb.put_item(
+        TableName="idempotency",
+        Item={"pk": {"S": "chg-77"}, "status": {"S": "DONE"},
+              "result": {"S": '{"chargeId":"ch_9","amount":50}'}},
+        ConditionExpression="attribute_not_exists(pk)")   # only if key is new
+    charge_card(50)                                        # real side effect
+    return {"chargeId": "ch_9", "amount": 50}
+except ClientError as e:
+    if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+        item = ddb.get_item(TableName="idempotency",
+                            Key={"pk": {"S": "chg-77"}})["Item"]
+        return json.loads(item["result"]["S"])            # replay stored result
+    raise
+```
+
+Trace the two deliveries:
+
+- **Attempt 1** (first delivery): `pk=chg-77` does not exist → `PutItem` succeeds →
+  `charge_card(50)` runs, card charged **$50 once** → result `{ch_9, 50}` stored and
+  returned.
+- **Attempt 2** (redelivery of the same message): `PutItem` fires the same
+  `attribute_not_exists(pk)` condition, but `chg-77` now exists →
+  **`ConditionalCheckFailedException`**. The handler catches it, reads the stored item,
+  and returns `{ch_9, 50}` — `charge_card` is **never called again**.
+
+Card charged exactly **$50 total** across two deliveries: that is "effectively-once."
+The conditional write is the linchpin — it is a single atomic DynamoDB operation, so
+two concurrent deliveries can't both pass the check (one wins the write, the other
+gets the exception and replays).
 - **SQS FIFO exactly-once-ish** — content-based dedup (`MessageDeduplicationId`)
   within a **5-minute** dedup window; ordering per `MessageGroupId`. Not a substitute
   for idempotent handlers across longer windows.

@@ -10,9 +10,9 @@ questions:
       In gRPC, where is the built-in retry policy for a method defined?
     options:
       - "In a JSON service config delivered to the client channel via the name resolver"
-      - "As a custom option inside the .proto service definition"
-      - "In the HTTP/2 SETTINGS frame at connection start"
-      - "As an environment variable read by the server"
+      - "As a custom option compiled directly into the .proto service definition at build time"
+      - "In the HTTP/2 SETTINGS frame negotiated between client and server at connection start"
+      - "As an environment variable read by the server process and then pushed down to clients"
     answer: 0
     explanation: |
       Retry/hedging/timeout/wait_for_ready policy lives in the JSON **service config**
@@ -62,10 +62,10 @@ questions:
       With initialBackoff=0.1s, backoffMultiplier=2, maxBackoff=1s, how does gRPC (per
       gRFC A6) choose the wait before the second retry?
     options:
-      - "Exactly 0.2s with no randomization"
-      - "A random value uniformly chosen in [0, 0.2s]"
+      - "Exactly 0.2s deterministically, with no randomization applied to any retry attempt"
+      - "A full-jitter value chosen uniformly at random across the interval [0, 0.2s]"
       - "A base of 0.2s multiplied by a random jitter factor in [0.8, 1.2]"
-      - "Exactly 0.2s plus a fixed 50ms jitter"
+      - "Exactly 0.2s plus a fixed 50ms jitter constant added on top for every retry"
     answer: 2
     explanation: |
       Per gRFC A6 the n-th retry waits min(initialBackoff * multiplier^(n-1), maxBackoff) *
@@ -117,10 +117,10 @@ questions:
       You add UNAVAILABLE retries to a non-idempotent Charge RPC and see occasional
       double charges. What is the root cause?
     options:
-      - "gRPC retries even on OK responses by default"
+      - "gRPC retries even on OK/success responses by default whenever a policy is present"
       - "The first attempt reached and executed on the server, but its response was lost, so gRPC replayed the committed operation"
-      - "UNAVAILABLE is not actually a retryable code"
-      - "The retry token bucket incremented on failure and triggered extra sends"
+      - "UNAVAILABLE is not actually a retryable code, so the framework silently resent the call"
+      - "The retry token bucket incremented on failure and that overflow triggered extra duplicate sends"
     answer: 1
     explanation: |
       The 'did my write happen?' ambiguity: the first attempt can reach and commit the
@@ -154,10 +154,10 @@ questions:
       With retryThrottling maxTokens=100, at what bucket level does gRPC stop attempting
       retries?
     options:
-      - "When tokens reach 0"
-      - "When tokens drop below tokenRatio"
+      - "When tokens reach exactly 0, meaning the bucket has been fully drained by failures"
+      - "When tokens drop below the fractional tokenRatio value configured for the policy"
       - "When tokens drop to or below maxTokens/2 (i.e. 50)"
-      - "When tokens drop below 1"
+      - "When tokens drop below 1, since a whole token is required to fund each retry attempt"
     answer: 2
     explanation: |
       A retry is only attempted while tokens > maxTokens/2. Once the bucket falls to the
@@ -172,9 +172,9 @@ questions:
       What problem does retry throttling primarily prevent?
     options:
       - "A retry storm that amplifies load on an already-struggling server"
-      - "Clients retrying non-idempotent methods"
-      - "Deadlines being reset on each retry"
-      - "HPACK header compression bombs"
+      - "Clients accidentally retrying non-idempotent methods that cause duplicate side effects"
+      - "Deadlines being incorrectly reset to a fresh budget on each retry attempt"
+      - "HPACK header compression bombs that exhaust the decoder's dynamic table memory"
     answer: 0
     explanation: |
       When many clients aggressively retry a failing server, retries multiply the load
@@ -188,9 +188,9 @@ questions:
     question: |
       What does gRPC hedging do?
     options:
-      - "Retries an RPC only after the previous attempt fails, with exponential backoff"
-      - "Splits a large message across multiple HTTP/2 streams for throughput"
-      - "Caches responses on the client to avoid duplicate calls"
+      - "Retries an RPC only after the previous attempt fails, waiting an exponential backoff each time"
+      - "Splits a large message across multiple parallel HTTP/2 streams to increase throughput"
+      - "Caches successful responses on the client keyed by request to avoid duplicate outbound calls"
       - "Sends parallel attempts of the same request on a timer and uses the first non-failing response"
     answer: 3
     explanation: |
@@ -207,10 +207,10 @@ questions:
       With hedgingPolicy maxAttempts=3 and hedgingDelay="0.5s", when is the second attempt
       sent?
     options:
-      - "Only after the first attempt returns a failure"
+      - "Only after the first attempt returns an explicit failure status from the server"
       - "0.5s after the first attempt starts, if no response has arrived yet, in parallel with the first"
-      - "Immediately alongside the first attempt"
-      - "After the first attempt's backoff, computed exponentially"
+      - "Immediately alongside the first attempt, both firing at the same instant with zero delay"
+      - "After the first attempt's exponential backoff timer elapses, computed from initialBackoff"
     answer: 1
     explanation: |
       The first attempt goes out immediately; if no response arrives within hedgingDelay
@@ -225,10 +225,10 @@ questions:
     question: |
       What is the key behavioral difference between retryPolicy and hedgingPolicy?
     options:
-      - "Retry attempts run in parallel; hedging attempts run sequentially"
-      - "Retry works only for streaming RPCs; hedging only for unary"
+      - "Retry attempts run in parallel on a timer; hedging attempts run sequentially after failures"
+      - "Retry works only for streaming RPCs, while hedging is restricted to unary calls only"
       - "Retry attempts are sequential (only after a failure); hedging attempts run in parallel on a timer"
-      - "Retry ignores the deadline; hedging respects it"
+      - "Retry ignores the call deadline entirely; hedging is the only one that respects it"
     answer: 2
     explanation: |
       Retry is sequential and failure-driven: an attempt is retried only after the previous
@@ -246,8 +246,8 @@ questions:
     options:
       - "No, they are mutually exclusive per method"
       - "Yes, they combine — hedge first, then retry"
-      - "Yes, but only for unary RPCs"
-      - "Yes, if maxAttempts matches in both"
+      - "Yes, but only when the method is a unary (non-streaming) RPC"
+      - "Yes, as long as the maxAttempts value matches in both policy blocks"
     answer: 0
     explanation: |
       A methodConfig may specify either retryPolicy or hedgingPolicy, never both for the
@@ -262,8 +262,8 @@ questions:
       An RPC has a 2s deadline and a retry policy. Attempt 1 burns 1.5s before failing with
       UNAVAILABLE. What does the channel do?
     options:
-      - "Reset the deadline to a fresh 2s for the retry"
-      - "Retry with no deadline since the first one was consumed"
+      - "Reset the deadline to a fresh 2s budget for the retry, since each attempt gets its own clock"
+      - "Retry with no deadline at all, since the original 2s budget was fully consumed by attempt 1"
       - "Fail immediately with CANCELLED because attempt 1 used most of the budget"
       - "Run the retry against the remaining ~0.5s, and skip it if backoff+attempt cannot finish in the budget"
     answer: 3
@@ -280,10 +280,10 @@ questions:
       A server handler with ~1.6s of budget left makes a downstream gRPC call. What
       deadline does the downstream service see?
     options:
-      - "A fresh default deadline chosen by the downstream service"
-      - "No deadline, since propagation only applies to the top-level caller"
+      - "A fresh default deadline chosen independently by the downstream service on arrival"
+      - "No deadline at all, since propagation only applies to the original top-level caller"
       - "A deadline no later than the remaining ~1.6s, sent via the grpc-timeout header"
-      - "Exactly the original 2s deadline the top-level client used"
+      - "Exactly the original 2s deadline the top-level client used, re-sent unchanged on every hop"
     answer: 2
     explanation: |
       gRPC propagates the remaining deadline downstream on each hop via the grpc-timeout
@@ -299,10 +299,10 @@ questions:
       Why can a tight deadline combined with an aggressive maxAttempts effectively run only
       1-2 attempts?
     options:
-      - "Because gRPC halves maxAttempts when the deadline is under 1s"
+      - "Because gRPC automatically halves the configured maxAttempts whenever the deadline is under 1s"
       - "Because backoff waits consume the shared budget, so remaining time runs out before later attempts"
-      - "Because retries require a new TCP connection each time, which is slow"
-      - "Because the server rejects more than 2 attempts per deadline window"
+      - "Because each retry requires establishing a brand-new TCP connection, which is inherently slow"
+      - "Because the server enforces a hard cap of 2 attempts per deadline window and rejects the rest"
     answer: 1
     explanation: |
       Since all attempts and their exponential backoff share one deadline, the accumulated
@@ -336,9 +336,9 @@ questions:
       When waitForReady=true, what still bounds how long the queued RPC can wait?
     options:
       - "The RPC's deadline — it fails with DEADLINE_EXCEEDED if the channel never becomes READY in time"
-      - "The keepalive_timeout setting"
-      - "A fixed 30-second internal cap"
-      - "The maxBackoff value from the retry policy"
+      - "The keepalive_timeout window, which aborts the call once a single PING goes unanswered"
+      - "A fixed 30-second internal cap that gRPC applies to every queued wait-for-ready call"
+      - "The maxBackoff value from the retry policy, which bounds how long a queued attempt waits"
     answer: 0
     explanation: |
       waitForReady queues the RPC instead of failing fast, but the deadline still applies:
@@ -352,10 +352,10 @@ questions:
     question: |
       For a latency-critical payment-gateway call, why is waitForReady=false often preferred?
     options:
-      - "It disables retries, which payments must never use"
-      - "It is the only setting that propagates deadlines downstream"
+      - "It disables the channel's retry machinery entirely, which payment flows are required to avoid for audit reasons"
+      - "It is the only channel setting that propagates the caller's remaining deadline downstream via grpc-timeout"
       - "It fails fast on a down dependency instead of piling up queued requests, letting orchestration decide, and blips surface as retryable UNAVAILABLE"
-      - "It forces the server to open a circuit breaker sooner"
+      - "It forces the remote server to trip its circuit breaker sooner by reporting each fast failure back upstream"
     answer: 2
     explanation: |
       Fail-fast semantics avoid masking a hard-down dependency by queueing requests; the
@@ -370,9 +370,9 @@ questions:
     question: |
       How does gRPC keepalive detect a silently dead connection?
     options:
-      - "It re-resolves DNS every keepalive_time interval"
-      - "It reopens the TCP socket on a fixed schedule"
-      - "It sends an empty gRPC message and waits for a response"
+      - "It re-resolves the target's DNS every keepalive_time interval and drops the connection if the address set changed"
+      - "It tears down and reopens the TCP socket on a fixed schedule so a dead peer surfaces as a failed reconnect"
+      - "It sends an empty zero-length gRPC data message on an idle stream and closes the channel if no reply comes back"
       - "It sends HTTP/2 PING frames and expects a PING ACK within keepalive_timeout, else closes the connection"
     answer: 3
     explanation: |
@@ -390,9 +390,9 @@ questions:
       the most likely cause?
     options:
       - "The client's keepalive pings are more frequent than the server's minimum allowed ping interval"
-      - "The client set no deadline on its RPCs"
-      - "The retry token bucket was exhausted"
-      - "The client used waitForReady=true"
+      - "The client set no deadline on its RPCs, so the server force-closed the idle stream"
+      - "The retry token bucket was fully exhausted, causing the transport to reset the connection"
+      - "The client used waitForReady=true, which the server treats as an abusive ping pattern"
     answer: 0
     explanation: |
       Servers enforce a minimum receive-ping interval and a MAX_PING_STRIKES limit. A client
@@ -407,10 +407,10 @@ questions:
     question: |
       What does keepalive_permit_without_calls=true do?
     options:
-      - "Permits RPCs to start before the channel is READY"
+      - "Permits new RPCs to start before the channel reaches the READY state by queuing them"
       - "Allows keepalive PINGs even when there are no active RPCs on the connection"
-      - "Disables the server's ping-strike enforcement"
-      - "Lets the client skip TLS for keepalive frames"
+      - "Disables the server's ping-strike enforcement so the client can ping at any rate"
+      - "Lets the client skip TLS encryption for keepalive PING frames to save handshake cost"
     answer: 1
     explanation: |
       By default keepalive PINGs are only sent while RPCs are active. permit_without_calls=true
@@ -424,10 +424,10 @@ questions:
     question: |
       Where does full-featured circuit breaking typically live for gRPC services?
     options:
-      - "In the gRPC core library, enabled via a circuitBreakerPolicy in service config"
-      - "In the .proto via a circuit_breaker option"
+      - "In the gRPC core library, enabled via a circuitBreakerPolicy block inside the JSON service config"
+      - "In the .proto service definition via a circuit_breaker option compiled into the generated stub"
       - "At the mesh/proxy layer (Envoy/Istio outlier detection) or app-level, since core gRPC has no first-class circuit breaker"
-      - "In the HTTP/2 layer through RST_STREAM throttling"
+      - "In the HTTP/2 transport layer, by throttling streams through automatic RST_STREAM frames on errors"
     answer: 2
     explanation: |
       gRPC core does not ship a first-class circuit breaker; its closest built-ins are
@@ -442,9 +442,9 @@ questions:
     question: |
       Why do gRPC retries fundamentally require buffering the outbound request?
     options:
-      - "To compress the request with HPACK before sending"
-      - "Because HTTP/2 forbids reusing stream IDs"
-      - "To compute the exponential backoff schedule"
+      - "To compress the outbound request payload with HPACK header encoding before it is sent"
+      - "Because HTTP/2 forbids reusing stream IDs, so the buffer holds the ID for the next stream"
+      - "To compute the exponential backoff schedule from the buffered message sizes on each attempt"
       - "So the client can replay the request messages on a fresh HTTP/2 stream for a retry"
     answer: 3
     explanation: |
@@ -461,9 +461,9 @@ questions:
       When does an RPC become "committed" so that gRPC can no longer retry it?
     options:
       - "Once the client receives any message from the server, or the outbound buffer exceeds the retry buffer size"
-      - "As soon as the first retry backoff timer starts"
-      - "Only after maxAttempts is reached"
-      - "When the deadline is set on the call"
+      - "As soon as the first retry's exponential backoff timer starts counting down"
+      - "Only once maxAttempts is reached and every configured attempt has been consumed"
+      - "The moment an absolute deadline is attached to the call at invocation time"
     answer: 0
     explanation: |
       An RPC is committed to a single attempt once the client has received a message/response
@@ -478,10 +478,10 @@ questions:
     question: |
       Which server response shape is the typical retryable failure that gRPC replays?
     options:
-      - "A response with several data frames followed by grpc-status=UNAVAILABLE"
-      - "A GOAWAY frame with no_error"
+      - "A response with several streamed data frames followed by a grpc-status=UNAVAILABLE trailer"
+      - "A GOAWAY frame carrying the no_error code, which gRPC always replays on a new connection"
       - "A trailers-only response carrying grpc-status=UNAVAILABLE with no data messages"
-      - "An HTTP/2 WINDOW_UPDATE with size 0"
+      - "An HTTP/2 WINDOW_UPDATE frame with an increment of size 0, signaling a stalled retryable stream"
     answer: 2
     explanation: |
       A trailers-only response carries the status in the initial HEADERS frame with no data
@@ -496,10 +496,10 @@ questions:
     question: |
       A server returns grpc-retry-pushback-ms with a negative value. What does the client do?
     options:
-      - "Retry immediately, ignoring backoff"
+      - "Retry immediately with zero delay, ignoring the configured backoff schedule entirely"
       - "Stop retrying and treat the failure as non-retryable"
-      - "Wait that many milliseconds (absolute value) then retry"
-      - "Double its maxBackoff"
+      - "Wait that many milliseconds (using the absolute value) and then issue the next retry"
+      - "Double its maxBackoff ceiling for the remainder of this RPC's retry sequence"
     answer: 1
     explanation: |
       grpc-retry-pushback-ms lets the server override client backoff. A non-negative value
@@ -514,9 +514,9 @@ questions:
     question: |
       In a DNS-based deployment, how does the service config reach the gRPC client?
     options:
-      - "Via an A record on the service hostname"
-      - "Via an HTTP header on the first response"
-      - "Via a SETTINGS frame from the server"
+      - "Via an A record on the service hostname whose address bytes encode the JSON policy"
+      - "Via a custom HTTP response header attached by the server to the first RPC reply"
+      - "Via an HTTP/2 SETTINGS frame the server sends at connection start to configure the client"
       - "Via a TXT record (grpc_config= payload) that the DNS resolver reads"
     answer: 3
     explanation: |
@@ -533,9 +533,9 @@ questions:
       config (including retry policy) to gRPC clients?
     options:
       - "xDS from a control plane (e.g. Envoy/Istio/Traffic Director)"
-      - "Manual JSON files copied to each host"
-      - "gRPC reflection"
-      - "The grpc-timeout header"
+      - "Manual JSON config files copied onto each host by a deployment script"
+      - "gRPC server reflection, which streams the active policy to every client"
+      - "The grpc-timeout request header, carrying the policy alongside the deadline"
     answer: 0
     explanation: |
       xDS lets a control plane push dynamic policy (routing, retries, load balancing, outlier
@@ -549,10 +549,10 @@ questions:
     question: |
       What is the role of a client-set defaultServiceConfig on a channel?
     options:
-      - "It overrides whatever the resolver returns"
-      - "It disables all resolver-provided policy permanently"
+      - "It overrides whatever service config the name resolver returns for the channel"
+      - "It permanently disables all resolver-provided policy once the channel is created"
       - "It is used only when the resolver returns no service config"
-      - "It is sent to the server as the negotiated policy"
+      - "It is sent to the server at handshake as the client's negotiated resiliency policy"
     answer: 2
     explanation: |
       A defaultServiceConfig (e.g. grpc.service_config arg / defaultServiceConfig) is the
@@ -567,9 +567,9 @@ questions:
     question: |
       In a hedgingPolicy, what does the nonFatalStatusCodes list control?
     options:
-      - "Codes that immediately succeed the RPC"
-      - "Codes that the server must never return"
-      - "Codes that reset the hedgingDelay to zero"
+      - "Codes that immediately succeed the RPC and cancel every other in-flight hedge attempt"
+      - "Codes the server is contractually forbidden to return once a hedgingPolicy is active"
+      - "Codes that reset the hedgingDelay timer to zero so the next attempt fires instantly"
       - "Codes for which a failed hedge attempt is ignored so hedging continues to other attempts"
     answer: 3
     explanation: |
@@ -584,10 +584,10 @@ questions:
     question: |
       Why is hedging even more dangerous than sequential retry for non-idempotent methods?
     options:
-      - "Hedging ignores the deadline entirely"
+      - "Hedging ignores the call's deadline entirely, so a write can run long after the caller quits"
       - "Multiple hedge attempts can be executing concurrently on different servers"
-      - "Hedging disables the retry throttling bucket"
-      - "Hedging never cancels losing attempts"
+      - "Hedging disables the retry throttling token bucket, removing the storm protection retries have"
+      - "Hedging never cancels the losing attempts, so every fired copy always runs to full completion"
     answer: 1
     explanation: |
       With hedging, several attempts run in parallel, so multiple copies of the operation can
@@ -602,9 +602,9 @@ questions:
       Are hedged attempts subject to the retryThrottling token bucket?
     options:
       - "Yes, hedging and retry both draw from the same throttling bucket"
-      - "No, only sequential retries count against it"
-      - "No, hedging has a separate dedicated bucket"
-      - "Only the first hedge attempt counts"
+      - "No, only sequential retries count against it; hedges bypass the bucket entirely"
+      - "No, hedging maintains its own separate dedicated bucket with an independent tokenRatio"
+      - "Only the very first hedge attempt counts against the bucket; later parallel ones are free"
     answer: 0
     explanation: |
       The retryThrottling token bucket applies to both retry and hedging attempts on the
@@ -618,10 +618,10 @@ questions:
     question: |
       The retryThrottling token bucket is scoped to what?
     options:
-      - "The entire fleet globally"
-      - "Each individual RPC"
+      - "The entire client fleet globally, shared through the control plane"
+      - "Each individual RPC, with a fresh bucket allocated per call attempt"
       - "A single channel (per client channel)"
-      - "Each HTTP/2 stream"
+      - "Each HTTP/2 stream opened on the underlying transport connection"
     answer: 2
     explanation: |
       Throttling is per channel, not global. Each client's channel maintains its own bucket, so
@@ -636,9 +636,9 @@ questions:
       From the application's perspective, what does it observe when a configured retry
       eventually succeeds on attempt 3?
     options:
-      - "Three separate return values, one per attempt"
-      - "An UNAVAILABLE error for attempts 1 and 2, then success"
-      - "A callback fired per attempt"
+      - "Three separate return values delivered in sequence, one for each underlying attempt"
+      - "An UNAVAILABLE error surfaced for attempts 1 and 2, then the success value on attempt 3"
+      - "A per-attempt callback fired on the stub so the app can observe each individual retry"
       - "Only the final successful result — retries are transparent above the stub"
     answer: 3
     explanation: |
@@ -654,9 +654,9 @@ questions:
       Why is RESOURCE_EXHAUSTED a borderline choice for retryableStatusCodes?
     options:
       - "Retrying it without backoff can worsen the very overload it signals"
-      - "It is never a real gRPC status code"
-      - "It is only ever returned after commit"
-      - "gRPC forbids retrying it at the protocol level"
+      - "It is not a real gRPC status code, so config validation rejects it outright"
+      - "It is only ever returned after the RPC has committed, when a retry is impossible"
+      - "gRPC forbids retrying it at the HTTP/2 protocol level regardless of the policy"
     answer: 0
     explanation: |
       RESOURCE_EXHAUSTED often means transient quota/backpressure, so a backed-off retry can
@@ -672,8 +672,8 @@ questions:
     options:
       - "Keepalive bounds how long an RPC may run; a deadline checks connection liveness"
       - "Keepalive checks connection liveness; a deadline bounds the time budget of an RPC"
-      - "They are the same feature under two names"
-      - "Both only apply to streaming RPCs"
+      - "They are the same feature under two names, one client-side and one server-side alias"
+      - "Both apply only to streaming RPCs and are ignored entirely for unary calls"
     answer: 1
     explanation: |
       Keepalive is about detecting a dead/half-open connection via PING/ACK; a deadline is the
@@ -687,10 +687,10 @@ questions:
     question: |
       How do waitForReady=false and a retry policy compose during a brief connection blip?
     options:
-      - "They conflict; you must pick one"
-      - "waitForReady disables retries automatically"
+      - "They conflict; the channel rejects a config that sets both at once"
+      - "waitForReady=false automatically disables the retry machinery on the channel"
       - "Fail-fast surfaces the blip as UNAVAILABLE, which the retry policy then catches and re-attempts on a fresh connection"
-      - "The retry policy is ignored until the channel becomes READY"
+      - "The retry policy is ignored and buffered until the channel transitions to READY"
     answer: 2
     explanation: |
       With fail-fast (waitForReady=false), a transient blip produces UNAVAILABLE; if UNAVAILABLE
@@ -726,9 +726,9 @@ questions:
       Which is a plausible gRPC-specific cause?
     options:
       - "Retries are disabled at the channel level (the enable-retries setting is off)"
-      - "The .proto is missing a retry option"
-      - "The server did not enable retries"
-      - "HTTP/1.1 was negotiated instead of HTTP/2"
+      - "The .proto is missing the required retry option on the method definition"
+      - "The server never enabled its matching server-side retry acknowledgement flag"
+      - "HTTP/1.1 was negotiated instead of HTTP/2, so per-method retry is unsupported"
     answer: 0
     explanation: |
       Built-in retry must be enabled on the channel. It is on by default in modern releases,
@@ -761,9 +761,9 @@ questions:
       A read-heavy, idempotent GetItem RPC has acceptable median latency but a bad p99 caused
       by occasional slow replicas. Which strategy best targets this?
     options:
-      - "Increase the deadline so slow calls have more time"
-      - "Set waitForReady=true"
-      - "Add UNAVAILABLE to retryableStatusCodes only"
+      - "Increase the call deadline so the occasional slow replica has more time to answer"
+      - "Set waitForReady=true so the channel queues calls until a fast replica is READY"
+      - "Add only UNAVAILABLE to retryableStatusCodes so slow attempts get re-sent quickly"
       - "Add a hedgingPolicy so a parallel attempt fires after a short hedgingDelay and the fastest replica wins"
     answer: 3
     explanation: |
@@ -780,10 +780,10 @@ questions:
       For a non-idempotent AppendLog write RPC with no idempotency key support, what is the
       safest retry configuration?
     options:
-      - "maxAttempts=5 retrying on UNAVAILABLE"
-      - "A hedgingPolicy with hedgingDelay=0s"
+      - "A retryPolicy with maxAttempts=5 retrying on UNAVAILABLE and default backoff"
+      - "A hedgingPolicy with hedgingDelay=0s so backups fire immediately in parallel"
       - "No retryPolicy/hedgingPolicy for the method (rely on the caller to decide)"
-      - "Retry on all status codes to maximize success"
+      - "Retry on the full set of status codes to maximize the write's success rate"
     answer: 2
     explanation: |
       Without server-side idempotency support, transparent retries risk duplicate appends
@@ -816,9 +816,9 @@ questions:
     question: |
       Where can waitForReady be configured?
     options:
-      - "Only globally at server startup"
-      - "Only via a DNS TXT record"
-      - "In the .proto message definition"
+      - "Only globally at server startup, applied uniformly to every inbound RPC"
+      - "Only via a DNS TXT record that the name resolver pushes to the channel"
+      - "In the .proto message definition as a field-level option on the request"
       - "As a per-call option in code, or as waitForReady in a methodConfig"
     answer: 3
     explanation: |
@@ -834,9 +834,9 @@ questions:
       Why can per-channel retry throttling still fail to protect a server from overload?
     options:
       - "Because each of many clients has its own bucket, so collectively they can still overwhelm the server"
-      - "Because it only throttles hedging, not retries"
-      - "Because the bucket resets on every RPC"
-      - "Because throttling is disabled whenever a deadline is set"
+      - "Because it only throttles hedged attempts and leaves sequential retries uncounted"
+      - "Because the token bucket is reset back to full on every single RPC invocation"
+      - "Because throttling is silently disabled whenever the call carries a deadline"
     answer: 0
     explanation: |
       The token bucket is per channel/client. A single client is protected from storming, but a
@@ -852,10 +852,10 @@ questions:
       When a subchannel fails to connect, what built-in gRPC behavior most resembles a simple
       circuit breaker?
     options:
-      - "The channel returns INVALID_ARGUMENT until manually reset"
+      - "The channel returns INVALID_ARGUMENT for the endpoint until an operator manually resets it"
       - "The subchannel enters TRANSIENT_FAILURE and applies connection backoff before retrying the connection"
-      - "gRPC opens a new TCP connection immediately on every failure"
-      - "The retry token bucket is refilled to full"
+      - "gRPC opens a brand-new TCP connection immediately on every failure with no backoff delay"
+      - "The retry token bucket is refilled to full so retries continue against the failing endpoint"
     answer: 1
     explanation: |
       A failing subchannel moves to TRANSIENT_FAILURE and uses connection backoff (exponential)

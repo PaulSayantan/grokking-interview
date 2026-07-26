@@ -37,7 +37,8 @@ The real goals are more pragmatic:
 - **Executable specification** — a well-named test documents intended behavior more
   reliably than prose, because it cannot drift out of date without failing.
 - **Design pressure** — code that is hard to test is usually badly coupled; writing
-  tests first (TDD) surfaces that early.
+  tests first (**TDD** — Test-Driven Development, where you write a failing test before
+  the code that satisfies it) surfaces that early.
 - **Confidence to deploy** — a green suite is the gate that makes continuous delivery
   possible.
 
@@ -67,7 +68,7 @@ love to check that you know the difference.
 |---|---|---|
 | Question it answers | "Are we building the product **right**?" | "Are we building the **right** product?" |
 | Checks against | The **specification / design** | The **user's actual needs** |
-| Typical activities | Reviews, static analysis, unit & integration tests | Acceptance testing, UAT, demos, beta programs |
+| Typical activities | Reviews, static analysis, unit & integration tests | Acceptance testing, UAT (User Acceptance Testing — real users verify it meets their needs), demos, beta programs |
 | Boehm's phrasing | Conformance to spec | Fitness for purpose |
 
 - **Verification** catches *implementation* defects — the code doesn't match the spec.
@@ -95,7 +96,7 @@ Two orthogonal axes are constantly conflated. Keep them separate.
 | Unit | One class/function in isolation | JUnit test of a `PriceCalculator` |
 | Integration | Several units + a real collaborator (DB, broker, HTTP) | Repository test against Postgres via Testcontainers |
 | System / end-to-end | The whole deployed application | Driving the running service over HTTP |
-| Acceptance | The system against business requirements | Cucumber/BDD scenario, UAT |
+| Acceptance | The system against business requirements | Cucumber/BDD scenario (BDD = Behavior-Driven Development; see [Shift-left testing](#shift-left-testing)), UAT |
 
 **Test *types*** describe **what quality attribute** you're checking, independent of
 level:
@@ -130,9 +131,21 @@ the implementation to the person designing the test.
   equivalence partitioning, boundary-value analysis, decision tables, state transition.
   Strength: tests survive refactoring; weakness: can miss internal edge cases.
 - **White-box (glass-box / structural) testing** — design tests *from the code*, aiming
-  to exercise specific paths, branches, and conditions. Coverage metrics (statement,
-  branch, MC/DC) are white-box notions. Strength: finds untested logic; weakness: tests
-  couple to implementation and break on refactor.
+  to exercise specific paths, branches, and conditions. Coverage metrics are white-box
+  notions: **statement** (was each line executed?), **branch** (was each `if`/`else`
+  direction taken?), and **MC/DC** — *Modified Condition/Decision Coverage*, which
+  requires that each boolean sub-condition be independently shown to affect the decision's
+  outcome (the rigorous standard used in safety-critical avionics). Strength: finds
+  untested logic; weakness: tests couple to implementation and break on refactor.
+
+**Coverage measures execution, not verification.** This is the single most important
+caveat about coverage numbers: a metric tells you a line *ran*, not that anything
+*checked* its result. A test with no meaningful assertions can drive line coverage to
+100% while catching zero bugs. The technique that measures whether tests actually detect
+faults is **mutation testing**: a tool (e.g., PIT for the JVM) deliberately injects small
+changes ("mutants" — flip a `>` to `>=`, replace `+` with `-`) and re-runs the suite; a
+mutant that survives — no test failed — reveals a gap your coverage number hid. See the
+follow-up "Is 100% coverage a good goal?" below.
 - **Gray-box testing** — a blend: you know *some* internals (e.g., that there's a cache
   or a DB) and use that to design smarter black-box-style tests, without asserting on
   private details. Most integration testing is effectively gray-box.
@@ -190,6 +203,21 @@ possible *down* to the cheapest layer that can still catch the class of bug in q
 prescriptive* — Fowler is explicit that the exact numbers matter far less than the
 shape. Don't quote a ratio as gospel in an interview; explain the *cost/feedback*
 reasoning instead.
+
+**Make the shape concrete.** Imagine a healthy pyramid-shaped suite:
+
+| Layer | Count | Total runtime | Per-test cost |
+|---|---|---|---|
+| Unit | 2,000 | ~25 s | ~12 ms, no I/O, deterministic |
+| Integration | 300 | ~4 min | seconds each; real DB/broker via Testcontainers |
+| E2E | 15 | ~9 min | tens of seconds each; whole system, occasionally flaky |
+
+The whole thing runs in about 13 minutes and a unit failure names the broken line
+instantly. Now invert it into an ice-cream cone testing the *same* behaviors — say 800
+E2E tests at ~25 s each — and you're looking at roughly 6 hours of wall-clock time,
+runs that flake daily, and failures that tell you "something in checkout broke" but not
+where. Same coverage of behavior; wildly different feedback economics. That gap is the
+entire argument for pushing coverage *down*.
 
 **A key nuance interviewers reward:** the pyramid says *fewer* high-level tests, not
 *zero*. E2E tests are your "second line of defense" — when one fails it often reveals
@@ -265,12 +293,30 @@ lifecycle) precisely to prevent field state leaking between tests.
 **2. Isolation of the unit under test (a design choice) — sociable vs solitary.**
 Fowler's terms for *how a unit test treats its collaborators*:
 
-- **Solitary** — replace every collaborator with a test double (mock/stub) so the test
-  exercises exactly one class. Failures localize perfectly; but you risk testing
-  interactions that don't match reality, and tests couple to internal collaboration.
+- **Solitary** — replace every collaborator with a **test double** (a stand-in object
+  substituted for a real dependency) so the test exercises exactly one class. Failures
+  localize perfectly; but you risk testing interactions that don't match reality, and
+  tests couple to internal collaboration.
 - **Sociable** — let the unit use its *real* collaborators (as long as they're fast and
   in-process), replacing only slow/awkward dependencies (DB, network, clock). More
   realistic, fewer mocks to maintain; a failure may implicate several classes.
+
+**"Test double" is an umbrella term — the five kinds are distinct** (Meszaros's
+taxonomy, popularized by Fowler). Interviewers dock points when a candidate uses "mock"
+and "stub" interchangeably, because the crucial split is *state verification* (assert on
+the result) vs *interaction/behavior verification* (assert on which calls were made):
+
+| Double | What it does | Verifies |
+|---|---|---|
+| **Dummy** | Passed to satisfy a parameter but never used | nothing |
+| **Stub** | Returns canned answers to calls made during the test | state (the result) |
+| **Spy** | A stub that also *records* how it was called for later inspection | state + recorded calls |
+| **Mock** | Pre-programmed with *expectations* about the calls it should receive; fails if they aren't met | interaction (the calls themselves) |
+| **Fake** | A working but lightweight implementation (e.g., an in-memory DB, a `HashMap`-backed repository) | state, via real-ish behavior |
+
+Mockito blurs the line in practice — its `mock()` objects act as stubs when you use
+`when(...).thenReturn(...)` and as mocks when you `verify(...)` interactions — but keep
+the *conceptual* distinction sharp for interviews.
 
 ```java
 // Solitary: the collaborator is mocked, so only OrderService logic is under test.
@@ -350,7 +396,12 @@ the properties of a healthy unit test:
 Beyond FIRST, good tests are **readable** (a failing test's name + message should tell
 you what broke without opening the code), **behavior-focused** (assert observable
 outcomes, not implementation), and follow **Arrange-Act-Assert** with **one logical
-assertion / one reason to fail** per test.
+assertion / one reason to fail** per test. "One assertion" means *one behavior / one
+reason to fail*, not literally one `assert` statement — asserting several fields of a
+single returned object is fine, and *soft assertions* (JUnit's `assertAll`, AssertJ's
+`SoftAssertions`) let you group them so all failures are reported at once instead of
+stopping at the first. The smell to avoid is one test verifying several *unrelated*
+behaviors.
 
 **Good vs bad test:**
 
@@ -409,8 +460,11 @@ silently return.
 **Advanced concerns.** As suites grow, running *everything* on every change gets
 expensive — hence **regression test selection** (run only tests affected by the change,
 via coverage/impact analysis), **test prioritization** (run most-likely-to-fail first),
-and **suite minimization** (prune redundant tests). The classic pitfall of aggressive
-minimization is deleting a test whose *only* job was pinning a subtle edge case.
+and **suite minimization** (prune redundant tests). Concretely: a commit changes
+`OrderService.java`; a coverage map shows only 40 of the 2,000 tests ever execute that
+file, so CI runs those 40 first (selection + prioritization) for fast feedback and
+defers the full suite to a nightly run. The classic pitfall of aggressive minimization
+is deleting a test whose *only* job was pinning a subtle edge case.
 
 > [!TIP]
 > Turn every bug into a test: reproduce the defect with a failing test *first*, then
@@ -459,8 +513,9 @@ development, quality is built in from the start.
 - Developers write automated tests alongside (or before, via TDD) the code.
 - Static analysis, linting, type checks, and security scanning (SAST) run in CI on every
   commit — *shift-left security* / DevSecOps.
-- Requirements are clarified with executable examples (BDD/specification by example)
-  *before* coding.
+- Requirements are clarified with executable examples (**BDD** — Behavior-Driven
+  Development, expressing requirements as Given/When/Then scenarios that double as
+  tests — or specification by example) *before* coding.
 - Contract tests catch integration mismatches at build time, not in a shared staging
   environment.
 
@@ -528,6 +583,12 @@ buying down the cost of the bugs we'd otherwise find late.
 - **"What exact ratio should the pyramid be?"** It's a shape, not a formula — many fast
   low-level tests, few slow high-level ones. The ratio falls out of your architecture;
   don't quote 70/20/10 as a rule.
+- **"Is 100% coverage a good goal?"** No — coverage measures whether code *ran*, not
+  whether anything *checked* the result, so assertion-free tests can hit 100% while
+  catching nothing. Treat coverage as a way to find *un*tested code (low numbers are a
+  real signal), not as proof of quality; chasing the last few percent tends to produce
+  brittle, low-value tests. To measure whether tests actually catch bugs, use **mutation
+  testing** (inject faults; a surviving mutant is a real gap).
 - **"Pyramid vs testing trophy — which is right?"** Both optimize confidence-per-feedback-
   second; the trophy just weights integration more (sensible when units are thin I/O
   wrappers). The debate is largely about how you define "unit."

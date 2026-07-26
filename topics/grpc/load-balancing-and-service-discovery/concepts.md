@@ -228,12 +228,15 @@ DNS gives back multiple IPs, `round_robin` can spread across them. If DNS return
 VIP, you're back to pinning. Hence the Kubernetes headless-service pattern below.
 
 > [!WARNING]
-> Plain DNS is a weak service-discovery mechanism: gRPC's DNS resolver **re-resolves
-> infrequently** (min interval, default ~30s) and honours the OS/library, not necessarily
-> per-record TTLs. Backends that scale up or churn fast may not be picked up promptly. For
-> dynamic fleets use xDS or a custom resolver that watches your registry (Consul/etcd) and
-> pushes updates. Note gRPC does **not** re-resolve on a timer alone — it re-resolves when a
-> connection breaks or the LB policy asks.
+> Plain DNS is a weak service-discovery mechanism. gRPC's DNS resolver is **event-driven,
+> not periodic**: on the success path it does **not** re-resolve on a timer — it re-resolves
+> only when a connection breaks or the LB policy requests it (a `ResolveNow` trigger). Even
+> then a **minimum re-resolution interval** (grpc-go default **30s**, `MinResolutionInterval`)
+> rate-limits how often it will actually re-query DNS, so bursts of triggers can't hammer the
+> resolver. (Only on a resolution *error* does it retry on a schedule — exponential backoff.)
+> It also honours the OS/library resolver, not necessarily per-record TTLs. So backends that
+> scale up or churn fast may not be picked up promptly. For dynamic fleets use xDS or a custom
+> resolver that watches your registry (Consul/etcd) and pushes updates.
 
 ## Kubernetes: Headless Services and the ClusterIP Gotcha
 
@@ -244,6 +247,25 @@ A normal Kubernetes **`ClusterIP`** Service gives you *one* virtual IP; kube-pro
 and gRPC keeps *one long-lived connection*, **every RPC from a client pins to a single pod.**
 New pods get no traffic; scaling out doesn't rebalance existing clients. Classic symptom:
 "we scaled the deployment but load stayed on the old pods."
+
+**Worked example — why the 7 new pods get exactly zero.** Start with **6 client pods**, each
+opening **1** long-lived connection through the `ClusterIP` VIP to a backend of **3** pods.
+kube-proxy DNATs each connection to a random pod at *connection-establishment time*; say the
+6 connections land 3 / 2 / 1 across pods P1 / P2 / P3. Each client fires **100 RPC/s**, and
+every RPC rides its one pinned connection — so:
+
+- P1 = 3 conns × 100 = **300 RPC/s**, P2 = 2 × 100 = **200 RPC/s**, P3 = 1 × 100 = **100 RPC/s**.
+
+Now scale the Deployment **3 → 10 pods**. DNAT only picks a backend when a *new* connection is
+made; the 6 existing connections stay pinned to P1–P3. So the **7 new pods receive 0 RPC/s**,
+and all **600 RPC/s** stay concentrated on the original 3. They only start getting traffic when
+an existing connection breaks (pod restart, `GOAWAY`, keepalive death) and its client
+reconnects — which is exactly "we scaled but load stayed on the old pods."
+
+Contrast **headless + `round_robin`**: each of the 6 clients resolves *all 10 pod IPs*, opens a
+subchannel to each, and rotates its 100 RPC/s across 10 subchannels = 10 RPC/s per subchannel.
+Every pod then serves 6 clients × 10 = **60 RPC/s** (600 ÷ 10), and a new pod starts receiving
+traffic as soon as re-resolution hands its IP to the policy. Even distribution, no idle pods.
 
 Fixes:
 
@@ -284,6 +306,26 @@ TRANSIENT_FAILURE → (back to CONNECTING) → SHUTDOWN`. The LB policy's *picke
 RPCs to subchannels in **`READY`**. When a subchannel drops, the policy stops picking it,
 retries connecting with **exponential backoff**, and re-resolves the name.
 
+```mermaid
+stateDiagram-v2
+  [*] --> IDLE
+  IDLE --> CONNECTING: first RPC / warm-up
+  CONNECTING --> READY: handshake ok
+  CONNECTING --> TRANSIENT_FAILURE: connect failed
+  READY --> TRANSIENT_FAILURE: connection dropped
+  TRANSIENT_FAILURE --> CONNECTING: backoff timer fires
+  READY --> SHUTDOWN
+  TRANSIENT_FAILURE --> SHUTDOWN
+  note right of READY: picker routes RPCs\nONLY to READY subchannels
+```
+
+**Worked example — what the picker returns.** With `round_robin` over 3 subchannels in states
+`{A:READY, B:TRANSIENT_FAILURE, C:READY}`, the picker's ready set is just **[A, C]** — B is
+excluded. Successive RPCs rotate `A, C, A, C, …`; B gets **0** picks. Meanwhile B is retrying
+with exponential backoff; the instant it transitions back to `READY` the picker is rebuilt and
+the rotation becomes `A, B, C, A, B, C, …`. So a client with one failing backend keeps serving
+at full availability on the survivors, with zero RPCs wasted on the dead subchannel.
+
 **Keepalive** (gRFC A8, HTTP/2 PING) matters for balancing because a silently-dead
 connection that never gets torn down keeps receiving picks that then fail. Client keepalive
 sends periodic PINGs; if the peer doesn't ACK within the timeout, the subchannel is torn down
@@ -323,6 +365,38 @@ capacity or heterogeneous request costs. Richer policies (mostly delivered via x
 | **weighted_round_robin** | rotate proportional to a weight, often derived from backend-reported load (ORCA/backend metrics) | heterogeneous capacity, or load-aware balancing |
 | **least_request** | pick the ready backend with the fewest outstanding RPCs (often "power of two choices") | uneven per-request cost; smooths hot spots better than round-robin |
 | **ring_hash / consistent hashing** | hash a request key to a backend for affinity | session/cache affinity (sticky by key) |
+
+**Worked example — `weighted_round_robin` 3:1.** Two backends, A with weight 3 and B with
+weight 1 (say A has 3× the CPU). The scheduler hands out picks in proportion 3:1, so over a
+window of **8 RPCs** A should get 8 × 3/(3+1) = **6** and B should get 8 × 1/4 = **2**. A
+smooth interleave (not "AAAAAAB B" in a burst) looks like:
+`A B A A A B A A` — count them: 6 A's, 2 B's. Every 4-RPC cycle is `A B A A` (3:1), repeated
+twice. If ORCA later reports B is overloaded and its weight drops to 0.5, the ratio becomes
+3:0.5 = 6:1, so over 7 RPCs A gets 6 and B gets 1 — traffic bled away from the hot pod without
+any redeploy.
+
+**Worked example — `least_request` / power-of-two-choices (P2C).** Four ready backends with
+outstanding-RPC counts `{A:5, B:2, C:9, D:3}`. Plain `least_request` would scan all four and
+pick B (min = 2), but that requires reading every backend's counter on every pick and tends to
+*herd* — many clients simultaneously spot the same idle backend and stampede it. **P2C** instead
+samples **2 backends at random** and routes to the lesser of the two. Say this pick samples
+{C:9, D:3} → route to **D** (3 < 9). D's outstanding count becomes 4. The next pick might sample
+{A:5, B:2} → route to **B**. P2C never picks the global worst (C:9 only loses whenever it's
+sampled against someone lower), needs only 2 reads per pick, and avoids the herd — while still
+beating plain `round_robin`, which would blindly send the next RPC to C:9 regardless of load.
+This matters most when request *cost* is uneven (one slow RPC leaves a high outstanding count
+that steers new work elsewhere).
+
+**Worked example — `ring_hash` (consistent hashing).** Place backends on a hash ring by hashing
+their IDs onto a 0–(2³²−1) circle, e.g. A@1000, B@2500, C@3900 (positions illustrative). To
+route a request, hash its key (say `user_id`) and walk **clockwise** to the first backend at or
+past that position. `hash(user=42)=1500` → next node clockwise is **B@2500**; `hash(user=7)=3000`
+→ **C@3900**; `hash(user=99)=4200` wraps past the top → **A@1000**. Same user always lands on the
+same backend → cache/session affinity. Now backend **B leaves**: only keys that mapped to B's arc
+(the range 1000–2500, i.e. user=42) move — they shift clockwise to C. Keys for A and C are
+untouched. Only ~**1/N** of keys remap (here ~1/3), versus a plain `hash(key) % N` scheme where
+changing N reshuffles nearly *every* key. (Real rings use many virtual nodes per backend so the
+arcs are evenly sized.)
 
 **ORCA (Open Request Cost Aggregation)** lets a backend report its real load (CPU, queue
 depth, custom metrics) back to the client, so `weighted_round_robin` can bias away from
@@ -368,9 +442,10 @@ scale is owned by `system-design`.
   config** `loadBalancingConfig: [{round_robin:{}}]` (default service config or resolver-
   delivered), *and* resolve to real backend IPs (e.g. `dns:///` to a headless service) — not
   a single VIP.
-- **"How does the client find out a new backend appeared?"** The resolver re-resolves (on
-  connection failure / LB request; DNS also on its min-interval) and hands the new address
-  list to the LB policy, which creates a subchannel; xDS/mesh instead *push* updates.
+- **"How does the client find out a new backend appeared?"** The resolver re-resolves when
+  triggered (connection failure / LB request), rate-limited by its minimum re-resolution
+  interval (grpc-go default ~30s) rather than on a fixed poll, and hands the new address list
+  to the LB policy, which creates a subchannel; xDS/mesh instead *push* updates.
 - **"How do you drain a gRPC backend during a deploy without dropping RPCs?"** Server sends
   HTTP/2 `GOAWAY`; clients finish in-flight RPCs, then reconnect/re-resolve to other backends.
 - **"What is `pick_first` good for if it doesn't balance?"** It's correct when something
@@ -386,6 +461,7 @@ scale is owned by `system-design`.
 - gRPC docs — *Load Balancing* (concept guide): https://grpc.io/docs/guides/custom-load-balancing/ and the load-balancing design doc `grpc/grpc/blob/master/doc/load-balancing.md`
 - gRPC blog — *gRPC Load Balancing*: https://grpc.io/blog/grpc-load-balancing/
 - gRPC docs — *Name Resolution* design: `grpc/grpc/blob/master/doc/naming.md`
+- grpc-go DNS resolver — event-driven re-resolution + `MinResolutionInterval` (30s default): `grpc/grpc-go/blob/master/internal/resolver/dns/dns_resolver.go`
 - gRPC docs — *Service Config* & `loadBalancingConfig`: `grpc/grpc/blob/master/doc/service_config.md`
 - gRFC A6 — client retries; gRFC A8 — client-side keepalive; gRFC A27/A28/A30/A31 — xDS support in gRPC (see `grpc/proposal`)
 - gRPC docs — *gRPC xDS features* and proxyless service mesh: https://grpc.io/docs/guides/xds/

@@ -331,13 +331,15 @@ an irreducible operational floor built into having humans on-call at all.
 
 ## Is All Toil Bad? The Nuance
 
-A senior signal is refusing the naive "eliminate all toil" reflex. The SRE book is explicit: **small
+A senior signal is refusing the naive "eliminate all toil" reflex. (The *quantitative* why-not-zero —
+the ~33% observed average and the rotation-floor math — is in the previous section; this section adds
+the distinct *qualitative* reason.) The SRE book is explicit: **small
 amounts of toil can be calming** — a predictable, quick-win task gives a sense of accomplishment and
 low-risk context between hard problems. Toil becomes **toxic only in large quantities**: that's when
 it crowds out engineering, burns people out, and scales O(n). So the goal is **keep toil bounded
 (below the cap, ideally near the ~33% average), not zero**. If an interviewer asks "should you drive
-toil to 0%?" the answer is *no* — both because a little toil is healthy and because the on-call
-rotation math makes 0% structurally impossible.
+toil to 0%?" the answer is *no* — both because a little toil is healthy *and* because the rotation-floor
+math above already showed 0% is structurally impossible without over-staffing.
 
 ## The Toil Taxonomy of Sources & Measurement Process
 

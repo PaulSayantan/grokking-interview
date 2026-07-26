@@ -247,6 +247,35 @@ Rules encoded here:
 
 Each transition maps to a `light.setState(nextState)` call the controller orchestrates on tick.
 
+### Worked example: one full cycle, tick by tick
+
+Numbers make the timing and the mutual-exclusion invariant concrete. Take the skeleton's
+durations — **GREEN 25s, YELLOW 5s, all-red clearance 2s** — with **one tick = one second**,
+starting from N-S just greened at `t=0` (`activeGroup = NORTH_SOUTH`, `elapsedSeconds = 0`).
+Trace `onTick()` second by second and record what each direction shows:
+
+| t (s)   | N-S    | E-W    | Active group  | What happens on the tick |
+|---------|--------|--------|---------------|--------------------------|
+| 0–25    | GREEN  | RED    | N-S           | `elapsedSeconds` climbs 1…25; N-S traffic flows, E-W held red |
+| 25      | YELLOW | RED    | N-S           | `elapsed`==25 (hold=25) → `advance()` GREEN→YELLOW, reset `elapsed` |
+| 25–30   | YELLOW | RED    | N-S           | yellow clearance; `elapsed` climbs 1…5 |
+| 30      | RED    | RED    | N-S           | `elapsed`==5 → `advance()` YELLOW→RED; color==RED → `allRedRemaining = 2` |
+| 30–32   | RED    | RED    | (all-red)     | both groups red; `allRedRemaining` 2→1→0 |
+| 32      | RED    | GREEN  | E-W           | `allRedRemaining`==0 → `handOverToNextGroup()` flips active to E-W, greens it |
+| 32–57   | RED    | GREEN  | E-W           | E-W traffic flows; N-S sits RED (its RedState duration is *not* consumed — it isn't active) |
+| 57–62   | RED    | YELLOW | E-W           | E-W yellow clearance |
+| 62–64   | RED    | RED    | (all-red)     | second all-red beat |
+| 64      | GREEN  | RED    | N-S           | hand back to N-S — cycle repeats |
+
+**Full cycle = 25 + 5 + 2 + 25 + 5 + 2 = 64 seconds.** Two facts pop out of the trace: (1) there
+is *never* a row where both columns show GREEN — that visible gap is the mutual-exclusion
+invariant `assertNoConflict()` protects; (2) every phase boundary is separated by a YELLOW then a
+2-second all-red, so the intersection is guaranteed empty before the cross traffic moves. Note
+too that N-S's `RedState.getDurationSeconds()==30` never fires during E-W's 32-second red stretch:
+only the *active* group's phase duration is counted, so a red simply waits out the other group's
+green + yellow + all-red. Swap in `AdaptiveTimingStrategy` and only the GREEN rows stretch or
+shrink (e.g. `15 + 12 cars × 2 = 39s`, clamped to 60); the yellow/all-red beats stay fixed.
+
 ## Key Design Decisions
 
 **State pattern — the star.** Each color is a phase with its own duration and its own
@@ -375,38 +404,66 @@ public class TrafficLight {
 }
 
 public class TrafficController {           // the context + coordinator
+    private static final int ALL_RED_SECONDS = 2;   // clearance beat between phase swaps
     private final Map<PhaseGroup, List<TrafficLight>> groups;
     private PhaseGroup activeGroup;
     private TimingStrategy timing;
+    private TrafficContext ctx;                      // sensor snapshot the adaptive strategy reads
     private final List<SignalObserver> observers = new ArrayList<>();
     private boolean preempted = false;
+    private PhaseGroup preemptTarget = null;         // group to green once the current wind-down finishes
+    private int elapsedSeconds = 0;                  // time held in the active group's current phase
+    private int allRedRemaining = 0;                 // >0 while BOTH groups are held red
 
+    // One tick == one second. A phase advances only when its duration elapses, so
+    // getDurationSeconds() (and the TimingStrategy for GREEN) actually governs timing —
+    // a tick is NOT a whole phase.
     public synchronized void onTick() {
-        // driven by the Timer; advance the currently active group's lights.
-        TrafficLight lead = groups.get(activeGroup).get(0);
-        lead.advance();                          // e.g., GREEN -> YELLOW -> RED
-        groups.get(activeGroup).forEach(l -> l.setState(lead.getState()));
-        if (lead.getColor() == SignalColor.RED) {
-            handOverToNextGroup();               // clearance done: swap groups
+        if (allRedRemaining > 0) {                   // all-red clearance beat: both groups red
+            if (--allRedRemaining == 0) handOverToNextGroup();
+            assertNoConflict();
+            notifyObservers();
+            return;
         }
-        assertNoConflict();                      // safety invariant, every tick
+        TrafficLight lead = groups.get(activeGroup).get(0);
+        int hold = lead.getState().getDurationSeconds();
+        if (lead.getColor() == SignalColor.GREEN && timing != null) {
+            hold = timing.greenDurationSeconds(activeGroup, ctx);   // Strategy governs green length
+        }
+        if (++elapsedSeconds >= hold) {
+            elapsedSeconds = 0;
+            lead.advance();                          // GREEN -> YELLOW -> RED
+            groups.get(activeGroup).forEach(l -> l.setState(lead.getState()));
+            if (lead.getColor() == SignalColor.RED) {
+                allRedRemaining = ALL_RED_SECONDS;   // hold a genuine all-red beat before the swap
+            }
+        }
+        assertNoConflict();                          // safety invariant, every tick
         notifyObservers();
     }
 
+    // Runs only after the all-red clearance beat, so both groups were genuinely red in between.
     private void handOverToNextGroup() {
-        PhaseGroup next = other(activeGroup);
-        // all-red clearance implicitly holds here (both groups red for one beat)
-        activeGroup = next;
-        groups.get(next).forEach(l -> l.setState(States.GREEN));
+        activeGroup = (preemptTarget != null) ? preemptTarget : other(activeGroup);
+        preemptTarget = null;
+        elapsedSeconds = 0;
+        groups.get(activeGroup).forEach(l -> l.setState(States.GREEN));
     }
 
+    // Preemption never slams a green group to red. It winds the active group down through
+    // YELLOW; onTick() then runs the normal yellow -> all-red clearance before the emergency
+    // group greens (handOverToNextGroup honors preemptTarget).
     public synchronized void preempt(Direction d) {
-        preempted = true;
         PhaseGroup wanted = groupOf(d);
-        groups.values().stream().flatMap(List::stream)
-              .forEach(l -> l.setState(States.RED));   // everyone red first
-        groups.get(wanted).forEach(l -> l.setState(States.GREEN));
-        activeGroup = wanted;
+        preempted = true;
+        if (wanted == activeGroup) return;           // already this group's turn — nothing to wind down
+        preemptTarget = wanted;
+        elapsedSeconds = 0;
+        for (TrafficLight l : groups.get(activeGroup)) {
+            if (l.getColor() == SignalColor.GREEN) {
+                l.setState(States.YELLOW);           // begin safe wind-down, not a hard slam to red
+            }
+        }
         assertNoConflict();
     }
 
@@ -447,6 +504,27 @@ public class AdaptiveTimingStrategy implements TimingStrategy {
 The tell that the design is working: `TrafficController`'s tick contains **no** `switch` on
 color — the color transitions live inside the state objects, and the controller only orchestrates
 *which group* advances and *guards the safety invariant*.
+
+### Worked example: emergency preemption during a green
+
+The safety rule is "never slam a green group to red — wind it down through yellow first." Trace it
+concretely. N-S is GREEN and 10 seconds into its phase (`activeGroup = NORTH_SOUTH`,
+`elapsedSeconds = 10`) when an ambulance triggers `preempt(EAST)` at `t=10`:
+
+| t (s) | N-S    | E-W   | State inside the controller |
+|-------|--------|-------|-----------------------------|
+| 10    | YELLOW | RED   | `preempt(EAST)`: `wanted = EAST_WEST` ≠ active, so `preemptTarget = EAST_WEST`, `elapsed = 0`, N-S GREEN→YELLOW (wind-down begins — **no** hard slam to red) |
+| 10–15 | YELLOW | RED   | normal `onTick()` runs the 5s yellow; `elapsed` climbs 1…5 |
+| 15    | RED    | RED   | `elapsed`==5 → `advance()` YELLOW→RED; color==RED → `allRedRemaining = 2` |
+| 15–17 | RED    | RED   | all-red clearance, `allRedRemaining` 2→1→0 |
+| 17    | RED    | GREEN | `handOverToNextGroup()` sees `preemptTarget` and greens **E-W** (not the normal alternation) |
+
+The emergency group is green **7 seconds** after the request (5 yellow + 2 all-red), and
+`assertNoConflict()` passed on every tick because the wind-down never overlapped two greens. Notice
+the *only* difference from a normal N-S→E-W swap is `handOverToNextGroup()` honoring
+`preemptTarget`; the yellow and all-red safety beats are the exact same code path. Edge case worth
+saying out loud: if `preempt(NORTH)` arrives while N-S is *already* green, `wanted == activeGroup`,
+so the method returns immediately — nothing to wind down.
 
 ## Extensibility
 

@@ -103,6 +103,20 @@ controller owns it and updates it to reflect reality. The controller's job is to
 changes) vs `status.observedGeneration` (the generation the controller has processed) is how
 you tell whether a controller has caught up with your latest change.
 
+Concretely, watch the two numbers diverge and reconverge during a rollout. Start at rest:
+
+| Moment | `metadata.generation` | `status.observedGeneration` | Meaning |
+|---|---|---|---|
+| Steady state | 2 | 2 | Controller has processed everything you asked for. |
+| You `kubectl apply` a new image | **3** | 2 | Spec changed → generation bumped to 3; controller hasn't reconciled yet, so it lags at 2. |
+| Rollout in progress | 3 | 2 | Still behind — new ReplicaSet spinning up. |
+| Reconcile complete | 3 | **3** | Caught up: observed == generation. |
+
+So the one-line test during an incident: run `kubectl get deploy web -o yaml` and compare the
+two fields. If `observedGeneration < generation`, the Deployment controller **has not yet acted
+on your latest edit** (still rolling out, or wedged). Only status fields count — editing a
+`metadata.label` or `annotation` does **not** bump `generation`.
+
 > [!WARNING]
 > Editing `status` by hand is almost always meaningless — the controller overwrites it on the
 > next reconcile. If you find yourself wanting to "fix" status, the real fix is to change the
@@ -150,6 +164,21 @@ nodes         no           v1           false        Node
 > straight from the server's OpenAPI — the fastest way to answer "what fields does this
 > object have?" without leaving the terminal. Add `--recursive` for the full field tree.
 
+**Extending the API** (a common "how do operators work?" probe): the same machinery is
+open-ended. A **CustomResourceDefinition (CRD)** registers a brand-new kind (e.g.
+`kind: PostgresCluster`) that the API server then serves, validates, and stores like any
+built-in — no recompile. For heavier needs an **aggregated API server** plugs a second server
+behind the main one. Operators are just controllers reconciling your CRD.
+
+**How controllers watch efficiently** (the "how do you watch millions of objects without
+hammering the API?" probe): they don't poll. Each controller does a **list-watch** — one `LIST`
+to get a snapshot plus its `resourceVersion`, then a long-lived `WATCH` that streams only
+*deltas* from that version forward. A client-side **informer** keeps those objects in a local
+in-memory cache (so reads hit RAM, not the API server) and fires handlers on add/update/delete.
+Periodic **bookmarks** advance the resourceVersion cheaply, and a **resync** re-lists to recover
+if the watch is dropped (ties directly to level-triggered reconciliation below). Control-plane
+internals are deep-dived in `architecture-control-plane`.
+
 ## Labels and selectors: the glue
 
 **Labels** are key/value pairs in `metadata.labels` that **identify** objects for grouping and
@@ -191,6 +220,20 @@ Pods it doesn't recognize as its own.
 Selectors underpin more than ownership: `kubectl` bulk operations (`kubectl delete pods -l
 app=web`), Service endpoints, `NetworkPolicy` peers, `podAffinity`, and topology-spread all
 select by label. Labels are the connective tissue of the entire object graph.
+
+> [!WARNING]
+> Not every object accepts set-based selectors. A `Service`'s `spec.selector` (and the legacy
+> `ReplicationController`'s) is an **equality-only plain map** — `matchLabels`-style key/value
+> pairs only. Workload controllers (`Deployment`, `ReplicaSet`, `Job`, `DaemonSet`) support the
+> richer **set-based `matchExpressions`** (`In`, `NotIn`, `Exists`, `DoesNotExist`). So this is
+> valid on a Deployment but a **validation error** on a Service:
+> ```yaml
+> selector:                      # OK on Deployment.spec.selector, REJECTED on Service.spec.selector
+>   matchExpressions:
+>     - { key: environment, operator: In, values: [prod, staging] }
+> ```
+> A Service must instead say `selector: { app: web, tier: frontend }`. Writing a Service the
+> "general" way is a classic interview trap.
 
 ## Annotations: non-identifying metadata
 
@@ -354,6 +397,25 @@ manifest (because it can see you removed it relative to last-applied) while **le
 fields it never managed (like a `replicas` count an HPA controls, or defaults the server
 added). The last-applied annotation is the memory that makes deletion detection possible.
 
+The merge rule per field is simple once you see it traced. For each field: if it's in your
+**new manifest**, patch the live object to that value; if it's in **last-applied but absent from
+your new manifest**, you removed it → delete it from live; if it's in **neither**, leave the
+live value untouched. Walk three concrete cases against a Deployment where an HPA sets
+`replicas`:
+
+| Case | new manifest | last-applied | live (server) | Merge decision | Result |
+|---|---|---|---|---|---|
+| **A — HPA field survives** | (no `replicas`) | (no `replicas`) | `replicas: 8` (HPA) | absent in both → untouched | stays **8** ✓ |
+| **B — you change a value** | `replicas: 5` | `replicas: 3` | `replicas: 3` | present in manifest → set to manifest value | becomes **5** |
+| **C — the footgun** | (no `replicas`) | `replicas: 3` | `replicas: 8` (HPA) | in last-applied, absent from manifest → **delete** | `replicas` removed → server defaults to **1**, clobbering HPA |
+
+Case A is the marquee win: because you *never* put `replicas` in your manifest, apply has no
+record of owning it, so the HPA's `8` survives every re-apply. Case C is why the docs say **do
+not set `replicas` in a manifest you also autoscale** — if `3` is still sitting in last-applied
+when you drop the field, that single apply deletes it and the value snaps back to the default
+`1` before the HPA scales it up again. (After that apply, last-applied no longer has `replicas`,
+so you're back in Case A.)
+
 ```mermaid
 flowchart LR
   NEW[New manifest] --> MERGE{3-way merge}
@@ -392,6 +454,64 @@ kubectl apply --server-side -f deploy.yaml
 kubectl apply --server-side --force-conflicts -f deploy.yaml
 kubectl get deploy web --show-managed-fields -o yaml   # inspect field ownership
 ```
+
+### Worked example: what ownership and a conflict actually look like
+
+Two writers manage one Deployment. The **HPA** owns `spec.replicas` (it scaled you to 8); your
+**GitOps apply** (field manager `gitops`) owns the image and template. After both have written,
+`metadata.managedFields` holds one entry per manager — each recording exactly the subtree it set:
+
+```yaml
+metadata:
+  managedFields:
+    - manager: gitops                      # your CD tool
+      operation: Apply
+      apiVersion: apps/v1
+      fieldsV1:
+        f:spec:
+          f:template:
+            f:spec:
+              f:containers:
+                k:{"name":"web"}:
+                  f:image: {}               # gitops owns the image
+    - manager: horizontal-pod-autoscaler    # the HPA controller owns replicas
+      operation: Apply                      # (HPA uses Update in practice; Apply shown for clarity)
+      apiVersion: apps/v1
+      fieldsV1:
+        f:spec:
+          f:replicas: {}                    # HPA owns replicas
+```
+
+The `f:` keys are the field path; `k:{"name":"web"}` is how SSA addresses a specific entry in a
+**list keyed by name** (the container named `web`). Note neither manager owns fields it didn't
+send — that's the whole point.
+
+Now you carelessly add `replicas: 3` to your GitOps manifest and `kubectl apply --server-side`.
+Because `spec.replicas` is owned by another manager, the server refuses to silently overwrite:
+
+```
+error: Apply failed with 1 conflict: conflict with "horizontal-pod-autoscaler" using apps/v1:
+  .spec.replicas
+Please review the fields above--they currently have other managers. Here are the ways you can
+resolve this warning:
+* If you intend to manage all of these fields, please re-run the apply command with the
+  `--force-conflicts` flag.
+...
+```
+
+Three ways to resolve, traced against this exact state:
+
+1. **Force (take ownership):** `kubectl apply --server-side --force-conflicts`. Your apply wins,
+   `spec.replicas` becomes `3`, and ownership of it **transfers to `gitops`** (removed from the
+   HPA's managedFields entry). Now the HPA and your tool will fight on every cycle — usually the
+   wrong choice for an autoscaled field.
+2. **Drop the field (yield the claim):** delete `replicas` from your manifest and re-apply. No
+   conflict, `spec.replicas` stays `8`, and ownership stays with the HPA. This is the correct fix
+   for a field another controller is meant to own.
+3. **Match the value (become a shared owner):** set `replicas: 8` (the current live value) in
+   your manifest. The value doesn't change, so there's no conflict, and both managers now list
+   `f:replicas` — they **co-own** it. Legal, but fragile: the next time the HPA moves it to 9,
+   your apply of `8` *would* conflict.
 
 SSA's big win is **safe multi-writer collaboration**: an HPA can own `replicas`, your GitOps
 tool can own the image and template, and neither stomps the other — conflicts are explicit,
@@ -559,7 +679,12 @@ sequenceDiagram
 5. **Reconcile**: the responsible controller acts to make actual match desired (e.g. the
    Deployment controller creates a ReplicaSet, which creates Pods) and writes back `status`.
 6. This loop runs **forever** — it is level-triggered, not edge-triggered, so a controller
-   re-checks desired-vs-actual on every resync and self-heals drift.
+   re-checks desired-vs-actual on every resync and self-heals drift. *Edge-triggered* means you
+   act only on the change **event** — miss the event (dropped watch, controller restart) and you
+   miss the work forever. *Level-triggered* means you re-read the current desired-vs-actual state
+   and reconcile the gap regardless of how you were woken; a lost event or a restart just means
+   the next resync converges anyway. That's why Kubernetes controllers are robust to missed
+   watches: the watch event is only a *hint to look*, never the source of truth.
 
 `metadata.resourceVersion` is the optimistic-concurrency token: updates carry the version they
 read, and the server rejects a write if the object changed underneath (a `Conflict`), forcing

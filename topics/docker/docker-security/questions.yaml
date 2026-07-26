@@ -15,9 +15,12 @@ questions:
   options:
   - A container shares the host kernel, so isolation is only as strong as the kernel boundary, while a
     VM has a hypervisor boundary
-  - A container always runs as non-root while a VM runs as root
-  - A container encrypts its filesystem while a VM does not
-  - A container cannot access the network while a VM can
+  - A container always runs its processes as a non-root user while a VM always runs
+    everything as the root account
+  - A container automatically encrypts its entire filesystem at rest while a VM keeps
+    its disk image completely in plaintext
+  - A container is fully blocked from all network access by default while a VM always
+    has unrestricted networking
   answer: 0
   explanation: |
     Containers are isolated processes on a shared host kernel (namespaces + cgroups), with no
@@ -53,9 +56,12 @@ questions:
     In a Dockerfile, where should the USER instruction typically be placed?
   options:
   - After the steps that require root (like installing packages), before the runtime command
-  - As the very first instruction, before FROM
-  - Only inside the CMD as an argument
-  - It must be the last line of every Dockerfile
+  - As the very first instruction in the file, placed above the FROM line so it applies
+    to the base image selection
+  - Only inside the CMD instruction, passed as a --user argument to the entrypoint at
+    container start
+  - As the mandatory final line of every Dockerfile, immediately after the CMD or
+    ENTRYPOINT declaration
   answer: 0
   explanation: |
     USER affects subsequent RUN, CMD, ENTRYPOINT and the running container. Place it after
@@ -71,10 +77,13 @@ questions:
   question: |
     A container running as a non-root user fails to bind to port 80. What is the cleanest fix?
   options:
-  - Run the container with --privileged
-  - Switch the process back to root with USER root
+  - Run the container with --privileged so the kernel skips the low-port permission check
+    entirely
+  - Switch the process back to root with USER root so it regains the low-port binding
+    privilege it lost
   - Listen on a high port (e.g. 8080) and map it, or grant CAP_NET_BIND_SERVICE
-  - Disable seccomp so the bind syscall is allowed
+  - Disable seccomp with --security-opt seccomp=unconfined so the bind() syscall is no
+    longer filtered
   answer: 2
   explanation: |
     Non-root processes cannot bind ports < 1024 by default. The right fixes are to listen on a
@@ -91,10 +100,13 @@ questions:
     Why is a USER instruction in the Dockerfile alone not sufficient to guarantee a container
     runs as non-root in production?
   options:
-  - USER only applies during the build, never at runtime
-  - USER is ignored unless seccomp is disabled
+  - USER only applies to build-time RUN steps and is silently discarded once the image is
+    run as a container
+  - USER is ignored at runtime unless a seccomp profile is explicitly attached to enforce
+    it
   - Anyone running the image can override it with docker run --user 0
-  - USER only works with numeric UIDs, and names are ignored
+  - USER only accepts numeric UIDs and silently ignores any username-based value written
+    into the Dockerfile
   answer: 2
   explanation: |
     USER is advisory: a caller can override it with docker run --user 0. Enforcement needs
@@ -110,9 +122,12 @@ questions:
     What is the defining characteristic of "rootless Docker"?
   options:
   - The Docker daemon and containers run as an unprivileged host user, not root
-  - Containers cannot run any process as UID 0 internally
-  - It removes the root filesystem from every image
-  - It disables the root account inside all images
+  - Containers are prevented from ever running any process as UID 0 internally, even the
+    entrypoint
+  - It strips the root (/) filesystem layer out of every image to shrink the attack
+    surface
+  - It disables and locks the root account inside every image so no login as root is
+    possible
   answer: 0
   explanation: |
     Rootless Docker runs the entire daemon (and its containers) as an unprivileged host user,
@@ -128,10 +143,12 @@ questions:
   question: |
     Which is a real limitation of rootless Docker compared to the default rootful daemon?
   options:
-  - It cannot run any containers at all
+  - It cannot run any containers at all until the daemon is restarted as the root user
   - Binding privileged ports (< 1024) and native bridge networking need extra configuration
-  - Images built under rootless mode cannot be pushed to a registry
-  - It requires --privileged for every container
+  - Images built under rootless mode are tagged locally but can never be pushed to a
+    remote registry
+  - It requires the --privileged flag on every container just to start the process
+    successfully
   answer: 1
   explanation: |
     Rootless mode has caveats: binding ports < 1024 needs extra config, networking often uses
@@ -149,9 +166,12 @@ questions:
     accomplish?
   options:
   - It maps container UID 0 to an unprivileged host UID, so container root is not host root
-  - It removes all capabilities from every container
-  - It encrypts container root filesystems
-  - It forces every container to run read-only
+  - It strips all Linux capabilities from every container the daemon launches, leaving an
+    empty capability set
+  - It transparently encrypts each container's root filesystem layers on disk using a
+    per-container key
+  - It forces every container the daemon launches to run with a read-only root filesystem
+    by default
   answer: 0
   explanation: |
     User namespaces remap container UIDs (0..65535) to a subordinate, unprivileged host range
@@ -168,11 +188,14 @@ questions:
     A team enables userns-remap and then finds that files their container writes into a bind
     mount are owned by an unexpected host UID like 231072. Why?
   options:
-  - The bind mount is corrupt
-  - Docker randomly assigns file ownership when remapping is on
+  - The bind mount metadata is corrupt and the kernel is reporting a garbage owner UID for
+    the affected files
+  - Docker assigns file ownership pseudo-randomly from a UID pool whenever userns
+    remapping is turned on
   - userns-remap maps container UIDs to a subordinate host UID range, so files are owned by the remapped
     host UID
-  - The container is secretly running as root on the host
+  - The container is secretly running as genuine root on the host and writing files with
+    the real host UID 0
   answer: 2
   explanation: |
     With remapping, container UID N maps to host base+N (e.g. 231072 for container 0). Files
@@ -187,10 +210,12 @@ questions:
   question: |
     What is the recommended best practice for Linux capabilities on a container?
   options:
-  - Add CAP_SYS_ADMIN so nothing breaks
-  - Keep all default capabilities since Docker already picked them
+  - Add CAP_SYS_ADMIN up front so no operation the container attempts can ever be blocked
+  - Keep the full default capability set unchanged since Docker already curated it for
+    safety
   - Drop all capabilities (--cap-drop ALL) and add back only the ones the app needs
-  - Use --privileged which grants exactly the right set
+  - Use --privileged, which grants exactly the tailored capability set the workload
+    requires
   answer: 2
   explanation: |
     Least privilege: --cap-drop ALL removes everything, then --cap-add re-grants only what's
@@ -205,9 +230,12 @@ questions:
   question: |
     Which statement about Docker's default capability set is accurate?
   options:
-  - Docker grants all ~40 capabilities by default
-  - Docker capabilities only apply to root processes, so non-root containers ignore them
-  - Docker drops every capability by default
+  - Docker grants the full set of all ~40 Linux capabilities to every container it starts
+    by default
+  - Docker capabilities apply only to processes running as root, so non-root containers
+    ignore the capability set entirely
+  - Docker drops every single Linux capability by default, so containers start with a
+    completely empty capability set
   - Docker grants a restricted allowlist (~14 caps) and drops the rest, but that set is still broader
     than most apps need
   answer: 3
@@ -246,10 +274,13 @@ questions:
   question: |
     Why is adding CAP_SYS_ADMIN to a container almost as dangerous as --privileged?
   options:
-  - It disables the network entirely
-  - It automatically mounts docker.sock
+  - It disables the container's network stack entirely, forcing all traffic through the
+    host namespace
+  - It automatically bind-mounts the host's docker.sock into the container so it can drive
+    the daemon
   - It is a broad catch-all capability enabling mount and other operations that enable container escape
-  - It grants the container a public IP
+  - It grants the container its own routable public IP address directly on the host
+    network interface
   answer: 2
   explanation: |
     CAP_SYS_ADMIN is a huge catch-all capability (mount, many privileged operations) and is
@@ -265,9 +296,12 @@ questions:
     What does docker run --privileged do?
   options:
   - Grants all capabilities, access to all host devices, and disables seccomp/AppArmor confinement
-  - Runs the container with slightly higher CPU priority only
-  - Encrypts the container's traffic
-  - Makes the container root filesystem read-only
+  - Runs the container with a slightly elevated CPU scheduling priority and nothing else
+    security-related
+  - Transparently encrypts all of the container's inbound and outbound network traffic on
+    the wire
+  - Makes the container's root filesystem read-only to prevent any runtime writes to image
+    layers
   answer: 0
   explanation: |
     --privileged grants all capabilities, exposes all host devices under /dev, allows mount
@@ -283,9 +317,11 @@ questions:
   question: |
     A container needs access to a single host device, /dev/fuse. What is the correct approach?
   options:
-  - Run it with --privileged
-  - Disable seccomp for the container
-  - Mount /var/run/docker.sock
+  - Run it with --privileged so every host device under /dev is exposed at once
+  - Disable seccomp with --security-opt seccomp=unconfined so the device-related syscalls
+    are permitted
+  - Mount /var/run/docker.sock so the container can request the device through the Docker
+    API
   - Use --device=/dev/fuse (and add only any specific capability required)
   answer: 3
   explanation: |
@@ -302,11 +338,14 @@ questions:
   question: |
     Why can a process in a --privileged container typically escape to the host?
   options:
-  - Because privileged containers get a public IP
+  - Because privileged containers receive a routable public IP that exposes the host
+    control plane directly
   - Because with all capabilities and access to host devices, it can mount the host's root disk (among
     other primitives)
-  - Because seccomp forces it to run as root
-  - Because the container filesystem is always shared with the host by default
+  - Because seccomp, when active, forces the container's main process to execute as the
+    host root user
+  - Because the container's filesystem is always transparently shared with the host root
+    filesystem by default
   answer: 1
   explanation: |
     With all capabilities and all host devices available, a privileged container can, for
@@ -323,9 +362,12 @@ questions:
   options:
   - It stops an attacker from writing malware, tampering with binaries, or persisting a foothold in the
     rootfs
-  - It makes the container start faster
-  - It automatically drops all capabilities
-  - It encrypts the image layers
+  - It makes the container start noticeably faster by skipping the writable overlay layer
+    setup step
+  - It automatically drops all Linux capabilities from the container as a side effect of
+    the read-only mount
+  - It encrypts the image layers on disk so the filesystem contents cannot be read from
+    the host
   answer: 0
   explanation: |
     A read-only root filesystem prevents writes to the image filesystem at runtime, blocking
@@ -342,10 +384,13 @@ questions:
     An app run with --read-only crashes because it needs to write temporary files to /tmp.
     What is the standard fix that preserves the read-only rootfs?
   options:
-  - Remove --read-only entirely
-  - Run the container with --privileged
+  - Remove --read-only entirely so the whole root filesystem becomes writable again for
+    the app
+  - Run the container with --privileged so the filesystem restriction is lifted along with
+    other limits
   - Add --tmpfs /tmp (or a volume) so only that path is writable
-  - Grant CAP_DAC_OVERRIDE
+  - Grant CAP_DAC_OVERRIDE so the process can bypass the read-only permission check on
+    /tmp
   answer: 2
   explanation: |
     Keep --read-only and add writable exceptions explicitly: --tmpfs /tmp gives an in-memory,
@@ -360,10 +405,10 @@ questions:
   question: |
     What does a seccomp profile control for a container?
   options:
-  - Which files the container can read
+  - Which files on the host filesystem the container's processes are allowed to read
   - Which system calls (syscalls) the container's processes may make
-  - Which network ports are published
-  - Which capabilities are granted
+  - Which network ports the container publishes and exposes to the host
+  - Which Linux capabilities are granted to the container's root user
   answer: 1
   explanation: |
     Seccomp (secure computing mode) filters syscalls — the most direct reduction of kernel
@@ -380,9 +425,9 @@ questions:
   options:
   - It is an allowlist (defaultAction SCMP_ACT_ERRNO) that blocks around 44 of 300+ syscalls automatically
     on every container
-  - It is disabled by default; you must opt in
-  - It blocks all syscalls except open and read
-  - It only applies to privileged containers
+  - It is disabled by default, so you must explicitly opt in with --security-opt seccomp before any filtering applies
+  - It is a strict denylist that blocks every syscall except a tiny core like open, read, write, and close
+  - It only takes effect on privileged containers and is skipped entirely for ordinary unprivileged ones
   answer: 0
   explanation: |
     The default profile is applied automatically to every container. It's an allowlist:
@@ -400,8 +445,8 @@ questions:
     Which command runs a container with NO seccomp filtering?
   options:
   - docker run --security-opt seccomp=default myapp
-  - docker run --read-only myapp
-  - docker run --cap-drop ALL myapp
+  - docker run --read-only --tmpfs /tmp myapp
+  - docker run --cap-drop ALL --user 10001:10001 myapp
   - docker run --security-opt seccomp=unconfined myapp
   answer: 3
   explanation: |
@@ -418,10 +463,10 @@ questions:
   question: |
     What kind of protection do AppArmor and SELinux provide for containers?
   options:
-  - They filter syscalls like seccomp
-  - They encrypt container network traffic
+  - They filter which system calls a process may issue, exactly like a seccomp profile does
+  - They transparently encrypt all of a container's inbound and outbound network traffic
   - Mandatory Access Control (MAC): policy, not the file owner, decides what resources a process may access
-  - They limit CPU and memory usage
+  - They cap how much CPU time and memory a container may consume via cgroup limits
   answer: 2
   explanation: |
     AppArmor and SELinux are Linux Security Modules implementing Mandatory Access Control:
@@ -438,10 +483,10 @@ questions:
     On a SELinux host, what do the :z and :Z suffixes on a bind mount (e.g. -v /data:/data:Z)
     do?
   options:
-  - Compress the volume
+  - Transparently compress the volume's contents on disk to save space
   - Relabel the volume's SELinux context so the container is permitted to access it
-  - Make the mount read-only
-  - Encrypt the mounted data
+  - Mount the volume read-only so the container cannot modify host files
+  - Encrypt the mounted data at rest using a per-volume key
   answer: 1
   explanation: |
     The :z (shared) and :Z (private) suffixes tell Docker to relabel the bind-mounted content
@@ -458,9 +503,9 @@ questions:
   options:
   - Because it is defense in depth: an LSM can deny access to a specific path/socket even if a syscall
       passes seccomp and a capability is held
-  - Because seccomp does not work without an LSM
-  - Because LSMs replace the need for non-root users
-  - Because AppArmor grants extra capabilities
+  - Because the seccomp syscall filter simply will not load or activate unless an LSM policy is attached first
+  - Because an LSM policy fully substitutes for running as a non-root user, making the USER setting redundant
+  - Because AppArmor quietly grants a container extra Linux capabilities beyond the default allowlist
   answer: 0
   explanation: |
     They operate at different layers. Even if a syscall passes seccomp and the process holds a
@@ -475,9 +520,9 @@ questions:
   question: |
     What does --security-opt no-new-privileges prevent?
   options:
-  - The container from making any network connections
-  - The image from being pulled without a signature
-  - The container from writing to its filesystem
+  - The container's processes from opening any outbound network connections to other hosts
+  - The image from being pulled from a registry unless it carries a valid cosign signature
+  - The container's processes from writing anything to the image's root filesystem at runtime
   - A process (and its children) from gaining more privileges via execve, neutralizing setuid/setgid binaries
     and file capabilities
   answer: 3
@@ -498,10 +543,10 @@ questions:
     sudo. Which single flag most directly prevents an attacker from using it to become
     root-in-container?
   options:
-  - --read-only
-  - --cap-add NET_BIND_SERVICE
+  - --read-only with a --tmpfs /tmp mount for scratch space
+  - --cap-add NET_BIND_SERVICE for low-port binding
   - --security-opt no-new-privileges
-  - --restart on-failure
+  - --restart on-failure with a max retry count
   answer: 2
   explanation: |
     no-new-privileges neutralizes setuid/setgid binaries and file capabilities on execve, so
@@ -519,9 +564,9 @@ questions:
     layer NOT remove the secret from the image?
   options:
   - Because the earlier layer that added the file still exists and is recoverable from image history
-  - Because rm requires root
-  - Because COPY encrypts the file
-  - Because Docker automatically re-adds deleted files
+  - Because the rm command silently fails unless the RUN step executes as the root user
+  - Because COPY encrypts the file, so a later rm cannot locate and remove the ciphertext
+  - Because Docker's layer cache automatically restores any file deleted in a later layer on rebuild
   answer: 0
   explanation: |
     Image layers are additive and immutable. A file added in one layer still exists in that
@@ -537,11 +582,11 @@ questions:
   question: |
     Why is storing a credential with ENV DB_PASSWORD=... in a Dockerfile a bad idea?
   options:
-  - ENV values are always encrypted so it wastes space
+  - ENV values are always encrypted by the daemon, so storing one there simply wastes image space
   - It is stored in image metadata, visible via docker inspect and to every process (and child) in the
     container
-  - ENV variables cannot hold passwords
-  - It slows down container startup
+  - ENV variables are length-limited and reject the special characters found in most passwords
+  - It measurably slows container startup because the daemon must decode every ENV value first
   answer: 1
   explanation: |
     ENV bakes the value into image metadata (visible via docker inspect) and exposes it to
@@ -558,11 +603,11 @@ questions:
     You need a private .npmrc token available during npm ci at build time, but it must never
     end up in any image layer. What is the correct mechanism?
   options:
-  - COPY the .npmrc then rm it in the next RUN
-  - Pass it as ENV NPM_TOKEN
+  - COPY the .npmrc into the image, run npm ci, then rm it in a following RUN layer to clean up
+  - Pass it as ENV NPM_TOKEN so npm reads it from the environment during the install step
   - Use a BuildKit secret mount: RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci with docker
       build --secret
-  - Bake it into an ARG
+  - Bake it into a build ARG NPM_TOKEN and reference that argument inside the RUN npm ci step
   answer: 2
   explanation: |
     BuildKit secret mounts expose the file only during that single RUN and never write it to a
@@ -578,11 +623,11 @@ questions:
     Why is mounting /var/run/docker.sock into a container considered equivalent to giving it
     root on the host?
   options:
-  - Because the socket file is owned by root
-  - Because it disables the container's network
+  - Because the socket file is owned by root, so opening it forces the container process to become root
+  - Because bind-mounting the socket disables the container's own network namespace and shares the host's
   - Because through the Docker API the container can start a new privileged container that bind-mounts
     the host root filesystem
-  - Because it forces the container to run as root internally
+  - Because the presence of the socket forces every process in the container to run as UID 0 internally
   answer: 2
   explanation: |
     The Docker socket is the daemon's API. A container with access can instruct the daemon to
@@ -600,9 +645,9 @@ questions:
     what is a safer approach?
   options:
   - Use a socket-less builder such as BuildKit/buildx, Kaniko, or rootless Docker-in-Docker
-  - Give the container --privileged
-  - Expose the Docker API over plain TCP without TLS
-  - Add the container to the docker group
+  - Give the runner container --privileged so it can drive its own embedded build daemon directly
+  - Expose the host Docker API over a plain unauthenticated TCP port so the runner connects remotely
+  - Add the runner's service account into the host docker group so it can reach the daemon socket
   answer: 0
   explanation: |
     Mounting docker.sock grants host root. Prefer socket-less builders (BuildKit/buildx,
@@ -618,9 +663,9 @@ questions:
     A teammate says "I only added the app user to the docker group, I didn't give it root."
     What's wrong with that reasoning?
   options:
-  - Nothing — docker group membership is a low-privilege grant
-  - docker group members can only run containers as themselves
-  - The docker group only allows reading logs
+  - Nothing — docker group membership is a low-privilege grant limited to basic container commands
+  - docker group members are confined to running containers only under their own unprivileged UID
+  - The docker group merely allows reading daemon and container logs, not launching containers
   - Membership in the docker group grants access to the daemon socket, which is equivalent to root on
     the host
   answer: 3
@@ -639,9 +684,9 @@ questions:
     Which of the following does NOT, by itself, give a compromised container a straightforward
     path to escape to the host?
   options:
-  - Running with --privileged
-  - Having /var/run/docker.sock bind-mounted in
-  - Being granted CAP_SYS_ADMIN
+  - Running the container with the --privileged flag
+  - Having the host's /var/run/docker.sock bind-mounted into the container
+  - Being granted the CAP_SYS_ADMIN capability
   - Running as a non-root user with --cap-drop ALL and a read-only rootfs
   answer: 3
   explanation: |
@@ -659,10 +704,10 @@ questions:
     For a workload that must run untrusted code with stronger-than-namespace isolation, which
     option provides a real isolation boundary?
   options:
-  - Adding more --cap-add flags
+  - Adding more --cap-add flags so the workload has every kernel privilege it might request
   - A sandboxed runtime such as gVisor (runsc) or Kata Containers (micro-VM per container)
-  - Running with --privileged for control
-  - Disabling seccomp so the app runs freely
+  - Running with --privileged so a supervisor process can tightly control the untrusted code
+  - Disabling seccomp with seccomp=unconfined so the untrusted app runs without syscall filtering
   answer: 1
   explanation: |
     gVisor intercepts syscalls in a user-space kernel, and Kata runs each container in a
@@ -679,9 +724,9 @@ questions:
     A container runs as root (UID 0) and bind-mounts a host directory. Even without escaping,
     what can it do, and what mitigates it?
   options:
-  - Nothing — bind mounts are always read-only
-  - It automatically encrypts the host files
-  - It can only read the files, never write
+  - Nothing — Docker forces every bind mount to be strictly read-only for safety
+  - It automatically encrypts the host files it touches so the host can no longer read them
+  - It can only read the mounted files and is blocked by the kernel from ever writing to them
   - It writes to those host files as host root (UID 0 maps to host root); userns-remap, non-root, or read-only
     mounts mitigate it
   answer: 3
@@ -700,9 +745,9 @@ questions:
     Which tools scan a container image's layers for known CVEs?
   options:
   - Trivy, Grype, and Docker Scout
-  - iptables and tc
-  - strace and ltrace
-  - make and gcc
+  - iptables, nftables, and tc for host packet filtering
+  - strace, ltrace, and perf for runtime syscall tracing
+  - make, gcc, and ld for compiling the application binary
   answer: 0
   explanation: |
     Trivy, Grype, and Docker Scout read an image's per-layer package metadata and match it
@@ -719,8 +764,8 @@ questions:
     Most CVEs reported when scanning a typical application image come from where?
   options:
   - The application's own compiled code
-  - The Dockerfile comments
-  - The image tag name
+  - The comment lines and documentation written into the Dockerfile
+  - The version label embedded in the image's tag string
   - The base image and OS packages it includes
   answer: 3
   explanation: |
@@ -736,11 +781,11 @@ questions:
   question: |
     Why does a distroless (or scratch) base image improve security beyond just being smaller?
   options:
-  - It automatically drops all capabilities
+  - It automatically drops every Linux capability from the container as a side effect of the stripped base
   - It removes shells and package managers, so there are fewer CVEs and no shell/tools for an attacker
     post-breach
-  - It encrypts the container at rest
-  - It forces the container to run read-only
+  - It transparently encrypts all of the container's image layers at rest using a per-image key
+  - It forces the container to run with a read-only root filesystem enforced by the runtime
   answer: 1
   explanation: |
     Distroless/scratch images strip out shells, package managers, and extra binaries. That
@@ -757,9 +802,9 @@ questions:
     Within this library, where does the broad supply-chain framework (SLSA levels, provenance
     attestation, keyless signing, pipeline policy gates) belong, versus this topic?
   options:
-  - This topic owns everything about supply chain
-  - Both are owned by the kubernetes domain
-  - Neither is covered anywhere
+  - This topic owns the entire supply-chain framework, including SLSA levels and pipeline policy gates
+  - Both the framework and the image angle are owned solely by the kubernetes domain's security topics
+  - Neither the framework nor the image angle is documented anywhere in this library
   - This topic covers the image/container angle (scanning layers, distroless, image signing, SBOM of an
     image); the general framework lives in devops-cicd/software-supply-chain-security
   answer: 3
@@ -778,11 +823,11 @@ questions:
     What is the purpose of signing an image with cosign/Sigstore and verifying it before
     deploy?
   options:
-  - To make the image smaller
+  - To compress the image layers so the final image occupies less registry storage space
   - To establish authenticity/integrity — you only run images from a trusted publisher that haven't been
     tampered with
-  - To speed up image pulls
-  - To automatically patch CVEs in the image
+  - To accelerate image pulls by letting the daemon skip re-downloading verified layers
+  - To automatically detect and patch known CVEs in the image at signing time
   answer: 1
   explanation: |
     Signing and verifying establishes provenance and integrity: deployment only proceeds for
@@ -797,9 +842,9 @@ questions:
   question: |
     What is the CIS Docker Benchmark?
   options:
-  - A tool that automatically fixes container vulnerabilities
-  - A registry for signed images
-  - A replacement for seccomp
+  - A scanning tool that automatically detects and remediates container vulnerabilities in place
+  - A hosted registry service dedicated to storing and distributing cryptographically signed images
+  - A drop-in replacement for the seccomp syscall-filtering profile on every container
   - An industry hardening standard of host, daemon, image, and runtime security recommendations for Docker
   answer: 3
   explanation: |
@@ -816,10 +861,10 @@ questions:
   question: |
     Setting --memory, --cpus, and --pids-limit on a container primarily protects against what?
   options:
-  - Secret leakage
+  - Leakage of credentials baked into the image's environment variables or layers
   - A compromised or buggy container exhausting host resources (a denial-of-service blast)
-  - Container escape via docker.sock
-  - Setuid escalation
+  - A container escape carried out through a bind-mounted docker.sock and the daemon API
+  - Privilege escalation via a setuid-root binary left in the base image
   answer: 1
   explanation: |
     Resource limits (cgroups) bound how much memory, CPU, and how many processes a container
@@ -835,10 +880,10 @@ questions:
   question: |
     Reviewing "docker run -d --privileged -e API_KEY=abc123 -v /var/run/docker.sock:/var/run/docker.sock myimg", how many serious security problems are present?
   options:
-  - None — this is fine
-  - Only one (the API key)
+  - None — every flag shown here is a standard, safe production configuration
+  - Only one, the API key passed in the environment; the other flags are harmless
   - Three (--privileged, a secret in ENV, and the mounted docker socket)
-  - Only the missing --read-only flag
+  - Only one, the absent --read-only flag that would have locked the root filesystem
   answer: 2
   explanation: |
     Three serious issues: --privileged removes the isolation boundary, -e API_KEY leaks a
@@ -855,10 +900,10 @@ questions:
     Which single set of flags best reflects the recommended runtime hardening baseline for an
     application container?
   options:
-  - --privileged --net host
+  - --privileged --net host --cap-add ALL --pid host so the app has full access to host resources
   - --user 10001:10001 --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges
-  - -v /var/run/docker.sock:/var/run/docker.sock --cap-add ALL
-  - --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+  - -v /var/run/docker.sock:/var/run/docker.sock --cap-add ALL so it can manage sibling containers
+  - --security-opt seccomp=unconfined --security-opt apparmor=unconfined to avoid syscall/LSM conflicts
   answer: 1
   explanation: |
     The baseline is least privilege + defense in depth: non-root numeric UID, read-only rootfs
@@ -875,10 +920,10 @@ questions:
     Given the shared-kernel model, which control most directly addresses the risk of a
     container reaching a kernel vulnerability through a syscall?
   options:
-  - Signing the image
+  - Signing the image with cosign so only trusted publishers' images are deployed
   - The default seccomp profile (reducing reachable syscalls) plus keeping the host kernel patched
-  - Adding CAP_SYS_ADMIN
-  - Publishing on a high port
+  - Adding CAP_SYS_ADMIN so the container can manage its own kernel interactions safely
+  - Publishing the service on a high, unprivileged port above 1024 instead of a low port
   answer: 1
   explanation: |
     Because the kernel is shared, you both reduce the syscall attack surface (seccomp restricts
@@ -895,9 +940,9 @@ questions:
     A stateless web API runs as a non-root user and listens on port 8080. Which capability
     configuration is appropriate?
   options:
-  - --cap-add ALL to be safe
-  - --cap-add SYS_ADMIN
-  - Leave the default capability set unchanged
+  - --cap-add ALL to be safe and avoid any capability-related runtime errors
+  - --cap-add SYS_ADMIN so the API process can perform any privileged operation it may need
+  - Leave Docker's default capability set unchanged since it is already tuned for web apps
   - --cap-drop ALL with no additions needed
   answer: 3
   explanation: |
@@ -913,10 +958,10 @@ questions:
   question: |
     Why is it recommended to specify a numeric UID (e.g. USER 10001) rather than a username?
   options:
-  - Numeric UIDs load faster
+  - Numeric UIDs let the container's processes start measurably faster at launch time
   - So orchestrators/OCI runtimes can verify runAsNonRoot without resolving /etc/passwd
-  - Usernames are not allowed in Dockerfiles
-  - Numeric UIDs get more capabilities
+  - Usernames are rejected by the Dockerfile USER instruction and cause a build error
+  - A process running under a numeric UID is granted a broader set of Linux capabilities
   answer: 1
   explanation: |
     A numeric UID lets Kubernetes runAsNonRoot and OCI checks confirm the user is non-root
@@ -932,9 +977,9 @@ questions:
     The container security mantra is "least privilege plus defense in depth." What does
     "defense in depth" imply about these controls?
   options:
-  - Only one control is needed if chosen well
-  - Controls should be applied only in production
-  - Defense in depth means disabling seccomp to avoid conflicts
+  - Only one control is needed as long as the single strongest one is chosen well
+  - Controls should be applied only in production and skipped in staging and development
+  - Defense in depth means disabling seccomp so it cannot conflict with the other controls
   - Each layer (non-root, cap-drop, read-only, seccomp, LSM, no-new-privileges) assumes the previous one
     might fail
   answer: 3

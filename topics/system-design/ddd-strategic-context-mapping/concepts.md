@@ -405,6 +405,44 @@ flowchart LR
     ACL --> Dom
 ```
 
+**Worked translation — legacy row → clean aggregate.** The legacy ERP stores a
+sales order as a header row plus detail rows, with cryptic codes:
+
+```
+SO_HDR:  SO_NBR=884210  CUST_NBR=5567  STAT_CD='3'  ORD_DT='2026-07-01'
+SO_DTL:  SO_NBR=884210  LINE_NO=1  ITM_CD='SKU-338'  QTY=2  UNIT_PRC=1499
+SO_DTL:  SO_NBR=884210  LINE_NO=2  ITM_CD='SKU-902'  QTY=1  UNIT_PRC=899
+```
+
+The ACL's translator applies three concrete transforms and hands your context a
+single clean aggregate:
+
+1. **Reshape** header + N detail rows → one `Order` aggregate with a list of
+   `LineItem`s (the legacy's flat two-table shape becomes your aggregate root).
+2. **Decode the status enum** using the legacy code book
+   (`'1'=DRAFT, '2'=SUBMITTED, '3'=CONFIRMED, '4'=SHIPPED, '5'=CANCELLED`), so
+   `STAT_CD='3'` → `status = CONFIRMED`. Your model never sees the magic number.
+3. **Convert primitives to value objects**: `UNIT_PRC` is integer cents, so
+   `1499` → `Money(14.99)` and `899` → `Money(8.99)`.
+
+```
+Order(
+  id       = OrderId("884210"),
+  customer = CustomerRef(5567),
+  status   = CONFIRMED,                          // from STAT_CD '3'
+  placedAt = 2026-07-01,
+  lineItems = [
+    LineItem(sku="SKU-338", qty=2, unitPrice=Money(14.99)),   // 1499 cents
+    LineItem(sku="SKU-902", qty=1, unitPrice=Money(8.99)),    //  899 cents
+  ]
+)
+```
+
+The **façade** hides the two-call `SELECT SO_HDR` + `SELECT SO_DTL` dance behind
+one `getOrder(884210)`; the **adapter** conforms it to the `OrderGateway`
+interface your domain expects; the **translator** does the three transforms
+above. Nothing named `SO_HDR` or `STAT_CD` ever crosses into the Orders model.
+
 - **Contrast with Conformist:** a Conformist *accepts* the upstream model; an
   ACL *rejects* it at the boundary and translates. Use an ACL when the cost of
   polluting your model would exceed the cost of the translation layer — almost
@@ -462,6 +500,13 @@ industry standard or a formally-versioned contract.
   *shared vocabulary/schema* expressed through it. You can publish a language
   without an OHS (e.g. a file format), and an OHS should expose a published
   language rather than leak its internal model.
+- **Published Language vs Shared Kernel** (a common confusion, since both are
+  "shared"): a **Shared Kernel** is co-owned *internal* model/code — it *couples*
+  the two contexts, so any change needs both teams' agreement. A **Published
+  Language** is a deliberately-designed *external* contract each side maps
+  to/from — it *decouples* internal models, so each team refactors freely behind
+  it. Prefer a Published Language when autonomy matters; reach for a Shared
+  Kernel only when the overlap is tiny, stable, and the teams are already close.
 
 > [!WARNING]
 > Don't expose your *internal* domain model directly as your integration
@@ -541,6 +586,79 @@ power**. A quick decision guide:
 
 ---
 
+## Worked example: a full e-commerce context map
+
+Patterns learned in isolation don't stick; interviewers ask you to *compose*
+them on one system. Here is a single e-commerce platform with six contexts, and
+a walk through **every seam** — which relationship it is and *why*. The "why" is
+always a statement about power and team relationship, not technology.
+
+```mermaid
+flowchart TD
+    Catalog["Catalog context"]
+    Orders["Orders context"]
+    Inventory["Inventory context"]
+    Payments["Payments platform<br/>(OHS + Published Language)"]
+    CRM["Legacy CRM<br/>(Big Ball of Mud)"]
+    Recs["Recommendations context"]
+
+    Orders -->|"D/C — conforms to Catalog's product IDs"| Catalog
+    Orders <-->|"Partnership (U/D both ways)"| Inventory
+    Orders -->|"D/C via OHS+PL"| Payments
+    Orders -->|"protected by ACL"| CRM
+    Orders -.->|"Published Language (Recs consumes Orders' event stream, D/C)"| Recs
+```
+
+Seam by seam:
+
+1. **Orders → Catalog = Conformist (downstream).** Catalog owns product IDs,
+   names, categories; Orders just needs to reference them and has no leverage to
+   change Catalog's schema. The overlap is stable and Catalog's model is
+   perfectly acceptable, so Orders **conforms** — it uses Catalog's product IDs
+   directly rather than paying for a translation layer. *Downstream + acceptable
+   upstream model + no power = Conformist.*
+
+2. **Orders ↔ Inventory = Partnership.** Placing an order must reserve stock, and
+   a stock-out must block/cancel an order — the two teams' deliverables are
+   tightly interlocked and they succeed or fail together, so they plan the
+   reserve/release interface jointly. Neither is purely upstream. *Mutual
+   success/failure + tight coordination = Partnership.*
+
+3. **Orders → Payments = Customer/Supplier over an OHS + Published Language.**
+   Payments serves *many* teams (Orders, Subscriptions, Refunds…), so it exposes
+   one stable versioned API (**Open Host Service**) speaking a designed contract
+   like ISO 20022 (**Published Language**) rather than N bespoke integrations.
+   Because the Payments team puts Orders' needs on its roadmap, the relationship
+   is **Customer/Supplier**, not raw Conformist. *Many downstreams → OHS+PL;
+   upstream honours downstream needs → Customer/Supplier.*
+
+4. **Orders → Legacy CRM = Anti-Corruption Layer.** The CRM is a Big Ball of Mud
+   we can't change and don't control. Orders needs customer records from it but
+   must not let `SO_HDR`/`STAT_CD`-style muck into its clean model, so it wraps
+   the CRM in an **ACL** that translates at the boundary. *Downstream of an
+   unchangeable messy upstream = contain with ACL.*
+
+5. **Recommendations → Orders = downstream consumer of a Published Language event stream.**
+   Recommendations wants order history but doesn't need live, consistent, synchronous
+   access; it subscribes to Orders' published domain events (a stable, versioned
+   **Published Language**) and builds its own slightly-stale read model. This is still
+   integration — just loose and asynchronous — so it is *not* Separate Ways (which means
+   no integration at all); Recs is a **downstream/conformist** consumer of that event
+   contract. *Async event consumption decouples cadence while keeping a real, versioned
+   contract at the seam.*
+
+Notice the pattern is dictated by the **relationship** each time — power,
+changeability, number of consumers, coordination cost — and the technology
+(REST vs events vs shared IDs) merely follows. That's exactly the reasoning an
+interviewer wants to hear at the whiteboard.
+
+> [!KEY-TAKEAWAY]
+> The context map is not one pattern applied everywhere — a single realistic
+> system mixes Conformist, Partnership, Customer/Supplier + OHS/PL, ACL, and
+> Separate Ways, each chosen by the *team relationship* at that seam.
+
+---
+
 ## Bounded contexts and microservices
 
 Bounded contexts and microservices are related but **not automatically 1:1**. A
@@ -570,6 +688,41 @@ boundary.
 
 See also **microservices-ddd-and-boundaries** for the service-boundary and
 distributed-monolith discussion in depth.
+
+---
+
+## Conway's Law and team topology
+
+Strategic design is "where architecture meets organization" precisely because of
+**Conway's Law**: *a system's structure mirrors the communication structure of
+the org that built it* — you ship your org chart. If three teams build one
+"service," it will grow three seams whether you designed them or not. So context
+boundaries and team boundaries are not independent; the honest question is which
+one you let drive the other.
+
+The **inverse Conway maneuver** turns this into a tool: instead of accepting the
+boundaries your org accidentally produces, **reorganize the teams to get the
+boundaries you want**. Want one bounded context per service, cleanly owned? Give
+each context to exactly one team with the mandate and skills to own it end to
+end. The boundary you draw on the context map becomes real only when a single
+team owns each side.
+
+This maps directly onto **Team Topologies** interaction modes, which is why the
+two frameworks are usually discussed together:
+
+| Context-map relationship | Team Topologies interaction mode |
+|---|---|
+| **Partnership** | **Collaboration** — two teams work closely for a defined period on an interlocked problem |
+| **Customer/Supplier**, **Open Host Service + Published Language** | **X-as-a-Service** — an upstream (often a *platform team*) offers a stable self-serve interface to many consumers |
+| **Anti-Corruption Layer**, **Conformist** | **Facilitating / shielding** — a stream-aligned team shields itself from a *complicated-subsystem* or legacy team it can't change |
+
+> [!INTERVIEW]
+> "How do bounded contexts relate to team structure?" → Name **Conway's Law**
+> (the architecture mirrors team communication), then the **inverse Conway
+> maneuver** (organize teams around the contexts you want). Note that an Open
+> Host Service is how a **platform team** offers "X-as-a-service," and an ACL is
+> a **stream-aligned team shielding itself** from a subsystem it can't change.
+> This is the answer that separates senior from staff.
 
 ---
 
@@ -644,6 +797,27 @@ supporting vs generic).
   Partnership (coordinate closely) or, if power is one-sided, Customer/Supplier
   with explicit contracts and shared acceptance tests. If coordination cost is
   too high and overlap is small, Separate Ways.
+
+- **"How big should a bounded context be — how do you know the boundary is
+  wrong?"** There's no size in lines of code; you read the symptoms.
+  **Too large:** one model juggles *conflicting invariants* (Inventory's
+  "never negative" alongside Catalog's indifference to stock), god objects with
+  many nullable fields, and different sub-teams fighting over the same model.
+  **Too small:** chatty cross-context calls for a single use case, a workflow
+  that needs a distributed transaction to stay consistent, and the ubiquitous
+  language bleeding across the seam constantly. The guidance is that boundaries
+  are **refined iteratively** — you draw them where the language is stable today
+  and redraw as it clarifies; getting one wrong is expensive but expected, which
+  is why starting as a modular monolith (cheap to re-slice) beats premature
+  service extraction (expensive to re-slice).
+
+- **"How do bounded contexts relate to team structure?"** Via **Conway's Law**:
+  the architecture mirrors team communication, so context and team boundaries
+  co-evolve. Use the **inverse Conway maneuver** — organize teams around the
+  contexts you want (one team per context) — and map the seams to Team
+  Topologies modes (Partnership ~ Collaboration; OHS/Customer-Supplier ~
+  X-as-a-Service from a platform team; ACL/Conformist ~ shielding from a team
+  you can't change).
 
 ---
 

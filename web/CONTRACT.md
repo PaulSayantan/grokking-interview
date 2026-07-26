@@ -50,9 +50,10 @@ web/
   public/
     favicon.svg
     questions/             GENERATED question pools (§4)
-      <domain>/<slug>.json
-      <domain>/_all.json
-      system-design/_group-{core,advanced,aws}.json
+      <domain>/<slug>.slim.json         per-subtopic pool (slim: no explanation/tags/difficulty)
+      <domain>/_all.slim.json           domain-level pool (slim)
+      <domain>/_explanations.json       { question_id -> explanation } (lazy-loaded)
+      system-design/_group-{core,advanced,aws}.slim.json
 ```
 
 ## 3. Content sync (`npm run sync`)
@@ -128,13 +129,20 @@ reading the file directly. Real excerpt (trimmed to one authored + one coming-so
 Served as static files under the site root at URL `/questions/...` (fetch at runtime from
 the Preact island, or import at build time). Each file is a **flat array of questions**.
 
+Only the **slim** twin of each pool is emitted (`.slim.json`): the light payload the island
+fetches (question + options + answer + ref, but no explanation/tags/difficulty). Explanations
+are lazy-loaded per domain from `_explanations.json` keyed by question id. (The full `_all.json`
+/ `<slug>.json` pools were removed — nothing at runtime fetched them and a single `_all.json`
+was the most convenient bulk-scrape target. See the header comment in `sync-content.mjs`.)
+
 | File | Contents |
 | --- | --- |
-| `public/questions/<domain>/<slug>.json` | one subtopic's questions |
-| `public/questions/<domain>/_all.json` | every question in the domain (parent-level practice) |
-| `public/questions/system-design/_group-core.json` | system-design "core" pool |
-| `public/questions/system-design/_group-advanced.json` | system-design "advanced" pool |
-| `public/questions/system-design/_group-aws.json` | system-design "aws" pool |
+| `public/questions/<domain>/<slug>.slim.json` | one subtopic's questions (slim) |
+| `public/questions/<domain>/_all.slim.json` | every question in the domain, slim (parent-level practice) |
+| `public/questions/<domain>/_explanations.json` | `{ question_id -> explanation }`, lazy-loaded on answer |
+| `public/questions/system-design/_group-core.slim.json` | system-design "core" pool (slim) |
+| `public/questions/system-design/_group-advanced.slim.json` | system-design "advanced" pool (slim) |
+| `public/questions/system-design/_group-aws.slim.json` | system-design "aws" pool (slim) |
 
 Each question object (matches the `Question` type in `@lib/types`):
 
@@ -281,12 +289,12 @@ Prerender all authored routes with `getStaticPaths` driven by `catalog.json`
 | `/domain/[domain]` | a domain's subtopics in grouped sections; client-side filter; per-group + whole-domain Practice buttons | `getDomain(domain)`; question pools under `/questions/<domain>/...` |
 | `/topic/[domain]/[slug]` | subtopic hub: choose Study or Practice | `getGroup`/catalog lookup |
 | `/study/[domain]/[slug]` | render `concepts.md` HTML + in-page TOC + heading anchors | `getEntry("concepts", "<domain>/<slug>")` + `render()` |
-| `/practice/[domain]/[slug]` | subtopic practice (25 MCQs) | fetch `/questions/<domain>/<slug>.json`, `pickN(pool, 25)` |
-| `/practice/[domain]` | domain-level practice (25 MCQs) | fetch `/questions/<domain>/_all.json` |
+| `/practice/[domain]/[slug]` | subtopic practice (25 MCQs) | fetch `/questions/<domain>/<slug>.slim.json`, `pickN(pool, 25)` |
+| `/practice/[domain]` | domain-level practice (25 MCQs) | fetch `/questions/<domain>/_all.slim.json` |
 
 **System-design group practice (decided):** use the domain-level route with a `group` query
 param — `/practice/system-design?group=core|advanced|aws` — and fetch the matching
-`/questions/system-design/_group-<key>.json` pool. (The route is still statically prerendered
+`/questions/system-design/_group-<key>.slim.json` pool. (The route is still statically prerendered
 for `system-design`; the group is read client-side from the query string. No separate route.)
 
 - `getStaticPaths` for `[domain]` should use authored domains only; `[domain]/[slug]` should

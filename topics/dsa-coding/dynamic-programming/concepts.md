@@ -42,6 +42,13 @@ flowchart TD
     D --> I["fib(1)"]
 ```
 
+**See the overlap (and the payoff) in numbers.** In the tree above, `fib(3)` is computed
+**2×** (once under `fib(5)`, once under `fib(4)`) and `fib(2)` is computed **3×** (nodes E, F,
+H) — and each duplicate drags its own subtree along. That duplication compounds
+exponentially: naive `fib(40)` makes `2·fib(41) − 1 ≈ 331,000,000` recursive calls, while a
+memoized version fills just **41** distinct states (`fib(0)…fib(40)`) and reads the rest from
+the cache. Same answer, ~8-million-fold fewer calls — that collapse *is* dynamic programming.
+
 > [!KEY-TAKEAWAY]
 > DP = **recursion + reuse**. The moment your recursive brute force recomputes an identical
 > call, add a cache keyed by the call's arguments and the exponential collapses to
@@ -160,6 +167,40 @@ dp[i][c] = max( dp[i-1][c],                       # skip item i
                 dp[i-1][c - w[i]] + v[i] )         # take item i (if w[i] <= c)
 ```
 
+**Worked example.** Items `(w,v) = (1,1), (3,4), (4,5), (5,7)`, capacity `W = 7`. Fill
+`dp[i][c]` row by row (row `i` = first `i` items considered):
+
+```text
+        c: 0  1  2  3  4  5  6  7
+ i=0 (—)    0  0  0  0  0  0  0  0
+ i=1 (1,1)  0  1  1  1  1  1  1  1
+ i=2 (3,4)  0  1  1  4  5  5  5  5
+ i=3 (4,5)  0  1  1  4  5  6  6  9   ← dp[3][7]=max(dp[2][7]=5, dp[2][3]+5=4+5=9)=9
+ i=4 (5,7)  0  1  1  4  5  7  8  9   ← dp[4][7]=max(dp[3][7]=9, dp[3][2]+7=1+7=8)=9
+```
+
+The answer `dp[4][7] = 9` comes from taking items `(3,4)` and `(4,5)` (weight `3+4=7`,
+value `4+5=9`) — better than the greedy "highest value first" pick of `(5,7)` which strands
+2 units of capacity. Watch `dp[3][7]`: it beats the skip option (5) by taking item 3 and
+reading back `dp[2][3] = 4`, the best value achievable in the *remaining* capacity 3.
+
+**Why the 1-D array must go descending for 0/1.** Collapse to `dp[c]` and process one item
+`(w=2, v=3)` into an all-zero array of capacity 6:
+
+```text
+Descending c=6→2 (correct):  dp[c]=max(dp[c], dp[c-2]+3), dp[c-2] is still old (0)
+  dp[6]=max(0,dp[4]+3)=3   dp[4]=max(0,dp[2]+3)=3   dp[2]=max(0,dp[0]+3)=3
+  → dp = [0,0,3,3,3,3,3]   item used AT MOST ONCE  ✓
+
+Ascending c=2→6 (BUG):       dp[c-2] was ALREADY updated this pass, so it compounds
+  dp[2]=max(0,dp[0]+3)=3   dp[4]=max(0,dp[2]+3)=6   dp[6]=max(0,dp[4]+3)=9
+  → dp = [0,0,3,3,6,6,9]   dp[6]=9 means item used 3× — this is unbounded, not 0/1  ✗
+```
+
+Descending order guarantees `dp[c-w]` still refers to the *previous* item's row; ascending
+lets item `i` see its own freshly-updated cell and reuse itself. That single loop direction
+is the entire difference between 0/1 and unbounded knapsack.
+
 `O(nW)` time, `O(W)` space with a rolling array (descending `c`). **Subset-sum / Partition
 Equal Subset Sum** is the boolean specialization: `dp[c]` = can we hit exactly sum `c`?
 `dp[c] |= dp[c - num]`. Partition-equal-subset reduces to subset-sum with target
@@ -173,8 +214,37 @@ capacity **ascending**.
 
 **Coin Change (min coins):** `dp[a]` = fewest coins summing to amount `a`; `dp[0]=0`,
 `dp[a] = 1 + min over coins c of dp[a-c]`. `O(amount × #coins)`, `O(amount)` space.
+
+> [!WARNING]
+> Sentinel handling is the classic min-coins bug. Initialize `dp[1..amount] = amount+1` (a
+> value larger than any real answer, since you never need more than `amount` coins), keep
+> `dp[0]=0`, and only relax `dp[a] = min(dp[a], dp[a-c]+1)` when `c <= a`. At the end,
+> `return dp[amount] == amount+1 ? -1 : dp[amount]` — the untouched sentinel means the amount
+> is unreachable. Using `0` or `Integer.MAX_VALUE` as the init instead causes wrong answers
+> or overflow (`MAX_VALUE + 1`).
+
 **Coin Change II (count combinations):** loop coins on the *outside*, amount inside, so
 each combination is counted once (order-independent) — a classic ordering subtlety.
+
+**Worked example — why loop order flips the count.** Coins `{1,2}`, amount `3`. Count of
+ways to make each amount, `dp[0]=1`:
+
+```text
+COINS OUTER (combinations)              AMOUNT OUTER (permutations)
+init:  dp = [1,0,0,0]                   init:  dp = [1,0,0,0]
+coin 1: dp[a]+=dp[a-1] for a=1..3       a=1: dp[1]+=dp[0](c=1)          → dp[1]=1
+        dp = [1,1,1,1]                  a=2: dp[2]+=dp[1](c=1)+dp[0](c=2)→ dp[2]=2
+coin 2: dp[a]+=dp[a-2] for a=2..3       a=3: dp[3]+=dp[2](c=1)+dp[1](c=2)→ dp[3]=3
+        dp[2]+=dp[0]=1→2, dp[3]+=dp[1]=1→2
+        dp = [1,1,2,2]
+answer dp[3] = 2                        answer dp[3] = 3
+  {1+1+1, 1+2}                            {1+1+1, 1+2, 2+1}
+```
+
+Coins-outer commits to using coin 1 fully before ever touching coin 2, so `1+2` and `2+1`
+can never both be produced — you get **2** combinations. Amount-outer reconsiders every coin
+at every amount, so it counts `1+2` and `2+1` separately — **3** permutations. Coin Change II
+wants combinations, so put coins on the outside.
 
 > [!WARNING]
 > In Coin Change II, swapping the loop order (amount outer, coins inner) counts *ordered*
@@ -191,6 +261,26 @@ That's `O(n²)`.
 of an increasing subsequence of length `k+1`. For each element, binary-search the first tail
 `>= x` and replace it (or append). The length of `tails` is the LIS length. `tails` is *not*
 a valid subsequence itself — only its length is meaningful.
+
+**Worked example.** Trace `tails` on `[10, 9, 2, 5, 3, 7, 101, 18]` (binary-search the first
+tail `>= x`; replace it, or append if none is `>= x`):
+
+```text
+x=10   append              tails = [10]
+x=9    replace 10 (>=9)    tails = [9]
+x=2    replace 9  (>=2)    tails = [2]
+x=5    append (no >=5)     tails = [2,5]
+x=3    replace 5  (>=3)    tails = [2,3]     ← replace, not append
+x=7    append (no >=7)     tails = [2,3,7]
+x=101  append              tails = [2,3,7,101]
+x=18   replace 101 (>=18)  tails = [2,3,7,18]
+```
+
+Final `len(tails) = 4` → LIS length **4** (e.g. `2,3,7,101`). The `x=3` step is the key
+move: `3` overwrites `5` because a length-2 subsequence ending in `3` (`2,3`) leaves more
+room to extend than one ending in `5` — that's the "smallest tail of length `k`" invariant.
+Note `tails = [2,3,7,18]` at the end is **not** an actual increasing subsequence of the input
+(`18` appears after `101` was overwritten); only its *length* is meaningful.
 
 ## LCS and edit distance
 
@@ -210,6 +300,24 @@ If `A[i-1]==B[j-1]`: `dp[i][j] = dp[i-1][j-1] + 1`; else `max(dp[i-1][j], dp[i][
     o    2  2   1   2   3   4
     s    3  3   2   2   2   3      edit("ros","horse") = 3
 ```
+
+**Reconstructing the operations (a common second-half-of-interview ask).** Start at the
+bottom-right `dp[3][5]=3` and walk back, at each cell picking the neighbor the value came
+from (`A="ros"` rows, `B="horse"` cols; we turn `A` into `B`):
+
+```text
+(3,5)=3  s vs e differ; came from insert dp[3][4]=2  → INSERT 'e'
+(3,4)=2  s vs s match;  came from diag  dp[2][3]=2   → MATCH  's'
+(2,3)=2  o vs r differ; came from insert dp[2][2]=1  → INSERT 'r'
+(2,2)=1  o vs o match;  came from diag  dp[1][1]=1   → MATCH  'o'
+(1,1)=1  r vs h differ; came from replace dp[0][0]=0 → REPLACE 'r'→'h'
+(0,0)=0  origin reached; done
+```
+
+Read forward from the origin, the ops turn `ros` into `horse`: REPLACE `r`→`h`, MATCH `o`,
+INSERT `r`, MATCH `s`, INSERT `e` — 1 replace + 2 inserts = **3 edits**, matching
+`dp[3][5]=3`. Store parent choices during the fill (or recompute the argmin on the way back)
+to recover the edit script, not just its cost.
 
 ## Grid / matrix-path DP
 
@@ -301,6 +409,31 @@ for x in nums[1:]:
     best = max(best, cur)
 return best
 ```
+
+**Worked example.** Trace on `[-2, 1, -3, 4, -1, 2, 1, -5, 4]`. `cur = max(x, cur+x)` resets
+the run whenever the previous sum would only drag `x` down:
+
+```text
+x      cur = max(x, cur+x)                 best
+-2     init                          -2    -2
+ 1     max(1, -2+1=-1)   = 1          1     1
+-3     max(-3, 1-3=-2)   = -2        -2     1
+ 4     max(4, -2+4=2)    = 4  ← reset 4     4
+-1     max(-1, 4-1=3)    = 3          3     4
+ 2     max(2, 3+2=5)     = 5          5     5
+ 1     max(1, 5+1=6)     = 6          6     6  ← best
+-5     max(-5, 6-5=1)    = 1          1     6
+ 4     max(4, 1+4=5)     = 5          5     6
+```
+
+Answer `best = 6` = subarray `[4,-1,2,1]`. Note the two resets: at `x=4` (`cur` jumps to 4
+because the prior sum `-2` would only hurt) and implicitly at `x=1` early on. That "start
+fresh vs extend" choice is the whole algorithm.
+
+> [!WARNING]
+> Initialize `best = cur = nums[0]`, **not** `0`. If every element is negative (e.g.
+> `[-3,-1,-2]`), starting `best` at `0` returns `0` — a subarray that doesn't exist — instead
+> of the correct `-1` (the least-bad single element). A classic interviewer follow-up.
 
 ## Interview Problems
 

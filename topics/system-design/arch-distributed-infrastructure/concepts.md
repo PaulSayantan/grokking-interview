@@ -117,6 +117,18 @@ graph LR
     P2 --- P4
 ```
 
+**Worked example — why "O(log N) hops" matters (1,000,000-node DHT).** In a
+structured DHT (Chord-style), each hop roughly *halves* the ID-space distance to
+the target key. Start with the whole ring of 1,000,000 nodes as candidates and
+keep halving: 1,000,000 → 500,000 → 250,000 → … → 1. That takes ⌈log₂(1,000,000)⌉
+hops, and since 2²⁰ = 1,048,576 ≈ 1M, the lookup lands on the responsible node in
+about **20 hops** — touching ~20 nodes total, with a guarantee the key is found if
+it exists. Contrast unstructured **flooding**: a peer with ~8 neighbours that
+floods to depth 4 fans out to as many as 8⁴ = 4,096 nodes for *one* query, still
+with **no guarantee** a rare item is reached. Same network — ~20 targeted messages
+with a guarantee versus thousands of broadcast messages without one. That gap is
+the entire reason DHTs exist.
+
 **Trade-offs.**
 - *Pros:* no central SPOF; capacity scales with peers; resilient to node churn;
   no central hosting cost.
@@ -169,6 +181,24 @@ call becomes a network hop that can fail, adds latency, and has no shared
 transaction (hence sagas / eventual consistency). Sharing a database across
 services produces a **distributed monolith** — the ops cost of microservices with
 none of the independence.
+
+**Worked example — a traced order, with a failure that triggers saga
+compensation.** There is no cross-service transaction, so a multi-step flow is
+stitched together with local commits plus *compensating* actions on failure.
+Trace one order where Payments fails:
+
+1. `Client → Gateway → Orders svc`: Orders writes `order #4711 = PENDING` to its
+   *own* DB and commits. (Local commit — no distributed transaction.)
+2. `Orders → Inventory svc`: reserve 2 units of SKU-9. Inventory commits
+   `reserved += 2`. Success.
+3. `Orders → Payments svc`: charge $60. The card is declined — **step fails**.
+4. There is no shared rollback, so the saga runs **compensating** steps in
+   reverse for what already committed: `Inventory.release(SKU-9, 2)` (undo step 2),
+   then `Orders.markFailed(#4711)` → `CANCELLED`.
+5. Net effect: inventory is back to its original count and the order ends
+   `CANCELLED`. The system is consistent again — but only **eventually**, and
+   there was a window where inventory showed 2 units reserved for an order that
+   never paid. That window is the price of trading a DB transaction for a saga.
 
 > [!KEY-TAKEAWAY]
 > **Deep dive: see `microservices-monolith-api-design`** (decomposition,
@@ -269,6 +299,33 @@ execution-time and memory/state limits, and **vendor lock-in** through
 proprietary triggers and services. Orchestrating multi-step workflows needs a
 state machine (e.g. Step Functions) rather than in-function loops.
 
+**Worked example — where FaaS stops being cheaper than an always-on VM.** Take a
+512 MB function (0.5 GB) that runs 100 ms (0.1 s) per call. Lambda-style pricing
+is roughly **$0.0000166667 per GB-second** of compute plus **$0.20 per 1M
+requests**:
+- compute per call = 0.5 GB × 0.1 s × $0.0000166667 = **$0.000000833**
+- request fee per call = $0.20 / 1,000,000 = **$0.000000200**
+- total ≈ **$0.00000103 per invocation**, i.e. ~**$1.03 per million calls**.
+
+Now compare a small always-on VM at ~**$30/month**. The crossover is where
+monthly invocations N satisfy N × $0.00000103 = $30 → N ≈ **29 million
+invocations/month**. Spread evenly that is ~29M / 2.6M s ≈ **11 requests/second**
+sustained. Below ~11 req/s of steady load (or for spiky traffic that sits idle
+most of the day) serverless wins because you pay nothing while idle; above it,
+the idle-free VM you're already fully utilizing is cheaper. This is exactly why
+"spiky/low-baseline → serverless, steady high-throughput → provisioned compute"
+is the right instinct.
+
+> [!WARNING]
+> **Concurrency limits and downstream connection storms.** Auto-scaling to
+> thousands of concurrent function instances can *melt the database behind them*:
+> if each of 5,000 concurrent invocations opens one connection, that's 5,000
+> connections against an RDS instance capped near a few hundred — a thundering
+> herd that exhausts the pool. Mitigations: a managed connection proxy (e.g. RDS
+> Proxy) to multiplex connections, reserved/maximum-concurrency caps to throttle
+> the fan-out, and **provisioned concurrency** to pre-warm instances and remove
+> cold-start latency on the hot path.
+
 > [!KEY-TAKEAWAY]
 > **Deep dive: see `aws-serverless-lambda-stepfunctions`** (Lambda execution
 > model, Step Functions orchestration) and **`aws-compute-ec2-fargate-lambda`**
@@ -299,6 +356,15 @@ to implement event consumers).
 **Problem it solves:** Sustain **extreme, spiky, high-volume concurrent load** by
 removing the central database from the request path — the usual scalability
 bottleneck — using replicated in-memory data instead.
+
+**Intuition.** Picture a **shared in-memory whiteboard** replicated onto every
+worker: because each worker already has the full working set in RAM, *any* worker
+can serve *any* request without ever calling the database. The four "grids" are
+just the plumbing around that whiteboard — one routes work to workers, one *is*
+the replicated whiteboard, one coordinates work that spans workers, and one
+spins workers up and down. The term **tuple space** comes from the Linda /
+JavaSpaces model: a shared associative memory that processes read from and write
+to by pattern, like a blackboard nobody owns.
 
 **How it works / key components.** Named after the **tuple space** / in-memory
 data grid idea. Requests hit stateless **processing units (PUs)** that keep the
@@ -332,6 +398,18 @@ flowchart TD
 persisting asynchronously, throughput scales near-linearly and the DB stops being
 the bottleneck. The in-memory-grid *mechanics* (replication, eviction, cache
 coherence) overlap heavily with caching.
+
+**Worked example — throughput scaling and the data-loss window.** Say one PU
+serves 5,000 req/s from memory. Because requests are served from replicated RAM,
+not a shared DB, adding PUs adds throughput almost linearly: 4 PUs ≈ 20,000 req/s,
+10 PUs ≈ 50,000 req/s — the DB is off the request path, so there's no central
+bottleneck to saturate. The cost lives in the **write-behind lag**. Suppose the
+grid takes 10,000 writes/s and the async data writer flushes to the backing DB
+every 4 seconds. At any instant up to 10,000 writes/s × 4 s = **40,000 writes**
+exist *only* in memory, not yet durable. If a PU (and its replicas) is lost inside
+that window, those ~40,000 updates are gone — that 4-second lag is your concrete
+data-loss exposure, and it's exactly why this style is disqualified for a
+financial ledger but fine for a gaming leaderboard.
 
 > [!KEY-TAKEAWAY]
 > **Deep dive: see `caching-and-cdn`** and **`aws-caching-elasticache-dax`** for
@@ -382,6 +460,22 @@ flowchart LR
 **Architectural treatment (overview only).** The broker absorbs load spikes
 (buffering), enables fan-out (pub/sub), and lets producers and consumers scale and
 fail independently. The cost is a new critical piece of infra to run and monitor.
+
+**Worked example — at-least-once redelivery, and why the consumer must be
+idempotent.** Most brokers guarantee *at-least-once* delivery: a message is
+redelivered until the consumer acknowledges it, so a lost ack means a duplicate.
+Trace it for a "charge $60" message with `messageId = m-88`:
+
+1. Broker delivers `m-88`. Consumer charges $60 and writes the charge — but
+   **crashes before sending the ack**.
+2. The unacked message stays on the queue; the broker redelivers `m-88`.
+3. A *naive* consumer charges $60 **again** → the customer is billed $120.
+4. An **idempotent** consumer keeps a processed-set keyed by `messageId`: on the
+   redelivery it sees `m-88` is already recorded, skips the charge, and just
+   re-acks. Net effect: charged once, even though the message arrived twice.
+
+The dedup key is the fix — at-least-once delivery makes duplicates a *when*, not
+an *if*, so idempotency is mandatory, not optional.
 
 > [!KEY-TAKEAWAY]
 > **Deep dive: see `message-queues-and-async`** for queues vs pub/sub, delivery
@@ -496,6 +590,30 @@ single fault can affect (e.g. 1 of N cells = 1/N blast radius) and allow
 incremental, per-cell deployments (canary a new version to one cell). The router
 must itself be simple and highly available or it becomes the SPOF.
 
+**Worked example — blast radius with 20 cells.** Put 1,000,000 customers behind
+**20 cells**, ~50,000 customers each. Now a poison request or a bad deploy takes
+down a cell:
+- *Without* cells (one big fleet): the fault hits the shared stack → **100%** of
+  customers (all 1,000,000) affected.
+- *With* 20 cells: the fault is contained to its cell → 50,000 / 1,000,000 =
+  **5%** (1/20) affected; the other 19 cells serve normally.
+
+Deploys use the same math: canary the new version to **one** cell first. If it's
+bad, the blast radius is that one cell (5%), and you roll back before touching the
+remaining 19. Going from 20 → 50 cells shrinks the worst case further to 1/50 =
+2% — you buy isolation by adding cells, at the cost of more duplicated capacity.
+
+**Keeping the router from becoming the SPOF.** The reason a bad router would undo
+everything is that *every* request passes through it, so a router outage is a
+100%-blast-radius event — the exact thing cells exist to prevent. The standard
+resolution is to keep the routing layer a **thin, deterministic mapping** (e.g. a
+static `customerId → cell` table or a hash), with **no per-request business
+logic** and no shared mutable state, so it can be replicated widely and cached at
+the edge. The genuinely hard part is **cross-cell rebalancing/migration**: moving
+a customer from an overloaded cell to another means moving their data while
+keeping the mapping consistent, so teams add cells (and split traffic) far more
+often than they migrate existing tenants between cells.
+
 > [!KEY-TAKEAWAY]
 > **Deep dive: see `resilience-tradeoffs-deep-dive`** (bulkhead / blast-radius
 > containment) and **`aws-resilience-multiregion-dr`** (cell-based, zonal/regional
@@ -551,6 +669,15 @@ flowchart TD
 control and gives uniform observability and zero-trust security without editing
 each service. The cost is a proxy hop per call (latency + CPU/memory) and a
 non-trivial platform to operate.
+
+> [!INTERVIEW]
+> **"What's new in service mesh?"** The per-instance sidecar's latency and
+> resource overhead is exactly what motivated **sidecar-less / ambient meshes**:
+> Istio *ambient mode* and eBPF-based **Cilium** move L4 handling into a shared
+> node-level component (and handle L7 only where needed), so most calls avoid a
+> dedicated per-pod proxy hop. The trade-off is weaker per-instance isolation and
+> a fuzzier security boundary in exchange for lower overhead — naming this keeps
+> the answer from sounding a version behind.
 
 > [!KEY-TAKEAWAY]
 > The **Sidecar** and **Ambassador** building blocks are object/deployment-level
@@ -660,6 +787,12 @@ All core styles on shared axes. "Coupling" = producer↔consumer / service↔ser
 | **Cell-Based** | Scales by adding cells | Low (isolated) | High (routing) | Per-cell | Per-cell (strong within) | High-availability, blast-radius-sensitive |
 | **Service Mesh** | Inherits fleet | Low (transparent infra) | High (control plane) | Per-service + sidecar | N/A (transport layer) | Large polyglot service fleets |
 | **Micro-Frontends** | UI teams scale | Low (per fragment) | Medium–high | Per-fragment | N/A (presentation) | Multi-team large web UIs |
+
+> *Footnote:* **Service Mesh** (transport-layer infrastructure) and
+> **Micro-Frontends** (presentation tier) are **cross-cutting styles, not
+> end-to-end topologies** — they layer onto whatever system runs beneath them. So
+> their `N/A` / "Inherits fleet" / "UI teams scale" cells are N/A *by nature*, not
+> gaps; don't read the blanks as missing data.
 
 ---
 

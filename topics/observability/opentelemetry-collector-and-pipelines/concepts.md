@@ -46,6 +46,20 @@ optional but strongly recommended intermediary. The value:
 > in production. Direct-to-backend export is fine for a demo or a tiny service; at scale the
 > Collector is table stakes.
 
+**Worked example — what "reduce egress" is worth.** Take one service emitting **10,000 spans/s**,
+each ~**1 KB** serialized OTLP protobuf → **10 MB/s** = 10 MB/s × 86,400 s = **864 GB/day** of raw
+telemetry. If that crosses a region/backend boundary billed at **~$0.02/GB**, exporting it straight
+from the SDK costs 864 × $0.02 = **$17.28/day ≈ $518/month** — just to move the bytes. Route it
+through a Collector and stack the wins:
+
+| Stage | Bytes/day | Cross-region cost/month |
+|---|---|---|
+| Direct SDK export (raw, no batch) | 864 GB | ~$518 |
+| + `batch` and gzip (~8× on repeated span structure) | ~108 GB | ~$65 |
+| + drop 90% via head/tail sampling | ~11 GB | ~$6.50 |
+
+Same telemetry, **~80× cheaper egress**, and the app never paid the compression/retry CPU.
+
 ## Collector architecture: receivers, processors, exporters
 
 The Collector is built from four component *kinds* plus **extensions**. Data flows left to right:
@@ -147,6 +161,40 @@ Two processors appear in almost every production pipeline, and **their order mat
 Recommended baseline order: `memory_limiter` → (sampling/filter/transform) → `attributes/resource`
 → `batch`. Put `batch` late so it batches the *final* shape of data.
 
+**Worked example — how much batching actually buys you.** Same 10,000 spans/s. Un-batched, the
+exporter opens roughly **one gRPC request per span** → **10,000 requests/s**, each carrying its own
+HTTP/2 framing, and gzip on a single ~1 KB message barely compresses (the dictionary never fills).
+Now add:
+
+```yaml
+processors:
+  batch:
+    send_batch_size: 8192      # flush when 8192 spans accumulate...
+    timeout: 200ms             # ...or every 200ms, whichever comes first
+```
+
+At 10,000 spans/s the 200 ms timer fires first (10,000 × 0.2 = 2,000 spans < 8,192), so you flush
+**~5 batches/s** — **10,000 → 5 requests/s, a 2,000× drop** in request count. And because the 2,000
+spans in a batch share attribute *keys* (`http.method`, `service.name`, `k8s.pod.name` repeat over
+and over), gzip's dictionary now has real redundancy to exploit and typically reaches **~5–10×**
+compression, versus ~1× on the lone tiny messages. That single processor is where the 864 GB → ~108
+GB egress line in the table above comes from.
+
+**Worked example — sizing `memory_limiter`.** The soft limit is `limit_mib - spike_limit_mib`:
+
+```yaml
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 4000          # hard limit
+    spike_limit_mib: 800     # headroom for a single check-interval spike
+    # → soft limit = 4000 - 800 = 3200 MiB
+```
+
+At ~**3,200 MiB** the limiter starts **refusing** data (backpressure to receivers); at **4,000 MiB**
+it forces GC. Pair it with `GOMEMLIMIT` at ~80% of the hard limit — 0.8 × 4000 = **3,200 MiB** — so
+the Go runtime GCs aggressively as you approach the ceiling instead of letting the heap sail past it.
+
 > [!KEY-TAKEAWAY]
 > `memory_limiter` first (protect the process), `batch` last (ship efficiently). Batching before
 > dropping wastes CPU on data you discard; batching before `memory_limiter` means memory is already
@@ -226,7 +274,12 @@ without leaving the Collector. Key connectors:
 
 - **`spanmetrics`** — consumes **traces**, produces **metrics** (RED metrics: request rate, error
   rate, duration histograms per service/operation). Exporter side sits in a traces pipeline;
-  receiver side feeds a metrics pipeline.
+  receiver side feeds a metrics pipeline. **Gotcha:** each `dimensions` entry becomes a metric
+  **label**, and the series count is the *product* of label cardinalities. Keep dimensions bounded —
+  `service.name` (50) × `operation` (20) × `status_code` (3) = **3,000 series**, fine. Add a raw
+  `http.url` carrying path params or a `user.id` and cardinality explodes into the millions and
+  melts your metrics backend. Normalize to `http.route` (`/users/{id}`) and never put unbounded
+  attributes in `dimensions` (see `sampling-cardinality-and-telemetry-cost-management`).
 - **`routing`** — reads an attribute and routes to different downstream pipelines (e.g. by tenant
   or `deployment.environment`).
 - **`forward`** — plumbing to merge/split pipelines.
@@ -288,8 +341,10 @@ central control point and a small, stable set of backend connections.
 
 Sampling comes in two flavors (see also `sampling-cardinality-and-telemetry-cost-management`):
 
-- **Head sampling** — decide at the start of a trace, in the SDK, before you know the outcome
-  (e.g. keep 10%). Cheap, but you might discard the very trace that errored.
+- **Head sampling** — decide at the start of a trace, before you know the outcome (e.g. keep 10%).
+  Usually done in the SDK, but the Collector can also head-sample via the `probabilistic_sampler`
+  processor (useful when you don't control the SDK). Cheap, but you might discard the very trace
+  that errored.
 - **Tail sampling** — decide **after** the trace completes, so you can keep traces that are
   slow or errored and drop boring fast ones. Done in the Collector via the **`tail_sampling`
   processor** with policies (`status_code`, `latency`, `probabilistic`, `string_attribute`, ...).
@@ -318,6 +373,40 @@ hashes each trace ID to one tier-2 collector**, guaranteeing every span of a tra
 same tail-sampling instance. Tier 2 runs `tail_sampling`. Because tail sampling **buffers spans
 until the trace is complete** (a decision wait window), it costs memory and adds latency to the
 export of that trace — size the buffer and window carefully.
+
+```yaml
+processors:
+  tail_sampling:
+    decision_wait: 10s                 # how long to buffer a trace before deciding
+    num_traces: 100000                 # max traces held in memory at once
+    expected_new_traces_per_sec: 5000  # hint for pre-allocating the buffer map
+    policies:
+      - name: keep-errors
+        type: status_code
+        status_code: { status_codes: [ERROR] }
+      - name: keep-slow
+        type: latency
+        latency: { threshold_ms: 500 }
+      - name: sample-rest
+        type: probabilistic
+        probabilistic: { sampling_percentage: 5 }
+```
+
+**Worked example — why it's memory-bound.** With **5,000 traces/s** arriving and a **10 s**
+`decision_wait`, at steady state you are holding roughly 5,000 × 10 = **50,000 in-flight traces**
+(so `num_traces: 100000` leaves 2× headroom). If an average trace is **20 spans × ~1 KB = ~20 KB**,
+the sampling buffer alone needs 50,000 × 20 KB = **~1 GB** of RAM — before batches, queues, or the
+`memory_limiter` overhead. Double `decision_wait` to 20 s and the buffer doubles to ~2 GB. This is
+why you provision tail-sampling collectors on memory, not CPU, and why the `decision_wait` window is
+a direct memory-vs-completeness knob.
+
+> [!WARNING]
+> On a tier-2 membership change (scale-up, scale-down, or a pod restart), the `loadbalancing`
+> exporter's consistent-hash ring **reshards** — a slice of trace IDs remaps to different tier-2
+> instances. Traces in flight during the reshuffle get **split** across the old and new owner, so
+> they briefly hit the exact partial-decision failure the tier exists to prevent. Mitigate with
+> slow/stable scaling, a stable resolver (e.g. headless-service DNS or k8s endpoint resolver), and
+> accepting a small transient sampling error during rescales rather than autoscaling aggressively.
 
 > [!WARNING]
 > Running `tail_sampling` on a plain multi-replica gateway **without** a trace-ID load-balancing
@@ -350,10 +439,19 @@ exporters:
       max_elapsed_time: 300s
 ```
 
+**Worked example — how long does the queue actually buffer?** `queue_size` counts **batches**
+waiting to be exported (not individual spans; the unit has shifted across versions, so pin it to
+your release). With `queue_size: 5000` and the `batch` processor flushing ~**5 batches/s** (from the
+batching example above), a full queue holds 5000 ÷ 5 = **1,000 seconds ≈ 16.7 minutes** of backend
+outage before it saturates and starts shedding. Want to ride out a 1-hour outage at that rate? You
+need ~3,600 × 5 = **18,000** slots — and enough memory (or `file_storage` disk) to hold them.
+
 The chain of defense against a backend outage: **retry** (transient) → **queue** (absorb) →
 **persistent queue** (survive restart) → **memory_limiter** (protect the process) → **drop**
-(last resort). A pure in-memory queue loses data on crash; use `file_storage` for at-least-once
-durability.
+(last resort). A pure in-memory queue loses data on crash; use `file_storage` for durability — but
+note it is **at-least-once**: after a crash, batches that were exported but not yet acked are
+replayed on restart, so the backend can see **duplicates**. Say "at-least-once, dedupe downstream,"
+not "exactly-once," when an interviewer probes durability.
 
 ## Scaling the Collector
 
@@ -367,7 +465,10 @@ durability.
 - Watch the Collector's **own** telemetry: `otelcol_exporter_send_failed_spans`,
   `otelcol_processor_dropped_spans`, `otelcol_exporter_queue_size` vs `queue_capacity`,
   `otelcol_processor_refused_*` (memory_limiter refusals). Rising refused/dropped/queue-full
-  metrics mean you are under-provisioned or the backend is slow.
+  metrics mean you are under-provisioned or the backend is slow. (These `otelcol_*` names are the
+  classic Prometheus-style form; the Collector's internal telemetry has been migrating to
+  OTLP-native names/format, so exact names/prefixes are **version-dependent** — check your release's
+  internal-telemetry docs before you build alerts on a specific string.)
 
 > [!KEY-TAKEAWAY]
 > Stateless gateway components scale trivially; **stateful** ones (tail sampling, group-by-trace)
@@ -391,6 +492,11 @@ durability.
 - **Q: Head vs tail sampling trade-off?** Head is cheap and stateless but blind to outcome (may drop
   the error). Tail is outcome-aware (keep errors/slow) but needs to buffer whole traces → memory,
   latency, and the load-balancing requirement.
+- **Q: What happens to the tail-sampling tier when it scales up or down?** The `loadbalancing`
+  exporter's consistent-hash ring reshards on membership change, so a fraction of in-flight traces
+  briefly split across the old and new owner and produce partial decisions — the same failure the
+  tier prevents at steady state. Scale slowly/stably, use a stable resolver, and accept a small
+  transient error rather than autoscaling aggressively.
 - **Q: How do I send telemetry to two backends?** List both exporters in one pipeline (fan-out
   copies to each). For *different* subsets per backend, use separate pipelines or a routing
   connector.

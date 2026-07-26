@@ -13,9 +13,9 @@ questions:
       throughput compared to an in-place B-tree?
     options:
       - "It turns random writes into sequential writes by appending to an in-memory table and flushing immutable sorted files"
-      - "It compresses every write before storing it, reducing bytes on disk"
-      - "It writes each row to a single fixed page location, avoiding any duplication"
-      - "It skips the write-ahead log, so commits never touch disk"
+      - "It compresses every write with a dictionary codec before storing it, cutting the total bytes that reach disk"
+      - "It writes each row to a single fixed page location on disk, so no key is ever duplicated across files"
+      - "It skips the write-ahead log entirely, so a commit never has to touch the disk at all"
     answer: 0
     explanation: |
       LSM buffers writes in a sorted in-memory memtable and periodically flushes
@@ -32,10 +32,10 @@ questions:
       In an LSM engine, how is a delete of an existing key handled, and why can
       deleting a key be surprisingly problematic?
     options:
-      - "The key's SSTable entry is overwritten in place immediately, so deletes are cheap"
-      - "The key is removed from the bloom filter, which guarantees it can never be read again"
+      - "The key's entry is located in its SSTable and overwritten in place with a null marker immediately, so deletes cost the same as a single point read"
+      - "The key is cleared from every level's bloom filter, which guarantees the engine can never surface that key on any subsequent read"
       - "A tombstone marker is appended; the key is only physically removed once compaction merges past all older copies, and dropping tombstones too early can resurrect data"
-      - "The engine rewrites every SSTable synchronously on delete to purge the key"
+      - "The engine rewrites every SSTable synchronously at delete time to physically purge the key from all levels before the call returns"
     answer: 2
     explanation: |
       Because SSTables are immutable, a delete writes a tombstone. Older versions in
@@ -55,9 +55,9 @@ questions:
       memtable and 8 SSTables across levels. Without any auxiliary structures, what
       is the worst-case read cost, and what primarily mitigates it?
     options:
-      - "O(1) always, because the memtable answers every read"
-      - "It touches only the newest SSTable, because SSTables are globally sorted"
-      - "It requires a full compaction to answer, so reads block on background merges"
+      - "O(1) always, because the memtable holds an index of every key and answers every point read without touching disk"
+      - "It touches only the single newest SSTable, because all SSTables share one globally sorted keyspace across every level"
+      - "It requires a full compaction pass to answer, so every point read blocks until the background merge threads finish"
       - "It touches every SSTable (read amplification ~ number of sorted runs); per-SSTable bloom filters let it skip files that definitely lack the key"
     answer: 3
     explanation: |
@@ -75,10 +75,10 @@ questions:
       Under sustained write load, an LSM engine like RocksDB may start throttling or
       stalling writes. What is the underlying cause?
     options:
-      - "The bloom filters have filled up and can no longer accept new keys"
+      - "The bloom filters have saturated their bit arrays and can no longer accept new keys until they are rebuilt"
       - "The incoming write rate outruns compaction throughput, so sorted runs pile up and the engine applies backpressure to protect read latency and space"
-      - "The WAL has become read-only after the first checkpoint"
-      - "The memtable switched to a B-tree layout, which cannot absorb writes"
+      - "The WAL segment has become read-only after the engine took its first checkpoint, blocking further appends"
+      - "The memtable transparently switched to a B-tree page layout that cannot absorb incoming writes without splitting"
     answer: 1
     explanation: |
       If writes arrive faster than background compaction can merge runs, the number
@@ -95,10 +95,10 @@ questions:
       An LSM-backed service shows a stable p50 but periodic p999 latency spikes
       every few minutes. Which explanation is most consistent with LSM internals?
     options:
-      - "The WAL fsync latency randomly increases and decreases with no external cause"
-      - "Bloom filter false positives are clustering in time, blocking reads"
+      - "The WAL fsync latency randomly oscillates up and down on its own with no external cause or correlated trigger"
+      - "Bloom filter false positives are clustering together in time, periodically blocking whole batches of reads at once"
       - "Large background compactions periodically saturate disk I/O and CPU, delaying foreground reads/writes and inflating tail latency"
-      - "The memtable is being read-locked during every point query"
+      - "The memtable is taking an exclusive read-lock during every point query, serializing all concurrent readers behind it"
     answer: 2
     explanation: |
       Compaction is a periodic, I/O- and CPU-heavy background task; a big merge can
@@ -116,8 +116,8 @@ questions:
       Which definition of write amplification is correct for an LSM store?
     options:
       - "The ratio of bytes physically written to disk to the bytes of user data written, inflated because compaction rewrites data repeatedly"
-      - "The ratio of read requests to write requests over a time window"
-      - "The number of replicas a write must reach before it is acknowledged"
+      - "The ratio of read requests to write requests measured over a rolling time window on the store"
+      - "The number of replicas a write must synchronously reach before the coordinator acknowledges it to the client"
       - "The extra disk space consumed by obsolete versions that have not been reclaimed"
     answer: 0
     explanation: |
@@ -154,9 +154,9 @@ questions:
       Why does size-tiered compaction (STCS) typically require significant free disk
       headroom, sometimes ~2x the size of the data being merged?
     options:
-      - "It stores every key twice for redundancy by design"
-      - "It writes the entire dataset to the WAL before each compaction"
-      - "Bloom filters for size-tiered require double the memory of leveled"
+      - "It deliberately stores every key twice in separate runs for redundancy, doubling the on-disk footprint by design"
+      - "It flushes the entire dataset to the write-ahead log before each compaction, so free space must cover a full copy"
+      - "Bloom filters under size-tiered compaction are provisioned at double the bits-per-key of leveled, doubling filter memory"
       - "Merging similarly-sized runs transiently holds both the input SSTables and the new merged output on disk at once, and obsolete versions linger across many coexisting runs"
     answer: 3
     explanation: |
@@ -176,9 +176,9 @@ questions:
       latency are the top concerns. Which compaction choice best fits, and why?
     options:
       - "Size-tiered, because its low write amplification maximizes SSD endurance regardless of read cost"
-      - "FIFO/TTL, because it minimizes all amplifications for any workload"
+      - "FIFO/TTL, because it simultaneously minimizes read, write, and space amplification for essentially any workload shape"
       - "Leveled, because its low read and space amplification directly serve read latency and disk-cost goals, accepting higher write amplification the moderate write rate can absorb"
-      - "Disable compaction entirely to avoid any background I/O"
+      - "Disable compaction entirely to eliminate all background I/O, letting every SSTable stay untouched on the NVMe"
     answer: 2
     explanation: |
       Read latency and disk cost point to leveled's low read and space amplification;
@@ -196,9 +196,9 @@ questions:
       Why do B+trees remain the default storage structure for read-heavy OLTP
       relational databases?
     options:
-      - "They never require a write-ahead log"
-      - "They turn all writes into sequential appends"
-      - "They store multiple versions of each key to speed up reads"
+      - "They never require a write-ahead log, because in-place page updates are inherently crash-atomic on disk"
+      - "They turn all incoming writes into sequential appends at the end of a single growing data file"
+      - "They store multiple versions of each key inline in the leaf pages to speed up concurrent reads"
       - "They keep data sorted in a shallow balanced tree so point and range reads take only a few page accesses, and each key lives in exactly one place"
     answer: 3
     explanation: |
@@ -218,9 +218,9 @@ questions:
       against?
     options:
       - "Torn pages: a crash during a multi-sector page write leaving a partially written 8 KB page that WAL redo alone cannot repair"
-      - "Bloom filter false positives during recovery"
-      - "Transaction-id wraparound in the visibility map"
-      - "Write skew between two concurrent transactions"
+      - "Bloom filter false positives that arise while replaying the log during crash recovery"
+      - "Transaction-id wraparound corrupting the visibility map as the 32-bit counter approaches its limit"
+      - "Write skew between two concurrent transactions that each read and update disjoint rows"
     answer: 0
     explanation: |
       The OS/disk atomic write unit (512 B or 4 KB) can be smaller than an 8 KB page,
@@ -237,10 +237,10 @@ questions:
       What causes write amplification and fragmentation in a B+tree under an
       insert-heavy workload?
     options:
-      - "Bloom filters being rebuilt on every insert"
+      - "Per-page bloom filters being fully rebuilt from scratch on every single insert into the tree"
       - "Inserting into a full page triggers a page split that rewrites and reorganizes pages, and repeated splits leave pages partially filled"
-      - "The WAL being truncated after each insert"
-      - "Compaction merging SSTables in the background"
+      - "The write-ahead log being truncated and re-created synchronously after each individual insert"
+      - "Background compaction threads repeatedly merging the tree's SSTables into larger sorted runs"
     answer: 1
     explanation: |
       When a leaf page is full, an insert splits it into two pages, rewriting data and
@@ -258,9 +258,9 @@ questions:
       write-bound and its SSD is wearing. Which change is best justified?
     options:
       - "Move to an LSM engine: sequential writes and good compression suit the ingest rate and SSD endurance, with time-partitioning for the range reads"
-      - "Increase B+tree page size to 64 KB to absorb more writes per page"
-      - "Add more secondary indexes so the B+tree can answer reads without scanning"
-      - "Switch to synchronous replication to reduce write amplification"
+      - "Increase the B+tree page size to 64 KB so each page absorbs many more sensor writes before it must split"
+      - "Add several more secondary indexes so the B+tree can answer the recent-range reads without ever scanning the heap"
+      - "Switch to synchronous multi-replica replication, which lowers the store's write amplification under the ingest load"
     answer: 0
     explanation: |
       High sustained ingest, compressible data, and SSD-endurance concern are exactly
@@ -296,9 +296,9 @@ questions:
       Through the RUM lens, what does adding bloom filters to an LSM engine actually
       do?
     options:
-      - "It repeals the RUM conjecture by improving read, update, and memory at once"
-      - "It reduces update overhead at the cost of read overhead"
-      - "It eliminates space amplification by discarding old versions"
+      - "It repeals the RUM conjecture entirely by improving read, update, and memory overhead all at the same time"
+      - "It reduces update overhead by batching key insertions, at the direct cost of higher read overhead on lookups"
+      - "It eliminates space amplification by letting the engine discard obsolete key versions as soon as they are filtered"
       - "It reduces read overhead by spending additional memory, an explicit read-for-memory trade"
     answer: 3
     explanation: |
@@ -316,10 +316,10 @@ questions:
       latency, write throughput, AND space efficiency versus both B-trees and LSM.
       What is the most defensible senior response?
     options:
-      - "Accept it; modern hardware makes the RUM conjecture obsolete"
+      - "Accept it at face value; fast modern NVMe and large RAM have made the RUM conjecture obsolete for real systems"
       - "Be skeptical: RUM says you optimize at most two of read/update/memory, so probe which overhead they actually sacrificed or which workload assumption hides the cost"
-      - "Reject it outright; no index can ever beat a B-tree on reads"
-      - "Assume they mean it only for append-only workloads and move on"
+      - "Reject it outright; no index structure can ever beat a well-tuned B-tree on read latency under any workload"
+      - "Assume they can only mean it for narrow append-only workloads and move on without probing the claim further"
     answer: 1
     explanation: |
       RUM predicts a hidden trade-off; the right move is to interrogate which overhead
@@ -336,10 +336,10 @@ questions:
       What guarantee does a bloom filter provide when it reports that a key is NOT in
       a set?
     options:
-      - "The key might still be present (false negatives are possible)"
-      - "The key is definitely present"
+      - "The key might still actually be present, because a bloom filter is allowed to report false negatives on membership"
+      - "The key is definitely present in the set, and no confirming lookup against the underlying data is ever required"
       - "The key is definitely not present (no false negatives), though a 'present' answer can be a false positive"
-      - "The answer is only probabilistic in both directions"
+      - "The answer is only probabilistic in both directions, so a 'not present' verdict must still be double-checked on disk"
     answer: 2
     explanation: |
       Bloom filters have no false negatives: a "not present" answer is certain, which
@@ -373,10 +373,10 @@ questions:
       `WHERE k BETWEEN a AND b` in an LSM store, and what is the practical
       consequence?
     options:
-      - "Bloom filters accelerate ranges perfectly, so there is no consequence"
+      - "Bloom filters index the min and max key of every SSTable, so a range scan prunes files perfectly and pays no read-amplification cost"
       - "Bloom filters answer only equality/membership, not ranges, so every candidate SSTable must still be opened; range-heavy LSM workloads keep suffering read amplification"
-      - "Range queries always hit the memtable only, so the filter is irrelevant"
-      - "Bloom filters return false negatives on ranges, corrupting results"
+      - "Range queries in an LSM store are always answered entirely from the memtable's sorted skiplist, so the on-disk filters are never even consulted"
+      - "Bloom filters occasionally return false negatives on range predicates, so the engine silently drops matching keys and corrupts the result set"
     answer: 1
     explanation: |
       A bloom filter tests membership of a single key, not whether any key in a range
@@ -393,9 +393,9 @@ questions:
       A workload deletes a large contiguous key range, then range-scans nearby keys
       and finds the scans have become very slow. What is the most likely cause?
     options:
-      - "The bloom filters now return only false positives"
-      - "The WAL grew and now must be replayed on every scan"
-      - "The memtable was promoted to a B+tree"
+      - "The bloom filters have entered a degenerate state and now return only false positives on every probe"
+      - "The write-ahead log has grown so large it must be fully replayed before each range scan can return"
+      - "The memtable was transparently promoted to an on-disk B+tree, adding page-split overhead to each scan"
       - "Accumulated tombstones from the range delete must be scanned during range queries until compaction physically clears them"
     answer: 3
     explanation: |
@@ -413,10 +413,10 @@ questions:
     question: |
       What is the fundamental invariant enforced by write-ahead logging?
     options:
-      - "Data pages are flushed to disk before their log records"
-      - "The log is written only during checkpoints"
+      - "Data pages are flushed to disk before their matching log records are ever written"
+      - "Log records are buffered and written to disk only during periodic checkpoints"
       - "The log record for a change reaches durable storage before the corresponding data page is written"
-      - "Only committed transactions are ever logged"
+      - "Only fully committed transactions are ever recorded in the log, never in-flight ones"
     answer: 2
     explanation: |
       WAL requires the log record to be durable before (ahead of) the data page, so a
@@ -433,9 +433,9 @@ questions:
       Group commit batches many transactions' log records into a single fsync. What
       is the essential trade-off it makes?
     options:
-      - "It reduces durability guarantees in exchange for lower latency"
-      - "It increases both latency and throughput with no downside"
-      - "It eliminates the need for a WAL entirely"
+      - "It weakens durability by fsyncing only one transaction per batch, in exchange for uniformly lower commit latency"
+      - "It increases both individual commit latency and aggregate throughput at the same time, with no accompanying downside"
+      - "It removes the need for a write-ahead log entirely by treating the batched fsync as the durability record"
       - "It slightly increases per-commit latency (waiting to batch) in exchange for much higher aggregate commit throughput"
     answer: 3
     explanation: |
@@ -454,9 +454,9 @@ questions:
       throughput, and how does group commit change it?
     options:
       - "~200 commits/sec; group commit can multiply this by the number of commits sharing each fsync window"
-      - "~5,000 commits/sec; group commit cannot improve it"
-      - "Unlimited; fsync latency does not bound commit rate"
-      - "~1 commit/sec regardless of batching"
+      - "~5,000 commits/sec, since the fsync pipeline overlaps ten flushes at once, and group commit cannot improve it further"
+      - "Effectively unlimited, because fsync latency runs in the background and never bounds the serialized commit rate"
+      - "~1 commit/sec regardless of batching, since each fsync must also await a full checkpoint to complete"
     answer: 0
     explanation: |
       1 / 5 ms = 200 commits/sec per serialized fsync stream. Group commit lets, say,
@@ -473,10 +473,10 @@ questions:
       Postgres) is proposed to boost commit throughput on a financial ledger. Why is
       this dangerous here, and when is it acceptable?
     options:
-      - "It is always safe; these settings only affect performance, not correctness"
+      - "It is always safe; these settings only tune background flush timing and never affect commit correctness or durability"
       - "It makes commits ack before the log is durably fsynced, so a crash can lose recently 'committed' transactions — unacceptable for a ledger, but reasonable for tolerant workloads like bulk analytics ingest"
-      - "It disables MVCC, causing dirty reads on the ledger"
-      - "It forces serializable isolation, which slows the ledger unacceptably"
+      - "It disables MVCC row versioning on the ledger, exposing readers to dirty reads of uncommitted balances"
+      - "It silently forces every ledger transaction up to serializable isolation, throttling commit throughput unacceptably"
     answer: 1
     explanation: |
       Relaxed flush modes acknowledge commits before the redo/WAL is durable, so a
@@ -494,9 +494,9 @@ questions:
       What is the central benefit MVCC provides for concurrent access?
     options:
       - "Readers see a consistent snapshot without blocking writers, and writers create new versions without blocking readers"
-      - "It guarantees serializable isolation with zero overhead"
-      - "It removes the need for a write-ahead log"
-      - "It ensures every transaction sees the latest committed value of every row"
+      - "It guarantees fully serializable isolation with essentially zero concurrency-control overhead"
+      - "It removes the need for a write-ahead log by keeping every version durable in memory"
+      - "It ensures every transaction always sees the very latest committed value of every row it touches"
     answer: 0
     explanation: |
       MVCC keeps multiple row versions so readers get a stable snapshot while writers
@@ -513,10 +513,10 @@ questions:
       In Postgres MVCC, how does an UPDATE affect the physical storage of a row, and
       what determines whether a given transaction sees a version?
     options:
-      - "It overwrites the row in place; visibility is determined by a row-level lock"
-      - "It deletes the row and inserts into a separate table; visibility is random"
+      - "It overwrites the existing tuple in place and records the change in undo; visibility is decided by acquiring a row-level exclusive lock during the read"
+      - "It deletes the old row and inserts the new one into a hidden shadow table; a background daemon then decides row visibility at random"
       - "It writes a new tuple and marks the old tuple's xmax; visibility depends on whether the version's xmin is committed and within the transaction's snapshot and its xmax is not"
-      - "It appends only to the WAL; the heap is never changed until vacuum"
+      - "It appends the change only to the write-ahead log; the heap page itself is never physically modified until the next vacuum pass rewrites it"
     answer: 2
     explanation: |
       Postgres creates a new tuple and stamps the old one's xmax (the superseding
@@ -533,9 +533,9 @@ questions:
       InnoDB and Oracle implement MVCC differently from Postgres. Which statement is
       accurate?
     options:
-      - "They store every version inline in the heap exactly like Postgres, with no undo log"
-      - "They do not support snapshot reads at all"
-      - "They avoid MVCC by locking every reader"
+      - "They store every historical version inline in the heap exactly like Postgres, keeping no separate undo or rollback log at all"
+      - "They do not support snapshot reads at all, so every SELECT observes the newest committed row directly"
+      - "They avoid MVCC entirely by taking a shared read lock on every reader, serializing readers behind concurrent writers"
       - "They keep the current row in place and reconstruct older snapshot versions from an undo/rollback log, which is why Oracle can raise 'snapshot too old' when undo is recycled"
     answer: 3
     explanation: |
@@ -553,10 +553,10 @@ questions:
       Which set of anomalies does snapshot isolation (SI) prevent, and which does it
       still allow?
     options:
-      - "Prevents all anomalies including write skew, making it equivalent to serializable"
+      - "Prevents every known anomaly including write skew and lost update, making it exactly equivalent to true serializable isolation"
       - "Prevents dirty reads, non-repeatable reads, and phantoms for the reader's view, and prevents lost updates via first-committer-wins, but still allows write skew"
-      - "Prevents only dirty reads; allows everything else including non-repeatable reads"
-      - "Prevents write skew but allows dirty reads"
+      - "Prevents only dirty reads while permitting everything else, including non-repeatable reads, phantoms, and lost updates within a transaction"
+      - "Prevents write skew through predicate locking but still exposes readers to dirty reads of uncommitted concurrent writes"
     answer: 1
     explanation: |
       SI gives each transaction a consistent snapshot (no dirty/non-repeatable reads,
@@ -573,10 +573,10 @@ questions:
       Why does an MVCC engine like Postgres require a background process such as
       autovacuum?
     options:
-      - "To rebuild bloom filters after each write"
-      - "To flush the memtable to SSTables"
+      - "To rebuild the per-table bloom filters from scratch after every committed write so lookups stay accurate"
+      - "To periodically flush the in-memory memtable out to immutable sorted SSTables on disk"
       - "Because MVCC never overwrites rows, dead (obsolete) versions accumulate and must be reclaimed to bound disk usage and read cost"
-      - "To assign transaction ids to new transactions"
+      - "To assign fresh monotonically increasing transaction ids to each newly started transaction in the system"
     answer: 2
     explanation: |
       MVCC creates new versions rather than overwriting, so dead tuples pile up;
@@ -593,9 +593,9 @@ questions:
       to reclaim space. What is the most likely root cause and correct fix?
     options:
       - "A long-running or idle-in-transaction transaction (or a stale replication slot / prepared txn) is pinning the oldest-snapshot horizon, so vacuum can't remove newer dead versions — fix by bounding transaction lifetime, not adding disk"
-      - "Autovacuum is disabled; the fix is to add more disk"
-      - "The bloom filters are too large; the fix is to shrink bits-per-key"
-      - "The WAL is full; the fix is to increase max_wal_size"
+      - "Autovacuum has been globally disabled on the cluster, so no dead tuples are ever reclaimed; the fix is simply to provision more disk for the table"
+      - "The table's per-page bloom filters have grown too large to fit in the buffer cache; the fix is to shrink their bits-per-key setting"
+      - "The write-ahead log has completely filled its allotted space and is blocking reclamation; the fix is to raise the max_wal_size limit"
     answer: 0
     explanation: |
       Vacuum can only remove versions older than the oldest snapshot still needed; a
@@ -612,10 +612,10 @@ questions:
       What is transaction-id (xid) wraparound in Postgres, and how does vacuum relate
       to it?
     options:
-      - "It is when two transactions get the same id; vacuum renumbers them"
+      - "It is when two concurrent transactions are accidentally assigned the same 32-bit id; vacuum resolves it by renumbering one of the colliding transactions on the fly"
       - "The 32-bit xid space is finite; if the oldest unfrozen xid approaches the wraparound limit, old rows could appear to be in the future — vacuum freezes old tuples, and Postgres will force anti-wraparound vacuums and ultimately refuse writes to protect data"
-      - "It is a bloom-filter overflow that vacuum resets"
-      - "It only affects replication and never blocks writes"
+      - "It is an overflow of the transaction-id bloom filter, which vacuum periodically resets to zero to keep membership checks accurate"
+      - "It only affects downstream logical replication consumers and, by design, can never block or throttle writes on the primary"
     answer: 1
     explanation: |
       Postgres transaction ids are 32-bit and wrap; without freezing, rows older than
@@ -653,10 +653,10 @@ questions:
       Under Read Committed (the default in Postgres/Oracle/SQL Server), what is true
       about snapshots and anomalies?
     options:
-      - "Each transaction gets one snapshot at its start, preventing non-repeatable reads"
-      - "It allows dirty reads for higher performance"
+      - "Each transaction takes exactly one snapshot at its start and reuses it for every statement, which prevents non-repeatable reads entirely"
+      - "It permits reading other transactions' uncommitted changes for higher performance, accepting dirty reads as the cost"
       - "Each statement sees a fresh snapshot of committed data, so non-repeatable reads are allowed but dirty reads are prevented"
-      - "It is equivalent to serializable for single-statement transactions"
+      - "It is effectively equivalent to full serializable isolation for any transaction that consists of a single statement"
     answer: 2
     explanation: |
       Read Committed takes a new snapshot per statement, so a value can change between
@@ -672,9 +672,9 @@ questions:
     question: |
       Which statement about isolation-level NAMING across engines is correct?
     options:
-      - "Oracle's SERIALIZABLE is truly serializable and prevents write skew"
-      - "All engines implement the ANSI levels identically"
-      - "InnoDB's default isolation level is Read Uncommitted"
+      - "Oracle's SERIALIZABLE is a genuine serializable level that detects rw-antidependencies and therefore prevents write skew"
+      - "All major engines implement the four ANSI isolation levels identically, with names that map one-to-one to the same guarantees"
+      - "InnoDB's default isolation level is Read Uncommitted, chosen so readers never block on concurrent writers"
       - "Postgres REPEATABLE READ is actually snapshot isolation, and Oracle's SERIALIZABLE is actually snapshot isolation (allowing write skew), while Postgres SERIALIZABLE is true SSI"
     answer: 3
     explanation: |
@@ -693,9 +693,9 @@ questions:
       or mechanism that prevents it?
     options:
       - "Lost update; it is prevented by snapshot isolation's first-committer-wins (or explicit locking / atomic RMW), and is not prevented by Read Committed"
-      - "Write skew; only full serializable prevents it"
-      - "Phantom read; prevented by Read Committed"
-      - "Dirty read; prevented by Repeatable Read only"
+      - "Write skew on a shared invariant; only full serializable isolation with rw-conflict detection is able to prevent it"
+      - "Phantom read caused by the re-scan of the counter predicate; it is fully prevented by the Read Committed level"
+      - "Dirty read of the other transaction's uncommitted increment; prevented only by moving up to Repeatable Read"
     answer: 0
     explanation: |
       Two concurrent read-modify-writes on the same row that clobber each other is the
@@ -712,10 +712,10 @@ questions:
       How does InnoDB's default REPEATABLE READ prevent many phantom reads, unlike the
       ANSI definition of Repeatable Read?
     options:
-      - "It escalates to table locks on every read"
+      - "It escalates to a full table lock on every read statement, so no concurrent inserts can occur anywhere in the table"
       - "It combines consistent MVCC snapshots with next-key (gap) locks that lock ranges, preventing inserts into the gaps a query scanned"
-      - "It disables secondary indexes during the transaction"
-      - "It falls back to Read Uncommitted for range queries"
+      - "It disables all secondary indexes for the duration of the transaction, forcing every scan onto the clustered primary key"
+      - "It quietly falls back to Read Uncommitted for range queries so that the scanned range is never locked at all"
     answer: 1
     explanation: |
       InnoDB uses next-key locks (record + gap locks) so that concurrent inserts into a
@@ -733,9 +733,9 @@ questions:
       prevent?
     options:
       - "Two on-call doctors each read 'count of on-call = 2', each decide it is safe to go off-call, and each update THEIR OWN row, leaving zero doctors on call"
-      - "Two transactions increment the same counter row and one increment is lost"
-      - "A transaction reads uncommitted data from another transaction"
-      - "A query returns different values for the same row within one transaction"
+      - "Two transactions both read the same counter row, each add one and write it back, so the two read-modify-writes clobber each other and one is lost"
+      - "A transaction reads a row another in-flight transaction has modified but not committed, then acts on that uncommitted value before the other rolls back"
+      - "A transaction reads one existing row twice and gets different committed values because a concurrent transaction updated that same row in between"
     answer: 0
     explanation: |
       Write skew involves transactions reading an overlapping set, checking an
@@ -752,10 +752,10 @@ questions:
       Why does snapshot isolation fail to detect write skew, and how does Serializable
       Snapshot Isolation (SSI) catch it?
     options:
-      - "SI ignores all conflicts; SSI adds pessimistic table locks"
-      - "SI detects rw-conflicts but ignores them; SSI simply retries every transaction twice"
+      - "SI ignores every kind of conflict entirely; SSI fixes this by acquiring pessimistic table-level locks on all rows a transaction touches"
+      - "SI already detects read-write conflicts but chooses to ignore them; SSI simply re-executes every transaction twice and compares the two results"
       - "SI only detects write-write conflicts on the same item; write skew is a read-write (rw-antidependency) conflict, so SSI tracks read-write dependencies at runtime and aborts a transaction when a dangerous structure of two rw-antidependency edges forms"
-      - "SI cannot see phantoms; SSI disables phantoms by locking the whole table"
+      - "SI is structurally unable to observe phantom rows; SSI eliminates phantoms by taking an exclusive lock on the entire table for each scan"
     answer: 2
     explanation: |
       SI's conflict detection is limited to write-write on the same item; write skew's
@@ -772,9 +772,9 @@ questions:
       What is the key operational trade-off of Postgres SERIALIZABLE (SSI) under high
       contention?
     options:
-      - "It deadlocks all transactions permanently"
-      - "It silently returns wrong results faster"
-      - "It downgrades to Read Committed automatically"
+      - "It drives every concurrent transaction into a permanent deadlock cycle that the lock manager can never break, freezing the whole database"
+      - "It silently returns incorrect, non-serializable query results but does so with lower latency than Read Committed under load"
+      - "It automatically and transparently downgrades each transaction to Read Committed whenever contention rises, quietly weakening the requested guarantee"
       - "It is conservative and produces false-positive serialization-failure aborts (SQLSTATE 40001), so applications must be built to retry aborted transactions"
     answer: 3
     explanation: |
@@ -792,10 +792,10 @@ questions:
       Without moving to full SERIALIZABLE, how can you prevent a write skew on rows a
       transaction reads under snapshot isolation?
     options:
-      - "Lower the isolation level to Read Committed"
+      - "Lower the isolation level to Read Committed so each statement takes a fresh snapshot, which removes the stale reads that cause write skew"
       - "Materialize the conflict by taking explicit locks on the rows you read (e.g. SELECT ... FOR UPDATE) or locking a summary/parent row, so a write-write conflict is created"
-      - "Add a bloom filter on the queried column"
-      - "Disable autovacuum during the transaction"
+      - "Add a bloom filter on the queried column so the engine can detect the overlapping reads of the two transactions and reject one"
+      - "Disable autovacuum for the duration of the transaction so obsolete row versions cannot be reclaimed mid-check"
     answer: 1
     explanation: |
       Write skew slips through because there is no write-write conflict; taking
@@ -812,10 +812,10 @@ questions:
     question: |
       In schema evolution terminology, what does "forward compatibility" mean?
     options:
-      - "New code can read data written by old code"
-      - "The schema can only ever add fields, never remove them"
+      - "Newly deployed code is able to correctly read and interpret data that was produced by an older version of the code"
+      - "The schema is permitted only to add brand-new fields over time and may never remove or rename any existing field"
       - "Old code can read data written by new code (ignoring fields it doesn't understand)"
-      - "Two schema versions are byte-for-byte identical"
+      - "Any two versions of the schema serialize to byte-for-byte identical output for the same input record"
     answer: 2
     explanation: |
       Forward compatibility means older readers can process data produced by newer
@@ -852,10 +852,10 @@ questions:
       rolling deploy where old and new code coexist. What is the correct
       expand/contract (parallel change) ordering?
     options:
-      - "Deploy writers that produce the field first, then later teach readers to tolerate it"
+      - "Deploy the writers that start producing the new field first, then in a later release teach the readers to tolerate and consume it"
       - "Add the field as optional and deploy readers that tolerate it everywhere first; then start writing it; then start reading it; then later remove any old field"
-      - "Add the field as required everywhere in a single deploy to avoid an intermediate state"
-      - "Change the field type in the same release to avoid a second migration"
+      - "Add the field as required across every service in one single coordinated deploy, so there is never any intermediate mixed-version state"
+      - "Change the field's type and add the new field together in the same release, avoiding the cost of running a second migration later"
     answer: 1
     explanation: |
       Expand/contract deploys tolerant readers before producing writers so no old
@@ -874,9 +874,9 @@ questions:
       How do Protobuf and Thrift achieve compatibility across schema versions in
       their binary encodings?
     options:
-      - "By embedding the full field name as text in every record"
-      - "By storing no field identity and decoding purely by position"
-      - "By requiring both sides to use byte-identical schema files"
+      - "By embedding the full textual field name alongside every value in each record, so readers match fields by their string names at decode time"
+      - "By storing no field identity in the bytes at all and decoding purely by positional order, requiring the reader to know the exact field layout in advance"
+      - "By requiring the producer and consumer to compile against byte-identical schema files, so any divergence between the two sides fails the decode"
       - "By tagging each field with a numeric id in the bytes; readers skip unknown tags (forward compat) and apply declared defaults for missing optional fields (backward compat), and removed tags must never be reused"
     answer: 3
     explanation: |
@@ -894,10 +894,10 @@ questions:
       Avro payloads contain no field tags or names. What does this design imply for
       how Avro data must be decoded and what infrastructure it motivates?
     options:
-      - "Avro can be decoded with no schema at all, since values are self-describing"
-      - "Avro embeds a numeric tag per field like Protobuf, so any schema works"
+      - "Avro can be decoded with no schema available at all, because each value in the payload is fully self-describing and carries its own type information"
+      - "Avro embeds a numeric tag ahead of every field exactly like Protobuf, so any reader schema can decode the bytes without needing the writer's schema"
       - "The exact writer's schema is required to decode the bytes, then resolved against the reader's schema (matching by name, applying defaults) — which is why Avro data must carry or reference a schema, motivating a schema registry"
-      - "Avro can only be read by the identical process that wrote it"
+      - "Avro payloads can only ever be read back by the identical process instance that originally wrote them, since the layout is not portable across processes"
     answer: 2
     explanation: |
       Avro encodes bare values by position, so decoding needs the writer's schema, then
@@ -914,9 +914,9 @@ questions:
       Why is Avro often preferred over Protobuf/Thrift for large-volume data pipelines
       where schemas are generated dynamically (e.g. one schema per database table)?
     options:
-      - "Because Avro requires manual tag-number assignment for every field"
-      - "Because Avro is human-readable text and easiest to debug"
-      - "Because Avro embeds the full schema in every single record for safety"
+      - "Because Avro requires a developer to manually assign and preserve a unique tag number for every field in each generated schema"
+      - "Because Avro serializes to human-readable JSON-like text, making it the easiest of the three formats to inspect and debug by eye"
+      - "Because Avro deliberately embeds the full schema definition inside every single record for safety, so no external schema is ever needed"
       - "Because Avro has no per-field tag numbers to assign, so schemas can be generated programmatically from a DB schema, and its payloads are the most compact (no field ids/names in the data)"
     answer: 3
     explanation: |
@@ -935,9 +935,9 @@ questions:
       Protobuf/Avro?
     options:
       - "It has no schema enforcement and ambiguous numeric types (no int/float distinction, no native bytes), and repeats field names in every record making it larger"
-      - "It cannot represent nested objects"
-      - "It provides forward compatibility but never backward compatibility"
-      - "It is a binary format that humans cannot read"
+      - "It is structurally unable to represent nested objects or arrays, so any hierarchical data must be flattened before it can be encoded"
+      - "It provides forward compatibility for older readers but is fundamentally incapable of ever offering backward compatibility to newer readers"
+      - "It is a compact binary wire format that cannot be inspected or read by humans without a dedicated decoding tool and the schema"
     answer: 0
     explanation: |
       JSON lacks a schema, has ambiguous number handling and no binary type, and
@@ -954,10 +954,10 @@ questions:
       In a Kafka + schema registry setup with BACKWARD compatibility mode (the
       default), which upgrade order is correct and why?
     options:
-      - "Upgrade producers first, because the new schema is written before it is read"
+      - "Upgrade the producers first, because under BACKWARD mode the new schema must be written to the topic before any reader is allowed to consume it"
       - "Upgrade consumers first, because BACKWARD means the new schema can read data written with the previous schema"
-      - "Order does not matter under any compatibility mode"
-      - "Upgrade only the registry; clients need no changes"
+      - "Order of the rollout does not matter at all, because every compatibility mode lets any schema version read any other version safely"
+      - "Upgrade only the schema registry itself to the new version; the producer and consumer clients need no code or schema changes at all"
     answer: 1
     explanation: |
       BACKWARD compatibility means new-schema readers can consume old-schema data, so
@@ -973,9 +973,9 @@ questions:
       What does a schema registry primarily let you avoid on the data path, and how?
     options:
       - "It avoids embedding the full schema in every message by storing schemas centrally and putting only a small schema id in each message, which consumers use to fetch and cache the schema"
-      - "It avoids the need for a WAL by logging schemas"
-      - "It avoids all network calls by inlining schemas into brokers"
-      - "It avoids compaction by versioning SSTables"
+      - "It avoids the need for a write-ahead log on the brokers by treating the durable schema history as the recovery log for message data"
+      - "It avoids every network round trip on the data path by inlining the full set of registered schemas directly into each broker's memory"
+      - "It avoids the cost of background compaction by versioning the underlying SSTables through the registry instead of merging them"
     answer: 0
     explanation: |
       The registry stores schemas centrally; messages carry a compact schema id and
@@ -991,10 +991,10 @@ questions:
       What is the main operational risk introduced by putting a schema registry on the
       streaming data path, and how is it mitigated?
     options:
-      - "It forces all messages to be JSON; mitigate by switching to Avro"
-      - "It doubles write amplification; mitigate by disabling compaction"
+      - "It forces every message on the topic to be encoded as JSON; mitigate the resulting bloat by switching the pipeline over to Avro instead"
+      - "It doubles the write amplification of the underlying brokers; mitigate this by disabling background compaction on the topic's log segments"
       - "It becomes critical infrastructure whose outage can block encode/decode; mitigate with client-side caching of immutable schema-id-to-schema mappings, high availability, and CI-gated compatibility checks"
-      - "It causes write skew; mitigate with SERIALIZABLE isolation"
+      - "It introduces write skew between concurrent producers sharing a schema; mitigate by raising the topic's isolation level to SERIALIZABLE"
     answer: 2
     explanation: |
       A registry on the hot path is a dependency that could block producers/consumers
@@ -1012,9 +1012,9 @@ questions:
       A local (document-partitioned) secondary index has what characteristic read and
       write profile in a sharded store?
     options:
-      - "Cheap targeted reads and expensive cross-partition writes"
-      - "Both reads and writes are cross-partition"
-      - "Reads and writes are both single-partition regardless of key"
+      - "Cheap targeted single-partition reads on the secondary key, paid for by expensive cross-partition writes that must update a remote index shard"
+      - "Both reads and writes must fan out across every partition, since the index and the data it points to always live on different shards"
+      - "Both reads and writes stay confined to a single partition no matter which key is used, because the index and data are co-located and globally sorted"
       - "Cheap local writes (index lives with the data on the same partition) but reads by the secondary key must scatter-gather across all partitions"
     answer: 3
     explanation: |
@@ -1031,10 +1031,10 @@ questions:
       Why are global (term-partitioned) secondary indexes, like DynamoDB GSIs, often
       only eventually consistent?
     options:
-      - "Because reads must scatter across all partitions"
+      - "Because a read on the indexed term must scatter-gather across every partition, and merging those partial results introduces the staleness"
       - "Because the index is partitioned by the indexed term on a different partition than the data, so keeping it in sync requires a cross-partition update that is typically done asynchronously to avoid distributed-transaction cost on every write"
-      - "Because they store no versions of the data"
-      - "Because bloom filters lose entries over time"
+      - "Because a global index stores only the current row and keeps no historical versions, so concurrent readers can observe an intermediate state"
+      - "Because the bloom filters backing the global index gradually lose entries over time and must be rebuilt before they are consistent again"
     answer: 1
     explanation: |
       A global index lives on a partition keyed by the term, usually different from the
@@ -1050,10 +1050,10 @@ questions:
       A table with a very high write rate is queried by a low-cardinality attribute at
       modest read QPS. Which secondary-index choice is best and why?
     options:
-      - "A global index, because the high write rate makes cross-partition index writes free"
-      - "No index; force full-table scans for every read"
+      - "A global index, because a very high write rate amortizes the cross-partition index synchronization until each remote index write effectively costs nothing"
+      - "No index at all; force a full-table scan for every read, since scanning is cheaper than maintaining any index under a heavy write rate"
       - "A local (document-partitioned) index, because it keeps the heavy writes cheap and local; the modest read QPS can absorb scatter-gather, whose tail latency is bounded by the slowest shard"
-      - "A global index, because scatter-gather on writes is faster than on reads"
+      - "A global index, because performing the scatter-gather on the write path is inherently faster than doing the same scatter-gather on the read path"
     answer: 2
     explanation: |
       With writes dominating, you want the cheap local-write profile; the modest read
@@ -1072,9 +1072,9 @@ questions:
       polling a table for changes?
     options:
       - "The replication log is the authoritative, ordered, already-durable record of every committed change, so tailing it captures all changes in commit order without missing fast successive updates or adding query load"
-      - "Polling cannot detect inserts, only updates"
-      - "Log-based CDC requires no retention of logs on the source"
-      - "Polling guarantees exactly-once delivery while log-based does not"
+      - "Polling a table is structurally able to detect row updates only and can never observe newly inserted rows, so it silently misses every insert"
+      - "Log-based CDC needs no log retention on the source database at all, because it reconstructs history from the current table state on demand"
+      - "Polling the table guarantees exactly-once delivery of each change, whereas log-based CDC can only ever offer at-most-once semantics"
     answer: 0
     explanation: |
       The WAL/binlog is the ordered, durable source of truth for committed changes;
@@ -1089,10 +1089,10 @@ questions:
     question: |
       The transactional outbox pattern solves which problem, and how?
     options:
-      - "It provides serializable isolation by locking the outbox table"
+      - "It provides serializable isolation across the database and the broker by holding an exclusive lock on the outbox table for the whole publish, so no two transactions can interleave their events"
       - "It solves the dual-write problem (no atomicity across a DB and a message broker) by writing the event into an outbox table in the SAME local transaction as the business change, so both commit atomically; a relay then publishes the event"
-      - "It eliminates the need for idempotent consumers by guaranteeing exactly-once delivery"
-      - "It removes the need for a message broker entirely"
+      - "It eliminates the need for idempotent consumers by having the relay run a two-phase commit with the broker, guaranteeing every outbox event is delivered exactly once end to end"
+      - "It removes the need for a message broker entirely by having consumers poll the outbox table directly over the database connection, so events never traverse any external messaging system"
     answer: 1
     explanation: |
       Writing to your DB and publishing to a broker are not atomic (dual write); the
@@ -1109,9 +1109,9 @@ questions:
       What delivery semantics does the outbox pattern (with a relay) actually provide,
       and what does that require of consumers?
     options:
-      - "Exactly-once delivery; consumers need no special handling"
-      - "At-most-once delivery; some events are silently dropped"
-      - "Ordered exactly-once delivery across all partitions"
+      - "Exactly-once delivery; because the relay marks each row as sent inside the same transaction that publishes it, consumers can process every event with no dedupe logic at all"
+      - "At-most-once delivery; the relay deletes each outbox row before it attempts the publish, so any crash mid-publish silently drops that event and it is never retried"
+      - "Ordered exactly-once delivery across all partitions, since the relay assigns a global sequence number the broker enforces, so no consumer ever observes a duplicate or a gap"
       - "At-least-once delivery, because the relay can publish a row and crash before marking it sent, so consumers must be idempotent (dedupe by event id)"
     answer: 3
     explanation: |
@@ -1128,10 +1128,10 @@ questions:
       A Postgres-based CDC pipeline via Debezium falls behind, and soon the database
       disk fills up and vacuum stops reclaiming space. What is the connecting cause?
     options:
-      - "Bloom filters grew until they filled the disk"
-      - "The outbox table grew because consumers were too fast"
+      - "The per-table bloom filters kept accumulating entries for every changed row until their bit arrays grew large enough to consume the remaining free space on the data volume"
+      - "The outbox table grew unbounded because the downstream consumers drained events faster than the relay could mark rows sent, leaving a backlog of half-processed rows on disk"
       - "A logical replication slot that isn't consumed pins the WAL (preventing its removal) and holds back the xmin horizon (blocking vacuum), so WAL accumulates and dead tuples can't be reclaimed"
-      - "Group commit batched too many transactions into one fsync"
+      - "Group commit batched so many concurrent transactions into a single fsync that the accumulated log records could not be flushed fast enough, filling the WAL directory on disk"
     answer: 2
     explanation: |
       An unconsumed/lagging replication slot forces Postgres to retain WAL until the
@@ -1148,9 +1148,9 @@ questions:
       For an analytical query that aggregates 3 columns out of a 200-column table over
       billions of rows, why does columnar storage vastly outperform row storage?
     options:
-      - "Columnar storage keeps all rows in memory"
-      - "Columnar storage avoids using any indexes"
-      - "Columnar storage writes single rows faster than row storage"
+      - "Columnar storage pins every row of the table into memory ahead of time, so the aggregation never touches disk once the initial load into RAM has completed"
+      - "Columnar storage avoids using any indexes at all, and scanning raw unindexed columns end to end is inherently faster than any index-assisted lookup on a row store"
+      - "Columnar storage writes each single row far faster than row storage, and that superior per-row write speed is what also makes its large analytical scans complete so quickly"
       - "Columnar storage reads only the 3 needed columns (a few percent of the data) and compresses same-type values well, drastically cutting I/O"
     answer: 3
     explanation: |
@@ -1167,9 +1167,9 @@ questions:
       Which combination of techniques makes column stores fast on analytical scans?
     options:
       - "High compression (run-length, dictionary, bit-packing, delta) that cuts I/O, plus vectorized/SIMD execution over batches of column values that cuts per-row CPU overhead"
-      - "Random-access point lookups and per-row interpretation"
-      - "Storing multiple MVCC versions of each row inline"
-      - "Full-page writes and torn-page protection"
+      - "Fast random-access point lookups that fetch one row at a time, combined with per-row tuple interpretation, which together dominate large analytical scan performance"
+      - "Storing multiple MVCC versions of each row inline within the column blocks, so scans can pick the visible version without a separate undo lookup, speeding aggregation"
+      - "Full-page writes to the write-ahead log plus torn-page protection on each column segment, which keep analytical scans consistent and therefore fast under concurrency"
     answer: 0
     explanation: |
       Columnar values of one type compress far better (less I/O), and processing a
@@ -1186,10 +1186,10 @@ questions:
       A team wants to run heavy analytics directly on their OLTP row store (Postgres)
       and is frustrated by slow scans. What is the best-justified recommendation?
     options:
-      - "Convert the OLTP tables to columnar in place, since columnar is strictly better"
+      - "Convert the OLTP tables to columnar in place, since columnar layout is strictly better on every axis including single-row point reads, updates, and transactional inserts"
       - "Keep OLTP on the row store and replicate to a column store (or use an HTAP setup / columnar replica), because columnar is poor at single-row OLTP writes/point lookups while excelling at scans"
-      - "Add more B-tree indexes until analytics are fast"
-      - "Disable MVCC to speed up the analytical scans"
+      - "Add more B-tree secondary indexes until the analytical scans are fast, since covering indexes on the aggregated columns make row-store scans as cheap as any column store"
+      - "Disable MVCC on the OLTP store to speed up the analytical scans, since removing version visibility checks lets the scanner read each heap page without any per-tuple overhead"
     answer: 1
     explanation: |
       Row storage suits OLTP point/whole-row operations; columnar suits scans but is
@@ -1207,9 +1207,9 @@ questions:
       row-oriented OLTP store)?
     options:
       - "Parquet, ORC, and systems like Redshift, ClickHouse, and BigQuery"
-      - "InnoDB and the Postgres heap"
-      - "The Redis in-memory key-value store"
-      - "A B+tree secondary index"
+      - "InnoDB and the Postgres heap, both of which lay out each table one column at a time on disk to accelerate wide analytical aggregation scans"
+      - "The Redis in-memory key-value store, which internally organizes every value into compressed per-column segments optimized for warehouse-style scans"
+      - "A B+tree secondary index, which stores its entries column-by-column and is the canonical columnar structure powering analytical warehouses"
     answer: 0
     explanation: |
       Parquet/ORC are columnar file formats and Redshift/ClickHouse/BigQuery are column
@@ -1224,10 +1224,10 @@ questions:
     question: |
       Why does the LSM / append-only design map so well onto time-series workloads?
     options:
-      - "Time-series data requires frequent in-place updates of old points"
-      - "Time-series queries are always single-key point lookups"
+      - "Time-series data requires frequent in-place updates of old points, and LSM's log-structured design is optimized precisely for rewriting historical samples cheaply in place"
+      - "Time-series queries are always single-key point lookups on one timestamp, a pattern that LSM bloom filters serve better than any time-range scan engine could"
       - "Time-series data is append-heavy, time-ordered, and mostly immutable, matching LSM's sequential writes; TTL/retention maps to dropping whole old time-partitioned segments cheaply"
-      - "Time-series data does not compress"
+      - "Time-series data does not compress at all, so LSM's ability to store every raw sample uncompressed on sequential media is what makes it the natural fit"
     answer: 2
     explanation: |
       Time-series is append-heavy, immutable-once-written, and time-ordered, which fits
@@ -1244,9 +1244,9 @@ questions:
       delta-of-delta timestamp encoding and XOR (Gorilla) value compression. Why do
       these work so well?
     options:
-      - "Because timestamps and values are random, maximizing entropy"
-      - "Because time-series data is stored as JSON text"
-      - "Because each point is stored with its full 64-bit timestamp uncompressed"
+      - "Because timestamps and values are effectively random and maximize entropy, and delta encoders exploit that high-entropy randomness to pack the bits tightly"
+      - "Because time-series data is stored as JSON text, and delta-of-delta and XOR encoders operate directly on the redundant field names in that text to shrink it"
+      - "Because each point is stored with its full 64-bit timestamp uncompressed, and keeping those fixed-width timestamps is what lets the XOR value encoder achieve its ratios"
       - "Because consecutive samples are highly similar (regular intervals, slowly changing values), so encoding differences instead of absolute values shrinks data dramatically (Gorilla reported ~1.37 bytes/point)"
     answer: 3
     explanation: |
@@ -1264,10 +1264,10 @@ questions:
       What is the most common operational failure mode when adopting a time-series
       store like Prometheus or InfluxDB, and what triggers it?
     options:
-      - "Write skew between concurrent scrapes"
+      - "Write skew between concurrent scrapes, where two collectors read the same series and write disjoint samples that together violate a retention invariant"
       - "Cardinality explosion: putting high-cardinality values (e.g. a unique request id or user id) into a label/tag creates a huge number of distinct series, blowing up index memory"
-      - "Torn pages during compaction"
-      - "Lost updates on aggregated rollups"
+      - "Torn pages during compaction, where a crash mid-merge leaves a partially written chunk that corrupts the series index and forces a full rebuild"
+      - "Lost updates on aggregated rollups, where two concurrent downsampling jobs read the same bucket, each add their partial sum, and one write silently overwrites the other"
     answer: 1
     explanation: |
       The #1 TSDB pitfall is cardinality explosion — using unbounded, high-cardinality
@@ -1283,10 +1283,10 @@ questions:
       Why is time-partitioning (chunks/hypertables/shards) combined with downsampling a
       standard design in time-series stores?
     options:
-      - "Because it enables in-place updates of historical data"
-      - "Because it forces every query to scan the entire dataset"
+      - "Because it enables cheap in-place updates of historical data, letting a query mutate individual old samples within a sealed chunk without rewriting the whole partition"
+      - "Because it forces every query to scan the entire dataset across all chunks, which improves cache locality and therefore speeds up narrow recent-time range reads"
       - "Because old chunks become read-only and can be compressed, downsampled to coarser resolution, or dropped as a cheap metadata operation, making retention a partition drop rather than a mass row delete"
-      - "Because it eliminates the need for any compression"
+      - "Because it eliminates the need for any compression, since each time chunk is small enough to fit in memory and never has to be encoded to save disk space"
     answer: 2
     explanation: |
       Time-partitioning makes old chunks immutable and independently manageable:
@@ -1305,9 +1305,9 @@ questions:
       engine?
     options:
       - "Prefer LSM for write/ingest-heavy, compressible, or TTL/time-series workloads that can tolerate compaction jitter and read amplification; prefer B-tree for read-latency-critical, point+range OLTP with strong transactional needs"
-      - "Always choose LSM; it is strictly superior on modern SSDs"
-      - "Prefer LSM whenever you need serializable transactions"
-      - "Prefer B-tree only for append-only logs"
+      - "Always choose LSM; on modern SSDs its sequential writes make it strictly superior to B-trees for every workload, including read-latency-critical transactional OLTP"
+      - "Prefer LSM whenever you need serializable transactions, because its immutable SSTables give each transaction a naturally isolated snapshot that a B-tree cannot provide"
+      - "Prefer B-tree only for append-only logs, since its in-place page updates are the ideal fit for purely sequential, immutable, write-once log workloads"
     answer: 0
     explanation: |
       The decision hinges on workload: LSM shines on heavy ingest, compressible/TTL data
@@ -1325,10 +1325,10 @@ questions:
       application writes 50 MB/s of logical data, roughly how much data is physically
       written to disk per second, and what is the practical concern?
     options:
-      - "~2.5 MB/s; the concern is read amplification"
+      - "~2.5 MB/s of physical writes; compaction merges runs so aggressively that the device sees far fewer bytes than the application writes, and the concern is read amplification"
       - "~1 GB/s of physical writes; the concern is disk write bandwidth and SSD endurance/wear being consumed far faster than the logical rate suggests"
-      - "~50 MB/s; write amplification does not affect physical writes"
-      - "~50 KB/s; compaction reduces total writes"
+      - "~50 MB/s of physical writes; write amplification only counts logical operations and never changes the actual number of bytes the device physically writes per second"
+      - "~50 KB/s of physical writes; leveled compaction deduplicates and discards most incoming data before it ever reaches the disk, shrinking the physical write rate below the logical one"
     answer: 1
     explanation: |
       20 x 50 MB/s = ~1 GB/s physically written, so device write bandwidth and SSD
@@ -1345,9 +1345,9 @@ questions:
       to book the last remaining seat because each checked availability then inserted a
       booking. Which fix is both correct and minimal?
     options:
-      - "Switch to Read Uncommitted so both transactions see each other's writes"
-      - "Add a bloom filter to the bookings table"
-      - "Increase group-commit batching to serialize the two inserts"
+      - "Switch to Read Uncommitted so both transactions immediately see each other's in-flight inserts, letting the second booker notice the seat is taken before it commits"
+      - "Add a bloom filter to the bookings table so each transaction can probe it for an existing seat reservation and refuse to insert a second one for the same seat"
+      - "Increase group-commit batching so the two competing inserts land in one fsync window, which forces the engine to serialize them and reject the duplicate booking"
       - "Take an explicit lock materializing the conflict (e.g. SELECT ... FOR UPDATE on the seat/inventory row, or use SERIALIZABLE/SSI), so the second booking blocks or aborts instead of double-booking"
     answer: 3
     explanation: |
@@ -1364,10 +1364,10 @@ questions:
     question: |
       What is the role of a checkpoint in a WAL-based engine?
     options:
-      - "It deletes the WAL to save space regardless of durability"
-      - "It converts the WAL into an SSTable"
+      - "It permanently deletes the entire WAL to reclaim disk space at fixed intervals, discarding log records whether or not their changes have been persisted to the data files"
+      - "It converts the accumulated WAL segments into an immutable sorted SSTable on disk, merging the logged changes into leveled runs the way LSM compaction would"
       - "It flushes dirty data pages to disk and records a point up to which the WAL has been applied, bounding crash-recovery replay time and allowing older WAL to be recycled"
-      - "It assigns snapshots to transactions"
+      - "It assigns a fresh consistent snapshot to every active transaction, capturing the set of committed versions each one is permitted to observe for its lifetime"
     answer: 2
     explanation: |
       A checkpoint persists dirty pages and marks how far the log has been applied, so
@@ -1383,9 +1383,9 @@ questions:
       Why do Protobuf and Thrift forbid reusing a field tag/id number that belonged to
       a removed field?
     options:
-      - "Because tag numbers must be sequential with no gaps"
-      - "Because reusing a tag doubles the message size"
-      - "Because the schema registry cannot store reused tags"
+      - "Because the encoding requires tag numbers to remain strictly sequential with no gaps, so reusing a removed tag would leave a hole that breaks the reader's field-offset math"
+      - "Because reusing a tag forces the encoder to emit the field under both its old and new identity, doubling the on-wire size of every message that carries that field"
+      - "Because the schema registry physically cannot store two schema versions that share a tag number, so it rejects the new schema at registration time before any data is written"
       - "Because old data or old peers may still contain that tag; reusing it for a new, differently-typed field would cause the new reader to misinterpret old bytes (silent data corruption)"
     answer: 3
     explanation: |
@@ -1404,9 +1404,9 @@ questions:
       time of 10 ms. Why is the end-to-end p99 typically much worse than 10 ms?
     options:
       - "Because the query must wait for the slowest of 50 partitions; with independent partitions the probability that at least one is slow is high, so tail-latency amplification pushes the combined latency well above any single partition's p99"
-      - "Because the coordinator adds a fixed 10 ms per partition serially"
-      - "Because bloom filters add latency proportional to partition count"
-      - "Because MVCC snapshots must be merged, doubling latency"
+      - "Because the coordinator queries the 50 partitions strictly one after another, adding a fixed 10 ms of serial wait per partition before it can return the merged result"
+      - "Because each partition's bloom filter must be probed in turn, and the filters add a latency cost that grows linearly with the number of partitions in the scatter"
+      - "Because the MVCC snapshots returned by all 50 partitions must be reconciled into one consistent view, and that merge step roughly doubles the end-to-end latency"
     answer: 0
     explanation: |
       A scatter-gather completes only when the slowest partition responds; querying 50
@@ -1422,10 +1422,10 @@ questions:
     question: |
       Which workload is row-oriented storage best suited for?
     options:
-      - "Scanning a few columns across billions of rows for aggregation"
+      - "Scanning just a few columns across billions of rows for aggregation, where keeping each row's fields contiguous minimizes the bytes read for the wide analytical scan"
       - "OLTP: reading and writing whole individual records by key with high selectivity (e.g. fetch or update one order)"
-      - "Long-term compressed archival of append-only metrics"
-      - "Vectorized analytical queries over a data warehouse"
+      - "Long-term compressed archival of append-only metrics, where storing whole rows together yields the homogeneous runs that delta and dictionary encoders compress most tightly"
+      - "Vectorized analytical queries over a data warehouse, where processing whole contiguous rows in SIMD batches is what gives row storage its scan-throughput advantage"
     answer: 1
     explanation: |
       Row storage keeps a record's columns together, ideal for OLTP whole-record point
@@ -1441,9 +1441,9 @@ questions:
       old." From an MVCC-internals standpoint, what happened?
     options:
       - "The undo/rollback data needed to reconstruct the query's consistent snapshot version of a block was overwritten by newer transactions before the long reader finished reading it"
-      - "The query exceeded the maximum row count"
-      - "A bloom filter false positive corrupted the read"
-      - "The WAL was checkpointed mid-query"
+      - "The query returned more rows than Oracle's configured fetch-array limit allows, so the server force-closed the cursor once its result set crossed the per-session row ceiling"
+      - "A bloom filter guarding the buffer cache returned a false positive, so Oracle served a stale block image and aborted the read rather than risk returning corrupted data to the client"
+      - "A redo-log checkpoint fired midway through the query and flushed the exact block the reader still needed, forcing Oracle to discard its half-built consistent read and error out"
     answer: 0
     explanation: |
       Oracle reconstructs a reader's snapshot from undo; if concurrent writes recycle
@@ -1459,10 +1459,10 @@ questions:
       In a log-based CDC/streaming setup, what does log compaction (keeping only the
       latest value per key) enable?
     options:
-      - "It guarantees exactly-once processing for all consumers"
-      - "It converts the row store to a column store"
+      - "It guarantees exactly-once processing for every consumer, because the broker deduplicates any key whose latest value was already delivered earlier in the same compacted partition"
+      - "It rewrites the compacted topic segments into a columnar on-broker layout, so downstream analytical consumers can scan a few fields without ever reading whole record payloads"
       - "It lets a new or rebuilt consumer bootstrap current state by replaying a bounded log that retains the latest value per key, instead of the full unbounded change history"
-      - "It prevents the dual-write problem without an outbox"
+      - "It prevents the dual-write problem without an outbox table, because compacting the log atomically binds each database change to its published event under one shared commit"
     answer: 2
     explanation: |
       Log compaction retains the most recent value per key so the compacted log is a
@@ -1478,9 +1478,9 @@ questions:
       A staff engineer maps four candidate structures to the RUM triangle for a new
       store. Which mapping is correct?
     options:
-      - "B+tree optimizes update at the cost of reads; leveled LSM optimizes reads at the cost of updates"
-      - "All four optimize the same two overheads"
-      - "In-memory hash indexes optimize memory at the cost of reads and updates"
+      - "B+tree optimizes update at the cost of reads by appending pages in place; leveled LSM optimizes reads at the cost of updates by never rewriting any data during its compaction"
+      - "All four structures optimize the identical pair of overheads — read and update — and differ only in on-disk file naming and block size, never in the underlying RUM trade they strike"
+      - "In-memory hash indexes optimize memory at the cost of reads and updates, packing keys so densely that both point lookups and writes must walk long collision chains to resolve"
       - "B+tree optimizes reads (paying update cost); leveled LSM optimizes update and memory (paying read cost); size-tiered LSM optimizes update (paying read AND memory); an in-memory hash index optimizes read and update (paying memory)"
     answer: 3
     explanation: |

@@ -206,9 +206,19 @@ split/combine. The **Master Theorem** compares `f(n)` against `n^(log_b a)`:
 
 | Case | Condition | Result |
 |---|---|---|
-| 1 | `f(n)` grows slower than `n^(log_b a)` | `T(n) = Θ(n^(log_b a))` |
+| 1 | `f(n)` grows *polynomially slower* than `n^(log_b a)` — i.e. `f(n) = O(n^(log_b a − ε))` for some `ε > 0` | `T(n) = Θ(n^(log_b a))` |
 | 2 | `f(n) = Θ(n^(log_b a))` | `T(n) = Θ(n^(log_b a) · log n)` |
-| 3 | `f(n)` grows faster than `n^(log_b a)` (+ regularity) | `T(n) = Θ(f(n))` |
+| 3 | `f(n)` grows *polynomially faster* — `f(n) = Ω(n^(log_b a + ε))` for some `ε > 0` — plus the regularity condition `a·f(n/b) ≤ c·f(n)` for some `c < 1` | `T(n) = Θ(f(n))` |
+
+> [!WARNING]
+> The word "polynomially" is load-bearing: `f(n)` must beat `n^(log_b a)` by a factor of
+> at least `n^ε`, not merely by a logarithmic factor. Recurrences where the gap is only
+> logarithmic fall into a **gap the Master Theorem cannot solve**. The classic example is
+> `T(n) = 2T(n/2) + n·log n`: here `n^(log₂2) = n` and `f(n) = n log n` is faster than `n`,
+> but only by a `log n` factor — *not* polynomially — so Case 3 does **not** apply. (The
+> true answer is `Θ(n·log²n)`, found via the recursion-tree method or the Akra–Bazzi
+> theorem.) Claiming "grows faster → Case 3 → `Θ(n log n)`" here is a common senior-level
+> trap.
 
 Worked examples:
 

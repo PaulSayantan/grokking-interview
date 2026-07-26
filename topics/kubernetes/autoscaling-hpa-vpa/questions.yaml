@@ -12,7 +12,7 @@ questions:
   - "HPA changes per-Pod requests, VPA changes replica count, CA changes nodes"
   - "HPA changes node count, VPA changes replica count, CA changes per-Pod requests"
   - "HPA changes replica count, VPA changes per-Pod requests/limits, Cluster Autoscaler changes node count"
-  - "All three change the replica count using different metrics"
+  - "All three change the replica count, differing only in which metric source and threshold they watch"
   answer: 2
   explanation: |
     HPA scales horizontally (number of Pod replicas), VPA scales vertically (per-Pod CPU/memory
@@ -29,7 +29,7 @@ questions:
   options:
   - "The Deployment has too few replicas"
   - "The HPA apiVersion should be autoscaling/v1"
-  - "The nodes are cordoned"
+  - "The nodes have been cordoned and drained"
   - "metrics-server is not installed or not healthy"
   answer: 3
   explanation: |
@@ -47,7 +47,7 @@ questions:
   options:
   - "A CPU request on the container"
   - "A CPU limit on the container"
-  - "A readiness probe"
+  - "A readiness probe on the container"
   - "A higher maxReplicas value"
   answer: 0
   explanation: |
@@ -79,9 +79,9 @@ questions:
   question: |
     An HPA targets 50% CPU. Pods sit steadily at 55% CPU and the HPA does not scale. Is this a bug?
   options:
-  - "Yes — 55% is above 50% so it must scale up"
-  - "Yes — the sync period is too long"
-  - "No — HPA only scales on memory, not CPU"
+  - "Yes — 55% is above the 50% target so the controller is obligated to add a replica"
+  - "Yes — the 15s sync period is too long, so the HPA missed the crossing and stalled"
+  - "No — HPA only scales on absolute memory, so a CPU target above 50% is silently ignored"
   - "No — 55/50 = 1.10 is within the default 0.1 tolerance, so scaling is intentionally skipped"
   answer: 3
   explanation: |
@@ -236,9 +236,9 @@ questions:
     their resource requests?
   options:
   - "Because a Pod's resource requests were immutable once the Pod was created"
-  - "Because the scheduler ignores updated requests"
-  - "Because metrics-server caches the old values"
-  - "Because HPA locks the Pod spec"
+  - "Because the scheduler ignores in-place request edits and only reads requests at bind time"
+  - "Because metrics-server caches the old request values and refuses to re-read the mutated spec"
+  - "Because the HPA takes an exclusive lock on the Pod spec that blocks any resource edits"
   answer: 0
   explanation: |
     Pre in-place resize, a running Pod's resources were immutable, so the only way to apply new
@@ -270,9 +270,9 @@ questions:
   question: |
     A single-replica Deployment is managed by a VPA in `Auto` mode. What risk does this create?
   options:
-  - "The HPA will double the replicas"
-  - "The node will be cordoned"
-  - "metrics-server will stop reporting CPU"
+  - "The HPA will detect the resize and immediately double the replica count"
+  - "The node hosting the Pod will be cordoned and drained during the resize"
+  - "metrics-server will stop reporting CPU for the workload until it restarts"
   - "Applying a new recommendation evicts the only Pod, causing a brief outage"
   answer: 3
   explanation: |
@@ -288,10 +288,10 @@ questions:
     Why should you avoid running HPA and VPA on the SAME resource metric (e.g. CPU) of the same
     workload?
   options:
-  - "It is not supported by the API server and will be rejected"
+  - "The API server validates the pairing and rejects the second autoscaler at admission time"
   - "VPA changes the request, which is HPA's utilization denominator, creating a feedback loop that oscillates"
-  - "HPA and VPA cannot run in the same namespace"
-  - "It doubles the metrics-server load"
+  - "HPA and VPA use conflicting finalizers and cannot coexist in the same namespace"
+  - "It doubles the load on metrics-server, which then throttles both controllers"
   answer: 1
   explanation: |
     HPA computes CPU utilization relative to the request. VPA changes that request, moving HPA's
@@ -305,10 +305,10 @@ questions:
   question: |
     Which HPA + VPA combination is considered safe?
   options:
-  - "HPA on CPU + VPA on CPU"
-  - "HPA on memory + VPA on memory"
+  - "HPA on CPU + VPA on CPU, with VPA capped by minAllowed to stay clear"
+  - "HPA on memory + VPA on memory, letting VPA own limits while HPA owns replicas"
   - "HPA on a custom/external metric (e.g. RPS) + VPA on CPU/memory"
-  - "Two HPAs on the same Deployment"
+  - "Two HPAs on the same Deployment, one for CPU and one for memory"
   answer: 2
   explanation: |
     When HPA scales on a signal independent of the resource VPA manages (e.g. requests-per-second),
@@ -322,9 +322,9 @@ questions:
     What triggers the Cluster Autoscaler to add a node?
   options:
   - "One or more Pods are Pending (unschedulable) because no node has capacity, and a node group can satisfy them"
-  - "Average node CPU utilization exceeding 80%"
-  - "The HPA increasing replicas"
-  - "A high number of running Pods"
+  - "Average node CPU utilization climbing above the 80% threshold set on the node group"
+  - "The HPA increasing its replica count, which the autoscaler watches directly to add nodes"
+  - "A high number of running Pods across the cluster crossing a per-node density limit"
   answer: 0
   explanation: |
     Cluster Autoscaler is driven by scheduling pressure: it acts when Pods are unschedulable due to
@@ -339,9 +339,9 @@ questions:
     A node is packed with Pods that REQUEST most of its CPU but actually USE very little. Will
     Cluster Autoscaler remove or add nodes based on the low actual usage?
   options:
-  - "Yes — it scales down because real CPU usage is low"
-  - "Yes — it adds a node to spread the load"
-  - "No — CA only looks at memory, not CPU"
+  - "Yes — it scales the node down because real-time CPU usage stays far below the threshold"
+  - "Yes — it adds another node to spread the load across more capacity and cut pressure"
+  - "No — CA evaluates only memory requests and never CPU, so this node is invisible to it"
   - "No — CA reasons about requests/scheduling, not live utilization, so the node looks full"
   answer: 3
   explanation: |
@@ -356,10 +356,10 @@ questions:
   question: |
     Under Cluster Autoscaler, when is a node a candidate for scale-down (removal)?
   options:
-  - "Immediately when any Pod on it finishes"
+  - "Immediately when any Pod running on it completes, freeing the node for prompt removal"
   - "When it has been underutilized for a period and its Pods can be rescheduled elsewhere"
-  - "Only when the whole node group is deleted"
-  - "When node CPU exceeds the scale-down threshold"
+  - "Only when the entire node group is manually deleted or scaled to zero by an operator"
+  - "When the node's live CPU utilization climbs above the configured scale-down threshold"
   answer: 1
   explanation: |
     CA removes a node when its utilization is below a threshold for a configured time
@@ -374,9 +374,9 @@ questions:
     Nodes are underutilized but Cluster Autoscaler never removes them. Which is a plausible reason?
   options:
   - "A PodDisruptionBudget prevents evicting Pods needed to drain the node"
-  - "The HPA is at minReplicas"
-  - "metrics-server is reporting high CPU"
-  - "The Service has no endpoints"
+  - "The HPA is pinned at minReplicas, which locks the node count in place"
+  - "metrics-server is reporting sustained high CPU utilization across all nodes"
+  - "The Service backing those Pods currently has no registered endpoints"
   answer: 0
   explanation: |
     CA must drain a node before removing it. If a PDB (or non-evictable Pods like unmanaged
@@ -390,10 +390,10 @@ questions:
   question: |
     In Cluster Autoscaler, what is the role of an "expander" strategy such as least-waste or priority?
   options:
-  - "It decides how long to wait before scaling down"
+  - "It decides how long the autoscaler waits before initiating any scale-down action"
   - "It decides which node group to scale up when several could satisfy the pending Pods"
-  - "It expands Pod requests to fill the node"
-  - "It sets the maximum node group size"
+  - "It expands each Pod's resource requests until they exactly fill the chosen node"
+  - "It sets the maximum size a node group may grow to during a scale-up event"
   answer: 1
   explanation: |
     When multiple node groups could accommodate the unschedulable Pods, the expander (random,
@@ -425,9 +425,9 @@ questions:
   question: |
     What is a defining architectural difference between Karpenter and the Cluster Autoscaler?
   options:
-  - "Karpenter scales Pods, not nodes"
-  - "Karpenter only works with a single instance type"
-  - "Karpenter replaces the kube-scheduler"
+  - "Karpenter scales the number of Pod replicas rather than provisioning cluster nodes"
+  - "Karpenter only works with a single fixed instance type chosen ahead of time"
+  - "Karpenter replaces the kube-scheduler and makes all Pod placement decisions itself"
   - "Karpenter provisions instances directly without node groups/ASGs, right-sizing just-in-time"
   answer: 3
   explanation: |
@@ -459,10 +459,10 @@ questions:
   question: |
     What does Karpenter's "consolidation" disruption do?
   options:
-  - "Merges multiple Deployments into one"
-  - "Consolidates Pod logs onto one node"
+  - "Merges multiple Deployments into one to cut the total number of running workloads"
+  - "Consolidates Pod log streams onto one dedicated node to simplify log collection"
   - "Removes empty nodes or replaces underutilized nodes with cheaper/fewer nodes to cut cost"
-  - "Combines several HPAs into one"
+  - "Combines several HPAs into one controller so replica decisions are centralized"
   answer: 2
   explanation: |
     Consolidation actively reduces cost by deleting empty nodes and by relocating workloads to
@@ -476,10 +476,10 @@ questions:
   question: |
     Which advantage is most specific to Karpenter over Cluster Autoscaler?
   options:
-  - "It can scale Pods to zero"
+  - "It can scale application Pods all the way down to zero replicas whenever they go idle"
   - "Fine-grained just-in-time instance-type/zone/purchase-option selection with strong consolidation"
-  - "It reads CPU from metrics-server"
-  - "It manages RBAC roles"
+  - "It reads live CPU utilization from metrics-server to decide when to launch new nodes"
+  - "It manages cluster RBAC roles and bindings for workloads automatically at scale-up"
   answer: 1
   explanation: |
     Karpenter's edge is choosing right-sized instances across many types/zones/purchase options and
@@ -495,8 +495,8 @@ questions:
   options:
   - "Both Cluster Autoscaler and Karpenter, for redundancy"
   - "One (either Cluster Autoscaler or Karpenter), alongside HPA for Pods"
-  - "None — HPA scales nodes"
-  - "One per namespace"
+  - "None needed — the HPA itself provisions nodes as the replica count grows"
+  - "One dedicated node autoscaler instance running per namespace in the cluster"
   answer: 1
   explanation: |
     CA and Karpenter both react to unschedulable Pods and would conflict if run together; you pick
@@ -509,9 +509,9 @@ questions:
   question: |
     What does KEDA add to Kubernetes autoscaling?
   options:
-  - "It replaces the HPA entirely with its own controller"
-  - "Vertical right-sizing of Pod requests"
-  - "Node provisioning without node groups"
+  - "It replaces the HPA entirely, swapping in its own controller to manage replica counts"
+  - "Vertical right-sizing of each Pod's CPU and memory requests based on observed usage"
+  - "Node provisioning without node groups, talking to the cloud provider API directly"
   - "Event-driven scaling on sources like queue depth and Kafka lag, plus scale-to-zero"
   answer: 3
   explanation: |
@@ -527,9 +527,9 @@ questions:
     How does KEDA relate to the HPA for 1-to-N scaling?
   options:
   - "KEDA creates and manages an HPA that reads the scaler's value as an external metric"
-  - "KEDA ignores the HPA and scales replicas itself"
-  - "KEDA disables the HPA controller in kube-controller-manager"
-  - "KEDA and HPA both write replicas, last-writer-wins"
+  - "KEDA ignores the HPA entirely and writes the replica count on the Deployment itself"
+  - "KEDA disables the built-in HPA controller inside kube-controller-manager at startup"
+  - "KEDA and the HPA both write spec.replicas directly, resolving ties last-writer-wins"
   answer: 0
   explanation: |
     For 1-to-N scaling, KEDA creates and manages an HPA under the hood; its metrics adapter exposes
@@ -544,10 +544,10 @@ questions:
     Which KEDA component implements the external.metrics.k8s.io API so the HPA can read event-source
     metrics?
   options:
-  - "keda-operator"
-  - "keda-admission-webhooks"
+  - "keda-operator (manages the ScaledObject lifecycle)"
+  - "keda-admission-webhooks (validates KEDA resources)"
   - "keda-metrics-apiserver (metrics adapter)"
-  - "metrics-server"
+  - "metrics-server (serves core CPU/memory metrics)"
   answer: 2
   explanation: |
     The keda-metrics-apiserver is the metrics adapter that exposes external metrics (Kafka lag, queue
@@ -562,9 +562,9 @@ questions:
     In KEDA's two-track model, which component performs the 0-to-1 activation when a queue goes from
     idle to having messages?
   options:
-  - "The HPA"
-  - "The kube-scheduler"
-  - "The Cluster Autoscaler"
+  - "The HPA, reading the queue metric while replicas sit at zero"
+  - "The kube-scheduler, once it notices the idle Deployment"
+  - "The Cluster Autoscaler, reacting to the newly queued messages"
   - "The keda-operator, watching the event source directly"
   answer: 3
   explanation: |
@@ -579,10 +579,10 @@ questions:
   question: |
     Why can't KEDA reliably scale a workload back UP from zero using a CPU/memory trigger?
   options:
-  - "CPU metrics are only available in autoscaling/v1"
+  - "CPU and memory metrics are only exposed through the older autoscaling/v1 API version"
   - "With zero Pods there are no Pods for metrics-server to observe, so there is no CPU signal to wake up on"
-  - "KEDA does not support resource metrics at all"
-  - "The HPA blocks CPU scaling below one replica"
+  - "KEDA does not support CPU or memory resource metrics as scaling triggers at all"
+  - "The HPA explicitly blocks any CPU-based scaling decision below one running replica"
   answer: 1
   explanation: |
     CPU/memory come from metrics-server, which observes running Pods. At zero replicas there are no
@@ -615,10 +615,10 @@ questions:
     Load rises and the HPA increases replicas, but the new Pods sit Pending. What must happen for
     them to run?
   options:
-  - "The VPA must shrink their requests"
-  - "metrics-server must restart"
+  - "The VPA must shrink their requests and cut the replica count down to fit the current nodes"
+  - "metrics-server must restart to refresh the stale capacity data blocking the scheduler"
   - "A node autoscaler (Cluster Autoscaler/Karpenter) must add nodes so the scheduler can place them"
-  - "The Service must add more endpoints"
+  - "The Service must register additional endpoints before the scheduler will place the Pods"
   answer: 2
   explanation: |
     Pod autoscalers only create Pending Pods when there's no capacity. A node autoscaler reacts to
@@ -633,9 +633,9 @@ questions:
     An HPA has maxReplicas: 10 and is pinned at 10 replicas while latency is still high. What is the
     correct interpretation?
   options:
-  - "The node autoscaler is broken"
-  - "metrics-server is returning stale data"
-  - "VPA is overriding the HPA"
+  - "The node autoscaler has crashed and stopped adding fresh capacity to the cluster"
+  - "metrics-server is returning stale CPU samples that have frozen the replica count"
+  - "A VPA is overriding the HPA and pinning the replica count fixed at ten"
   - "The HPA is capped at maxReplicas and will not add more Pods regardless of load"
   answer: 3
   explanation: |
@@ -669,9 +669,9 @@ questions:
     signal is generally best?
   options:
   - "A custom metric like requests-per-second or in-flight requests"
-  - "CPU utilization"
-  - "Memory utilization"
-  - "Node count"
+  - "CPU utilization, since it tracks connection saturation closely on I/O-bound services"
+  - "Memory utilization, which climbs in lockstep with open connections on such an API"
+  - "Node count, scaling replicas up whenever the cluster gains additional worker nodes"
   answer: 0
   explanation: |
     CPU misleads for I/O-bound apps (low CPU while saturated). A custom metric that reflects actual
@@ -685,10 +685,10 @@ questions:
   question: |
     Why is memory usually a poor metric to scale a Deployment horizontally on?
   options:
-  - "metrics-server can't measure memory"
-  - "HPA v2 does not support memory"
+  - "metrics-server can't measure memory, so the HPA has no usage samples to act on"
+  - "HPA v2 dropped memory as a resource metric type and only accepts CPU targets now"
   - "Memory rarely frees on scale-in and high usage risks OOM rather than indicating a need for more replicas"
-  - "Memory is a compressible resource"
+  - "Memory is a compressible resource that the kernel reclaims freely under pressure"
   answer: 2
   explanation: |
     Memory often doesn't drop when you add replicas and doesn't reclaim on scale-in, so it's a weak
@@ -702,10 +702,10 @@ questions:
   question: |
     Can a plain HPA (resource metrics) scale a Deployment down to zero replicas?
   options:
-  - "Yes, set minReplicas: 0"
+  - "Yes, set minReplicas: 0 and the HPA will retire the last replica when idle"
   - "No — plain HPA needs at least one replica; use KEDA for scale-to-zero"
-  - "Yes, but only for StatefulSets"
-  - "No — only the Cluster Autoscaler can scale to zero"
+  - "Yes, but scale-to-zero on resource metrics works only for StatefulSets"
+  - "No — only the Cluster Autoscaler can drive a workload down to zero replicas"
   answer: 1
   explanation: |
     A standard HPA on resource metrics keeps minReplicas >= 1 (with 0 pods there's no metric). True
@@ -721,9 +721,9 @@ questions:
     the problem?
   options:
   - "Both the HPA and GitOps write spec.replicas and fight, causing thrash; don't set replicas in Git when an HPA owns it"
-  - "Nothing — GitOps and HPA cooperate automatically"
-  - "The HPA will delete the Deployment"
-  - "GitOps disables the metrics-server"
+  - "Nothing — GitOps and HPA cooperate automatically by negotiating field ownership at sync time"
+  - "The HPA will delete the Deployment when it detects a conflicting replicas field in Git"
+  - "GitOps disables the metrics-server whenever it reconciles a Deployment carrying an HPA"
   answer: 0
   explanation: |
     Both the HPA and the GitOps reconciler write spec.replicas, so they continually overwrite each
@@ -737,10 +737,10 @@ questions:
   question: |
     Is it appropriate to use metrics-server as your cluster's long-term monitoring/metrics store?
   options:
-  - "Yes — it retains full history for dashboards"
+  - "Yes — it retains full metric history in a time-series store for long-term dashboards"
   - "No — it stores only a short rolling window for autoscaling and `kubectl top`, not history; use Prometheus"
-  - "Yes — but only for memory metrics"
-  - "No — it cannot be queried by HPA"
+  - "Yes — but it durably persists only memory metrics, discarding CPU after each scrape"
+  - "No — it cannot be queried by the HPA, so it is useful only as a dashboard backend"
   answer: 1
   explanation: |
     metrics-server keeps only the latest samples to serve HPA and `kubectl top`; it stores no history
@@ -755,10 +755,10 @@ questions:
     During a scale-up, how does the HPA treat Pods that are not yet Ready when computing the desired
     replica count?
   options:
-  - "It counts them at 100% utilization to scale faster"
-  - "It excludes them from minReplicas"
+  - "It counts them at 100% utilization so the controller scales out more aggressively"
+  - "It excludes them from the minReplicas floor until their readiness probe first passes"
   - "It assumes they consume 0% (dampening overshoot) until they become Ready"
-  - "It restarts them"
+  - "It restarts them immediately, treating an unready Pod as a failed scale-up attempt"
   answer: 2
   explanation: |
     On scale-up the HPA conservatively assumes not-yet-ready Pods use 0% of the metric, which dampens
@@ -772,9 +772,9 @@ questions:
   question: |
     In a VPA `resourcePolicy`, what do `minAllowed` and `maxAllowed` control?
   options:
-  - "The min/max number of replicas"
-  - "The node group size limits"
-  - "The HPA tolerance"
+  - "The minimum and maximum number of Pod replicas the workload may run"
+  - "The lower and upper node group size limits the cluster autoscaler may reach"
+  - "The tolerance band around the HPA target below which scaling is skipped"
   - "The lower and upper bounds VPA may set for a container's CPU/memory requests"
   answer: 3
   explanation: |
@@ -790,9 +790,9 @@ questions:
     In a KEDA ScaledObject, what does `cooldownPeriod` govern?
   options:
   - "How long to wait after the last active trigger before scaling the workload back to zero"
-  - "How often KEDA polls the event source"
-  - "The HPA stabilization window for scale-up"
-  - "The Pod termination grace period"
+  - "How often KEDA polls the configured event source for the current trigger value"
+  - "The HPA stabilization window that dampens repeated scale-up decisions over time"
+  - "The Pod termination grace period granted before a scaled-in replica is killed"
   answer: 0
   explanation: |
     cooldownPeriod is the wait, after the trigger last reported activity, before KEDA scales the

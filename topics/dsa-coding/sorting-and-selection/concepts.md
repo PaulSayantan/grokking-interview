@@ -44,13 +44,14 @@ Before comparing algorithms, fix two vocabulary words interviewers probe:
 | Quicksort | O(n log n) | O(n log n) | **O(n²)** | O(log n)† | No | Yes |
 | Heap sort | O(n log n) | O(n log n) | O(n log n) | O(1) | No | Yes |
 | Counting sort | O(n+k) | O(n+k) | O(n+k) | O(n+k) | Yes | No |
-| Radix sort (LSD) | O(d·(n+k)) | O(d·(n+k)) | O(d·(n+k)) | O(n+k) | Yes | No |
+| Radix sort (LSD) | O(d·(n+b)) | O(d·(n+b)) | O(d·(n+b)) | O(n+b) | Yes | No |
 | Bucket sort | O(n+k) | O(n+k) | O(n²) | O(n+k) | Yes‡ | No |
 
 \* Best case O(n) only for the "adaptive" variant that stops early when the array is already
 sorted (insertion sort, or bubble sort with an early-exit flag). † Quicksort recursion depth
 is O(log n) expected, O(n) worst case unless you recurse into the smaller side first. ‡ Bucket
-sort stability depends on the per-bucket sub-sort.
+sort stability depends on the per-bucket sub-sort. Symbols: `k` = counting sort's key range;
+`b` = radix's base/radix (each of radix's `d` passes runs a counting sort over base `b`).
 
 > [!TIP]
 > "Best case O(n)" for insertion sort is why it (and hence Timsort) shines on **nearly
@@ -154,13 +155,37 @@ def partition(a, lo, hi):
     return i
 ```
 
+**Pointer roles & invariant:** `i` is the **boundary** of the ≤-pivot region (everything in
+`[lo, i)` is ≤ pivot); `j` is the **scanner** sweeping the unknown region. The invariant held
+throughout the loop is: **`[lo, i)` ≤ pivot, `[i, j)` > pivot**. Whenever the scanner finds an
+element ≤ pivot, it swaps it into the boundary slot `i` and advances `i`, growing the ≤ region by
+one. The final swap drops the pivot at `i`, its true sorted position.
+
+**Lomuto partition, traced — `a = [3,7,1,4]`, pivot = `a[hi]` = 4:**
+
+```text
+start: i=lo=0, pivot=4
+ j=0: a[0]=3 ≤ 4 → swap a[0],a[0] (no-op), i→1    a=[3,7,1,4]   ≤region=[3]
+ j=1: a[1]=7 > 4 → skip (7 joins the >region)     a=[3,7,1,4]   ≤region=[3]
+ j=2: a[2]=1 ≤ 4 → swap a[1],a[2], i→2            a=[3,1,7,4]   ≤region=[3,1]
+ loop ends (j reached hi). final: swap a[i]=a[2] with a[hi]=a[3]:
+                                                  a=[3,1,4,7]   return p=2
+```
+
+Pivot 4 now sits at index 2 with `[3,1]` (all ≤ 4) to its left and `[7]` (all > 4) to its right —
+its permanent sorted spot. Quicksort then recurses on `[3,1]` and `[7]` independently.
+
 **Complexity:** each good partition halves the problem → T(n)=2T(n/2)+O(n)=**O(n log n)**
 average. But a **bad pivot** (e.g. always the min/max, which happens with a naive "last element"
 pivot on already-sorted input) gives partitions of size 0 and n−1 → T(n)=T(n−1)+O(n)=**O(n²)**.
 
 **Mitigations interviewers want:**
-- **Randomized pivot** or **median-of-three** (median of first/mid/last) → makes worst case
-  astronomically unlikely, defeats adversarial sorted/reverse-sorted input.
+- **Randomized pivot** or **median-of-three** (median of first/mid/last) → makes the common
+  already-sorted/reverse-sorted cases fast. **Important distinction:** median-of-three is
+  *deterministic*, so a crafted adversarial input (McIlroy's "antiquicksort") can still force
+  O(n²). Only a **randomized pivot** (or introsort's heap-sort fallback) makes the worst case
+  *probabilistically* negligible against any fixed input, since the adversary can't predict the
+  pivot choices.
 - Recurse into the **smaller** partition first (or use tail recursion) → bounds stack to O(log n).
 - **3-way partition (Dutch National Flag)** → groups `< = >` in one pass; O(n) on arrays with
   **many duplicate keys** (avoids re-partitioning equal elements). This is exactly the *Sort
@@ -181,6 +206,16 @@ children are `2i+1` and `2i+2`.
   O(n log n); most nodes are near the leaves and sift down cheaply).
 - **Sort phase:** n swaps, each followed by an O(log n) sift-down → **O(n log n)**.
 
+**Why build-heap is O(n), not O(n log n) (the classic senior gotcha):** sift-down cost is
+proportional to a node's *height*, not the tree's depth — and almost all nodes are shallow. In a
+heap of n nodes, ~n/2 are leaves (height 0, sift 0 levels), ~n/4 have height 1, ~n/8 have height
+2, and so on. Total work ≈ n·Σ(h / 2^(h+1)) over heights h = 0,1,2,…. That series Σ(h/2^h)
+converges to a **constant (= 2)**, so the sum is O(n), not O(n log n). Concretely for n = 8:
+4 leaves sift 0, 2 nodes sift ≤1, 1 node sifts ≤2, the root sifts ≤3 → work ≈ 4·0 + 2·1 + 1·2 +
+1·3 = 7 sift-steps, far below the naive 8·log₂8 = 24. Contrast the **sort phase**:
+there each of the n sift-downs starts at the *root* and can fall the full height (up to log n
+levels), so that phase genuinely costs Θ(n log n) — which is where heap sort's bound comes from.
+
 **Properties:** O(n log n) **worst-case guaranteed** (unlike quicksort), **in-place** O(1) aux,
 but **not stable** and **poor cache locality** (jumps around the array), so it's usually slower
 in practice than quicksort. Its guaranteed bound + O(1) space is why it's used as the fallback in
@@ -200,11 +235,47 @@ structured keys**.
   input right-to-left when placing. Great when `k = O(n)` (small integer range); useless when `k`
   is huge (sorting 32-bit ints directly needs a 4-billion-entry array).
 - **Radix sort (LSD)** — stable-counting-sort the numbers one digit at a time, least-significant
-  digit first. **O(d·(n + b))** for d digits in base b. Turns "large range" into "few passes over
-  small ranges." Requires a stable inner sort (counting) to be correct.
+  digit first. **O(d·(n + b))** for d digits in base b (b = 10 for decimal digits). Turns "large
+  range" into "few passes over small ranges." Requires a stable inner sort (counting) to be correct.
+  (**MSD radix** instead recurses most-significant-digit first; it's natural for variable-length
+  strings and can stop early on a prefix without processing every digit, but needs recursion/bucketing
+  per level. Reach for MSD on the "how would you radix-sort strings?" follow-up.)
 - **Bucket sort** — scatter n elements into `~n` buckets by value range, sort each bucket, concat.
   **O(n)** expected when input is **uniformly distributed**; degrades to **O(n²)** if everything
   lands in one bucket. Good for uniform floats in [0,1).
+
+**Counting sort, traced — input `[2,5,2,0,3]`, keys in `[0,6)`:**
+
+```text
+1. COUNT each key:        count = [1, 0, 2, 1, 0, 1]   (one 0, zero 1s, two 2s, one 3, …)
+                                    ↑idx0            ↑idx5
+2. PREFIX-SUM (running):  cum   = [1, 1, 3, 4, 4, 5]   (cum[v] = how many keys ≤ v)
+   cum[v] is a 1-based end position: the LAST element with key v lands at output index cum[v]-1.
+
+3. PLACE right-to-left (this ordering is what makes it STABLE):
+   read a[4]=3 → out idx cum[3]-1 = 4-1 = 3 → out=[_,_,_,3,_]  ; cum[3] → 3
+   read a[3]=0 → out idx cum[0]-1 = 1-1 = 0 → out=[0,_,_,3,_]  ; cum[0] → 0
+   read a[2]=2 → out idx cum[2]-1 = 3-1 = 2 → out=[0,_,2,3,_]  ; cum[2] → 2
+   read a[1]=5 → out idx cum[5]-1 = 5-1 = 4 → out=[0,_,2,3,5]  ; cum[5] → 4
+   read a[0]=2 → out idx cum[2]-1 = 2-1 = 1 → out=[0,2,2,3,5]  ; cum[2] → 1
+
+RESULT: [0,2,2,3,5]
+STABILITY: the two 2s were a[0] (earlier) and a[2] (later). Going right-to-left we place a[2]
+first at index 2, then a[0] at index 1 — so the earlier 2 keeps the earlier slot. Iterating
+left-to-right (or forgetting to decrement) would flip them and break stability.
+```
+
+**Radix LSD, traced — input `[170, 45, 75, 90, 802, 24]` (stable counting sort per digit):**
+
+```text
+by UNITS digit:   170,90 (·0) | 802 (2) | 24 (4) | 45,75 (5)  → [170, 90, 802, 24, 45, 75]
+by TENS digit:    802 (0) | 24 (2) | 45 (4) | 170,75 (7) | 90 (9) → [802, 24, 45, 170, 75, 90]
+by HUNDREDS:      24,45,75,90 (0) | 170 (1) | 802 (8)        → [24, 45, 75, 90, 170, 802]  ✓ sorted
+```
+
+Why it works: each pass is **stable**, so when the hundreds pass groups `24,45,75,90` all under
+digit 0, it leaves them in the order the *earlier* (tens/units) passes already established. A
+non-stable per-digit sort would scramble those ties and the result would be wrong.
 
 > [!WARNING]
 > Non-comparison sorts are **not free lunch**. They assume the keys fit an integer range /
@@ -223,6 +294,16 @@ has height ≥ log₂(L). So the worst-case number of comparisons (tree height) 
 ```text
 h ≥ log₂(n!)  and by Stirling  log₂(n!) = Θ(n log n)
 ```
+
+**Why n! leaves?** Each of the n! input orderings needs its *own* distinct sequence of
+comparison outcomes to reach a sorted result — if two different permutations funneled to the same
+leaf, the algorithm would apply the identical rearrangement to both and at least one would come
+out unsorted. So the tree needs a separate leaf per permutation: ≥ n!.
+
+**Why log₂(n!) ≈ n log n?** log₂(n!) = log₂1 + log₂2 + … + log₂n = Σᵢ log₂ i. Roughly the top
+half of those n terms (i from n/2 to n) are each ≥ log₂(n/2), so the sum is ≥ (n/2)·log₂(n/2) =
+Θ(n log n). Sanity check with n = 4: n! = 24, log₂24 ≈ 4.58 — so any comparison sort needs ≥ 5
+comparisons in the worst case to sort 4 elements.
 
 Therefore **no comparison-based sort can do better than Θ(n log n) comparisons in the worst
 case.** This is why merge/heap sort are asymptotically optimal, and why linear sorts must abandon
@@ -267,11 +348,36 @@ k-th index. Each pass discards a chunk, so the expected work is n + n/2 + n/4 + 
 def quickselect(a, k):            # k-th smallest, 0-indexed
     lo, hi = 0, len(a) - 1
     while lo <= hi:
-        p = partition(a, lo, hi)  # random pivot in practice
+        # NOTE: the Lomuto `partition` above is deterministic (last-element pivot) and
+        # would hit O(n²) on sorted input. To randomize, swap a random index into a[hi]
+        # first:  r = random.randint(lo, hi); a[r], a[hi] = a[hi], a[r]
+        p = partition(a, lo, hi)
         if p == k: return a[p]
         if p < k:  lo = p + 1
         else:      hi = p - 1
 ```
+
+**Quickselect, traced — `a = [7,2,9,4,1,6]`, want k = 2 (the 3rd-smallest, 0-indexed):**
+
+```text
+round 1: lo=0, hi=5, pivot=a[5]=6 → partition puts 6 at its sorted index.
+         elements ≤6: 2,4,1  → a = [2,4,1,6,9,7], p=3
+         p=3 > k=2 → answer is in the LEFT half: hi = p-1 = 2   (lo stays 0)
+
+round 2: lo=0, hi=2, subarray [2,4,1], pivot=a[2]=1 → 1 is the smallest
+         a = [1,4,2,6,9,7], p=0
+         p=0 < k=2 → answer is in the RIGHT half: lo = p+1 = 1  (hi stays 2)
+
+round 3: lo=1, hi=2, subarray [4,2], pivot=a[2]=2 → 2 ≤ ... , 4 >
+         a = [1,2,4,6,9,7], p=1
+         p=1 < k=2 → lo = p+1 = 2
+
+round 4: lo=2, hi=2, pivot=a[2]=4, p=2 == k → return a[2] = 4
+```
+
+Sorted the array would be `[1,2,4,6,9,7]`→`[1,2,4,6,7,9]`; index 2 is indeed **4**. Notice we
+only ever recursed into one side, and the index arithmetic (`lo=p+1` when p<k, `hi=p-1` when p>k)
+keeps narrowing the window to the target index.
 
 - **Average O(n)**, **worst O(n²)** (adversarial pivots) — randomize the pivot to make worst case
   negligible. **Median-of-medians** guarantees worst-case O(n) but has large constants and is rarely

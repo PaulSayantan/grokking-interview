@@ -91,6 +91,24 @@ know which area they touch:
 Knowing this table lets you answer "how do I unstage a file?" (`git reset HEAD <file>` /
 `git restore --staged`) versus "how do I discard local edits?" (`git restore <file>`).
 
+**Worked example — the three `reset` variants on one scenario.** Say your branch is
+`C1 ← C2 ← C3` (HEAD at `C3`), where `C3` was the commit "add feature X" that touched
+`x.js`. You run `git reset HEAD~1` in each of its three modes. `HEAD~1` is `C2`, so all three
+move the branch pointer back to `C2` — history now ends at `C2` and `C3` is no longer
+referenced by the branch. The difference is what happens to `C3`'s changes to `x.js`:
+
+| After `reset HEAD~1` | History (HEAD) | Index (staged) | Working tree (disk) | `x.js` state |
+|---|---|---|---|---|
+| `--soft` | `C1 ← C2` | `C3`'s changes | `C3`'s changes | staged, ready to re-commit |
+| `--mixed` (default) | `C1 ← C2` | matches `C2` | `C3`'s changes | modified but **unstaged** |
+| `--hard` | `C1 ← C2` | matches `C2` | matches `C2` | **gone** |
+
+So `--soft` is "undo the commit but keep everything staged" (perfect for re-doing the commit
+message or squashing `C3` into a new commit); `--mixed` is "undo the commit and the `git add`,
+leaving my edits in the working tree"; `--hard` is "undo the commit *and* throw away the edits."
+`C3`'s object still exists in the reflog after all three — see [Reflog](#reflog-the-safety-net)
+— so even a `--hard` is recoverable until garbage collection.
+
 ---
 
 ## Fast-forward vs three-way merge
@@ -103,6 +121,17 @@ When you merge branch `feature` into `main`:
 - **Three-way merge** — if both branches have new commits (they diverged), Git computes a merge
   using the two tips and their **merge base** (common ancestor) and records a **merge commit
   with two parents**. History now has a visible branch/join.
+
+**Worked example — what "three-way" actually diffs.** Suppose `feature` branched off `main` at
+commit `B`, then both moved on: `main = A ← B ← E` and `feature = A ← B ← C ← D`. The **merge
+base** is `B` (the last commit both share). "Three-way" means Git looks at *three* snapshots:
+the base `B`, `main`'s tip `E`, and `feature`'s tip `D`. It computes two diffs — `B → E` (what
+`main` changed) and `B → D` (what `feature` changed) — and combines both sets of changes. If the
+two sides touched different lines, Git merges them automatically and writes merge commit `M`
+with two parents (`E` and `D`). If they touched the *same* region, that region is a conflict.
+Contrast the fast-forward case: if `main` had *not* moved (still at `B`), there's no divergence
+and nothing to reconcile — Git just slides the `main` pointer forward to `D`, and history stays
+the linear line `A ← B ← C ← D` with no merge commit.
 
 ```mermaid
 gitGraph
@@ -156,6 +185,17 @@ flowchart LR
   history and avoid noise merge commits before opening/updating a PR.
 - Merge (or use the platform's merge button) to integrate a reviewed PR into `main`, especially
   when you want the merge to be an auditable, atomic event.
+
+**Worked example — why the hash changes and why that breaks teammates.** Take `feature = A ← B
+← C ← D` where `main` has since advanced to `E`. Commit `C` currently has hash `abc123` and its
+parent is `B`. When you run `git rebase main`, Git replays `C`'s diff on top of `E`: the new
+commit `C'` has the *same changes* but a *different parent* (`E` instead of `B`) and a new
+timestamp, so its content hashes to something new — say `def456`. `D` likewise becomes `D'`. The
+old `abc123` still exists in the object store (reachable via reflog) but nothing points to it on
+the branch anymore. Now the danger: if a teammate had already pulled `abc123`, their `feature`
+still ends in `abc123` while yours ends in `def456`. Git sees two divergent histories with
+*duplicate-looking* commits, and their next `pull` produces conflicts or a tangle of doubled
+commits. That is exactly what the Golden Rule prevents.
 
 > [!WARNING]
 > **The Golden Rule of Rebasing: never rebase commits that others have already pulled.** Rebase
@@ -236,6 +276,34 @@ git reset --hard HEAD@{3}  # or: git branch recovered <sha>
 > When someone says "I lost my commits after a rebase/reset," the answer is almost always
 > `git reflog`. Reflog entries are local and expire (default 90 days for reachable, 30 for
 > unreachable), and are **not** shared on clone.
+
+---
+
+## Finding a bad commit: git bisect
+
+When a bug "appeared sometime in the last N commits" but you don't know which one,
+`git bisect` does a **binary search** over history. You mark one commit `good` (bug absent) and
+one `bad` (bug present); Git checks out the midpoint, you test and mark it `good`/`bad`, and it
+halves the suspect range each round until one commit is left — the first `bad` one.
+
+**Worked example.** A bug is somewhere in the last **200** commits. Linear search could take up
+to 200 tests; bisect takes about `log2(200) ≈ 7.6`, so **8 tests**. The range shrinks
+`200 → 100 → 50 → 25 → 13 → 7 → 4 → 2 → 1`, isolating the culprit in a handful of steps:
+
+```bash
+git bisect start
+git bisect bad                 # current HEAD is broken
+git bisect good v1.4.0         # this old tag was fine
+# Git checks out the midpoint; test it, then:
+git bisect good   # or: git bisect bad   -> repeat ~8 times
+git bisect run ./test.sh       # or automate: Git runs the script and marks each step for you
+git bisect reset               # restore your original HEAD when done
+```
+
+With `git bisect run <script>` (exit 0 = good, non-zero = bad) the whole search is automated.
+One connection to squash-and-merge: squashing collapses a PR into a single commit, so bisect can
+only pin blame to the *whole PR*, not to the individual commit inside it — coarser but usually
+still fast enough.
 
 ---
 
@@ -436,7 +504,10 @@ The **PR (GitHub) / MR (GitLab)** is the review + gate unit in branch-based work
 Merge strategies the button offers:
 - **Merge commit** — preserves all branch commits + a merge commit (full history, `--no-ff`).
 - **Squash and merge** — collapses the branch into **one commit** on `main` (clean linear
-  history, one revertable unit; loses intermediate commits).
+  history, one revertable unit; loses intermediate commits). The real cost beyond "loses
+  commits": it collapses per-commit `git blame`/`git bisect` resolution to PR granularity and
+  discards intermediate authorship/co-author metadata — fine for small PRs, but on a large PR you
+  lose the signal of *which* internal change introduced a line or a bug.
 - **Rebase and merge** — replays the branch's commits onto `main` with no merge commit (linear,
   keeps individual commits, new hashes).
 

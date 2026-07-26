@@ -10,9 +10,9 @@ questions:
       In an AWS SaaS system, what does "tenant context" add on top of ordinary authentication?
     options:
       - "It binds the request to a tenant, tier, and role so it can be scoped and routed correctly"
-      - "It encrypts the payload of every request"
-      - "It caches the user's password for faster re-login"
-      - "It replaces authentication entirely so no login is required"
+      - "It encrypts the payload of every request end-to-end using a per-tenant key"
+      - "It caches the user's hashed password in memory so subsequent logins skip the IdP"
+      - "It replaces authentication entirely, so users skip the login step and the IdP is bypassed"
     answer: 0
     explanation: |
       Authentication proves *who* the user is; tenant context adds *which tenant* they act for, at what
@@ -43,10 +43,10 @@ questions:
       A client sends a request with a header `X-Tenant-Id: acme`. Should the backend trust it to
       determine data access?
     options:
-      - "Yes, as long as the request uses HTTPS"
+      - "Yes, as long as the request arrives over HTTPS with a valid TLS certificate on the connection"
       - "No, only a tenant claim inside a signature-verified JWT (or something derived from it) is trustworthy"
-      - "Yes, because API Gateway strips malicious headers automatically"
-      - "Yes, headers set by the client are trustworthy"
+      - "Yes, because API Gateway validates and strips spoofed X-Tenant-Id headers before the backend sees them"
+      - "Yes, custom headers set by the client are authenticated by the load balancer and can be trusted"
     answer: 1
     explanation: |
       Client-supplied headers/body are attacker-controlled. The trustworthy tenant identifier is a claim
@@ -59,9 +59,9 @@ questions:
     question: |
       What is "pooled identity" in AWS SaaS?
     options:
-      - "A separate Cognito user pool per tenant"
-      - "Storing all passwords in a shared DynamoDB table"
-      - "Federating every tenant to a single corporate IdP"
+      - "A separate Cognito user pool provisioned per tenant, each with its own app clients"
+      - "Storing all tenants' hashed passwords together in one shared DynamoDB credentials table"
+      - "Federating every tenant's users into a single shared corporate IdP that all tenants log in through"
       - "One shared Cognito user pool for all tenants, with the tenant carried as a claim/attribute"
     answer: 3
     explanation: |
@@ -90,9 +90,9 @@ questions:
       What is the tenant registry typically implemented as, and what does it hold?
     options:
       - "A DynamoDB table keyed by tenantId holding tier, status, routing, and identity config"
-      - "An S3 bucket of tenant profile images"
-      - "An SQS queue of onboarding events"
-      - "A CloudWatch log group holding request logs"
+      - "An S3 bucket storing each tenant's uploaded profile images and branding assets"
+      - "An SQS queue buffering onboarding events until the provisioning workflow consumes them"
+      - "A CloudWatch log group holding per-tenant request and access logs for later analysis"
     answer: 0
     explanation: |
       The tenant registry is the control plane's source of truth, commonly a DynamoDB table keyed by
@@ -105,9 +105,9 @@ questions:
     question: |
       Which of these is a valid tenant routing mechanism on AWS?
     options:
-      - "Choosing a random backend per request"
-      - "Routing based on the client's screen resolution"
-      - "Routing based on the time of day only"
+      - "Choosing a random backend per request and relying on sticky sessions to keep tenants together"
+      - "Routing based on the client's screen resolution so mobile tenants hit a separate backend fleet"
+      - "Routing based on the time of day only, sending off-peak traffic to a smaller reserved cluster"
       - "Host-based routing on subdomains like acme.app.com via ALB or CloudFront"
     answer: 3
     explanation: |
@@ -121,10 +121,10 @@ questions:
     question: |
       When a user authenticates to a Cognito user pool, which tokens are returned?
     options:
-      - "Only a single opaque session cookie"
+      - "Only a single opaque session cookie that the hosted UI sets in the browser"
       - "An ID token, an access token, and a refresh token"
-      - "A TLS client certificate"
-      - "An IAM access key and secret key pair"
+      - "A short-lived TLS client certificate bound to the user's device fingerprint"
+      - "A long-lived IAM access key and secret key pair scoped to the user pool"
     answer: 1
     explanation: |
       Cognito user pools return an ID token and access token (both JWTs) plus a refresh token. They do
@@ -138,9 +138,9 @@ questions:
       Which Cognito feature lets you add tenant claims (tenantId, tier, role) to the token during login?
     options:
       - "The pre-token-generation Lambda trigger"
-      - "A CloudFront function"
-      - "An S3 event notification"
-      - "A DynamoDB stream"
+      - "A CloudFront function running at the edge on the login response"
+      - "An S3 event notification fired when the user record is written"
+      - "A DynamoDB stream processor that rewrites the issued token"
     answer: 0
     explanation: |
       The pre-token-generation Lambda trigger runs during authentication and can add/override claims,
@@ -153,10 +153,10 @@ questions:
     question: |
       What is the recommended first step when offboarding a tenant?
     options:
-      - "Rotate the AWS root account password"
+      - "Rotate the AWS root account password to lock the departing tenant out of everything"
       - "Immediately hard-delete all data with no retention window"
       - "Disable/suspend the tenant (block auth and routing) before any hard delete"
-      - "Delete the shared production table"
+      - "Delete the shared production table and recreate it without the departing tenant's rows"
     answer: 2
     explanation: |
       Offboarding should first disable/suspend (reversible) then hard-delete after a retention window,
@@ -185,9 +185,9 @@ questions:
     question: |
       What is "federated identity" in a B2B SaaS context?
     options:
-      - "Storing tenants in separate AWS accounts"
-      - "Using API keys instead of tokens"
-      - "Sharing one password across all tenants"
+      - "Storing each tenant's users and data in a separate dedicated AWS account"
+      - "Using long-lived per-tenant API keys instead of signed identity tokens"
+      - "Sharing one set of credentials across all tenants for a single sign-on experience"
       - "A tenant's users authenticate through their own corporate SAML/OIDC IdP"
     answer: 3
     explanation: |
@@ -201,10 +201,10 @@ questions:
     question: |
       True or false: the URL path `/t/{tenantId}/...` by itself authorizes access to that tenant's data.
     options:
-      - "False — paths cannot contain tenant identifiers"
-      - "True — the path is sufficient authorization"
+      - "False — URL paths are not allowed to embed tenant identifiers for security reasons"
+      - "True — the path names the tenant, so it is sufficient authorization on its own"
       - "False — the path is only a routing hint; authorization must come from the verified JWT"
-      - "True — as long as the path is HTTPS"
+      - "True — as long as the path is served over HTTPS the tenantId in it can be trusted"
     answer: 2
     explanation: |
       Routing (path or host) tells the system where to send a request but never grants access. The
@@ -219,9 +219,9 @@ questions:
       each user. What is the problem?
     options:
       - "Cognito allows only 50 custom attributes per user pool, and they cannot be deleted/renamed once created"
-      - "Custom attributes cost $1 each per month"
-      - "Custom attributes are encrypted and cannot be read at runtime"
-      - "There is no problem; Cognito supports unlimited custom attributes"
+      - "Custom attributes are billed at $1 each per month on top of the monthly active user charge"
+      - "Custom attributes are stored encrypted at rest and therefore cannot be read back at runtime"
+      - "There is no problem; Cognito supports an unlimited number of custom attributes per pool"
     answer: 0
     explanation: |
       Cognito caps custom attributes at 50 per user pool (name ≤ 20 chars, value ≤ 2,048 bytes) and they
@@ -251,10 +251,10 @@ questions:
     question: |
       Why is it a bad idea to put a tenant's full feature-flag/entitlement set inside the JWT?
     options:
-      - "JWTs cannot contain any custom claims"
+      - "JWTs are a fixed schema and cannot carry any application-defined custom claims at all"
       - "Entitlements change faster than the token TTL and bloat every request; look them up by tenantId instead"
-      - "Custom claims are not signed"
-      - "It would make the token unreadable by API Gateway"
+      - "Custom claims are excluded from the signature, so entitlements placed there can be tampered with"
+      - "Embedding entitlements makes the token payload unreadable by API Gateway authorizers"
     answer: 1
     explanation: |
       Keep tokens small and stable (tenantId, tier, role). Entitlements change more often than the token
@@ -269,9 +269,9 @@ questions:
       most likely to be introduced?
     options:
       - "By failing to carry tenantId on the queue message, so the worker loses tenant context"
-      - "In the TLS handshake with SQS"
-      - "In the Cognito refresh-token rotation"
-      - "In the JWT signature verification at the edge"
+      - "In the TLS handshake with SQS, where the tenant identity can be stripped in transit"
+      - "In the Cognito refresh-token rotation step that runs while the job is being processed"
+      - "In the JWT signature verification performed at the edge before the message is enqueued"
     answer: 0
     explanation: |
       Async hops are where tenant context is commonly lost: if the SQS message omits tenantId (e.g., as a
@@ -285,10 +285,10 @@ questions:
       In an API Gateway + Lambda design, what is the cleanest place to verify the JWT and extract
       tenant context once per request?
     options:
-      - "In a CloudWatch alarm"
-      - "Inside every business Lambda separately"
+      - "In a CloudWatch alarm that fires when an unverified token is detected on the request"
+      - "Inside every business Lambda separately, re-verifying the token on each invocation"
       - "In a Lambda (or Cognito/JWT) authorizer that returns tenant context in the authorizer context"
-      - "In the client before sending the request"
+      - "In the client application, which verifies the token before sending the request upstream"
     answer: 2
     explanation: |
       A Lambda/Cognito/JWT authorizer verifies the token once and passes tenantId/tier/role via the
@@ -318,9 +318,9 @@ questions:
     question: |
       How do STS session tags enable one shared role to isolate DynamoDB access per tenant?
     options:
-      - "By creating a new DynamoDB table per tag"
-      - "By increasing the table's provisioned throughput"
-      - "By encrypting the table with a per-tenant KMS key automatically"
+      - "By automatically creating a new DynamoDB table named after each tag value so a tenant's rows land in a separate store"
+      - "By raising the table's provisioned read/write throughput for each tag so every tenant gets a reserved slice of capacity"
+      - "By transparently encrypting each tenant's items with a distinct per-tenant KMS key that STS derives from the session tag"
       - "By setting a TenantID session tag referenced via ${aws:PrincipalTag/TenantID} in a policy condition (e.g., dynamodb:LeadingKeys)"
     answer: 3
     explanation: |
@@ -335,10 +335,10 @@ questions:
       Why is "one API Gateway custom domain name per tenant" a poor fit for a SaaS with thousands of
       tenants?
     options:
-      - "Custom domains disable Lambda authorizers"
-      - "Custom domains cannot be used with TLS"
+      - "Attaching a custom domain silently disables any Lambda or Cognito authorizer configured on that API stage"
+      - "Custom domains only accept plain HTTP and cannot terminate TLS, so per-tenant login would be unencrypted"
       - "Custom domain names are quota-limited per account, so domain-per-tenant does not scale to thousands"
-      - "API Gateway does not support custom domains at all"
+      - "API Gateway has no concept of custom domains, so every tenant would be stuck on the execute-api hostname"
     answer: 2
     explanation: |
       Custom domain names are a limited per-account resource, so mapping one per tenant does not scale to
@@ -353,9 +353,9 @@ questions:
       tenant?
     options:
       - "Provisioning dedicated infrastructure (a CloudFormation/CDK stack) — done for silo, skipped for pooled"
-      - "Setting the final ACTIVE status"
-      - "Creating the onboarding API request"
-      - "Writing the initial tenant registry record"
+      - "Setting the final ACTIVE status, which runs a longer approval sub-workflow for pooled tenants than for silo tenants"
+      - "Creating the onboarding API request, which must be signed with a per-tenant IAM role only in the pooled path"
+      - "Writing the initial tenant registry record, which uses a separate registry table for silo versus pooled tenants"
     answer: 0
     explanation: |
       Siloed tenants require deploying a dedicated stack (CloudFormation/CDK/Service Catalog or a new
@@ -368,9 +368,9 @@ questions:
     question: |
       Why should the tenant registry be treated as a highly available, cached, critical dependency?
     options:
-      - "Because it must be publicly accessible on the internet"
-      - "Because DynamoDB requires it for billing"
-      - "Because it stores tenant passwords"
+      - "Because it must be publicly accessible on the internet so tenants can self-serve their own configuration"
+      - "Because DynamoDB requires a registry table to be present before it will emit per-tenant billing records"
+      - "Because it stores every tenant's hashed passwords and is therefore on the authentication critical path"
       - "Because it is read on nearly every control-plane operation and often on the routing path"
     answer: 3
     explanation: |
@@ -384,10 +384,10 @@ questions:
     question: |
       In a pooled (shared-schema) model, what makes tenant deletion during offboarding risky?
     options:
-      - "You can simply drop the table safely"
+      - "You can simply drop the shared table safely because pooled schemas keep each tenant in an isolated segment"
       - "Deletion is a filtered delete by tenant_id; a wrong filter deletes the wrong tenant's data"
-      - "Pooled models cannot delete data at all"
-      - "Deletion always requires a full table scan of every AWS account"
+      - "Pooled models physically cannot delete rows once written, so offboarding only ever soft-flags records"
+      - "Deletion always requires a full table scan across every AWS account before any rows can be removed"
     answer: 1
     explanation: |
       In pooled data, deletion is a filtered operation keyed by tenant_id, so a mistaken filter can
@@ -402,9 +402,9 @@ questions:
       identity topology is most appropriate?
     options:
       - "Pooled identity for the 40,000 small tenants; silo pools for the 3 regulated enterprises (a bridge)"
-      - "Pooled identity for everyone with no exceptions"
-      - "Federated identity for the small tenants and pooled for the enterprises"
-      - "Silo (pool per tenant) for all 40,003 tenants"
+      - "Pooled identity for every tenant with no exceptions, since a single shared pool satisfies regulated enterprises too"
+      - "Federated identity for the 40,000 small self-serve tenants and pooled identity for the 3 regulated enterprises"
+      - "Silo (a dedicated Cognito user pool per tenant) for all 40,003 tenants regardless of size or regulatory need"
     answer: 0
     explanation: |
       A bridge fits best: pool the mass of small tenants (cost/scale) and silo the few regulated
@@ -418,10 +418,10 @@ questions:
       Your APIs authorize on the access token, but you need custom tenant claims there. What enables
       customizing the access token in Cognito?
     options:
-      - "Access tokens cannot carry any tenant information"
-      - "Only the ID token can ever be customized"
+      - "Access tokens are a locked OAuth structure that cannot carry any tenant-specific information at all"
+      - "Only the ID token can ever be customized; the access token schema is frozen and rejected by authorizers if altered"
       - "The newer pre-token-generation trigger (V2/V3) can add/suppress claims and scopes on the access token"
-      - "You must switch to IAM users"
+      - "You must abandon Cognito user pools entirely and switch to native IAM users to carry tenant claims"
     answer: 2
     explanation: |
       The advanced (V2/V3) pre-token-generation trigger can customize the access token — adding or
@@ -435,10 +435,10 @@ questions:
       Which routing approach is most flexible when some tenants are pooled and some are siloed (a bridge
       deployment)?
     options:
-      - "A hardcoded if/else in the client app"
+      - "A hardcoded if/else in the client app that maps each known tenant subdomain to its pooled or siloed endpoint"
       - "A routing service that reads tenantId from the token and looks up the tenant's stack in a DynamoDB mapping"
-      - "Round-robin DNS across all stacks"
-      - "A single static Route 53 alias to the pooled stack"
+      - "Round-robin DNS that spreads every tenant's requests evenly across all pooled and siloed stacks in rotation"
+      - "A single static Route 53 alias pointing all tenants at the pooled stack, with silo tenants proxied from there"
     answer: 1
     explanation: |
       A context/header-based routing service that resolves the tenant's target stack from the registry
@@ -485,9 +485,9 @@ questions:
       plane)?
     options:
       - "They have different access patterns, owners, and blast radius; mixing them couples lifecycle to workload"
-      - "DynamoDB cannot store both kinds of data"
-      - "Application data is always relational and registries are always graph databases"
-      - "They must be in different AWS partitions by law"
+      - "DynamoDB physically cannot store control metadata and application records in the same table or account"
+      - "Application data is always relational and registries are always graph databases, so they need different engines"
+      - "Regulations mandate that lifecycle metadata and tenant workload data live in separate AWS partitions by law"
     answer: 0
     explanation: |
       Registry (lifecycle metadata) and application data differ in access pattern, ownership, and blast
@@ -500,9 +500,9 @@ questions:
     question: |
       Why must the onboarding workflow be idempotent?
     options:
-      - "Because Step Functions cannot be retried otherwise"
-      - "To allow tenants to onboard themselves without any control plane"
-      - "To reduce the AWS bill by half"
+      - "Because Step Functions refuses to retry any state machine unless every task is declared idempotent"
+      - "To allow tenants to onboard themselves directly from the browser without any control plane involved"
+      - "To roughly halve the AWS bill, since idempotent workflows are billed at a lower per-transition rate"
       - "So retries after partial failures don't create duplicate/half-provisioned tenants"
     answer: 3
     explanation: |
@@ -517,10 +517,10 @@ questions:
       Which statement best captures the "defense in depth" approach to preventing cross-tenant data
       access in a pooled table?
     options:
-      - "Rely solely on the application always adding WHERE tenant_id"
+      - "Rely solely on the application always remembering to add a WHERE tenant_id clause on every single query"
       - "Combine a verified JWT tenant claim, app-level scoping, and IAM-scoped credentials so a code bug still cannot cross tenants"
-      - "Encrypt the whole table and share one key across tenants"
-      - "Put every tenant in its own AWS account"
+      - "Encrypt the whole table at rest and share one KMS key across all tenants, treating encryption as the isolation boundary"
+      - "Put every tenant in its own AWS account, which is a silo architecture rather than a defense-in-depth layering"
     answer: 1
     explanation: |
       Defense in depth layers a verified tenant claim, application scoping, AND credential-level scoping
@@ -535,9 +535,9 @@ questions:
       What is the cleanest way to model this?
     options:
       - "Keep the authoritative user-to-tenant-and-role mapping in a DynamoDB registry and resolve the right context per login/session"
-      - "Two separate AWS accounts for the one person"
-      - "Store both roles in the refresh token"
-      - "A single Cognito user with one custom:tenantId attribute"
+      - "Provision two separate AWS accounts for the one person, one per tenant, and let them switch between accounts"
+      - "Store both tenant roles inside the long-lived refresh token and let each API pick whichever role it needs"
+      - "Model it as a single Cognito user carrying one custom:tenantId attribute that lists both tenants comma-separated"
     answer: 0
     explanation: |
       One-user-in-many-tenants breaks a single custom:tenantId attribute. An external registry mapping
@@ -550,10 +550,10 @@ questions:
     question: |
       A user edits the URL to hit `/t/other-tenant/orders`. What must the backend do?
     options:
-      - "Trust the path since it came over HTTPS"
-      - "Serve the data because the path names a valid tenant"
+      - "Trust the path and serve the data, since the request arrived over an authenticated HTTPS connection"
+      - "Serve the data because the path names a valid, existing tenant that is registered in the tenant registry"
       - "Reject unless the path tenantId matches (or is subordinate to) the tenantId in the verified JWT"
-      - "Redirect to the tenant's login page and grant access after login"
+      - "Redirect the user to that tenant's hosted login page and grant access to the orders once they sign in"
     answer: 2
     explanation: |
       The routing hint must be reconciled with the verified token's tenantId; a mismatch is rejected,
@@ -566,10 +566,10 @@ questions:
     question: |
       How does a per-tenant KMS key strengthen the offboarding/compliance story?
     options:
-      - "It makes queries faster"
+      - "It makes queries against that tenant's encrypted data noticeably faster by caching the plaintext key"
       - "Scheduling the tenant's key for deletion cryptographically shreds that tenant's data"
-      - "It automatically deletes the tenant's rows"
-      - "It removes the need for a retention window"
+      - "It automatically deletes the tenant's rows from the shared table the moment the key is disabled"
+      - "It removes the need for any retention window because encrypted data is exempt from deletion obligations"
     answer: 1
     explanation: |
       Deleting a per-tenant KMS key renders that tenant's encrypted data unrecoverable (crypto-shredding),
@@ -583,9 +583,9 @@ questions:
       What are the size constraints on an inline session policy passed to AssumeRole and the alternative
       for larger policies?
     options:
-      - "Unlimited size inline"
-      - "Up to 64 KB inline; managed ARNs not allowed"
-      - "Exactly 100 characters, no alternative"
+      - "Unlimited inline size, so any policy fits directly in the AssumeRole call without a managed alternative"
+      - "Up to 64 KB of inline JSON, and passing managed policy ARNs alongside it is explicitly not allowed"
+      - "Exactly 100 characters of plaintext inline, with no supported alternative for larger policies"
       - "Up to 2,048 characters of plaintext inline; use up to 10 managed policy ARNs for more"
     answer: 3
     explanation: |
@@ -600,10 +600,10 @@ questions:
       A high-RPS pooled service does an sts:AssumeRole per request and is now being throttled by STS.
       Which mitigation is best and what is its main risk?
     options:
-      - "Call AssumeRole twice per request to spread load"
-      - "Remove IAM scoping entirely to avoid STS calls"
+      - "Call sts:AssumeRole twice per request and alternate the two sessions, effectively doubling the STS rate you consume"
+      - "Remove per-tenant IAM scoping entirely and share one broad role, eliminating STS calls at the cost of isolation"
       - "Cache the scoped credentials per tenant for their TTL; risk is stale credentials/permissions until the cache expires"
-      - "Switch every tenant to its own AWS account"
+      - "Migrate every tenant into its own dedicated AWS account so each gets a separate STS quota, re-architecting the platform"
     answer: 2
     explanation: |
       Caching scoped credentials per tenant for their lifetime removes per-request STS calls; the trade-
@@ -619,9 +619,9 @@ questions:
       TenantID session tags?
     options:
       - "It isolates per request without multiplying IAM roles toward the ~1,000 roles-per-account quota"
-      - "It removes the need for any policy conditions"
-      - "It makes AssumeRole unnecessary"
-      - "It gives each tenant a completely separate IAM audit trail with no extra work"
+      - "It removes the need for any policy conditions, since the session tag alone silently scopes every data call"
+      - "It makes sts:AssumeRole unnecessary because tagged sessions are minted directly by the token authorizer"
+      - "It gives each tenant a completely separate IAM audit trail in CloudTrail automatically, with no extra configuration"
     answer: 0
     explanation: |
       Session tags let a single role serve all tenants while still scoping each session, avoiding a role
@@ -636,9 +636,9 @@ questions:
       In pooled identity, what is the most serious systemic risk relative to silo identity, and how do
       you mitigate it while staying pooled?
     options:
-      - "Slower DNS resolution; mitigate with Route 53 health checks"
-      - "Inability to issue JWTs; mitigate with API keys"
-      - "Higher storage cost; mitigate by compressing tokens"
+      - "A shared pool slows DNS resolution for every tenant; mitigate with Route 53 latency-based routing and health checks"
+      - "A pooled directory cannot issue JWTs to more than one tenant; mitigate by falling back to per-tenant API keys"
+      - "Pooling drives higher token-storage cost per user; mitigate by gzip-compressing the JWT before returning it"
       - "A single directory/token bug can affect all tenants; mitigate with layered isolation (verified claims + IAM-scoped data access) and rigorous claim validation"
     answer: 3
     explanation: |
@@ -671,9 +671,9 @@ questions:
       filter?
     options:
       - "A cache entry keyed only by resource id (omitting tenantId), so one tenant reads another's cached value"
-      - "A JWT with an expired timestamp"
-      - "A 500 error from the database"
-      - "A slow cold start on Lambda"
+      - "A JWT with an expired timestamp that the authorizer rejects, forcing the caller to refresh before retrying"
+      - "A 500 error returned by the database connection pool when it is momentarily exhausted under peak load"
+      - "A slow Lambda cold start that adds several hundred milliseconds of latency to the first request per container"
     answer: 0
     explanation: |
       A cache key that omits tenantId can serve one tenant's cached data to another — a context-loss
@@ -686,10 +686,10 @@ questions:
     question: |
       What is the fundamental trade-off between siloed and pooled onboarding?
     options:
-      - "There is no meaningful difference"
-      - "Siloed onboarding is always cheaper and faster"
+      - "There is no meaningful difference; both paths seed identical config and finish in the same amount of time"
+      - "Siloed onboarding is always cheaper and faster because a dedicated stack skips the shared registry write"
       - "Siloed gives stronger isolation and per-tenant blast radius but couples sign-up to a slow stack deploy and consumes quotas; pooled is instant/cheap but shares blast radius"
-      - "Pooled onboarding requires a CloudFormation deploy per tenant"
+      - "Pooled onboarding requires a full CloudFormation stack deploy per tenant before the tenant can be marked active"
     answer: 2
     explanation: |
       Siloed onboarding deploys per-tenant infrastructure (strong isolation, small blast radius, but slow
@@ -702,10 +702,10 @@ questions:
     question: |
       For a cross-account sts:AssumeRole, whose STS request-rate quota is consumed?
     options:
-      - "Both accounts equally"
+      - "Both the caller and target accounts equally, each charged one request against their shared STS rate limit"
       - "Only the account making the AssumeRole request (the caller); the target account's quota is untouched"
-      - "Only the target account"
-      - "Neither account; cross-account calls are free of quota"
+      - "Only the target account that owns the role being assumed, since it is the resource granting the session"
+      - "Neither account; cross-account AssumeRole calls are exempt from the per-account STS request-rate quota"
     answer: 1
     explanation: |
       For cross-account AssumeRole, only the calling account's STS quota is consumed; the target account's
@@ -718,9 +718,9 @@ questions:
       You cache tenant-scoped STS credentials to reduce AssumeRole calls. Which trade-off must you weigh
       when choosing the session DurationSeconds?
     options:
-      - "Longer sessions are always safer"
-      - "Shorter sessions are impossible below 12 hours"
-      - "Duration has no effect on caching"
+      - "Longer sessions are always safer because credentials that live longer are re-validated by STS on every use"
+      - "Shorter sessions are impossible below 12 hours, so DurationSeconds cannot be tuned for freshness at all"
+      - "DurationSeconds has no effect on caching because cached credentials are refreshed on every single request"
       - "Longer sessions reduce STS calls but widen the window in which revoked/changed permissions still work"
     answer: 3
     explanation: |
@@ -735,10 +735,10 @@ questions:
       A silo tenant is served by a dedicated stack reachable at tenant-a.api.com. What prevents a Tenant
       B user from reaching Tenant A's stack simply by using that hostname?
     options:
-      - "TLS certificates prevent it automatically"
-      - "The hostname is secret so no one can find it"
+      - "The TLS certificate on tenant-a.api.com automatically rejects any request carrying a different tenant's token"
+      - "The hostname is kept secret and unlisted in DNS, so a Tenant B user has no way to discover or reach it"
       - "Each stack (or the shared authorizer) validates that the request's verified tenantId matches the tenant the stack serves"
-      - "Nothing; hostnames are inherently isolated"
+      - "Nothing prevents it, but per-hostname stacks are inherently isolated so a Tenant B token is harmless there"
     answer: 2
     explanation: |
       Reaching a hostname is not authorization: the stack/authorizer must confirm the verified token's
@@ -753,9 +753,9 @@ questions:
       your shared pool. Which approach best satisfies this?
     options:
       - "A dedicated (silo) user pool for that tenant federated to their Okta via SAML/OIDC"
-      - "Store their users in your shared pool but tag them"
-      - "Issue static API keys instead of SSO"
-      - "Pooled identity with the tenant as a custom attribute"
+      - "Store their users in your shared pool but tag them with a tenant attribute so their directory data stays logically separate"
+      - "Issue static long-lived per-tenant API keys instead of SSO, then map each key to their Okta directory on the backend"
+      - "Pooled identity with the tenant carried as a custom attribute, syncing their Okta users into the shared pool nightly"
     answer: 0
     explanation: |
       A dedicated pool federated to their Okta keeps auth in the customer's directory and isolates the
@@ -768,9 +768,9 @@ questions:
     question: |
       Which access rule keeps the tenant registry consistent and safe?
     options:
-      - "The client app writes tenant status directly"
-      - "The registry is write-only and never read at runtime"
-      - "Any service may freely mutate tenant lifecycle state"
+      - "The client app writes tenant status directly to the registry so onboarding can complete without a control plane"
+      - "The registry is write-only and never read at runtime; routing decisions are made from the JWT claims alone"
+      - "Any service may freely mutate tenant lifecycle state, relying on DynamoDB conditional writes to stay consistent"
       - "Only the control-plane workflow mutates lifecycle state; application code reads it (cached, keyed by the JWT tenantId) but does not change lifecycle"
     answer: 3
     explanation: |
@@ -785,10 +785,10 @@ questions:
       Why is threading tenant context as an explicit object preferable to storing it in a thread-local or
       global in a multi-tenant service?
     options:
-      - "Globals are faster and always correct"
+      - "Globals are faster to access and always correct, since the runtime scopes them to the active request automatically"
       - "Explicit context avoids leaking one request's tenant into another (e.g., across async tasks, thread reuse, or reactive pipelines)"
-      - "Thread-locals are not supported on AWS"
-      - "It reduces the JWT size"
+      - "Thread-locals are not supported on AWS compute like Lambda or Fargate, so an explicit object is the only option"
+      - "It reduces the JWT size by moving the tenantId out of the token and into the passed context object instead"
     answer: 1
     explanation: |
       Explicit tenant-context passing prevents accidental bleed-over from thread reuse, async
@@ -803,9 +803,9 @@ questions:
       account during onboarding?
     options:
       - "AWS Control Tower Account Factory (or an account-vending pipeline)"
-      - "Amazon Cognito groups"
-      - "Amazon SQS FIFO queues"
-      - "Amazon CloudFront distributions"
+      - "Amazon Cognito groups, creating one group per tenant that provisions a backing account on first login"
+      - "Amazon SQS FIFO queues, whose ordered messages trigger AWS to allocate a fresh account per tenant"
+      - "Amazon CloudFront distributions, using a per-tenant distribution as the boundary for a new account"
     answer: 0
     explanation: |
       Control Tower Account Factory (or a custom account-vending pipeline) automates provisioning a new
@@ -818,10 +818,10 @@ questions:
     question: |
       What are the limits on STS session tags used to carry tenant context?
     options:
-      - "Unlimited tags of any length"
-      - "Up to 10 tags, key ≤ 20 characters"
+      - "Unlimited session tags of any key/value length, bounded only by the overall AssumeRole request size"
+      - "Up to 10 session tags, with each key limited to 20 characters and each value to 64 characters"
       - "Up to 50 session tags, key ≤ 128 and value ≤ 256 characters"
-      - "Exactly 1 session tag only"
+      - "Exactly 1 session tag only, which must be reserved for the aws:PrincipalTag/TenantID condition key"
     answer: 2
     explanation: |
       STS supports up to 50 session tags with key ≤ 128 and value ≤ 256 characters — plenty for
@@ -833,10 +833,10 @@ questions:
     question: |
       Which end-to-end design best reflects a mature "bridge" for tenant identity, routing, and data?
     options:
-      - "Account per tenant for all tenants, no shared control plane"
+      - "A dedicated AWS account per tenant for every tenant, with no shared control plane coordinating them"
       - "Pooled identity + shared stack + IAM-scoped data for most tenants, with silo identity + dedicated stack + per-tenant KMS for premium/regulated tenants, all under one control plane"
-      - "Pooled everything with no isolation at the data tier"
-      - "A separate Cognito pool per user"
+      - "Pooled identity and a shared stack for everyone with no isolation at the data tier beyond application filters"
+      - "A separate Cognito user pool provisioned per individual user rather than per tenant, keyed by email"
     answer: 1
     explanation: |
       A bridge mixes pooled defaults with siloed premium/regulated tenants, coordinated by one control
@@ -849,9 +849,9 @@ questions:
     question: |
       Which set of checks must a JWT authorizer perform before trusting tenant claims?
     options:
-      - "Only decode the payload without verifying the signature"
-      - "Check the token length is under 8 KB"
-      - "Only check that the token is not empty"
+      - "Only base64-decode the payload and read the claims, trusting them without verifying the signature"
+      - "Check that the token length is under 8 KB and reject anything larger before reading its claims"
+      - "Only check that the Authorization header is present and the token string is not empty, then proceed"
       - "Verify signature, issuer, audience, and expiry, then extract tenantId/tier/role"
     answer: 3
     explanation: |
@@ -866,10 +866,10 @@ questions:
       What is the main trade-off of path-based tenant routing (`/t/{tenantId}`) versus host-based routing
       (`tenant.app.com`)?
     options:
-      - "There is no difference between them"
-      - "Path-based routing cannot use a load balancer"
+      - "There is no functional difference between them; both expose the tenantId identically in URLs and logs"
+      - "Path-based routing cannot be used behind an Application Load Balancer, so it forces a direct-to-Lambda design"
       - "Path-based is simple but exposes tenantId in URLs/logs; host-based gives cleaner per-tenant branding/isolation but needs DNS/cert management"
-      - "Host-based routing is impossible with HTTPS"
+      - "Host-based routing is impossible with HTTPS because a single certificate cannot cover multiple tenant subdomains"
     answer: 2
     explanation: |
       Path-based routing is simple but puts tenantId in URLs and logs; host/subdomain routing offers
@@ -884,9 +884,9 @@ questions:
       directly prevents this class of problem?
     options:
       - "An idempotent, fully automated onboarding state machine with retries and a clear terminal state"
-      - "Letting the client retry the whole flow from the browser"
-      - "Skipping the tenant registry write until the very end"
-      - "Manual runbooks executed by an on-call engineer for each tenant"
+      - "Letting the client retry the whole flow from the browser, so a stuck tenant just refreshes the sign-up page"
+      - "Skipping the tenant registry write until the very end, so a partial failure leaves no half-provisioned record"
+      - "Manual runbooks executed by an on-call engineer for each tenant that got stuck mid-provisioning"
     answer: 0
     explanation: |
       An idempotent, automated state machine with retries and defined terminal states recovers from
@@ -899,9 +899,9 @@ questions:
     question: |
       Which is a genuine downside of silo (pool-per-tenant) identity that a pooled model avoids?
     options:
-      - "You can no longer use MFA"
-      - "You cannot federate to a corporate IdP"
-      - "You lose the ability to sign tokens"
+      - "You can no longer enable multi-factor authentication for any tenant, because a pool-per-tenant topology disables Cognito's MFA challenge flows"
+      - "You permanently lose the ability to federate any tenant to a corporate SAML/OIDC IdP, since dedicated pools cannot be linked to external providers"
+      - "You lose the ability to have Cognito sign JWTs, forcing you to mint and sign your own tokens with a custom Lambda for each dedicated pool"
       - "You lose a single global user search/admin view and must provision a pool at onboarding, pressing the user-pools-per-Region quota"
     answer: 3
     explanation: |
@@ -916,10 +916,10 @@ questions:
       You want IAM itself to prevent a pooled DynamoDB query from returning another tenant's items using
       a tenant-id partition-key prefix. Which mechanism achieves this?
     options:
-      - "Enabling DynamoDB Streams"
+      - "Enabling DynamoDB Streams so each read is intercepted and filtered to the caller's tenant before the items are returned"
       - "A dynamodb:LeadingKeys condition tied to ${aws:PrincipalTag/TenantID} on the scoped session"
-      - "A DynamoDB TTL attribute"
-      - "A global secondary index without a tenant attribute"
+      - "A DynamoDB TTL attribute that expires and hides any item whose partition-key prefix does not match the caller's tenant"
+      - "A global secondary index without a tenant attribute, letting the query planner automatically drop other tenants' items"
     answer: 1
     explanation: |
       The dynamodb:LeadingKeys condition, referencing the session's TenantID principal tag, restricts
@@ -935,9 +935,9 @@ questions:
       queries a GSI. What subtle isolation gap can arise?
     options:
       - "If the GSI's partition key is not tenant-scoped and the policy/query does not enforce tenantId on the index, queries can span tenants"
-      - "GSIs cannot be queried with scoped credentials at all"
-      - "GSIs always require a separate AWS account"
-      - "GSIs are automatically scoped by the base table's LeadingKeys condition"
+      - "GSIs cannot be queried with scoped credentials at all, because dynamodb:LeadingKeys conditions block every Query action against any secondary index"
+      - "GSIs always require a separate AWS account to hold the index, so a scoped session in the base account can never read the projected items"
+      - "GSIs are automatically scoped by the base table's LeadingKeys condition, since the index inherits the same partition-key restriction as its base table"
     answer: 0
     explanation: |
       LeadingKeys applies to the key it names; a GSI with a non-tenant partition key can return
@@ -951,10 +951,10 @@ questions:
       What practical constraint most often bounds how much tenant/claim data you can add in a Cognito
       pre-token-generation trigger?
     options:
-      - "You cannot add more than one claim ever"
-      - "A hard 10-claim maximum"
+      - "You cannot add more than one custom claim ever, because the trigger overwrites any previously added claim on each invocation"
+      - "A hard 10-claim maximum enforced by Cognito, after which the pre-token-generation trigger silently drops any additional claims"
       - "The overall token size (headers/JWT length) in practice, well before the 5,000 combined added-claims/scopes quota"
-      - "Claims must each be under 4 bytes"
+      - "Claims must each be under 4 bytes of UTF-8, so only very short tenant identifiers can be stamped into the token at all"
     answer: 2
     explanation: |
       The combined added claims + scopes quota is high (5,000, adjustable); in practice JWT/header size
@@ -969,10 +969,10 @@ questions:
       entries dominate memory and its permission change is slow to take effect. Which refinement best
       balances the tensions?
     options:
-      - "Disable caching and accept STS throttling"
+      - "Disable caching entirely and accept STS throttling, relying on exponential backoff and retries to absorb the per-request AssumeRole load"
       - "Use short-TTL cached sessions plus an explicit invalidation signal on permission/tier change, sized per tenant activity"
-      - "Give every tenant a 12-hour session unconditionally"
-      - "Move all tenants to account-per-tenant"
+      - "Give every tenant a fixed 12-hour session unconditionally, so the cache is refreshed at most twice a day regardless of tenant activity"
+      - "Move all tenants to an account-per-tenant model so each gets its own STS quota, re-architecting the entire pooled platform to eliminate the hot cache"
     answer: 1
     explanation: |
       Short-TTL sessions bound staleness while cutting STS load, and an invalidation signal on
@@ -987,9 +987,9 @@ questions:
       A tenant must be promoted from the pooled stack to a dedicated silo stack (tier upgrade) with
       minimal downtime. Which approach best leverages the routing/registry design?
     options:
-      - "Delete the tenant and have them sign up again"
-      - "Change DNS TTL to zero for all tenants permanently"
-      - "Hardcode the new endpoint in the client and redeploy the mobile app"
+      - "Delete the tenant and have them sign up again on the silo stack, re-entering all of their data manually during the upgrade window"
+      - "Change the DNS TTL to zero for every tenant permanently, so the promoted tenant's records propagate instantly whenever routing changes"
+      - "Hardcode the new silo endpoint in the client application and force-push a mobile app redeploy that every user must install before cutover"
       - "Provision the silo stack, migrate the tenant's data, then atomically flip the tenant's stack mapping in the registry so routing sends new requests to the silo"
     answer: 3
     explanation: |
@@ -1004,10 +1004,10 @@ questions:
       A pooled-identity SaaS discovers a compromised admin token for one tenant. Access tokens are valid
       up to their TTL. Which combination best limits damage?
     options:
-      - "Rotate the AWS account root credentials"
-      - "Wait for the token to expire and do nothing else"
+      - "Rotate the AWS account root credentials, on the assumption that this invalidates every Cognito-issued access token across the pool"
+      - "Wait for the compromised token to reach its TTL and expire on its own, taking no other containment action in the meantime"
       - "Revoke/rotate refresh tokens, shorten access-token TTL, and rely on IAM-scoped data access so the token cannot reach other tenants even if replayed"
-      - "Delete the entire user pool immediately"
+      - "Delete the entire shared user pool immediately, forcing every tenant's users to re-register in a freshly provisioned replacement pool"
     answer: 2
     explanation: |
       Revoking refresh tokens and shortening access-token TTL limits the compromised token's usable
@@ -1023,9 +1023,9 @@ questions:
       What is the best way to keep registry reads from becoming a bottleneck or hot partition?
     options:
       - "Cache registry lookups (e.g., DAX or in-memory) keyed by tenantId with a sensible TTL, so per-request reads rarely hit DynamoDB"
-      - "Store the registry in a single S3 object read per request"
-      - "Move the registry to the client browser"
-      - "Scan the whole table on every request"
+      - "Store the entire registry in a single S3 object and GET it on every request, letting S3's read throughput absorb the hot-tenant pattern"
+      - "Move the registry into the client browser's local storage so each tenant reads its own routing config without any server round-trip"
+      - "Scan the whole registry table on every request and filter to the caller's tenantId, relying on DynamoDB auto-scaling to keep it fast"
     answer: 0
     explanation: |
       Caching registry entries keyed by tenantId (DAX/in-memory) absorbs the read-heavy, hot-tenant
@@ -1039,9 +1039,9 @@ questions:
       To debug and meter per tenant, you want the tenantId available in logs and traces across services.
       What is the key risk to manage while doing this?
     options:
-      - "Logging tenantId doubles the JWT size"
-      - "Traces cannot carry any custom attributes"
-      - "tenantId is impossible to log"
+      - "Logging tenantId doubles the JWT size, because every emitted log line is folded back into the token on the next request"
+      - "Traces cannot carry any custom attributes, so adding a tenantId span tag would silently break distributed trace propagation"
+      - "tenantId is impossible to log, since the verified claim is redacted from the request context before any handler executes"
       - "Propagating tenantId as a trusted, server-derived value (not from client headers) while avoiding logging sensitive tenant PII"
     answer: 3
     explanation: |
@@ -1057,10 +1057,10 @@ questions:
       An interviewer asks you to justify per-tenant KMS keys versus one shared key for a pooled data
       store. Which answer shows the best judgment?
     options:
-      - "Always use one shared key; per-tenant keys have no benefit"
+      - "Always use one shared key for every tenant; per-tenant keys add cost and offer no isolation or compliance benefit that a single well-guarded key does not already provide"
       - "Per-tenant keys enable crypto-shredding and stronger isolation but add key-management overhead and cost, and can hit KMS request/limit considerations; choose per-tenant for regulated/premium tenants and shared for the pooled majority"
-      - "Always use a key per tenant regardless of tenant count"
-      - "KMS keys are unrelated to tenant isolation"
+      - "Always provision a distinct key per tenant regardless of tenant count, since more keys is strictly safer and KMS scales to any number of keys for free"
+      - "KMS keys are unrelated to tenant isolation and only affect at-rest storage cost, so the choice between shared and per-tenant keys is purely a billing decision"
     answer: 1
     explanation: |
       The judgment answer weighs crypto-shredding/isolation benefits against key-management overhead,
@@ -1076,9 +1076,9 @@ questions:
       endpoint). How should it apply the scoped-credential pattern correctly?
     options:
       - "Obtain a distinct tenant-scoped session per tenant it acts for (assuming/caching a scoped session per tenantId) so each data operation uses that tenant's credentials"
-      - "Put all tenants' data in one query with no scoping"
-      - "Reject batch endpoints entirely"
-      - "Assume one broad role that can access all tenants and skip per-tenant scoping for the batch"
+      - "Combine all tenants' rows into a single unscoped query and split the results by tenantId in application memory after the read completes"
+      - "Reject batch endpoints entirely and require callers to issue one separate single-tenant request per item, since batching cannot be safely scoped"
+      - "Assume one broad role that can access every tenant's data and skip per-tenant scoping for the batch, relying on application code to filter correctly"
     answer: 0
     explanation: |
       Even in a multi-tenant batch, each tenant's data operations must run under that tenant's scoped
@@ -1091,10 +1091,10 @@ questions:
     question: |
       Which offboarding design best balances reversibility, compliance, and safety in a pooled model?
     options:
-      - "Drop the shared table and rebuild it without the tenant"
-      - "Immediately and permanently delete all tenant rows on cancellation"
+      - "Drop the entire shared table and rebuild it from a filtered backup that omits the departing tenant, cutting over all remaining tenants to the new table"
+      - "Immediately and permanently delete all of the tenant's rows the moment they cancel, with no suspension window, export, or chance to reverse the action"
       - "Suspend (block auth/routing) first, offer/perform a per-tenant data export, then filtered-delete after a retention window, with per-tenant KMS key deletion where applicable"
-      - "Only disable login but keep all data forever with no deletion path"
+      - "Only disable the tenant's login but keep all of their data indefinitely with no deletion path, treating retention as always safer than removal"
     answer: 2
     explanation: |
       Suspend-then-export-then-filtered-delete after a retention window (plus KMS key deletion where

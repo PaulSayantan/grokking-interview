@@ -27,7 +27,7 @@ flowchart LR
     subgraph box[" "]
         M["METRICS → CloudWatch Metrics + Alarms"]
         L["LOGS → CloudWatch Logs + Insights"]
-        T["TRACES → X-Ray / ADPT (OTel)"]
+        T["TRACES → X-Ray / ADOT (OTel)"]
     end
     Emit --> M --> SNS["SNS"] --> PD["PagerDuty"]
     Emit --> L --> Sub["subscription"] --> OSK["OpenSearch/Kinesis"]
@@ -60,6 +60,39 @@ the same request. CloudWatch **Metric Filters** turn logs into metrics; **Embedd
 Metric Format (EMF)** lets a log line *carry* metrics so you extract high-cardinality
 metrics without a separate `PutMetricData` call. X-Ray's service map is built from
 traces; CloudWatch **Application Signals** stitches all three into SLOs.
+
+**What an EMF log line actually looks like** (a top interview probe). It is ordinary
+JSON with a reserved `_aws` block that tells CloudWatch which fields to extract as
+metrics; everything else stays as searchable log fields:
+
+```json
+{
+  "_aws": {
+    "Timestamp": 1700000000000,
+    "CloudWatchMetrics": [{
+      "Namespace": "OrderService",
+      "Dimensions": [["Service", "Operation"]],
+      "Metrics": [
+        { "Name": "Latency", "Unit": "Milliseconds" },
+        { "Name": "Faults",  "Unit": "Count" }
+      ]
+    }]
+  },
+  "Service": "checkout",
+  "Operation": "PlaceOrder",
+  "Latency": 142,
+  "Faults": 0,
+  "requestId": "a1b2c3d4-e5f6-7890-abcd-ef0123456789",
+  "customerId": "cust-98217"
+}
+```
+
+Write this **one line** to CloudWatch Logs and you get two things for free: CloudWatch
+auto-extracts `Latency=142ms` and `Faults=0` as metrics under
+`OrderService` dimensioned by `{Service=checkout, Operation=PlaceOrder}` (a bounded,
+cheap dimension set), **and** the full line — including the high-cardinality
+`requestId`/`customerId` you would never make a metric dimension — stays queryable in
+Logs Insights. One write, both pillars, no separate `PutMetricData`.
 
 **Trade-offs.** Do not treat logs as a metrics store (querying "count of 500s" by
 scanning logs is slow and costs per-GB scanned in Logs Insights). Do not treat
@@ -150,6 +183,30 @@ to alarm" rule. On transition it fires **alarm actions**: publish to **SNS**, tr
   `breaching`, `ignore`) — a classic gotcha: a broken metric source can silently go
   `INSUFFICIENT_DATA` and never page you.
 - **M-of-N** reduces flapping: alarm only if 3 of the last 5 datapoints breach.
+
+**Traced timeline (EvaluationPeriods=5, DatapointsToAlarm=3, period=60s).** The alarm
+looks back at the last 5 one-minute datapoints each minute and flips to `ALARM` the
+moment 3 of those 5 breach the threshold. Let `B` = breaching, `.` = OK:
+
+| Minute | Datapoint | Last-5 window | Breaches in window | State |
+|---|---|---|---|---|
+| 12:00 | `.` | `.` | 0 | OK |
+| 12:01 | `B` | `. B` | 1 | OK |
+| 12:02 | `.` | `. B .` | 1 | OK |
+| 12:03 | `B` | `. B . B` | 2 | OK |
+| 12:04 | `B` | `. B . B B` | 3 | **ALARM** |
+
+So even with a *sustained* problem, an M-of-N=3-of-5 alarm pages ~3–5 minutes after
+onset, not on the first breach — that lag is the price of noise suppression. **Now the
+`treatMissingData` gotcha:** suppose at 12:03 the metric source dies instead of
+breaching. That datapoint is *missing*, not breaching. With
+`treatMissingData=notBreaching` the window still has only 1–2 breaches and the alarm
+sits happily in `OK` — a real outage stays silent. With `treatMissingData=breaching`,
+the missing point counts toward the 3, and the alarm fires — which is exactly why
+liveness/heartbeat alarms should use `breaching`. Note also that if
+`DatapointsToAlarm` equalled `EvaluationPeriods` (5-of-5) the alarm would need five
+consecutive breaches and page slower; making them *unequal* (3-of-5) trades a little
+specificity for faster, flap-resistant detection.
 
 **Composite alarms** combine child alarms with a boolean rule
 (`ALARM("HighCPU") AND ALARM("HighLatency")`). Their job is **noise reduction**: page
@@ -263,6 +320,21 @@ is the culprit?"
 - **Sampling** keeps cost and overhead bounded. The **default sampling rule** = **1
   request per second (reservoir) + 5% of any additional requests**. Sampling decisions
   are made once at the edge and propagated so a trace is captured whole or not at all.
+
+  **Worked example — what the default rule yields at two traffic levels.** The
+  reservoir guarantees the *first* 1 req/s is always traced; the 5% applies to the
+  rest.
+  - At **1,000 req/s**: 1 (reservoir) + 5% × 999 ≈ 1 + 49.95 ≈ **~51 traces/s** — about
+    **5.1%** of traffic. The reservoir barely matters here; you are essentially at 5%.
+  - At **20 req/s**: 1 (reservoir) + 5% × 19 = 1 + 0.95 = **~2 traces/s** — about
+    **10%** of traffic. The fixed reservoir now doubles the effective rate.
+  - At **2 req/s**: 1 + 5% × 1 = 1.05 ≈ **~1 trace/s** — about **~50%**.
+
+  The lesson: the reservoir *dominates at low traffic* (guaranteeing you always have
+  some traces) and *fades to the 5% rate at high traffic* (bounding cost). But notice
+  that at 1,000 req/s you trace only ~5% — if 3 of those requests/sec are failing, you
+  might capture *none* of the failures. That is exactly why you add a rule to
+  **force-sample errors/faults at 100%** rather than relying on the default.
 - **Segment document max ≈ 64 KB**; batch upload via the X-Ray daemon / ADOT collector
   (UDP to the daemon, which buffers and sends to the X-Ray API).
 - **Annotations** are indexed and filterable (limited count); **metadata** is stored
@@ -486,6 +558,35 @@ events (e.g. fraction of requests < 300ms; fraction of 2xx/3xx). An **SLO** (obj
 is a target for the SLI over a window (99.9% over 28 days). The **error budget** =
 1 − SLO (0.1% of requests may fail) — a currency you *spend* on risk and releases.
 
+**Worked example — SLO to budget to burn-rate thresholds.** Take a **99.9% availability
+SLO over a 28-day window**.
+- **Budget in real units:** 28 days = 28 × 24 × 60 = **40,320 minutes**. Error budget =
+  1 − 0.999 = 0.1% → 0.001 × 40,320 = **~40 minutes of allowed "bad" time per 28 days**.
+  That is the whole currency — ~40 min of downtime (or ~0.1% of requests failing) is all
+  you may spend before you blow the SLO.
+- **Burn rate** = how fast you are spending relative to "even" pace. Burn rate `1` spends
+  the entire 40 min evenly across 28 days; burn rate `B` exhausts the budget in `28 days ÷ B`.
+  Equivalently, if your live error rate is 1.0% while the budget only allows 0.1%, that is
+  a **10× burn**.
+- **Fast burn → page.** Suppose the error rate jumps to **1.44%** (14.4× the budgeted
+  0.1%). In one hour that burns 14.4 × (1h ÷ 672h) ≈ **2.1% of the month's budget** (≈0.86
+  min) — and sustained it would drain the full 40-min budget in 28 ÷ 14.4 ≈ **~1.9 days**.
+  That is a severe, user-visible event: **page now**, evaluated on a short (~1h) window.
+- **Slow burn → ticket.** Suppose the error rate sits at **0.3%** (3× budget) for hours.
+  Over a 24h window that burns 3 × (24h ÷ 672h) ≈ **10.7% of the budget** (≈4.3 min), and
+  sustained would exhaust it in 28 ÷ 3 ≈ **~9.3 days**. Not an emergency, but the budget is
+  eroding: **cut a ticket**, evaluated on a long (~24h) window.
+
+| Severity | Burn rate | Window | Budget spent in window | Exhausts 40-min budget in |
+|---|---|---|---|---|
+| **Page** (fast) | 14.4× | ~1h | ~2.1% (~0.9 min) | ~1.9 days |
+| **Ticket** (slow) | 3× | ~24h | ~10.7% (~4.3 min) | ~9.3 days |
+
+This is why **multi-window multi-burn-rate** alerting exists: the fast/short rule catches
+catastrophic spikes in minutes without waiting, while the slow/long rule catches steady
+erosion without flapping on a one-minute blip. Requiring a short *and* a long window to
+both breach before paging suppresses noise.
+
 **On AWS:**
 - **CloudWatch Application Signals** provides first-class **SLOs**: define an SLI from
   a metric (latency/availability), a goal and window, and it tracks **attainment and
@@ -565,9 +666,16 @@ you know the **pricing dimensions** and how to control them.
 - Scope **CloudTrail data events** with advanced selectors.
 
 **Back-of-envelope.** 1,000 req/s × 2 KB structured log/req ≈ 2 MB/s ≈ ~170 GB/day of
-ingestion — at CloudWatch Logs ingestion pricing that is a large monthly number *before*
-storage or Insights scans. This is why teams sample, tier to S3/IA, and alarm on metric
-filters instead of scanning logs repeatedly.
+ingestion. Put a rate on it (ingestion is ~**$0.50/GB**, illustrative and
+region-dependent): 170 GB/day × 30 ≈ **5,100 GB/month × $0.50 ≈ ~$2,550/month** in
+ingestion *alone* — before storage or Insights scans. Now watch the levers move it:
+- **Sample logs to 10%** → 510 GB/month × $0.50 ≈ **~$255/month** (a 10× cut).
+- **Route bulk to the IA log class** (~50% cheaper ingestion) → ~5,100 GB × ~$0.25 ≈
+  **~$1,275/month** (roughly half), at the cost of losing metric filters / Live Tail on
+  those groups.
+
+That single traffic profile going from ~$2,550 to ~$255 is why teams sample, tier to
+S3/IA, and alarm on metric filters instead of scanning logs repeatedly.
 
 **Trade-off.** Every cost lever trades **visibility for money**: less sampling / longer
 retention / more cardinality = more insight, higher bill. The senior move is to spend

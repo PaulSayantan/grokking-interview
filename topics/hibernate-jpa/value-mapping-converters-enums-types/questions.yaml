@@ -31,9 +31,9 @@ questions:
       (REFUNDED added before SHIPPED). What happens to existing rows?
     options:
       - "Hibernate throws a mapping exception at startup because the enum changed"
-      - "Existing rows are automatically migrated to the new positions"
+      - "Existing rows are automatically migrated to the new positions during the next schema-validation pass at startup"
       - "Rows storing the old ordinal for SHIPPED (2) now silently decode to REFUNDED — data corruption with no error"
-      - "Nothing changes because ORDINAL stores the name internally"
+      - "Nothing changes because ORDINAL stores the constant name internally alongside the position for safety"
     answer: 2
     explanation: |
       ORDINAL persists the position. Inserting a constant shifts every later position, so
@@ -48,10 +48,10 @@ questions:
       Why is `@Enumerated(EnumType.STRING)` generally preferred over ORDINAL for
       business enums?
     options:
-      - "It uses less storage than an integer"
-      - "It lets Hibernate index the column automatically"
+      - "It uses less storage than an integer because Hibernate interns the name into a compact 2-byte token"
+      - "It lets Hibernate index the column automatically and build a covering index on the enum values"
       - "It stores the constant name, so it is readable in the DB and safe against reordering/inserting constants"
-      - "It is the only mode that supports null values"
+      - "It is the only enum mode that permits null values, since ORDINAL always coerces null to zero"
     answer: 2
     explanation: |
       STRING stores Enum.name(), which is human-readable in raw SQL and stable when you
@@ -86,7 +86,7 @@ questions:
       'I' for INACTIVE), not its name or ordinal. What is the standard approach?
     options:
       - "Use @Enumerated(EnumType.STRING) and rename the constants to A and I"
-      - "Use @Temporal(TemporalType.CHAR) on the field"
+      - "Use @Temporal(TemporalType.CHAR) on the field to bind the constant to a single-character code"
       - "It is impossible; enums can only be stored as name or ordinal"
       - "Write an AttributeConverter<MyEnum, String> and apply it with @Convert"
     answer: 3
@@ -102,10 +102,10 @@ questions:
     question: |
       What are the two methods an `AttributeConverter<X, Y>` implementation must define?
     options:
-      - "serialize(X) and deserialize(Y)"
-      - "toSql(X) and fromSql(Y)"
+      - "serialize(X) for the write path and deserialize(Y) for the read path"
+      - "toSql(X) to bind the column and fromSql(Y) to rehydrate the attribute"
       - "convertToDatabaseColumn(X) and convertToEntityAttribute(Y)"
-      - "write(X) and read(Y)"
+      - "write(X) on flush and read(Y) on result-set extraction from the row"
     answer: 2
     explanation: |
       AttributeConverter<X,Y> requires Y convertToDatabaseColumn(X) (Java → DB on write)
@@ -119,9 +119,9 @@ questions:
     question: |
       What does `@Converter(autoApply = true)` do?
     options:
-      - "Applies the converter only to fields explicitly annotated with @Convert"
-      - "Generates the converter class at build time"
-      - "Applies the converter only within native SQL queries"
+      - "Applies the converter only to fields explicitly annotated with @Convert, ignoring the flag otherwise"
+      - "Generates the converter class at build time via an annotation processor and caches it in the metamodel"
+      - "Applies the converter only within native SQL queries, leaving JPQL and criteria reads unconverted"
       - "Automatically applies the converter to every basic attribute of the matching Java type across the whole persistence unit"
     answer: 3
     explanation: |
@@ -137,9 +137,9 @@ questions:
       Why must an AttributeConverter's methods handle `null` explicitly?
     options:
       - "Because Hibernate may pass null for a nullable column on read, and a null attribute on write — unhandled null can NPE or store wrong data"
-      - "Because Hibernate never passes null and null indicates a bug"
-      - "Because null handling is required only for @Id converters"
-      - "It doesn't; JPA guarantees non-null values into converters"
+      - "Because Hibernate never passes null and any null reaching the converter signals a corrupted persistence context"
+      - "Because null handling is required only for @Id converters, where the key must round-trip without loss"
+      - "It doesn't; JPA guarantees non-null values into converters by coalescing null to the type's default first"
     answer: 0
     explanation: |
       For a nullable column, Hibernate can hand the converter a null column value on read
@@ -154,10 +154,10 @@ questions:
       A team writes an AttributeConverter that encrypts a `ssn` column in
       convertToDatabaseColumn. What is a real consequence at the query layer?
     options:
-      - "Encryption makes the column faster to index"
-      - "Hibernate automatically decrypts inside SQL WHERE clauses"
+      - "Encryption makes the column faster to index because ciphertext hashes distribute more evenly across B-tree pages"
+      - "Hibernate automatically decrypts inside SQL WHERE clauses by injecting the key into the generated predicate"
       - "You can no longer do meaningful DB-side range scans, ordering, or LIKE on the stored form, and it defeats the index — comparisons must round-trip through the decrypted attribute"
-      - "JPQL LIKE queries will transparently match plaintext against ciphertext"
+      - "JPQL LIKE queries will transparently match plaintext against ciphertext by re-encrypting the pattern before comparison"
     answer: 2
     explanation: |
       A converter transforms the value before it hits the column, so the DB only sees
@@ -172,9 +172,9 @@ questions:
     question: |
       When should you prefer a Hibernate `UserType` over a JPA `AttributeConverter`?
     options:
-      - "Whenever you map an enum"
-      - "Always — UserType is the modern, spec-standard approach"
-      - "Only when the attribute is nullable"
+      - "Whenever you map an enum, since UserType is the only mechanism that reaches enum constants"
+      - "Always — UserType is the modern, spec-standard approach that superseded AttributeConverter in JPA 3.1"
+      - "Only when the attribute is nullable, because converters cannot null-check both conversion directions"
       - "When the mapping spans multiple columns or needs custom dirty-checking/semantics that a single-column converter can't express"
     answer: 3
     explanation: |
@@ -191,9 +191,9 @@ questions:
       Which of these can you generally NOT apply an AttributeConverter to?
     options:
       - "An attribute already annotated @Enumerated or @Temporal (or an association/version field)"
-      - "A plain String attribute"
-      - "A BigDecimal attribute"
-      - "A field mapped with @Column"
+      - "A plain String attribute, unless it also carries an explicit @Column(length) declaration"
+      - "A BigDecimal attribute whose precision and scale are set on the mapped @Column"
+      - "A field mapped with @Column that participates in a composite unique constraint"
     answer: 0
     explanation: |
       Converters apply to basic attributes, but not to attributes that already have their
@@ -207,9 +207,9 @@ questions:
     question: |
       For a legacy `java.util.Date` field, why is `@Temporal` required?
     options:
-      - "To enable second-level caching of the date"
-      - "To make the date immutable"
-      - "To convert the date to a String"
+      - "To enable second-level caching of the date so repeated reads skip the database round trip"
+      - "To make the date immutable by wrapping it in a defensive read-only snapshot at load time"
+      - "To convert the date to a String in ISO-8601 form before it is bound to the column"
       - "Because java.util.Date carries both date and time, so JPA needs TemporalType to know whether to map DATE, TIME, or TIMESTAMP"
     answer: 3
     explanation: |
@@ -225,10 +225,10 @@ questions:
       For a `LocalDate` field in a JPA 2.2+/Jakarta Persistence entity, what annotation
       is needed to map it to a SQL DATE column?
     options:
-      - "@Temporal(TemporalType.DATE)"
-      - "@Convert with a LocalDate converter"
+      - "@Temporal(TemporalType.DATE), which is still mandatory for every java.time date type"
+      - "@Convert with a LocalDate converter that serializes the value to a SQL date literal"
       - "None — java.time types are natively supported basic types and need no @Temporal"
-      - "@Lob"
+      - "@Lob, so the date is stored as a large-object character locator rather than a column"
     answer: 2
     explanation: |
       Since JPA 2.2 (and in Jakarta Persistence), java.time types like LocalDate,
@@ -246,7 +246,7 @@ questions:
       - "LocalDateTime (maps to TIMESTAMP, wall-clock, no zone)"
       - "java.util.Date with @Temporal(TemporalType.DATE)"
       - "Instant (a point on the UTC timeline, maps to TIMESTAMP)"
-      - "String in ISO-8601 form"
+      - "String in ISO-8601 form, since text sorts chronologically and preserves the zone"
     answer: 2
     explanation: |
       Instant represents an unambiguous point on the timeline (UTC), which is what you want
@@ -262,9 +262,9 @@ questions:
       lost when reading from clients in different regions. What is the correct explanation?
     options:
       - "LocalDateTime is a zone-less wall-clock value by design; to preserve a zone/offset use Instant or OffsetDateTime (TIMESTAMP WITH TIME ZONE)"
-      - "LocalDateTime is buggy in Hibernate 6 and should be avoided"
-      - "You must add @Temporal(TemporalType.TIMESTAMP) to keep the zone"
-      - "The DB column must be VARCHAR to keep the offset"
+      - "LocalDateTime is buggy in Hibernate 6 and silently drops the offset on any multi-region read path"
+      - "You must add @Temporal(TemporalType.TIMESTAMP) to keep the zone, since it activates offset-aware binding"
+      - "The DB column must be VARCHAR to keep the offset, because binary TIMESTAMP columns cannot hold a zone"
     answer: 0
     explanation: |
       LocalDateTime intentionally has no zone/offset — it maps to plain TIMESTAMP and
@@ -279,9 +279,9 @@ questions:
       What happens if you put `@Temporal(TemporalType.TIMESTAMP)` on a `LocalDateTime`
       field?
     options:
-      - "It is required and improves precision"
-      - "It converts the LocalDateTime to a java.util.Date automatically"
-      - "It changes the column to VARCHAR"
+      - "It is required and improves precision by widening the column to fractional-second TIMESTAMP(9)"
+      - "It converts the LocalDateTime to a java.util.Date automatically before each bind and read"
+      - "It changes the column to VARCHAR holding the ISO-8601 text form of the timestamp"
       - "It is at best redundant and historically was rejected — @Temporal is only for java.util.Date/Calendar"
     answer: 3
     explanation: |
@@ -296,10 +296,10 @@ questions:
     question: |
       What does `@Lob` on a `String articleBody` field do?
     options:
-      - "Maps it to a length-limited VARCHAR(255)"
-      - "Encrypts the string at rest"
+      - "Maps it to a length-limited VARCHAR(255) and truncates any overflow at flush time"
+      - "Encrypts the string at rest using the persistence unit's configured column cipher"
       - "Maps it to a large-character column (CLOB/TEXT) for content too big for a normal column"
-      - "Marks the column as lazy-loaded by default"
+      - "Marks the column as lazy-loaded by default so the text is fetched only on first access"
     answer: 2
     explanation: |
       @Lob signals a Large OBject. For a character type (String/char[]) it maps to
@@ -313,9 +313,9 @@ questions:
     question: |
       With `@Lob`, what determines whether Hibernate maps to a CLOB versus a BLOB?
     options:
-      - "The @Column(length) value"
-      - "A separate @Lob(type=...) attribute"
-      - "The database dialect alone, regardless of Java type"
+      - "The @Column(length) value, where anything above 255 is treated as binary BLOB"
+      - "A separate @Lob(type=...) attribute that names CLOB or BLOB explicitly on the annotation"
+      - "The database dialect alone, regardless of Java type, based on the dialect's default LOB kind"
       - "The Java attribute type: String/char[] → CLOB (character), byte[]/Serializable → BLOB (binary)"
     answer: 3
     explanation: |
@@ -332,9 +332,9 @@ questions:
       is slow and memory-hungry. What is the most accurate cause and fix?
     options:
       - "A plain @Lob loads eagerly with the row, so each row pulls the full blob; mark it @Basic(fetch=LAZY) with bytecode enhancement, or don't select it"
-      - "LOBs are always lazy, so this can't be the cause"
-      - "Add @Enumerated to defer loading"
-      - "Switch the column to VARCHAR(255)"
+      - "LOBs are always fetched lazily by the JPA spec, so the blob contents can't be the cause; the cost must be the row count alone"
+      - "Add @Enumerated to the byte[] field so Hibernate treats it as a deferred value and skips loading it until first accessed"
+      - "Switch the column to VARCHAR(255) so it is no longer a LOB and list-all queries skip its contents automatically"
     answer: 0
     explanation: |
       A plain @Lob attribute is effectively fetched with the row. Selecting many rows pulls
@@ -349,10 +349,10 @@ questions:
       Reading a lazily-loaded LOB after the persistence context/session has closed can
       fail. This is most analogous to which classic Hibernate problem?
     options:
-      - "The N+1 select problem"
-      - "OptimisticLockException"
+      - "The N+1 select problem, where each accessed LOB fires its own extra query per row"
+      - "OptimisticLockException, raised because the LOB's version stamp changed after the session committed"
       - "LazyInitializationException — the value needs an open session/connection to be materialized"
-      - "A cascade REMOVE surprise"
+      - "A cascade REMOVE surprise, where closing the session deletes the orphaned LOB child row"
     answer: 2
     explanation: |
       Some drivers stream LOBs and need an open connection/transaction to read them later.
@@ -368,9 +368,9 @@ questions:
       On PostgreSQL, why do some teams avoid `@Lob` on a String and instead use a plain
       String with columnDefinition="text" (or @JdbcTypeCode(SqlTypes.LONGVARCHAR))?
     options:
-      - "Because PostgreSQL doesn't support text columns"
-      - "Because @Lob is not allowed on PostgreSQL at all"
-      - "Because text columns are automatically encrypted"
+      - "Because PostgreSQL has no unbounded text column type, so @Lob is the only way to exceed the varchar length ceiling"
+      - "Because @Lob is rejected by the PostgreSQL dialect at bootstrap and fails schema validation on startup"
+      - "Because text columns on PostgreSQL are automatically encrypted at rest, which @Lob String disables"
       - "Because @Lob String historically maps to the oid/large-object API rather than a text column, which surprises people"
     answer: 3
     explanation: |
@@ -387,9 +387,9 @@ questions:
       In Hibernate 6+, a basic type is described by a pair of descriptors. What are they?
     options:
       - "A JavaType (Java-side descriptor) and a JdbcType (JDBC-side descriptor)"
-      - "A Serializer and a Deserializer"
-      - "A UserType and a CompositeType"
-      - "An EntityType and a ColumnType"
+      - "A Serializer (write-side descriptor) and a Deserializer (read-side descriptor)"
+      - "A UserType (the value strategy) and a CompositeType (the multi-column strategy)"
+      - "An EntityType (the persistent class descriptor) and a ColumnType (the DDL descriptor)"
     answer: 0
     explanation: |
       Hibernate 6 splits the old monolithic org.hibernate.type.Type into a JavaType<T>
@@ -404,10 +404,10 @@ questions:
       In Hibernate 5 you wrote `@Type(type = "yes_no")` using a string type name. What
       changed in Hibernate 6?
     options:
-      - "Nothing — string type names still work identically"
-      - "@Type was renamed to @Temporal"
+      - "Nothing — string type names like \"yes_no\" still resolve through the legacy registry identically"
+      - "@Type was renamed to @Temporal, so `@Temporal(\"yes_no\")` is now the way to name a custom type"
       - "String-based @Type and legacy string type names are gone; @Type now takes a UserType Class, and simple cases move to converters or @JdbcTypeCode"
-      - "You must now register every type in persistence.xml"
+      - "You must now register every custom type in persistence.xml under a <type-mapping> element before use"
     answer: 2
     explanation: |
       Hibernate 6 removed the string-based @Type("...") and the legacy string type
@@ -440,9 +440,9 @@ questions:
       In Hibernate 6+, what is the version-current way to map a POJO or Map to a JSON
       column?
     options:
-      - "@Lob on the field"
-      - "@Enumerated(EnumType.STRING)"
-      - "@Temporal(TemporalType.JSON)"
+      - "@Lob on the field, which routes the object through CLOB serialization as JSON"
+      - "@Enumerated(EnumType.STRING) with a JSON-shaped enum constant per document"
+      - "@Temporal(TemporalType.JSON), the temporal type added in JPA for JSON payloads"
       - "@JdbcTypeCode(SqlTypes.JSON) on the attribute"
     answer: 3
     explanation: |
@@ -459,9 +459,9 @@ questions:
       (e.g. Vlad Mihalcea's hibernate-types, `@Type("jsonb")`). What is true in HB6+?
     options:
       - "HB6's @JdbcTypeCode(SqlTypes.JSON) makes the third-party library largely unnecessary for the common case"
-      - "The library is still mandatory; HB6 has no JSON support"
-      - "HB6 dropped JSON support entirely"
-      - "You must now store JSON as a BLOB"
+      - "The hibernate-types library is still mandatory because HB6 shipped no built-in JSON JdbcType of its own"
+      - "HB6 dropped JSON column support entirely, so you must model the document with a normalized child table instead"
+      - "You must now store JSON as a BLOB of Jackson-serialized bytes, since HB6 removed text-based JSON binding"
     answer: 0
     explanation: |
       Hibernate 6 added native JSON mapping via @JdbcTypeCode(SqlTypes.JSON), so the older
@@ -476,9 +476,9 @@ questions:
       You map a jsonb column with @JdbcTypeCode(SqlTypes.JSON) and want to query by a JSON
       path with a GIN index. What is the accurate boundary between Hibernate and the DB?
     options:
-      - "Hibernate transparently translates any JSON-path predicate into portable JPQL"
-      - "JSON columns cannot be indexed at all"
-      - "You must switch to @Lob to enable JSON queries"
+      - "Hibernate transparently translates any JSON-path predicate into portable JPQL that runs identically on every dialect"
+      - "JSON columns cannot be indexed at all, so a GIN index on jsonb is silently ignored by the query planner"
+      - "You must switch the column to @Lob first, since GIN indexing only works on large-object-backed JSON storage"
       - "Hibernate binds/extracts the JSON value, but native JSON path operators and GIN indexing are database features (see messaging-databases); portable JPQL doesn't express arbitrary JSON-path predicates"
     answer: 3
     explanation: |
@@ -496,9 +496,9 @@ questions:
       an object as JSON is:
     options:
       - "An AttributeConverter<MyObject, String> that serializes/deserializes JSON text (but stores plain text, losing native JSON operators)"
-      - "Using @Temporal with a JSON TemporalType"
-      - "Marking the field transient"
-      - "Using @Enumerated(EnumType.STRING)"
+      - "Using @Temporal with a JSON TemporalType to bind the serialized document as a temporal value"
+      - "Marking the field @Transient and reconstructing the JSON payload manually after each load"
+      - "Using @Enumerated(EnumType.STRING) with one enum constant holding the serialized JSON text"
     answer: 0
     explanation: |
       A Jackson-based AttributeConverter<MyObject,String> is fully portable and stores JSON
@@ -512,10 +512,10 @@ questions:
     question: |
       Why should monetary amounts be mapped as `BigDecimal` rather than `double`?
     options:
-      - "double is slower to read from the DB"
-      - "double can't be stored in a NUMERIC column"
+      - "double is slower to read from the DB because the driver must widen each 8-byte value into a decimal string"
+      - "double can't be stored in a NUMERIC column, so Hibernate rejects the mapping at schema-validation time"
       - "Binary floating point can't represent decimal fractions exactly, so double money accumulates rounding errors; BigDecimal is exact decimal"
-      - "BigDecimal uses less memory than double"
+      - "BigDecimal uses less memory than double because it packs its digits into a single primitive long field"
     answer: 2
     explanation: |
       double/float are binary floating point and can't exactly represent values like 0.1,
@@ -531,9 +531,9 @@ questions:
       mean?
     options:
       - "precision = total significant digits; scale = digits after the decimal point"
-      - "precision = digits after the decimal; scale = total digits"
-      - "precision = column byte length; scale = rounding mode"
-      - "Both are ignored for BigDecimal"
+      - "precision = digits after the decimal point; scale = the total count of significant digits"
+      - "precision = the column's byte length on disk; scale = the rounding mode applied on write"
+      - "Both are ignored for BigDecimal and only take effect on float and double columns"
     answer: 0
     explanation: |
       precision is the total number of significant digits and scale is the count of digits
@@ -548,9 +548,9 @@ questions:
       A developer sets `@Column(precision=19, scale=4)` but observes the existing production
       column is still NUMERIC(19,2). Why?
     options:
-      - "precision/scale are runtime-only and never touch the schema"
-      - "Hibernate silently rewrites the column on startup"
-      - "scale must be 0 for money"
+      - "precision/scale are runtime rounding hints only and never appear in any generated DDL statement"
+      - "Hibernate silently rewrites the column to NUMERIC(19,4) during the first flush after startup"
+      - "scale must always be 0 for monetary columns, so Hibernate coerced your scale=4 down to NUMERIC(19,2)"
       - "precision/scale affect only DDL generation; on an existing schema they don't retroactively alter the column — a migration is needed"
     answer: 3
     explanation: |
@@ -567,9 +567,9 @@ questions:
       `@Column(nullable = false)`?
     options:
       - "@Basic(optional=false) is an object-model/validation hint; @Column(nullable=false) drives the actual NOT NULL DDL constraint on the schema"
-      - "They are exact synonyms"
-      - "@Basic(optional=false) creates the NOT NULL constraint; @Column(nullable=false) is only a hint"
-      - "Both only affect fetch behavior"
+      - "They are exact synonyms and Hibernate treats setting either one as identical to setting both"
+      - "@Basic(optional=false) creates the NOT NULL constraint in DDL; @Column(nullable=false) is only an object-model hint"
+      - "Both only affect fetch behavior, deciding whether the column is loaded eagerly or lazily with the row"
     answer: 0
     explanation: |
       @Basic(optional=false) is a hint about the object model (the value may not be null),
@@ -584,10 +584,10 @@ questions:
       What is required for `@Basic(fetch = FetchType.LAZY)` on a single column to actually
       take effect?
     options:
-      - "Nothing; JPA guarantees lazy basic loading everywhere"
-      - "The column must be a @Lob"
+      - "Nothing; the JPA spec guarantees lazy loading of basic attributes on every provider out of the box"
+      - "The column must also be a @Lob, since lazy basic fetching is only honored for large-object columns"
       - "Bytecode enhancement must be enabled; otherwise the LAZY hint on a basic attribute is ignored and the column loads eagerly"
-      - "You must also add @Convert"
+      - "You must also add @Convert, because lazy loading is driven by the converter's read-path callback"
     answer: 2
     explanation: |
       Lazy fetching of a basic (single-column) attribute requires bytecode enhancement.
@@ -602,9 +602,9 @@ questions:
       Why should a nullable numeric column be mapped with `Integer` rather than primitive
       `int`?
     options:
-      - "int can't be stored in the DB"
-      - "Integer is faster to bind"
-      - "int is not allowed as an entity field"
+      - "int can't be stored in the DB, so Hibernate refuses to generate a column for a primitive field"
+      - "Integer is faster to bind because the driver caches boxed instances and skips a widening conversion"
+      - "int is not allowed as an entity field at all; JPA requires object types for every persistent attribute"
       - "A primitive int can't represent SQL NULL and will throw when reading a null value; Integer can hold null"
     answer: 3
     explanation: |
@@ -619,10 +619,10 @@ questions:
     question: |
       In JPA's classification of persistent attributes, what is a "basic" attribute?
     options:
-      - "A reference to another entity via a foreign key"
-      - "A composite value made of multiple embedded fields"
+      - "A reference to another entity via a foreign key, managed through @ManyToOne or @OneToMany"
+      - "A composite value made of multiple embedded fields flattened into columns via @Embedded"
       - "A single value mapped to a single column (String, number, boolean, enum, java.time, byte[], or converter-flattened type)"
-      - "Any field annotated @Transient"
+      - "Any field annotated @Transient, which JPA still persists as a shadow single-column value"
     answer: 2
     explanation: |
       A basic attribute maps a single value to a single column, governed by @Basic and
@@ -638,9 +638,9 @@ questions:
       convertToDatabaseColumn run?
     options:
       - "On every bind — when Hibernate flushes an insert or update and binds the value to the PreparedStatement"
-      - "Only once at application startup"
-      - "Only inside second-level cache lookups"
-      - "Never for updates, only for inserts"
+      - "Only once at application startup, when Hibernate pre-computes the converted form for each field"
+      - "Only inside second-level cache lookups, when a cached entity is rehydrated from its region"
+      - "Never for updates, only for the initial insert; subsequent flushes bind the raw value directly"
     answer: 0
     explanation: |
       convertToDatabaseColumn runs whenever Hibernate binds the attribute to SQL — on
@@ -656,9 +656,9 @@ questions:
       A legacy system genuinely needs EnumType.ORDINAL (to save space and match an existing
       integer column). What is the safest rule to follow?
     options:
-      - "Alphabetize the enum for readability"
+      - "Alphabetize the enum constants so the column reads back in a tidy sorted order"
       - "Treat the declaration order as an immutable schema and only ever append new constants at the end"
-      - "Switch to STRING silently, since it's equivalent"
+      - "Switch to STRING silently in the same release, since the two modes store byte-identical data"
       - "Store each constant's ordinal in a comment and reorder freely"
     answer: 1
     explanation: |
@@ -673,10 +673,10 @@ questions:
     question: |
       Which mapping is correct for legacy types?
     options:
-      - "@Temporal(TemporalType.DATE) on a Date → SQL TIMESTAMP with time"
+      - "@Temporal(TemporalType.DATE) on a Date → SQL TIMESTAMP keeping the full time-of-day"
       - "@Temporal(TemporalType.TIMESTAMP) on a java.util.Date → SQL TIMESTAMP (date + time)"
-      - "@Temporal(TemporalType.TIME) on a Date → SQL DATE only"
-      - "@Temporal is optional on java.util.Date"
+      - "@Temporal(TemporalType.TIME) on a Date → SQL DATE storing only the calendar day"
+      - "@Temporal is optional on java.util.Date because the driver infers TIMESTAMP by default"
     answer: 1
     explanation: |
       For java.util.Date, TemporalType.TIMESTAMP keeps both date and time (SQL TIMESTAMP),
@@ -691,9 +691,9 @@ questions:
       With an AttributeConverter<Boolean,String> mapping true→'Y'/false→'N', how do you
       write a JPQL query filtering active rows?
     options:
-      - "WHERE e.active = 'Y' — you must use the stored form in JPQL"
-      - "You cannot query a converted attribute in JPQL at all"
-      - "WHERE CONVERT(e.active) = 'Y'"
+      - "WHERE e.active = 'Y' — JPQL requires you to spell out the converted stored form by hand"
+      - "You cannot query a converted attribute in JPQL at all; only native SQL can filter on it"
+      - "WHERE CONVERT(e.active) = 'Y' — you must wrap the path in a CONVERT() function to reach the column"
       - "WHERE e.active = true — you query using the entity attribute type; Hibernate applies the converter to the parameter/literal"
     answer: 3
     explanation: |
@@ -710,10 +710,10 @@ questions:
       An entity maps a large mutable Map to a JSON column. Mutating the map in place still
       triggers an UPDATE on flush. What mechanism explains this, and what's the cost?
     options:
-      - "Hibernate tracks every map mutation via listeners with no cost"
+      - "Hibernate registers a per-key mutation listener on the map, so it observes each change with zero flush overhead"
       - "Hibernate detects the change by deep-comparing the serialized JSON snapshot during dirty checking; for very large JSON this makes flush/dirty-checking expensive"
-      - "JSON columns are never dirty-checked, so no UPDATE occurs"
-      - "The map must be reassigned to a new instance or no UPDATE fires"
+      - "JSON columns are excluded from dirty checking entirely, so an in-place mutation never produces an UPDATE"
+      - "The map is treated as immutable, so it must be reassigned to a brand-new instance before any UPDATE will fire"
     answer: 1
     explanation: |
       Hibernate dirty-checks the value by comparing against the loaded snapshot; for a JSON
@@ -730,9 +730,9 @@ questions:
       it applies application-wide?
     options:
       - "@JdbcTypeRegistration / @JavaTypeRegistration"
-      - "@Convert(autoApply=true)"
-      - "@Enumerated"
-      - "@Basic"
+      - "@Convert(autoApply=true), which registers a JdbcType descriptor across the whole persistence unit"
+      - "@Enumerated(EnumType.STRING), which globally installs the enum's JavaType descriptor"
+      - "@Basic(descriptorScope=GLOBAL), the attribute-level flag that registers the pair application-wide"
     answer: 0
     explanation: |
       @JdbcTypeRegistration and @JavaTypeRegistration register descriptors globally in
@@ -766,9 +766,9 @@ questions:
       enum to a database column?
     options:
       - "Mapping to a native DB ENUM / CHECK-constrained column via @JdbcTypeCode / the enhanced type system"
-      - "Mapping the enum to a BLOB automatically"
-      - "Storing the enum's hashCode()"
-      - "Nothing — only STRING and ORDINAL exist in any version"
+      - "Mapping the enum to a BLOB automatically, serializing each constant as Java bytes into the column"
+      - "Storing the enum's hashCode() as a stable integer surrogate that survives constant reordering"
+      - "Nothing — only STRING and ORDINAL exist in any Hibernate or JPA version to date"
     answer: 0
     explanation: |
       Hibernate 6's type system can map an enum to a native DB ENUM or a CHECK-constrained
@@ -783,10 +783,10 @@ questions:
       You have a value object `Money(amount, currency)` and want it in a single column as a
       string like "USD 19.99". Which tool fits, and which does NOT?
     options:
-      - "Fits: @Temporal. Does not fit: AttributeConverter"
-      - "Fits: @Lob only. Does not fit: any converter"
+      - "Fits: @Temporal, since it flattens the pair into one column. Does not fit: AttributeConverter"
+      - "Fits: @Lob only, storing the value object as a CLOB. Does not fit: any AttributeConverter"
       - "Fits: AttributeConverter<Money,String>. Does not fit: @Enumerated (Money isn't an enum)"
-      - "Fits: @Enumerated(STRING). Does not fit: @Convert"
+      - "Fits: @Enumerated(STRING), treating Money as an enum constant. Does not fit: @Convert"
     answer: 2
     explanation: |
       A single-column custom-type mapping is exactly what AttributeConverter<Money,String>
@@ -800,10 +800,10 @@ questions:
     question: |
       In Hibernate 6, what does `@org.hibernate.annotations.Type` now take as its argument?
     options:
-      - "A string type name like \"yes_no\" or \"jsonb\""
+      - "A string type name like \"yes_no\" or \"jsonb\", still resolved through the legacy type registry"
       - "A UserType Class (class-based), not a string type name"
-      - "A TemporalType enum"
-      - "A java.sql.Types integer code"
+      - "A TemporalType enum constant selecting DATE, TIME, or TIMESTAMP binding"
+      - "A java.sql.Types integer code identifying the target JDBC column type"
     answer: 1
     explanation: |
       Hibernate 6 changed @Type to take a UserType Class rather than the legacy string type
@@ -818,9 +818,9 @@ questions:
       Which java.time → SQL mapping is correct (no @Temporal needed)?
     options:
       - "Instant → TIMESTAMP (a point on the UTC timeline)"
-      - "LocalTime → DATE"
-      - "LocalDate → TIMESTAMP WITH TIME ZONE"
-      - "OffsetDateTime → DATE"
+      - "LocalTime → DATE (the calendar day the time-of-day was recorded on)"
+      - "LocalDate → TIMESTAMP WITH TIME ZONE (a zoned instant at midnight)"
+      - "OffsetDateTime → DATE (with the offset folded into the stored day)"
     answer: 0
     explanation: |
       Instant maps to TIMESTAMP (a UTC instant). LocalTime → TIME, LocalDate → DATE,
@@ -835,10 +835,10 @@ questions:
       When discussing money storage, which concern belongs to messaging-databases rather
       than this ORM topic?
     options:
-      - "Which @Column(precision, scale) to declare on a BigDecimal"
-      - "Whether the field type should be BigDecimal vs double"
+      - "Which @Column(precision, scale) to declare on a BigDecimal entity attribute"
+      - "Whether the mapped Java field type should be BigDecimal versus a primitive double"
       - "The DB-level trade-off of NUMERIC vs storing integer minor units (cents), and NUMERIC internals"
-      - "That double is a correctness bug for money"
+      - "That mapping money as a double is a correctness bug because of binary rounding drift"
     answer: 2
     explanation: |
       This topic owns the ORM mapping (BigDecimal + @Column precision/scale). The deeper
@@ -853,10 +853,10 @@ questions:
       You map an enum's priority with a converter that stores a hash of the name. A query
       does `ORDER BY e.priority`. What's the problem?
     options:
-      - "Nothing; Hibernate sorts by the Java enum order automatically"
+      - "Nothing; Hibernate re-sorts the results by the Java enum declaration order after the fetch"
       - "The DB orders by the stored (hashed) form, which has no relationship to the logical enum order, so ORDER BY yields meaningless ordering"
-      - "ORDER BY on a converted column throws a compile error"
-      - "The converter is applied after sorting, fixing the order"
+      - "ORDER BY on a converted column throws a compile-time error during JPQL query validation"
+      - "The converter is applied to each row only after sorting, so the logical order is preserved"
     answer: 1
     explanation: |
       DB-side ORDER BY sorts the stored column values. A converter that scrambles the value
@@ -870,9 +870,9 @@ questions:
     question: |
       What does @JdbcTypeCode(SqlTypes.JSON) map to on a database with no native JSON type?
     options:
-      - "It fails to start the application"
-      - "It stores the object as a BLOB of Java-serialized bytes"
-      - "It silently drops the column"
+      - "It fails to start the application, aborting schema validation with an unsupported-type error"
+      - "It stores the object as a BLOB of Java-serialized bytes using ObjectOutputStream"
+      - "It silently drops the column from the generated schema and skips persisting the value"
       - "It falls back to storing JSON text in a CLOB/VARCHAR column"
     answer: 3
     explanation: |
@@ -888,9 +888,9 @@ questions:
       For new code today (Jakarta Persistence + Hibernate 6/7), which temporal choice is
       recommended?
     options:
-      - "java.util.Date with @Temporal, because it's the most compatible"
-      - "java.util.Calendar for its flexibility"
-      - "Store all timestamps as long epoch millis in a BIGINT"
+      - "java.util.Date with @Temporal, because it remains the most broadly compatible legacy type"
+      - "java.util.Calendar, for its flexible field-level manipulation and locale awareness"
+      - "Store every timestamp as a long epoch-millis value in a BIGINT column for portability"
       - "java.time types (LocalDate/LocalDateTime/Instant), which are immutable, unambiguous, and natively supported with no @Temporal"
     answer: 3
     explanation: |
@@ -907,9 +907,9 @@ questions:
       attribute is most accurate?
     options:
       - "Converters on identifier attributes were restricted historically (not allowed on @Id) and support/behavior is version-sensitive — don't assume it works"
-      - "Converters have always been fully supported on @Id in every JPA version"
-      - "Converters are required on every @Id"
-      - "@Id fields are converted automatically without any annotation"
+      - "Converters have always been fully supported on @Id attributes in every JPA and Hibernate version"
+      - "Converters are mandatory on every @Id field, since keys always need explicit database-form conversion"
+      - "@Id fields are converted automatically by the provider without needing any @Convert annotation"
     answer: 0
     explanation: |
       The spec historically disallowed converters on @Id (and version) attributes, and
@@ -925,10 +925,10 @@ questions:
       Where does the responsibility for JPA repository query methods (derived queries,
       @Query, pagination) live in this library?
     options:
-      - "In this value-mapping topic"
-      - "In messaging-databases"
+      - "In this value-mapping topic, alongside the column-conversion coverage"
+      - "In messaging-databases, next to the raw SQL and query-planner material"
       - "In hibernate-jpa/spring-data-jpa-repositories (with the container/tx proxy mechanics referenced to spring-* topics)"
-      - "In system-design"
+      - "In system-design, as part of the data-access and scaling discussion"
     answer: 2
     explanation: |
       Value mapping stays at the column-conversion altitude. The repository abstraction
@@ -948,7 +948,7 @@ questions:
       - "A plain `varchar(255)` with no constraint (same as Hibernate 5)"
       - "`varchar(255)` plus a `CHECK (status in ('NEW','PAID','SHIPPED'))` constraint"
       - "A native PostgreSQL `CREATE TYPE ... AS ENUM` column by default"
-      - "An `integer` column storing the ordinal"
+      - "An `integer` column storing the ordinal, since STRING silently degrades to ORDINAL on export"
     answer: 1
     explanation: |
       Hibernate 6 improved the DDL: STRING enums export as `varchar` plus a CHECK constraint
@@ -963,10 +963,10 @@ questions:
       For `@Enumerated(EnumType.ORDINAL)` on a 4-constant enum, what column type and
       constraint does Hibernate 6 generate (schema export)?
     options:
-      - "`INTEGER` with no constraint"
-      - "`SMALLINT` with a NOT NULL constraint only"
+      - "`INTEGER` with no constraint, exactly as Hibernate 5 exported ordinal enums"
+      - "`SMALLINT` with a NOT NULL constraint only, leaving the range unbounded"
       - "`TINYINT` plus a `CHECK (col between 0 and 3)` constraint"
-      - "`VARCHAR` storing the stringified ordinal"
+      - "`VARCHAR` storing the stringified ordinal digits as text"
     answer: 2
     explanation: |
       HB6 maps ORDINAL to TINYINT (not plain INTEGER as in HB5) and adds a CHECK constraint
@@ -1000,10 +1000,10 @@ questions:
       Production data was corrupted because someone reordered an ORDINAL enum. You must move
       to STRING safely. Which migration sequence is correct?
     options:
-      - "Just change the annotation to STRING and redeploy; Hibernate rewrites the column"
-      - "Delete all rows and re-insert them from the application"
+      - "Just change the annotation to STRING and redeploy; Hibernate detects the type switch at schema validation and rewrites every stored ordinal into its matching constant name"
+      - "Delete every row and have the application re-insert each record from an in-memory cache, relying on the new STRING mapping to write correct names back in"
       - "Add a new varchar column, backfill it from the old ordinal via `UPDATE ... CASE ordinal WHEN 0 THEN 'NEW' ...`, then switch the mapping to the new column and drop the old one"
-      - "Set hbm2ddl=update in production so the column auto-converts"
+      - "Set hbm2ddl=update in production so the column widens to varchar and Hibernate translates each stored ordinal to its name during the update"
     answer: 2
     explanation: |
       There is no automatic conversion. The safe runbook: add a new STRING column, backfill
@@ -1020,8 +1020,8 @@ questions:
       6.2), and what does it resolve to?
     options:
       - "NATIVE always, failing on dialects without TIMESTAMP WITH TIME ZONE"
-      - "NORMALIZE, always dropping the zone to the JVM default"
-      - "COLUMN, always storing the offset in a companion column"
+      - "NORMALIZE, which unconditionally rebases every timestamp to the JVM default zone before binding it to the column"
+      - "COLUMN, which unconditionally provisions a companion offset column on every temporal field across the schema"
       - "DEFAULT — which resolves to NATIVE where the dialect supports TIMESTAMP WITH TIME ZONE, else NORMALIZE_UTC"
     answer: 3
     explanation: |
@@ -1039,8 +1039,8 @@ questions:
     options:
       - "The exact same value including the `+05:30` offset"
       - "The correct instant, but normalized to UTC (offset `+00:00`) — the original +05:30 is lost"
-      - "A LocalDateTime with the time components truncated"
-      - "An error, because Postgres cannot store offsets"
+      - "A LocalDateTime with the time-of-day components truncated to midnight because timestamptz discards sub-day precision on read"
+      - "An error at flush time, because the Postgres JDBC driver rejects any OffsetDateTime whose offset is not exactly +00:00"
     answer: 1
     explanation: |
       Postgres `timestamptz` stores UTC. Under DEFAULT/NATIVE the instant is preserved but the
@@ -1056,10 +1056,10 @@ questions:
       UTC offset a client submitted with an `OffsetDateTime`. Which storage strategy
       guarantees both the instant and the original offset survive on any dialect?
     options:
-      - "TimeZoneStorageType.NORMALIZE_UTC"
-      - "TimeZoneStorageType.NATIVE"
+      - "TimeZoneStorageType.NORMALIZE_UTC, which rebases the instant to UTC yet still records the submitted offset in the column metadata"
+      - "TimeZoneStorageType.NATIVE, which relies on the dialect's TIMESTAMP WITH TIME ZONE to persist the exact offset on every database"
       - "TimeZoneStorageType.COLUMN (or AUTO), using @TimeZoneColumn for the companion offset column"
-      - "Mapping the field as LocalDateTime"
+      - "Mapping the field as LocalDateTime, since dropping the zone lets the application reattach the original offset deterministically on read"
     answer: 2
     explanation: |
       COLUMN stores the offset in a separate companion column (@TimeZoneColumn), preserving
@@ -1075,9 +1075,9 @@ questions:
       What does the `hibernate.jdbc.time_zone` property (e.g. set to `UTC`) control?
     options:
       - "The zone the JDBC driver normalizes to when binding/reading timestamps, giving reproducible values across JVMs in different regions"
-      - "The default @Temporal type for all date fields"
-      - "The enum ordinal offset applied to all enums"
-      - "Whether Hibernate uses jsonb or json for JSON columns"
+      - "The default @Temporal precision applied to every legacy java.util.Date field when none is declared explicitly"
+      - "The base ordinal offset added to every @Enumerated(ORDINAL) value so positions never collide with legacy zero-based rows"
+      - "Whether Hibernate selects the jsonb or the json column type when exporting DDL for @JdbcTypeCode(SqlTypes.JSON) attributes"
     answer: 0
     explanation: |
       hibernate.jdbc.time_zone tells Hibernate which zone the JDBC driver should normalize to
@@ -1092,10 +1092,10 @@ questions:
       With no override annotation, how does Hibernate 6 map a `UUID` attribute on
       PostgreSQL by default?
     options:
-      - "As `char(36)` textual form"
+      - "As a `char(36)` textual form, the canonical hyphenated UUID string that HB6 selects by default for readability in raw SQL"
       - "As the native `uuid` column type (SqlTypes.UUID), falling back to `binary(16)` where unsupported"
-      - "As `varchar(255)`"
-      - "As a BLOB of serialized bytes"
+      - "As `varchar(255)`, the same generic string default HB6 applies to any attribute lacking a more specific JDBC type code"
+      - "As a BLOB holding the Java-serialized UUID object produced by ObjectOutputStream at bind time"
     answer: 1
     explanation: |
       HB6's default type code for UUID is SqlTypes.UUID → native `uuid` on Postgres, with a
@@ -1110,10 +1110,10 @@ questions:
       Per the Hibernate 6.0 migration guide, what are the default JDBC type codes for
       `Instant` and `Duration`?
     options:
-      - "Instant → VARCHAR; Duration → VARCHAR"
+      - "Instant → VARCHAR holding an ISO-8601 string; Duration → VARCHAR holding the ISO-8601 period text like `PT5M`"
       - "Instant → TIMESTAMP_UTC (fallback timestamp); Duration → INTERVAL_SECOND (fallback numeric(21))"
-      - "Instant → BIGINT epoch millis; Duration → BIGINT nanos"
-      - "Both map to BLOB by default"
+      - "Instant → BIGINT epoch millis since 1970; Duration → BIGINT total nanoseconds, matching the java.time internal representation"
+      - "Both map to BLOB by default, storing the Java-serialized temporal object as opaque binary bytes"
     answer: 1
     explanation: |
       HB6 defaults: Instant → SqlTypes.TIMESTAMP_UTC (fallback plain `timestamp`), Duration →
@@ -1128,9 +1128,9 @@ questions:
       HB6 Postgres app. Which annotation, and what is the index-size trade-off vs native uuid?
     options:
       - "@JdbcTypeCode(SqlTypes.CHAR); char(36) is 36 bytes vs native uuid's 16, so indexes are larger/less dense"
-      - "@Enumerated(EnumType.STRING); no size difference"
-      - "@Lob; smaller than native uuid"
-      - "No annotation needed; HB6 defaults to char(36) anyway"
+      - "@Enumerated(EnumType.STRING) forcing the textual form; it produces char(36) with no index-size difference versus native uuid"
+      - "@Lob mapping it as a character large object; the CLOB locator is smaller on disk than a native 16-byte uuid"
+      - "No annotation needed; HB6 already defaults UUID attributes to char(36) textual storage on PostgreSQL"
     answer: 0
     explanation: |
       Override the default (native uuid) with @JdbcTypeCode(SqlTypes.CHAR) to force char(36).
@@ -1145,10 +1145,10 @@ questions:
       A SQL Server app stores non-ASCII customer names in a `varchar` column and sees data
       corruption. What is the correct fix at the mapping layer?
     options:
-      - "Annotate the String with @Lob"
+      - "Annotate the String with @Lob so it maps to an nvarchar(max) large object that stores the Unicode text without corruption"
       - "Use @Nationalized on the field (or set hibernate.use_nationalized_character_data=true) so it maps to nvarchar"
-      - "Switch the field to byte[]"
-      - "Add @Enumerated(EnumType.STRING)"
+      - "Switch the field to byte[] so the UTF-8 encoded name is stored as raw binary and decoded back in Java"
+      - "Add @Enumerated(EnumType.STRING) so the name is validated against the collation's allowed character set on write"
     answer: 1
     explanation: |
       SQL Server `varchar` is collation-bound single-byte; Unicode data needs `nvarchar`.
@@ -1163,10 +1163,10 @@ questions:
       You need to apply an `AttributeConverter` only to the VALUES of a
       `Map<String,City> attributes` element collection. Which annotation form targets that?
     options:
-      - "@Convert on the field applies to keys and values equally"
+      - "@Convert placed directly on the field is applied uniformly to both the map keys and the map values in a single pass"
       - "@Convert(converter = CityConverter.class, attributeName = \"value\")"
-      - "You cannot convert map values; only scalar fields"
-      - "@Enumerated(EnumType.STRING) on the map"
+      - "You cannot convert map values at all; AttributeConverters are restricted to scalar top-level entity fields only"
+      - "@Enumerated(EnumType.STRING) on the map, which routes each City value through the enum name-mapping machinery"
     answer: 1
     explanation: |
       @Convert(attributeName = "value") targets a Map's values (and "key" targets keys);
@@ -1182,9 +1182,9 @@ questions:
       specific Boolean field must be stored as the raw boolean, NOT converted. What do you use?
     options:
       - "@Convert(disableConversion = true) on that field"
-      - "Nothing can override an autoApply converter"
-      - "@Transient on the field"
-      - "@Enumerated(EnumType.ORDINAL)"
+      - "Nothing can override an autoApply converter; once registered globally it binds every matching type with no per-field escape hatch"
+      - "@Transient on the field, which detaches only that column from the converter while still persisting the raw boolean value"
+      - "@Enumerated(EnumType.ORDINAL) on the field, which forces Hibernate to bypass the converter and store the boolean as 0 or 1"
     answer: 0
     explanation: |
       @Convert(disableConversion = true) switches off an autoApply converter for a specific
@@ -1199,10 +1199,10 @@ questions:
       Can you put both `@Enumerated(EnumType.STRING)` and `@Convert(converter=...)` on the
       same enum attribute?
     options:
-      - "Yes, the converter runs after @Enumerated"
+      - "Yes; Hibernate first applies @Enumerated to produce the name, then feeds that string into the converter as a second transformation stage"
       - "No — a converter and @Enumerated are mutually exclusive on one attribute; choose one mapping strategy"
-      - "Yes, but only if the converter is autoApply"
-      - "Only on @Id attributes"
+      - "Yes, but only when the converter is registered with autoApply, in which case it silently overrides the @Enumerated strategy"
+      - "Only on @Id attributes, where the spec permits stacking @Enumerated and @Convert to build a composite key encoding"
     answer: 1
     explanation: |
       An attribute uses exactly one basic-mapping strategy. A converter and @Enumerated (also
@@ -1217,10 +1217,10 @@ questions:
       In Hibernate 6, which method of the generic `UserType<T>` interface tells Hibernate the
       JDBC type code for the mapped column?
     options:
-      - "returnedClass()"
+      - "returnedClass(), which reports the mapped Java type and from it Hibernate infers the matching JDBC column type code"
       - "sqlTypes() returning an int[] (the Hibernate 5 signature)"
       - "getSqlType() returning a single SqlTypes/java.sql.Types int"
-      - "nullSafeGet()"
+      - "nullSafeGet(), whose ResultSet extraction logic Hibernate inspects to derive the column's JDBC type code automatically"
     answer: 2
     explanation: |
       HB6's UserType<T> exposes int getSqlType() returning a single JDBC type code (e.g.
@@ -1236,8 +1236,8 @@ questions:
     options:
       - "@Type(\"myUserType\") using a registered string name"
       - "@Type(MyUserType.class) — passing the UserType Class (not a string)"
-      - "@Convert(converter = MyUserType.class)"
-      - "@JdbcTypeCode(MyUserType.class)"
+      - "@Convert(converter = MyUserType.class), treating the UserType as a converter class"
+      - "@JdbcTypeCode(MyUserType.class), passing the UserType Class in place of a SqlTypes code"
     answer: 1
     explanation: |
       HB6's @org.hibernate.annotations.Type takes a Class (the UserType implementation), not a
@@ -1252,10 +1252,10 @@ questions:
       In a HB6 `UserType<T>` for a MUTABLE value object, which pair of methods most directly
       governs correct dirty checking of in-place changes?
     options:
-      - "getSqlType() and returnedClass()"
-      - "assemble() and disassemble()"
+      - "getSqlType() and returnedClass(), the descriptor pair Hibernate consults each flush to decide whether the value changed"
+      - "assemble() and disassemble(), whose cache round-trip Hibernate reuses as its primary in-place mutation detector"
       - "isMutable() returning true and deepCopy() returning a real defensive copy"
-      - "nullSafeGet() and nullSafeSet()"
+      - "nullSafeGet() and nullSafeSet(), since the get/set binding pair is what Hibernate diffs to spot in-place edits"
     answer: 2
     explanation: |
       For mutable values, isMutable() must return true and deepCopy() must return a genuine
@@ -1271,10 +1271,10 @@ questions:
       What does mapping an `@Embeddable` with `@Struct(name = "address_type")` do on a
       database that supports composite/UDT types?
     options:
-      - "Flattens the embeddable's fields into columns of the parent table"
-      - "Stores the embeddable as a JSON blob"
+      - "Flattens the embeddable's fields into individual columns of the parent table, exactly as a plain @Embedded mapping would with no UDT involved"
+      - "Stores the embeddable as a JSON blob, serializing its fields into a jsonb document rather than a native composite type"
       - "Maps it to a single column of a DB composite/UDT type (e.g. Postgres `CREATE TYPE ... AS (...)`) instead of flattening its fields"
-      - "Serializes it as Java bytes into a BLOB"
+      - "Serializes it as Java bytes into a BLOB, writing the embeddable object via ObjectOutputStream into a single binary column"
     answer: 2
     explanation: |
       @Struct / SqlTypes.STRUCT maps an embeddable to a native composite/UDT type as a single
@@ -1290,9 +1290,9 @@ questions:
       it stored?
     options:
       - "In a native SQL array column (e.g. `text[]`), not a separate collection table"
-      - "In a separate join table like @ElementCollection"
-      - "As a comma-joined VARCHAR"
-      - "As a JSON array in a jsonb column"
+      - "In a separate join table keyed by the owner id, exactly as an @ElementCollection of strings would materialize each tag as its own row"
+      - "As a single comma-joined VARCHAR value that Hibernate splits back into the array on read using the @Array length as the delimiter count"
+      - "As a JSON array serialized into a jsonb column, with @Array(length=10) capping the number of elements the document may hold"
     answer: 0
     explanation: |
       @Array / SqlTypes.ARRAY maps a List/array to a native SQL array column (text[], integer[]
@@ -1308,10 +1308,10 @@ questions:
       Compared with an encrypting AttributeConverter, why is `@ColumnTransformer` the better
       fit?
     options:
-      - "@ColumnTransformer runs the crypto in Java, exactly like a converter"
+      - "@ColumnTransformer runs the encrypt/decrypt logic inside the JVM on each bind and read, exactly like a converter, so the two are interchangeable and the DB still only ever receives finished ciphertext it cannot filter on"
       - "@ColumnTransformer injects read/write SQL expressions so the transform runs in the DB, keeping the data expressible in predicates (and functional-index-able); a converter hands the DB only opaque ciphertext"
-      - "@ColumnTransformer disables encryption entirely"
-      - "A converter keeps the column indexable while @ColumnTransformer does not"
+      - "@ColumnTransformer merely disables encryption on that column entirely, leaving the ssn value stored as plaintext so ordinary B-tree indexes and SQL predicates keep working without any cryptographic protection at rest"
+      - "A converter keeps the column fully indexable and predicate-friendly because it stores plaintext, whereas @ColumnTransformer forces opaque ciphertext into the column and therefore defeats every index and WHERE clause"
     answer: 1
     explanation: |
       @ColumnTransformer wraps read/write SQL expressions (e.g. pgp_sym_encrypt/decrypt) around
@@ -1327,9 +1327,9 @@ questions:
       What is the requirement on the `write` expression of a `@ColumnTransformer`?
     options:
       - "It must contain exactly one `?` placeholder for the bound value"
-      - "It must return a boolean"
-      - "It cannot reference SQL functions"
-      - "It must be identical to the read expression"
+      - "It must be a SQL expression that returns a boolean, which Hibernate evaluates as a guard before deciding whether to bind the value"
+      - "It cannot reference any SQL functions and must be a bare column assignment, since Hibernate refuses to inline function calls on the write path"
+      - "It must be textually identical to the read expression so that Hibernate can pair them and round-trip the value symmetrically on select and insert"
     answer: 0
     explanation: |
       The write expression must include exactly one `?` placeholder where Hibernate binds the
@@ -1344,10 +1344,10 @@ questions:
       Which Hibernate annotations auto-populate temporal fields on insert and on every update
       respectively?
     options:
-      - "@Temporal on insert, @Convert on update"
+      - "@Temporal(TemporalType.TIMESTAMP) fires on the initial INSERT and @Convert re-runs its converter on every UPDATE to refresh the field"
       - "@CreationTimestamp (set on INSERT) and @UpdateTimestamp (refreshed on INSERT and UPDATE)"
-      - "@Generated for both"
-      - "@Basic(optional=false) handles it automatically"
+      - "@Generated(GenerationTime.ALWAYS) on both fields, which delegates the timestamping to a DB trigger that stamps insert-time and update-time rows"
+      - "@Basic(optional=false) on both fields handles it automatically, since a non-null temporal column tells Hibernate to inject the current clock value"
     answer: 1
     explanation: |
       @CreationTimestamp sets the value once at insert; @UpdateTimestamp refreshes it on every
@@ -1363,10 +1363,10 @@ questions:
       updatedAt` (both default source). Right after the INSERT, why can `createdAt` and
       `updatedAt` differ by microseconds?
     options:
-      - "Because @UpdateTimestamp always adds one second"
+      - "Because @UpdateTimestamp deliberately adds a fixed one-second skew after @CreationTimestamp so the two fields can always be ordered chronologically in reports"
       - "Because they are populated by two separate JVM-clock reads (Instant.now()) at insert time, not a single shared timestamp"
-      - "Because @CreationTimestamp uses the DB clock and @UpdateTimestamp uses the JVM clock"
-      - "They can never differ; Hibernate forces them equal on insert"
+      - "Because @CreationTimestamp reads the database's now() via a round trip while @UpdateTimestamp reads the JVM clock, and the two clocks are never perfectly in sync"
+      - "They can never differ; Hibernate captures one value and forces both fields equal on the initial insert, only letting them diverge on a later update"
     answer: 1
     explanation: |
       With the default source, both pull from the JVM clock via separate now() reads during the
@@ -1382,10 +1382,10 @@ questions:
       `@Immutable`. Code mutates the map in place and commits, but no UPDATE fires. Why, and
       what is the fix?
     options:
-      - "JSON columns are read-only; remove @JdbcTypeCode"
+      - "JSON columns are inherently read-only in Hibernate once written, so you must remove @JdbcTypeCode and remap the field as a plain updatable String to let the UPDATE fire"
       - "@Immutable opts the attribute out of dirty checking, so in-place mutation is never detected; reassign a new Map instance (or drop @Immutable) to trigger the UPDATE"
-      - "Hibernate always ignores Map changes; switch to @ElementCollection"
-      - "The commit failed silently; add flush()"
+      - "Hibernate always ignores in-place changes to any Map-typed attribute, so you must switch the mapping to an @ElementCollection of key/value rows for the change to persist"
+      - "The commit silently rolled back because Hibernate could not diff the JSON; call flush() explicitly before commit so the pending change is forced out"
     answer: 1
     explanation: |
       @Immutable tells Hibernate the value never changes in place, so it skips dirty checking
@@ -1401,10 +1401,10 @@ questions:
       does `entity.getTags().add("x")` and commits; the change is not persisted. What is the
       most likely mechanism, and the robust fix?
     options:
-      - "Converters never persist changes; use a UserType"
+      - "Converters can only serialize a value on the very first insert and never re-run on subsequent flushes, so any post-insert edit is invisible; you must replace the converter with a full UserType to get updates"
       - "The attribute's mutability plan treats the converted value as immutable, so in-place list mutation isn't detected; reassign a new List (setTags(newList)) to flip the reference"
-      - "Hibernate persists it on the next query automatically"
-      - "The list must be a Set for dirty checking to work"
+      - "Hibernate defers the converted write and persists the accumulated changes automatically the next time any query touches that entity in the session"
+      - "The backing collection must be a Set rather than a List for dirty checking of converted basics to fire, because List order confuses the deep-comparison snapshot"
     answer: 1
     explanation: |
       Change detection on a converted basic depends on the type's mutability plan / deep
@@ -1419,10 +1419,10 @@ questions:
       On PostgreSQL, `@Lob String bigText` throws "Large Objects may not be used in
       auto-commit mode" / LargeObject errors. What is the accurate cause and modern fix?
     options:
-      - "Postgres doesn't support large text; store it elsewhere"
+      - "PostgreSQL has no column type able to hold text beyond the varchar ceiling, so long strings must be offloaded to a separate blob store or the filesystem and only a reference kept in the row"
       - "@Lob String maps to the `oid` large-object API (needs the LO API and an open tx); drop @Lob and use @JdbcTypeCode(SqlTypes.LONGVARCHAR) or columnDefinition=\"text\""
-      - "Add @Nationalized to fix it"
-      - "Switch the field to byte[] and it works"
+      - "Add @Nationalized to the field so it maps to an nvarchar-style column, which sidesteps the large-object machinery and stores the Unicode text inline without the transaction requirement"
+      - "Switch the field from String to byte[] so it maps to a BLOB instead of the oid API, which stores the encoded bytes inline and works cleanly even in auto-commit mode"
     answer: 1
     explanation: |
       On Postgres @Lob String maps to the `oid` large-object mechanism, which requires the LO
@@ -1438,10 +1438,10 @@ questions:
       `java.sql.Clob`. After the transaction commits, reading each outside the tx behaves
       differently. Why?
     options:
-      - "Both fail equally; LOBs can never be read after commit"
+      - "Both fail identically, because every LOB in Hibernate is backed by a connection-bound streaming locator and neither the String nor the java.sql.Clob form can ever be read once the transaction has committed"
       - "The materialized String was fully read into memory and is safe; the java.sql.Clob is a locator valid only while the connection/tx is open, so reading it post-commit throws"
-      - "The Clob is safe and the String throws"
-      - "Neither is affected by transaction boundaries"
+      - "The java.sql.Clob is the safe form since its locator is cached by the driver, while the String throws because Hibernate lazily re-fetches char data on each access from the closed connection"
+      - "Neither is affected by transaction boundaries, since Hibernate detaches both LOB forms into the persistence context and both remain fully readable long after the session closes"
     answer: 1
     explanation: |
       A String/byte[] is fully materialized into memory at load, so it's usable anywhere. A
@@ -1458,9 +1458,9 @@ questions:
       column, which mapping should you choose and why?
     options:
       - "@JdbcTypeCode(SqlTypes.JSON) → native jsonb, keeping DB-side JSON operators and GIN indexing"
-      - "An AttributeConverter<Doc,String> → stores plain text, but keeps native jsonb operators"
-      - "@Lob → enables JSON-path indexing"
-      - "Either is identical; JSON operators work on plain text columns too"
+      - "An AttributeConverter<Doc,String> → serializes to a plain text column yet still lets Postgres apply its native jsonb path operators and back the column with a GIN index"
+      - "@Lob → routes the document through the large-object API, which is what actually enables JSON-path operators and GIN indexing on the stored value"
+      - "Either mapping is identical for this purpose, because Postgres JSON-path operators and GIN indexes work just as well against a plain varchar/text column as against native jsonb"
     answer: 0
     explanation: |
       @JdbcTypeCode(SqlTypes.JSON) maps to native jsonb, preserving JSON operators and GIN
@@ -1475,10 +1475,10 @@ questions:
       Migrating a Hibernate 5 app that used the hibernate-types library with
       `@Type(type = "jsonb")`, what is the correct HB6 replacement?
     options:
-      - "Keep @Type(type=\"jsonb\") — string @Type still works in HB6"
+      - "Keep @Type(type=\"jsonb\") unchanged, since HB6 preserved the legacy string-based type registry and still resolves the \"jsonb\" name through the hibernate-types bridge"
       - "Replace it with @JdbcTypeCode(SqlTypes.JSON); string @Type/@TypeDef/@TypeDefs were removed in HB6"
-      - "Replace it with @Enumerated(EnumType.STRING)"
-      - "Move the mapping to persistence.xml"
+      - "Replace it with @Enumerated(EnumType.STRING), which HB6 repurposed to serialize arbitrary objects to their JSON string form in the column"
+      - "Move the mapping into a <type-mapping> block in persistence.xml, since HB6 no longer allows JSON types to be declared with annotations"
     answer: 1
     explanation: |
       HB6 removed string-based @Type and @TypeDef/@TypeDefs. Native JSON support means the
@@ -1493,10 +1493,10 @@ questions:
       A teammate proposes an `AttributeConverter<List<String>,String>` to store roles as a
       comma-joined string in one column. What is the best senior assessment?
     options:
-      - "It's the ideal normalized design; always prefer it"
+      - "It's the ideal normalized design and should always be preferred, because collapsing the roles into one column satisfies first normal form and lets the database index and join on individual roles efficiently"
       - "It works (mind null/empty handling), but it violates 1NF and blocks indexed/relational querying of individual roles — a real @ElementCollection or child table is usually better"
-      - "It's impossible to write such a converter"
-      - "Comma-joining is faster than any normalized alternative in all cases"
+      - "It's impossible to write such a converter, because AttributeConverter forbids a parameterized collection type like List<String> as its entity-attribute side and only accepts scalar types"
+      - "Comma-joining is unconditionally faster than any normalized alternative in every case, so the delimited column is the correct performance choice regardless of how you query the roles"
     answer: 1
     explanation: |
       The converter is technically fine (watch null vs empty-list handling), but a delimited
@@ -1512,10 +1512,10 @@ questions:
       A `BigDecimal amount` is mapped `@Column(precision=19, scale=2)` but the application
       computes a value with 5 decimal places before persist. What governs the stored result?
     options:
-      - "Hibernate always rounds to scale automatically with HALF_UP before binding"
+      - "Hibernate always rounds the BigDecimal to the mapped scale using RoundingMode.HALF_UP just before binding it to the PreparedStatement, so the 5-decimal value is safely truncated to 2 places"
       - "Hibernate binds the BigDecimal as-is; the DB then rounds or rejects per its rules — so the application should apply the intended scale/RoundingMode BEFORE persist"
-      - "The value is silently truncated to an integer"
-      - "precision/scale force the JVM to round at construction time"
+      - "The value is silently truncated to a whole-number integer on bind, because a scale=2 column instructs Hibernate to strip the fractional part entirely"
+      - "The precision and scale attributes cause the JVM to round the BigDecimal at construction time, so the object can never hold more than 2 fractional digits in the first place"
     answer: 1
     explanation: |
       @Column(precision,scale) only drives DDL; Hibernate binds the BigDecimal unchanged. The
@@ -1530,10 +1530,10 @@ questions:
       Beyond DDL, what additional effect can `@Basic(optional = false)` have that
       `@Column(nullable = false)` does not?
     options:
-      - "It generates the NOT NULL constraint while @Column does not"
+      - "It is the annotation that actually emits the NOT NULL constraint into the generated DDL, whereas @Column(nullable=false) is merely an object-model hint that never reaches the schema"
       - "It informs Hibernate the value is always present, which can influence secondary-table/join and eager-fetch optimizations; @Column(nullable=false) only drives the NOT NULL DDL"
-      - "It encrypts the column"
-      - "It makes the attribute lazy by default"
+      - "It transparently encrypts the column at rest using the persistence unit's configured cipher, a protection that @Column(nullable=false) does not provide"
+      - "It makes the attribute lazily fetched by default, deferring the column's load until first access, which @Column(nullable=false) never does"
     answer: 1
     explanation: |
       @Basic(optional=false) is object-model metadata telling Hibernate the value is non-null,
@@ -1550,10 +1550,10 @@ questions:
       enhancement IS enabled. Accessing one lazy field triggers loading of all three in a
       single select. How do you make the @Lob load independently?
     options:
-      - "Lazy basics always load one-at-a-time; nothing to do"
+      - "Lazy basic attributes always load strictly one-at-a-time on first access under bytecode enhancement, so the @Lob already loads on its own and there is nothing further to configure"
       - "All lazy basics form one fetch group by default; separate them with @LazyGroup(...) so the @Lob is its own group"
-      - "Disable bytecode enhancement"
-      - "Add @Convert to the @Lob"
+      - "Disable bytecode enhancement on the entity, which forces each lazy basic to be fetched by its own separate select the moment it is first touched"
+      - "Add a no-op @Convert converter to the @Lob field, which places converted attributes into an isolated fetch group and loads the @Lob independently"
     answer: 1
     explanation: |
       With enhancement, all lazy basic attributes load together as a single fetch group unless

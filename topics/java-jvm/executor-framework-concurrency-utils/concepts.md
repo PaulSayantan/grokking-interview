@@ -25,12 +25,30 @@ new ThreadPoolExecutor(
 
 **The task-admission algorithm (critical and counter-intuitive):**
 
+*Mental model:* core threads are your **standing staff**, the queue is the **waiting room**, and threads up to `maximumPoolSize` are **emergency temps** you only hire when the waiting room is full. Threads are expensive and finite; the queue is the cheap buffer; max is the emergency valve. This is exactly why an **unbounded** queue (an infinite waiting room) means you never hire temps — `maximumPoolSize` becomes dead config.
+
 1. If threads running `< corePoolSize`, start a **new core thread** for the task (even if other threads are idle).
 2. Else, try to **enqueue** the task on `workQueue`.
 3. Only if the queue is **full** does the pool create threads beyond core, up to `maximumPoolSize`.
 4. If the queue is full **and** the pool is at `maximumPoolSize`, the task is **rejected** via the `RejectedExecutionHandler`.
 
 The gotcha: with an **unbounded queue** (e.g., `LinkedBlockingQueue` with default capacity `Integer.MAX_VALUE`), step 2 always succeeds, so `maximumPoolSize` is **never reached** and is effectively ignored. That is why `newFixedThreadPool` core == max.
+
+> [!TIP]
+> **Worked trace — admission with `ThreadPoolExecutor(core=2, max=4, ArrayBlockingQueue(2))`.** Submit 8 tasks one at a time, each long-running so nothing finishes during the burst. Track `(live threads, queued tasks)`:
+>
+> | Submit | Rule that fires | Live threads | Queued | Result |
+> |---|---|---|---|---|
+> | T1 | threads(0) < core(2) → new core thread | 1 | 0 | runs on thread #1 |
+> | T2 | threads(1) < core(2) → new core thread | 2 | 0 | runs on thread #2 |
+> | T3 | at core → enqueue (queue 0/2) | 2 | 1 | waits in queue |
+> | T4 | at core → enqueue (queue 1/2) | 2 | 2 | waits in queue |
+> | T5 | queue full → grow toward max | 3 | 2 | runs on thread #3 |
+> | T6 | queue full → grow toward max | 4 | 2 | runs on thread #4 |
+> | T7 | queue full **and** at max(4) → **reject** | 4 | 2 | `RejectedExecutionHandler` |
+> | T8 | queue full **and** at max(4) → **reject** | 4 | 2 | `RejectedExecutionHandler` |
+>
+> The counter-intuitive part is T3–T4: even though the pool *could* hold 4 threads, it fills the queue **before** spawning threads 3 and 4. Only when the queue is full (T5) do the "emergency temps" get hired. Capacity before rejection = `max + queue` = `4 + 2 = 6` tasks in flight; the 7th and 8th are rejected.
 
 **Rejection policies** (`RejectedExecutionHandler`), all nested in `ThreadPoolExecutor`:
 
@@ -46,6 +64,8 @@ The gotcha: with an **unbounded queue** (e.g., `LinkedBlockingQueue` with defaul
 - **`shutdown()` vs `shutdownNow()`**: `shutdown()` is a graceful drain — no new tasks accepted, already-submitted tasks still run. `shutdownNow()` attempts to stop active tasks (interrupts worker threads) and returns the `List<Runnable>` of never-started tasks. Neither blocks; you must call `awaitTermination(timeout, unit)` to wait.
 - **`prestartAllCoreThreads()`** warms the pool. **`allowCoreThreadTimeOut(true)`** lets core threads die when idle.
 - Sizing: CPU-bound work ≈ `N_cpu + 1` threads; IO-bound work needs more, roughly `N_cpu * (1 + waitTime/computeTime)`.
+
+**Worked sizing calc.** Take an 8-core box (`N_cpu = 8`). A CPU-bound task (in-memory transform) wants `8 + 1 = 9` threads — one extra to cover the occasional page fault; more threads would just thrash the context switcher without adding parallelism. Now an IO-bound task that spends **90 ms** blocked on a downstream call and only **10 ms** on CPU: `8 * (1 + 90/10) = 8 * 10 = 80` threads. The intuition: each thread is idle 90% of the time, so to keep all 8 cores busy you need ~10 threads per core. Halve the wait to 45 ms and it drops to `8 * (1 + 45/10) = 8 * 5.5 = 44` threads — less blocking, fewer threads needed. This is why a fixed pool sized for CPU work (e.g., 9) throttles an IO-heavy service to a fraction of its potential throughput.
 
 ---
 
@@ -89,6 +109,19 @@ CompletableFuture.supplyAsync(() -> fetchUser(id))          // run async, produc
     .thenAccept(System.out::println);                        // consume, no result
 ```
 
+**Worked trace — what flows through each stage.** Call `fetchUser(42)` on the pipeline above and follow the value and the executing thread:
+
+| Stage | Input | Output | Runs on |
+|---|---|---|---|
+| `supplyAsync(() -> fetchUser(42))` | — | `User(id=42, name="Alice")` | common ForkJoinPool worker |
+| `.thenApply(user -> user.getName())` | `User(42,"Alice")` | `"Alice"` | the FJP worker that completed stage 1 (non-`Async`, so same thread) |
+| `.thenCompose(name -> lookupAddressAsync(name))` | `"Alice"` | `Address("12 Elm St")` (unwrapped from the inner `CompletableFuture`) | whichever thread completes `lookupAddressAsync` |
+| `.thenCombine(loadSettingsAsync(), (addr,s) -> merge(addr,s))` | `Address("12 Elm St")` + `Settings(dark=true)` | `Profile{addr, dark=true}` | thread completing whichever of the two finishes **last** |
+| `.exceptionally(ex -> "fallback")` | (no exception) | `Profile{...}` passes through untouched | n/a — skipped on success |
+| `.thenAccept(System.out::println)` | `Profile{...}` | `void` (prints it) | same thread as prior stage |
+
+Two teaching points fall out: (1) `thenCompose` **flattens** — without it stage 3 would yield `CompletableFuture<CompletableFuture<Address>>`; with it you get a clean `Address`. (2) The non-`Async` stages piggyback on the previous stage's thread, so a slow `thenApply` body silently ties up a common-pool worker — the reason you pass a dedicated executor for anything blocking.
+
 Key method families:
 
 | Method | Purpose |
@@ -128,6 +161,24 @@ s.scheduleWithFixedDelay(task, 0, 1, TimeUnit.SECONDS);      // delay measured e
 - **Fixed rate:** the next execution is scheduled at `initialDelay + n*period` regardless of how long the task takes. If a run overruns the period, subsequent runs happen back-to-back (they do **not** run concurrently — they queue), so the task can "fall behind."
 - **Fixed delay:** the next run starts `delay` time units **after the previous one finished**. The gap between runs is constant regardless of task duration.
 
+**Worked timeline — task takes 3s, period/delay = 1s.** The task *overruns* its interval, which is where the two modes diverge:
+
+```
+Fixed RATE  (start = initialDelay + n*period = 0,1,2,3…, but a run can't start until the prior one ends):
+  run1: start 0s → end 3s      (scheduled slots 1s and 2s already passed — pool never runs them concurrently)
+  run2: start 3s → end 6s      (fires the instant run1 frees the thread — back-to-back, "falling behind")
+  run3: start 6s → end 9s
+  → effective starts: 0, 3, 6, 9  (period is swallowed by the 3s work; runs are wall-to-wall, never overlapping)
+
+Fixed DELAY (next start = previous end + 1s):
+  run1: start 0s → end 3s → wait 1s
+  run2: start 4s → end 7s → wait 1s
+  run3: start 8s → end 11s
+  → effective starts: 0, 4, 8, 12  (always a clean 1s gap between finish and next start)
+```
+
+So with a 3s task and 1s interval, fixed-rate fires at **0,3,6,9** (gap 3s, the work time — the 1s period is too short to matter) while fixed-delay fires at **0,4,8,12** (gap 4s = work + delay). If the task were *faster* than the period (say 0.2s), fixed-rate would fire crisply at 0,1,2,3 and fixed-delay at 0,1.2,2.4 — the divergence only appears once the task can't fit inside the period.
+
 **Advanced — gotchas.**
 - **`Timer` vs `ScheduledExecutorService`:** `Timer` uses a single thread, so one long/blocking task delays all others; an **uncaught exception in a `TimerTask` kills the Timer thread** and cancels all future tasks silently. `ScheduledThreadPoolExecutor` uses a pool and isolates failures better.
 - **Silent death of periodic tasks:** if a task submitted via `scheduleAtFixedRate`/`WithFixedDelay` throws an **uncaught exception, the task is suppressed and never runs again** — but the pool keeps living. Always wrap periodic task bodies in try/catch, or inspect the returned `ScheduledFuture` (whose `get()` will surface the exception).
@@ -156,6 +207,23 @@ class SumTask extends RecursiveTask<Long> {
 }
 ```
 
+**Worked trace — sum `[3,1,4,1,5,9,2,6]` with `THRESHOLD = 2`.** The 8-element range splits until each piece has ≤ 2 elements, forking the left half and computing the right half in place, then joining:
+
+```
+compute[0,8)  mid=4        fork L[0,4); r = compute R[4,8)
+  L[0,4) mid=2  fork [0,2); r = compute [2,4)
+     [0,2)  base: 3+1 = 4          (forked, may run on a stolen worker)
+     [2,4)  base: 4+1 = 5          (computed in this thread)
+     join → 4 + 5 = 9
+  R[4,8) mid=6  fork [4,6); r = compute [6,8)
+     [4,6)  base: 5+9 = 14
+     [6,8)  base: 2+6 = 8
+     join → 14 + 8 = 22
+  join → L(9) + R(22) = 31
+```
+
+Total = **31** (verify: 3+1+4+1+5+9+2+6 = 31). Four base-case leaves (`[0,2),[2,4),[4,6),[6,8)`) do the actual addition; the interior nodes only combine. Because each node `fork()`s its left child but `compute()`s its right in the current thread, that current thread is never idle waiting — it does useful work while the forked halves may be **stolen** and run on other cores in parallel.
+
 **Intermediate — work stealing.** Each worker thread owns a **double-ended queue (deque)** of tasks. A worker pushes/pops its own subtasks from the **head** (LIFO — good cache locality, newest task is hottest). When a worker runs out of work, it **steals** from the **tail** of another worker's deque (FIFO — steals the oldest, largest task, minimizing contention). This keeps all cores busy without a central bottleneck and self-balances uneven workloads.
 
 **Advanced — gotchas and idioms.**
@@ -171,7 +239,7 @@ class SumTask extends RecursiveTask<Long> {
 **Beginner.** JUC provides thread-safe collections that scale far better than the legacy `Collections.synchronizedXxx` wrappers (which lock the whole collection on every operation) and the ancient `Hashtable`/`Vector`.
 
 **ConcurrentHashMap (CHM).**
-- **Reads are lock-free**; writes lock only a small portion. In **Java 7** it used lock striping with `Segment`s (default 16). **Since Java 8** it abandoned segments for a `synchronized` block on the **first node of each bin** plus CAS for empty bins, and it converts a long bin to a **red-black tree** when it exceeds 8 entries (treeification) for O(log n) worst case.
+- **Reads are lock-free**; writes lock only a small portion. In **Java 7** it used lock striping with `Segment`s (default 16). **Since Java 8** it abandoned segments for a `synchronized` block on the **first node of each bin** plus CAS for empty bins, and it converts a long bin to a **red-black tree** when it exceeds 8 entries (treeification) for O(log n) worst case. Treeification also requires overall table capacity ≥ 64 (`MIN_TREEIFY_CAPACITY`); below that a bin hitting 8 triggers a **resize instead**, since a small table with a hot bin is better fixed by spreading entries across more buckets.
 - `null` keys and values are **forbidden** (unlike `HashMap`) — ambiguity between "absent" and "mapped to null" in concurrent `get`.
 - Atomic compound ops: `putIfAbsent`, `computeIfAbsent`, `compute`, `merge`. Bulk parallel ops `forEach`, `search`, `reduce` (Java 8).
 - **Weakly consistent iterators**: never throw `ConcurrentModificationException`; reflect some but not necessarily all updates since creation. `size()` is an estimate.
@@ -231,7 +299,7 @@ if (!sl.validate(stamp)) {            // a write happened — retry pessimistica
 **Advanced — gotchas.**
 - `StampedLock` is **not reentrant** — re-acquiring in the same thread deadlocks. It does **not** support `Condition`. It is **not** a fair lock.
 - `StampedLock` supports lock conversion (`tryConvertToWriteLock`).
-- Prefer `synchronized` for simple cases (it's optimized, biased-locking-free since JDK 15, and auto-releases); reach for explicit locks only when you need their extra features.
+- Prefer `synchronized` for simple cases (it's heavily JIT-optimized and auto-releases); note that biased locking was **disabled by default in JDK 15 (JEP 374)** and later removed, which can slightly *raise* the cost of uncontended single-thread locking — so it's a neutral change, not a pure win. Reach for explicit locks only when you need their extra features.
 
 ---
 
@@ -256,7 +324,7 @@ done.await();  // proceeds once count hits 0
 | Count changed by | Any thread via `countDown()` | Each party arriving via `await()` |
 | Barrier action | No | Yes (optional Runnable) |
 
-**Semaphore.** Maintains a set of **permits**; `acquire()` blocks until one is available, `release()` returns one. Used to bound concurrent access to a resource (e.g., a connection pool of size K). A binary semaphore (1 permit) acts like a lock, but — unlike `ReentrantLock` — a permit released by one thread can be acquired by another (no ownership). Supports fairness and `tryAcquire`.
+**Semaphore.** Maintains a set of **permits**; `acquire()` blocks until one is available, `release()` returns one. Used to bound concurrent access to a resource (e.g., a connection pool of size K). A binary semaphore (1 permit) acts like a lock, but — unlike `ReentrantLock` — a permit released by one thread can be acquired by another (no ownership). Supports fairness and `tryAcquire`. **Gotcha:** because permits aren't owned, an accidental extra `release()` (e.g., in a retry or error path that releases twice) raises the permit count *above* the initial value, silently defeating the concurrency limit — a `Semaphore(10)` can quietly become an effective `Semaphore(11+)`. `acquire`/`release` counts need not balance per thread, so this bug is subtle and hard to diagnose in production.
 
 **Phaser (Java 7).** A more flexible, reusable barrier that supports a **dynamic** number of parties (`register`/`arriveAndDeregister`) and **multiple phases**. `arriveAndAwaitAdvance()` is the per-phase rendezvous. It supersedes `CountDownLatch`+`CyclicBarrier` for staged, multi-round computations where participants join and leave over time.
 

@@ -255,8 +255,9 @@ onboarding, design review, unblocking, cross-team coordination, keeping everyone
 is **real technical leadership** and often the difference between a project shipping or not.
 The problem: many promotion processes reward quantifiable output (code, designs) and label
 glue "**not technical enough**," so it can be **career-limiting** if you do only it — and
-it's distributed unfairly (studies: women are asked ~44% more often and volunteer ~48% more
-for non-promotable tasks).
+it's distributed unfairly (research by Babcock, Recalde, Vesterlund & Weingart finds women
+are disproportionately asked to take on, volunteer for, and accept these "non-promotable"
+tasks relative to men).
 
 The nuance interviewers want you to hold: glue work is **high-leverage AND a career risk**,
 and the resolution is *not* "refuse to do it." It's:
@@ -443,6 +444,9 @@ flowchart TD
 - Amazon — Leadership Principles, esp. *"Have Backbone; Disagree and Commit"*, *Earn Trust*,
   *Hire and Develop the Best*; the Bar Raiser process.
 - Herminia Ibarra — research on sponsorship vs mentorship and the sponsorship gap.
+- Babcock, Recalde, Vesterlund & Weingart — "Gender Differences in Accepting and Receiving
+  Requests for Tasks with Low Promotability" (*American Economic Review*, 2017): women
+  disproportionately volunteer for, are asked to do, and accept non-promotable tasks.
 - Google — Project Oxygen (behaviors of effective technical leaders: coaching, not
   micromanaging).
 - Published engineering ladders — Dropbox, CircleCI, Rent the Runway, GitLab (Senior vs

@@ -70,6 +70,40 @@ The one big decision is **queue type**, chosen at creation and immutable.
 - **Cost:** Standard ~$0.40 / million requests, FIFO ~$0.50 / million (first 1M/mo
   free). Batching (up to 10 msgs/request) cuts request count and cost ~10x.
 
+**Worked example — "per-customer ordering at 50,000 msg/s: how far does FIFO go?"**
+Set `MessageGroupId = customerId` so each customer's messages are ordered but
+different customers run in parallel.
+
+1. *Spread across groups.* Say 50,000 active customers averaging **1 msg/s** each
+   (or 5,000 customers at 10 msg/s) → 50,000 groups, each trivially slow. A single
+   group is *serialized end to end*, so what matters is that no one group is hot,
+   not the total.
+2. *One queue enough?* Base FIFO caps at **3,000 msg/s** (batched). 50,000 / 3,000
+   ≈ **17× over** — base mode is out. **High-throughput FIFO** raises a single queue
+   into the tens of thousands msg/s (region-dependent). If your region's ceiling is,
+   say, ~30,000 msg/s, then 50,000 still exceeds one queue.
+3. *Shard across queues.* Use ⌈50,000 / 30,000⌉ = **2 FIFO queues**; route with
+   `queueIndex = hash(customerId) mod 2`, so **all of one customer's messages always
+   land on the same queue** → per-customer order preserved, ~25,000 msg/s each. If
+   the per-queue ceiling were only 10,000 msg/s you'd need ⌈50,000/10,000⌉ = **5
+   queues**.
+4. *The wall FIFO can't climb.* If a **single customer** needs more than a few
+   hundred *ordered* msg/s, no amount of sharding helps — one group is serialized and
+   cannot be parallelized. At that point per-key ordering is the wrong tool: move to
+   Kinesis/Kafka (same per-partition serialization wall, but higher ceilings and
+   replay) or redesign the ops to be commutative so order stops mattering.
+
+**Worked example — the 5-minute dedup window (why FIFO ≠ true exactly-once).**
+With `MessageDeduplicationId = X`:
+- **t = 0:00** — send `X` → accepted and **delivered** once.
+- **t = 2:00** — a retry re-sends `X` (same id, still inside the 5-min window) → SQS
+  returns success but **does not enqueue a second copy**; the consumer sees it once.
+- **t = 6:00** — the same `X` is sent again (window has expired) → treated as **new**
+  and **delivered again** → the consumer sees a duplicate.
+
+So "exactly-once processing" holds only *within* the window; at minute 6 a duplicate
+slips through. This is exactly why consumers must still be idempotent even on FIFO.
+
 ---
 
 ## Visibility timeout, polling and message lifecycle
@@ -122,6 +156,24 @@ times without being deleted, SQS moves it to the DLQ instead of redelivering.
 There it can be inspected, alarmed on (CloudWatch `ApproximateNumberOfMessagesVisible`
 on the DLQ), and later **redriven** back to the source queue after a fix (DLQ
 redrive, available in console/API).
+
+**Worked example — a poison message walking to the DLQ.**
+Queue with **visibility timeout = 30 s**, **maxReceiveCount = 3**. A malformed
+message that always throws:
+
+| Wall clock | Event | receiveCount |
+|---|---|---|
+| t = 0:00 | `ReceiveMessage` returns it, hidden 30 s; consumer throws, no `DeleteMessage` | 1 |
+| t = 0:30 | visibility expires → message reappears, redelivered; throws again | 2 |
+| t = 1:00 | reappears again, redelivered; throws again | 3 |
+| t = 1:30 | visibility expires; next receive **would** be #4 > maxReceiveCount → SQS **moves it to the DLQ** instead | — |
+
+So the poison message lands in the DLQ at **≈ 1:30** — roughly
+`maxReceiveCount × visibilityTimeout = 3 × 30 s = 90 s` of wall-clock churn (plus
+receive latency). Two takeaways: (1) that product sizes how long poison burns
+compute before quarantine — a 5-min visibility timeout with maxReceiveCount=5 means
+~25 min per poison message; (2) give the DLQ retention *longer* than that plus your
+investigation time, or failures expire before you look.
 
 **Design rules**
 - DLQ **type must match** the source (FIFO source → FIFO DLQ).
@@ -232,10 +284,16 @@ reactions.**
 - **Standard topics:** high throughput, at-least-once, best-effort order. Can
   fan out to all subscriber types.
 - **FIFO topics:** strict ordering + dedup (5-min dedup window), with
-  `MessageGroupId`/`MessageDeduplicationId`. **FIFO topics can only deliver to
-  SQS FIFO queues** (and, more recently, are constrained on subscriber types).
-  Throughput capped like SQS FIFO (300 msg/s base, 3,000 with batching; high
-  throughput mode available). Use SNS FIFO → SQS FIFO when you need ordered fan-out.
+  `MessageGroupId`/`MessageDeduplicationId`. **SNS FIFO topics deliver only to SQS
+  queues** — to **SQS FIFO** queues when you need order/dedup preserved end-to-end,
+  or to **SQS standard** queues when downstream can tolerate best-effort order (and
+  you just want dedup at publish). They **cannot** deliver to customer-managed
+  endpoints — HTTP/S, email, SMS, or mobile push — because those can't guarantee
+  strict order; to reach a Lambda you subscribe an SQS queue and let it trigger the
+  function. Throughput is capped: **300 msg/s per message group**, with a per-topic
+  default of **3,000 msg/s (or 20 MB/s, whichever comes first)** when
+  `FifoThroughputScope=Topic` (raisable via quota increase). Use SNS FIFO → SQS FIFO
+  when you need ordered fan-out.
 
 **Message filtering (subscription filter policies).** Each subscription can carry a
 **filter policy** (JSON). SNS evaluates it against the message and only delivers
@@ -250,6 +308,23 @@ Filter policy on the "search-index" subscription:
 
 This pushes routing into SNS so each consumer only gets relevant messages — no
 consumer-side filtering, no wasted invocations.
+
+**Worked example — one publish, four subscriptions, filter policies decide.**
+Publish to an `orders` topic with attributes
+`{ eventType: "OrderPlaced", region: "us-east-1", amount: 1500 }`:
+
+| Subscription | Filter policy | Match? | Why |
+|---|---|---|---|
+| `fulfillment` (SQS) | *(none)* | ✅ delivered | no policy → receives everything |
+| `search-index` (SQS) | `{ "eventType": ["ProductCreated","ProductUpdated"] }` | ❌ skipped | `"OrderPlaced"` not in the allowed list |
+| `analytics` (SQS) | `{ "region": ["us-east-1"] }` | ✅ delivered | region matches |
+| `fraud-check` (Lambda) | `{ "amount": [{ "numeric": [">", 1000] }] }` | ✅ delivered | 1500 > 1000 |
+
+One `Publish` fans out to **fulfillment, analytics, and fraud-check**; `search-index`
+is filtered out at SNS and never pays for a delivery or an invocation. Now publish an
+`OrderPlaced` with `amount: 200`: fraud-check drops out (200 is not > 1000), and only
+fulfillment + analytics receive it. The routing decision happens once, in SNS —
+consumers never see messages they'd only discard.
 
 **Trade-offs**
 - Filter policies keep fan-out efficient and cheap (you don't pay to deliver + drop
@@ -450,7 +525,14 @@ choose the partition key so unrelated entities don't serialize behind each other
   transparently survive a single-AZ loss; no action needed.
 - **Region failure:** these are **regional** services. Cross-region needs explicit
   design: SNS cross-region delivery, EventBridge **cross-region bus** targets/global
-  endpoints, or active-active with per-region buses. State it as a real gap.
+  endpoints, or active-active with per-region buses. State it as a real gap, and name
+  the trade-offs: (1) your **dedup/idempotency store must span both regions** (a
+  global DynamoDB table, not a per-region one) or the same event processed in each
+  region counts as new twice; (2) **ordering does not survive cross-region
+  replication** — FIFO/per-shard order is regional only, so a failover reorders
+  relative to the primary; (3) **active-active means double-processing by design** —
+  cheaper to make consumers idempotent and eat the duplicate work than to build
+  cross-region exactly-once, which does not exist.
 
 **Quotas worth memorizing**
 - SQS message size **256 KB**; retention **60 s–14 days** (default 4 days);
@@ -530,7 +612,10 @@ scope as the things juniors forget.
 - AWS SQS Developer Guide — standard vs FIFO, visibility timeout, long polling,
   DLQ/redrive, message retention, quotas, Extended Client Library.
 - AWS SNS Developer Guide — pub/sub, subscription types, message filtering, FIFO
-  topics, subscription DLQs, fan-out to SQS.
+  topics, subscription DLQs, fan-out to SQS. See "Amazon SNS message delivery for
+  FIFO topics" (FIFO delivers to SQS standard *and* FIFO queues, not to
+  HTTP/S/email/SMS/push) and the SNS quotas page (FIFO 300 msg/s per message group,
+  3,000 msg/s or 20 MB/s per topic default).
 - AWS EventBridge User Guide — event buses, rules and event patterns, schema
   registry, Scheduler, Pipes, archive and replay, partner event sources.
 - AWS Kinesis Data Streams Developer Guide — shard limits, retention, consumers.

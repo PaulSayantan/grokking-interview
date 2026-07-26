@@ -101,11 +101,13 @@ to reflective lookup — you must use `int.class`, `long.class`, etc. for primit
 **Overload resolution is your job.** Reflection performs *no* overload selection based on runtime
 argument types the way `javac` does at compile time; you name the exact parameter types up front.
 
-**`final` fields.** With `setAccessible(true)` you can historically mutate non-static `final`
-fields via `Field.set`, but the JIT may have already inlined the constant, so the change may not
-be observed. Setting `static final` fields is effectively blocked. Since Java 9+ the platform
-increasingly rejects writes to `final` fields via reflection; treat mutating `final` as
-unsupported.
+**`final` fields (precise current rule).** With `setAccessible(true)`, a **non-static** `final`
+field is still writable via `Field.set` on most JDKs — but the JIT may have already inlined its
+value at read sites, so the mutation is **not reliably observed** (you may see the old constant).
+**`static final`** fields are blocked (`IllegalAccessException`) — the compiler treats them as
+constants. And fields of **hidden classes and `record` components reject** reflective writes
+outright. Bottom line: treat mutating any `final` as unsupported/undefined; if you need mutability,
+don't declare the field `final`.
 
 ---
 
@@ -148,6 +150,25 @@ java --add-opens java.base/java.lang=ALL-UNNAMED -jar app.jar
 
 **Rule of thumb:** an *exported* package (`exports`) lets you compile and call public API; only an
 *opened* package (`opens`) permits `setAccessible` deep reflection at runtime.
+
+**Concrete `module-info.java` showing both gates side by side:**
+
+```java
+module com.myapp {
+    requires spring.core;
+
+    exports com.myapp.api;          // callers may COMPILE against + call public API here
+    opens   com.myapp.entity to     // Spring may DEEP-REFLECT (setAccessible) into here only,
+            spring.core, hibernate.orm;  // and only from these two modules
+    // com.myapp.internal is neither exported nor opened -> fully hidden
+}
+```
+
+Trace the access decision for a caller in another module:
+- Call `com.myapp.api.OrderApi.submit()` → **allowed** (package exported).
+- `field.setAccessible(true)` on a private field of `com.myapp.entity.Order` from `spring.core`
+  → **allowed** (package opened *to* `spring.core`).
+- Same `setAccessible` on `com.myapp.internal.Secret` → **`InaccessibleObjectException`** (not opened).
 
 ---
 
@@ -248,6 +269,38 @@ public class BuilderProcessor extends AbstractProcessor {
 }
 ```
 
+**Concrete round: input annotation → generated source.** Given this input the developer wrote:
+
+```java
+@Builder
+public class Foo { int x; String name; }
+```
+
+the processor, during a `javac` round, inspects the `TypeElement` for `Foo`, reads its two
+`VariableElement` fields (`x:int`, `name:String`), and writes a brand-new source file
+`FooBuilder.java` through the `Filer`:
+
+```java
+// createSourceFile("com.example.FooBuilder").openWriter() writes exactly this text:
+package com.example;
+public class FooBuilder {
+    private int x;
+    private String name;
+    public FooBuilder x(int x)        { this.x = x; return this; }
+    public FooBuilder name(String n)  { this.name = n; return this; }
+    public Foo build() {
+        Foo f = new Foo();
+        f.x = this.x; f.name = this.name;
+        return f;
+    }
+}
+```
+
+That generated file is then compiled in the *same* `javac` invocation (a later round), so callers
+can write `new FooBuilder().x(3).name("a").build()` with full compile-time type-safety and **zero
+runtime reflection**. This is the exact mechanism behind MapStruct mappers and Dagger's DI graph —
+strings-of-code written by `process()`, compiled alongside your code.
+
 **Key points:**
 - Registered via `META-INF/services/javax.annotation.processing.Processor`
   (or the `@AutoService` helper).
@@ -295,6 +348,15 @@ Spring bean has no interface, Spring falls back to CGLIB.
 - Since Java 16+, `Proxy` also supports proxying interfaces with **non-public** access and can define
   proxy classes in specific modules.
 
+> [!WARNING]
+> **Object-method pitfall.** Because `equals`/`hashCode`/`toString` route through your handler, a
+> naive handler that forwards everything (or returns `null`) silently breaks identity: two distinct
+> proxies may test `equals` inconsistently, and a broken `hashCode` corrupts any `HashMap`/`HashSet`
+> holding the proxy. Handle `Object` methods explicitly — e.g. `equals` → proxy-identity
+> (`proxy == args[0]`), `hashCode` → `System.identityHashCode(proxy)`, `toString` → a fixed label.
+> And **never** call a method *on the proxy* from inside `invoke` — that re-enters `invoke` and
+> causes infinite recursion (`StackOverflowError`). Dispatch to the real target instead.
+
 **Default methods:** an `InvocationHandler` that wants to *invoke* the interface's own `default`
 method (rather than reimplement it) must use `InvocationHandler.invokeDefault(proxy, method, args)`
 — **added in Java 16**. Before 16 this required brittle `MethodHandles.Lookup` hacks with
@@ -327,6 +389,43 @@ proxy reference. When one method of the target calls another method on `this` (e
 method A calls method B on the same bean), the call does **not** pass through the proxy, so B's
 advice (transaction, caching) is **not** applied. This is the #1 real-world proxy bug.
 
+**Concrete failure and the fixes.** The caller holds `proxy`; the proxy wraps `target`. The call
+chain shows exactly where advice is lost:
+
+```java
+@Service
+class OrderService {
+    @Transactional
+    public void placeOrder(Order o) {
+        save(o);            // this.save(o) -> raw target, BYPASSES the proxy
+    }
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void save(Order o) { /* expects its OWN new transaction */ }
+}
+
+// controller injects the PROXY, so the outer call is advised:
+orderService.placeOrder(o);
+//   proxy.placeOrder  -> [tx advice fires] -> target.placeOrder
+//     target.save     -> plain this.save  -> [NO tx advice] -> REQUIRES_NEW never happens
+```
+
+`save`'s `REQUIRES_NEW` silently does nothing because `this.save(o)` never re-enters the proxy.
+Three fixes, in order of cleanliness:
+
+```java
+// FIX 1 (best): move save() into its own bean so the call crosses a proxy boundary.
+class OrderService { @Transactional void placeOrder(Order o){ saver.save(o); } }  // saver is a separate proxied bean
+
+// FIX 2: self-inject the proxy and call through it.
+@Autowired @Lazy private OrderService self;
+public void placeOrder(Order o){ self.save(o); }   // self IS the proxy -> advice fires
+
+// FIX 3: grab the current proxy explicitly (needs exposeProxy=true).
+((OrderService) AopContext.currentProxy()).save(o);
+```
+
+Each fix routes the inner call *back through the proxy reference* so the interceptor runs.
+
 Modern successor: **ByteBuddy** has largely replaced CGLIB (Hibernate, Mockito, Spring's repackaged
 CGLIB all moved to or bundle ByteBuddy) because CGLIB struggles on modern JDKs. All of these still
 share the subclassing limitation regarding `final`.
@@ -351,12 +450,59 @@ Reflection is slower and less safe than direct calls; the gap has narrowed but n
 old bytecode-generating "inflation" machinery and the `sun.reflect.*` generated accessor classes.
 Semantics are unchanged; startup and maintainability improved.
 
+**How much slower, concretely (approximate, warmed-up HotSpot):**
+
+| Operation                                   | Rough cost per call | Notes                              |
+|---------------------------------------------|---------------------|------------------------------------|
+| Direct call `svc.hello(x)`                  | ~1 ns               | JIT inlines it                     |
+| `MethodHandle.invokeExact` (resolved once)  | ~1–2 ns             | near direct; JIT-friendly          |
+| Cached `Method.invoke` (warmed, `setAccessible` done) | ~5–10 ns  | boxing + `Object[]` overhead       |
+| **Un**cached `getMethod(...)` lookup per call | ~hundreds of ns to µs | the lookup dominates everything    |
+
+The takeaway to say out loud: **lookup cost >> invocation cost.** Trace a loop of 1,000,000 calls
+on a method whose reflective lookup costs ~500 ns and whose cached invoke costs ~5 ns:
+
+- **Look up every iteration:** 1,000,000 × (500 ns + 5 ns) = 505,000,000 ns ≈ **505 ms**.
+- **Look up once, cache the `Method`, invoke in the loop:** 500 ns + 1,000,000 × 5 ns
+  = 5,000,500 ns ≈ **5 ms**.
+
+That is a **~100× speedup** from a single change — hoisting `getMethod` out of the loop — with no
+change to the call itself. Reflection's bad reputation is mostly *repeated lookups*, not invocation.
+
+> [!KEY-TAKEAWAY]
+> If asked "how do I make reflection fast?", the first answer is *cache the `Method`/`Field`
+> object and call `setAccessible(true)` once*; the second is *use a `MethodHandle`/`VarHandle`
+> resolved once*. Never resolve inside a hot loop.
+
 **Faster alternatives, in rough order of preference:**
 - **`java.lang.invoke.MethodHandle` / `VarHandle`** (Java 7 / Java 9): resolved once, then close to
   direct-call speed because they're JIT-friendly. `VarHandle` (JEP 193, Java 9) is the modern
   replacement for field reflection and `sun.misc.Unsafe` field access.
 - **`LambdaMetafactory`** — convert a `MethodHandle` into a functional-interface lambda once; repeated
   calls are essentially direct. Used by high-performance mappers.
+
+**Worked snippet — resolve once, call many.** The fast pattern is: pay the lookup cost a single
+time outside the loop, then invoke the handle repeatedly.
+
+```java
+// MethodHandle: resolve String.length() once, then call it hot.
+MethodHandles.Lookup lk = MethodHandles.lookup();
+MethodType mt = MethodType.methodType(int.class);          // returns int, no args
+MethodHandle len = lk.findVirtual(String.class, "length", mt);  // one-time lookup
+for (String s : words) {
+    int n = (int) len.invokeExact(s);   // ~direct-call speed, no boxing of the receiver
+}
+
+// VarHandle: field get without reflective Field boxing (Java 9+).
+VarHandle COUNT = MethodHandles
+    .privateLookupIn(Counter.class, MethodHandles.lookup())
+    .findVarHandle(Counter.class, "count", int.class);      // one-time
+int c = (int) COUNT.get(counterInstance);                    // fast field read
+```
+
+Contrast with the reflective equivalent shown earlier (`f.get(target)` returning `Object`, which
+autoboxes the `int` every call). `invokeExact` returns the primitive directly with **no allocation**,
+which is why `MethodHandle`/`VarHandle` sit near the top of the speed table above.
 - **Caching `Method`/`Field` objects** — never look them up per call; resolve once, call
   `setAccessible(true)` once, reuse. Most of reflection's cost is in lookup, not invocation.
 - **Compile-time code generation** (annotation processors: MapStruct, Dagger) — zero runtime

@@ -9,10 +9,10 @@ questions:
   question: |
     What does "cascading" a persistence operation mean in JPA?
   options:
-  - "It configures a database ON DELETE CASCADE foreign-key constraint"
+  - "It configures a database ON DELETE CASCADE foreign-key constraint on the child table"
   - "It propagates an EntityManager operation from a parent entity to its associated entities"
-  - "It automatically fetches associations eagerly to avoid N+1 queries"
-  - "It merges the first-level and second-level caches on flush"
+  - "It automatically fetches all associations eagerly to avoid N+1 select queries"
+  - "It merges the first-level and second-level caches together on every flush"
   answer: 1
   explanation: |
     Cascading tells the provider to walk an association and apply the same
@@ -28,9 +28,9 @@ questions:
     By default, if you declare `@OneToMany List<OrderLine> lines;` with no
     `cascade` attribute, which operations are cascaded to the lines?
   options:
-  - "PERSIST and MERGE only"
-  - "REMOVE only"
-  - "ALL operations"
+  - "PERSIST and MERGE are cascaded automatically for @OneToMany"
+  - "REMOVE is cascaded by default so children are deleted with the parent"
+  - "ALL operations are propagated implicitly to the child collection"
   - "None — nothing is cascaded unless you specify it"
   answer: 3
   explanation: |
@@ -48,9 +48,9 @@ questions:
     the FK column is nullable. What happens on flush?
   options:
   - "Hibernate issues `UPDATE OrderLine SET order_id = NULL` — the row survives as an orphan"
-  - "Hibernate issues `DELETE FROM OrderLine` for that line"
-  - "Nothing changes until the parent Order is removed"
-  - "A dereferenced-collection exception is thrown"
+  - "Hibernate issues `DELETE FROM OrderLine WHERE id = ?` for that dereferenced line"
+  - "Nothing changes on flush until the parent Order is explicitly removed later"
+  - "A dereferenced-collection exception is thrown because the child lost its parent"
   answer: 0
   explanation: |
     CascadeType.REMOVE only reacts to an explicit `em.remove(parent)`, not to
@@ -67,9 +67,9 @@ questions:
     `order.getLines().remove(line)` and flush, without calling `em.remove(line)`.
     What SQL runs?
   options:
-  - "`UPDATE OrderLine SET order_id = NULL`"
+  - "`UPDATE OrderLine SET order_id = NULL` — the child is merely disowned"
   - "No SQL — orphanRemoval only fires when the parent is removed"
-  - "`DELETE FROM \"Order\"` cascading down"
+  - "`DELETE FROM \"Order\"` cascading down to every child line"
   - "`DELETE FROM OrderLine WHERE id = ?` for the removed line"
   answer: 3
   explanation: |
@@ -85,9 +85,9 @@ questions:
     Is `orphanRemoval` one of the values of `jakarta.persistence.CascadeType`?
   options:
   - "No — it is a separate boolean attribute on @OneToOne/@OneToMany"
-  - "Yes — it is `CascadeType.ORPHAN`"
-  - "Yes — it is included inside `CascadeType.ALL`"
-  - "No — it only exists as a Hibernate-native cascade style"
+  - "Yes — it is the enum constant `CascadeType.ORPHAN` added in JPA 2.0"
+  - "Yes — it is one of the operations bundled inside `CascadeType.ALL`"
+  - "No — it exists only as the Hibernate-native `@Cascade(ORPHAN_DELETE)` style"
   answer: 0
   explanation: |
     orphanRemoval is a distinct boolean element of @OneToOne and @OneToMany, not a
@@ -105,7 +105,7 @@ questions:
   - "PERSIST, MERGE, REMOVE, REFRESH, DETACH"
   - "PERSIST, MERGE, REMOVE, REFRESH, DETACH, and orphanRemoval"
   - "SAVE_UPDATE, REPLICATE, LOCK, PERSIST, REMOVE"
-  - "PERSIST, MERGE, REMOVE only"
+  - "PERSIST, MERGE, and REMOVE only — REFRESH and DETACH are excluded"
   answer: 0
   explanation: |
     CascadeType.ALL is shorthand for the five spec cascade types: PERSIST, MERGE,
@@ -120,10 +120,10 @@ questions:
     Many `Employee` entities reference one shared `Department` via `@ManyToOne`.
     Why is putting `cascade = CascadeType.REMOVE` on that association dangerous?
   options:
-  - "It causes a LazyInitializationException when loading employees"
+  - "It causes a LazyInitializationException whenever you load a batch of employees"
   - "Removing one employee would delete the shared Department other employees still reference"
-  - "It forces the Department association to become EAGER"
-  - "It prevents the Employee row from ever being deleted"
+  - "It silently forces the @ManyToOne Department association to become EAGER-fetched"
+  - "It prevents the Employee row itself from ever being deleted by the provider"
   answer: 1
   explanation: |
     Cascading REMOVE across a shared reference means em.remove(employee) tries to
@@ -141,7 +141,7 @@ questions:
   options:
   - "Employee → Department (many employees per department)"
   - "Order → OrderLine (a line exists only within its order)"
-  - "Book → Author in a @ManyToMany"
+  - "Book → Author across a @ManyToMany (authors shared by many books)"
   - "Product → Category (a shared lookup category)"
   answer: 1
   explanation: |
@@ -159,9 +159,9 @@ questions:
     `orphanRemoval = true`?
   options:
   - "It compares the managed persistent collection against its snapshot during dirty checking at flush"
-  - "It relies on a database trigger installed by schema generation"
-  - "It polls the database for rows whose FK no longer matches any parent"
-  - "It marks orphans immediately when remove() is called, before any flush"
+  - "It relies on a database AFTER-DELETE trigger that schema generation installs on the child table"
+  - "It periodically polls the database for child rows whose FK no longer matches any parent row"
+  - "It marks the orphan immediately when Collection.remove() is called, before any flush occurs"
   answer: 0
   explanation: |
     Loaded collections are wrapped in a persistent collection that records contents.
@@ -176,10 +176,10 @@ questions:
     With `orphanRemoval = true` on `Order.lines`, what does
     `order.getLines().clear()` followed by a flush do?
   options:
-  - "Nulls the FK of every line but keeps all rows"
+  - "Nulls the FK of every line via UPDATE but keeps all the rows"
   - "Issues a DELETE for every line that was in the collection"
-  - "Only detaches the lines from the persistence context"
-  - "Throws because you cannot clear an orphan-removal collection"
+  - "Only detaches the lines from the persistence context, leaving rows intact"
+  - "Throws because you cannot call clear() on an orphan-removal collection"
   answer: 1
   explanation: |
     clear() dereferences every element. With orphanRemoval=true each becomes an
@@ -195,9 +195,9 @@ questions:
     the likely result?
   options:
   - "A HibernateException: 'A collection with orphan deletion was no longer referenced by the owning entity instance'"
-  - "The new list is silently ignored"
-  - "It works fine and orphans the old elements cleanly"
-  - "All new lines are deleted instead of inserted"
+  - "The new list is silently ignored and the original collection is kept intact"
+  - "It works fine and orphans the old elements cleanly, deleting only the dropped ones"
+  - "All the new lines are deleted instead of inserted because they look like orphans"
   answer: 0
   explanation: |
     Hibernate manages the original persistent collection instance. Reassigning the
@@ -233,8 +233,8 @@ questions:
   options:
   - "All lines are inserted automatically because persist is always transitive"
   - "Only the Order is inserted; the transient lines cause an error or stay unsaved"
-  - "Hibernate silently ignores the Order and inserts only the lines"
-  - "The lines are inserted lazily on the next query"
+  - "Hibernate silently ignores the Order and inserts only the transient lines"
+  - "The lines are inserted lazily on the next query that touches the collection"
   answer: 1
   explanation: |
     persist is not transitive without cascade=PERSIST. Hibernate inserts the Order;
@@ -250,10 +250,10 @@ questions:
     (`OrderLine.order` @ManyToOne). What is the consequence of
     `em.remove(someLine)`?
   options:
-  - "Only that line is removed, as expected"
-  - "Nothing — cascade on @ManyToOne is ignored"
+  - "Only that single line is removed, exactly as you would expect"
+  - "Nothing — the cascade attribute on a @ManyToOne is silently ignored"
   - "It tries to delete the parent Order (and possibly its other lines)"
-  - "It nulls the order_id of every line in the order"
+  - "It nulls the order_id column of every sibling line in the order"
   answer: 2
   explanation: |
     Cascade is directional and fires toward the target of the annotated
@@ -270,10 +270,10 @@ questions:
     list (now 2 lines), then `em.merge(order)`. The mapping has
     `orphanRemoval = true`. What happens to the third line in the DB?
   options:
-  - "It is kept — merge never deletes rows"
+  - "It is kept — merge only inserts and updates and never deletes existing rows"
   - "It is deleted, because the merged collection is missing it and orphanRemoval fires"
-  - "It causes an OptimisticLockException"
-  - "It is duplicated"
+  - "It causes an OptimisticLockException because the graph was modified while detached"
+  - "It is duplicated, producing a second copy of the third line row in the table"
   answer: 1
   explanation: |
     On merge, Hibernate reconciles the collection; the element present in the DB but
@@ -288,9 +288,9 @@ questions:
     Where is the `cascade` attribute specified?
   options:
   - "On the association mapping annotation (e.g. @OneToMany(cascade = ...))"
-  - "In persistence.xml as a global setting"
-  - "On the @Entity annotation of the parent class"
-  - "On the @Id field of the child entity"
+  - "In persistence.xml as a global default applied to every association"
+  - "On the @Entity annotation of the parent class as a class-level setting"
+  - "On the @Id field of the child entity so the key drives the cascade"
   answer: 0
   explanation: |
     Cascade is a property of a single association, set as an attribute of the
@@ -304,10 +304,10 @@ questions:
     In a bidirectional relationship, if `Order.lines` has `cascade = ALL`, what
     cascade does `OrderLine.order` have?
   options:
-  - "It automatically inherits cascade = ALL"
+  - "It automatically inherits cascade = ALL from the owning collection side"
   - "Whatever is declared on its own @ManyToOne — cascade is per-association"
-  - "It is forced to have no cascade"
-  - "It inherits only PERSIST and MERGE"
+  - "It is forced to have no cascade because the other side already declared it"
+  - "It inherits only PERSIST and MERGE, but never REMOVE, from the parent"
   answer: 1
   explanation: |
     Cascade is a property of each individual association. The two sides of a
@@ -322,10 +322,10 @@ questions:
     Which of these is a Hibernate-NATIVE cascade style that has no direct equivalent
     in `jakarta.persistence.CascadeType`?
   options:
-  - "PERSIST"
-  - "REMOVE"
+  - "PERSIST (the standard JPA cascade for em.persist)"
+  - "REMOVE (the standard JPA cascade for em.remove)"
   - "SAVE_UPDATE (and REPLICATE / LOCK)"
-  - "DETACH"
+  - "DETACH (the standard JPA cascade for em.detach)"
   answer: 2
   explanation: |
     SAVE_UPDATE, REPLICATE, and LOCK are Hibernate-native styles tied to legacy
@@ -339,10 +339,10 @@ questions:
   question: |
     What does `CascadeType.REFRESH` cause?
   options:
-  - "It flushes pending changes to children before a query"
-  - "It reloads the second-level cache for the entity"
+  - "It flushes any pending in-memory changes to the child entities to the database immediately before the next query runs"
+  - "It reloads every associated child entity from the shared second-level cache region instead of issuing a fresh SQL read"
   - "It re-reads the parent and its associated children from the database when em.refresh(parent) is called"
-  - "It reattaches detached children to the persistence context"
+  - "It reattaches previously detached child entities to the current persistence context so they become managed again"
   answer: 2
   explanation: |
     REFRESH propagates em.refresh(parent) to associated entities, overwriting their
@@ -356,10 +356,10 @@ questions:
   question: |
     What does `CascadeType.DETACH` do when `em.detach(parent)` is called?
   options:
-  - "Deletes the children from the database"
+  - "Issues a DELETE for each associated child row in the database as the parent leaves the context"
   - "Evicts the associated children from the persistence context along with the parent"
-  - "Marks the children as read-only"
-  - "Refreshes children from the DB before detaching"
+  - "Marks every associated child as read-only so subsequent dirty checking skips them entirely"
+  - "Re-reads each child from the database to refresh its state just before the parent is detached"
   answer: 1
   explanation: |
     DETACH cascades em.detach(parent) so associated entities are also evicted from
@@ -376,9 +376,9 @@ questions:
     result?
   options:
   - "The line is inserted with order_id = NULL (or a NOT NULL constraint fails)"
-  - "The line is not inserted at all"
-  - "Hibernate infers the FK automatically from the collection"
-  - "An OptimisticLockException is thrown"
+  - "The line is not inserted at all because the cascade cannot reach an entity with a missing back-reference"
+  - "Hibernate infers and populates the FK automatically by scanning the parent's collection during flush"
+  - "An OptimisticLockException is thrown because the unset back-reference is read as a stale version"
   answer: 0
   explanation: |
     Cascade propagates the operation, not the link. The owning @ManyToOne side sets
@@ -393,10 +393,10 @@ questions:
     What is a key difference between `CascadeType.REMOVE` and a database
     `ON DELETE CASCADE` constraint?
   options:
-  - "They are identical; JPA just generates the DDL constraint"
+  - "They are identical; JPA simply generates the ON DELETE CASCADE DDL for every CascadeType.REMOVE association"
   - "CascadeType.REMOVE runs in the persistence context (issuing child DELETEs and firing callbacks); ON DELETE CASCADE is enforced by the DB and bypasses Hibernate"
-  - "ON DELETE CASCADE fires JPA lifecycle callbacks; CascadeType.REMOVE does not"
-  - "CascadeType.REMOVE only works on @ManyToMany associations"
+  - "ON DELETE CASCADE fires the JPA @PreRemove/@PostRemove lifecycle callbacks, whereas CascadeType.REMOVE skips them entirely"
+  - "CascadeType.REMOVE only works on @ManyToMany associations and is ignored on @OneToMany collections"
   answer: 1
   explanation: |
     CascadeType.REMOVE is an application-level, in-context operation: Hibernate loads
@@ -412,9 +412,9 @@ questions:
     For a shared reference where you want to save a new object graph in one call but
     must never delete the shared target, which cascade setting is safest?
   options:
-  - "cascade = ALL"
-  - "cascade = REMOVE only"
-  - "orphanRemoval = true"
+  - "cascade = ALL, since it conveniently bundles every propagation the graph could ever need"
+  - "cascade = REMOVE only, so the delete flows to the shared target along with the save"
+  - "orphanRemoval = true, letting dereferenced targets be cleaned up automatically"
   - "cascade = {PERSIST, MERGE} (never REMOVE)"
   answer: 3
   explanation: |
@@ -430,10 +430,10 @@ questions:
     For a `@ManyToMany` between Book and Author, why is cascading REMOVE almost
     always wrong?
   options:
-  - "@ManyToMany does not support the cascade attribute"
+  - "@ManyToMany does not support the cascade attribute, so the setting is silently ignored at runtime"
   - "Deleting one Book could delete Authors referenced by other Books"
-  - "It would only delete the join-table rows, which is never useful"
-  - "REMOVE is not a valid cascade type for collections"
+  - "It would only delete the join-table rows, which is a no-op that never affects any real data"
+  - "REMOVE is not a valid cascade type for collection-valued associations and fails validation"
   answer: 1
   explanation: |
     In @ManyToMany the targets are shared by definition. Cascading REMOVE means
@@ -450,9 +450,9 @@ questions:
     AND `orphanRemoval = true`, rather than either alone?
   options:
   - "cascade=ALL handles persist/merge/refresh/detach and parent-remove; orphanRemoval adds delete-on-dereference which cascade does not cover"
-  - "They are redundant; either one alone gives full aggregate behavior"
-  - "cascade=ALL only inserts, orphanRemoval only updates"
-  - "orphanRemoval propagates persist while cascade=ALL handles deletes"
+  - "They are fully redundant; either one declared alone already gives complete aggregate lifecycle behavior"
+  - "cascade=ALL only propagates the INSERT of new children, while orphanRemoval only propagates UPDATE statements"
+  - "orphanRemoval is what propagates persist to new children, while cascade=ALL is limited to handling deletes"
   answer: 0
   explanation: |
     cascade=ALL alone won't delete a child you merely drop from the collection;
@@ -467,9 +467,9 @@ questions:
     Mapping has `cascade = REMOVE` only (no orphanRemoval) and the child FK is
     `NOT NULL`. You remove a child from the collection and flush. What happens?
   options:
-  - "The child is silently deleted"
-  - "The removal is queued until the parent is removed"
-  - "Hibernate skips the flush with a warning"
+  - "The child is silently deleted because cascade REMOVE treats a dropped element as an orphan"
+  - "The removal is queued and deferred until the parent Order is itself removed later in the session"
+  - "Hibernate skips the flush entirely and logs a warning that the NOT NULL FK cannot be nulled"
   - "Hibernate tries UPDATE ... SET order_id = NULL and the DB rejects it with a NOT NULL constraint violation"
   answer: 3
   explanation: |
@@ -501,10 +501,10 @@ questions:
   question: |
     At what point does the DELETE for an orphaned child actually execute?
   options:
-  - "Immediately when remove() is called on the collection"
-  - "Only when the transaction is rolled back"
+  - "Immediately and synchronously the moment remove() is called on the in-memory collection"
+  - "Only at the very end when the surrounding transaction is rolled back rather than committed"
   - "At flush time, within the transaction, during dirty checking"
-  - "At the next em.find() on the child"
+  - "Lazily, on the next em.find() that touches the orphaned child by its identifier"
   answer: 2
   explanation: |
     Removing an element from the collection only changes in-memory state. The DELETE
@@ -519,10 +519,10 @@ questions:
     With `orphanRemoval = true` and 500 children cleared from a collection, why
     might you see 500 individual DELETE statements, and how do you improve it?
   options:
-  - "Hibernate always uses one bulk DELETE; 500 statements indicate a bug"
+  - "Hibernate always collapses orphans into one set-based bulk DELETE, so 500 statements can only mean a mapping bug"
   - "Each orphan is a separate DELETE unless JDBC batching (hibernate.jdbc.batch_size) is enabled"
-  - "You must switch to CascadeType.REMOVE to get a single DELETE"
-  - "Orphan removal cannot be batched under any configuration"
+  - "You must switch to CascadeType.REMOVE, which alone rewrites the deletes into a single WHERE-in statement"
+  - "Orphan removal can never be batched under any configuration and always emits one statement per row"
   answer: 1
   explanation: |
     Orphan removal issues per-row DELETEs by default. Enabling
@@ -554,9 +554,9 @@ questions:
     A developer replaces a collection's contents with `clear()` then `addAll(...)`,
     including some of the same logical rows. With orphanRemoval on, what is the risk?
   options:
-  - "Nothing — Hibernate reuses the existing rows by natural key"
-  - "It throws a dereferenced-collection exception"
-  - "The addAll is ignored because the rows already exist"
+  - "Nothing changes — Hibernate matches and reuses the existing rows by their natural key during flush"
+  - "It throws a dereferenced-collection exception because clear() detaches an orphan-managed collection"
+  - "The addAll is silently ignored because Hibernate detects the rows already exist in the database"
   - "clear() orphans and DELETEs all rows, then addAll re-INSERTs them, losing row identity/history"
   answer: 3
   explanation: |
@@ -573,9 +573,9 @@ questions:
     often throws which exception, and what is the fix?
   options:
   - "IllegalArgumentException (remove requires a managed instance); merge first, then remove"
-  - "LazyInitializationException; enable eager fetching"
-  - "OptimisticLockException; retry the transaction"
-  - "TransientObjectException; call persist first"
+  - "LazyInitializationException, because the detached children are uninitialized; the fix is to enable eager fetching on the collection"
+  - "OptimisticLockException, since the detached graph carries a stale @Version; the fix is to retry the whole transaction"
+  - "TransientObjectException, because the graph looks unsaved to the provider; the fix is to call persist on it first"
   answer: 0
   explanation: |
     em.remove requires a managed entity. Removing a detached instance throws
@@ -590,9 +590,9 @@ questions:
     `CascadeType.MERGE` propagates which operation?
   options:
   - "em.merge(parent) — merging a detached parent also merges its children"
-  - "em.persist(parent)"
-  - "em.detach(parent)"
-  - "em.flush()"
+  - "em.persist(parent) — inserting a new parent also inserts its associated children"
+  - "em.detach(parent) — evicting the parent also evicts its associated children"
+  - "em.flush() — synchronizing the parent also flushes its associated children"
   answer: 0
   explanation: |
     MERGE cascades em.merge(parent): the detached state of the parent and its
@@ -624,9 +624,9 @@ questions:
     When you call `em.persist(parent)` with cascade=PERSIST, when is the actual
     INSERT SQL for the children emitted?
   options:
-  - "Immediately during the persist() call"
-  - "As soon as the child object is constructed"
-  - "Only after the transaction commits successfully"
+  - "Immediately and synchronously during the persist() call itself, before any flush occurs"
+  - "As soon as the child object is constructed in memory, even before it is added to the parent"
+  - "Only after the surrounding transaction has already committed successfully to the database"
   - "Later, when the persistence context flushes (before commit or a triggering query)"
   answer: 3
   explanation: |
@@ -643,10 +643,10 @@ questions:
     `person.setAddress(newAddress)`, replacing the previous managed Address, then
     flush. What happens to the OLD address row?
   options:
-  - "It is kept and simply unlinked"
-  - "Both old and new addresses coexist"
+  - "It is kept in the table and simply unlinked, with its person_id foreign key set to null"
+  - "Both the old and the new Address rows coexist, since replacing the reference only adds the new one"
   - "It is deleted, because the previously-owned Address was dereferenced"
-  - "A unique-constraint violation is thrown"
+  - "A unique-constraint violation is thrown because two Address rows briefly point at the same Person"
   answer: 2
   explanation: |
     orphanRemoval on @OneToOne means replacing the owned target dereferences the old
@@ -679,10 +679,10 @@ questions:
     `orphanRemoval=true` result in the children being deleted. So what is the ONLY
     scenario where their behavior actually diverges?
   options:
-  - "When persisting a brand-new parent"
-  - "When refreshing the parent from the database"
+  - "When persisting a brand-new parent whose children have never yet been saved to the database"
+  - "When refreshing the parent from the database and its managed children get reloaded along with it"
   - "When a child is removed from the collection while the parent stays managed (dereferencing)"
-  - "When the parent is detached"
+  - "When the parent is detached from the persistence context and its children are evicted with it"
   answer: 2
   explanation: |
     For an explicit parent remove, both delete the children. They diverge only on
@@ -698,10 +698,10 @@ questions:
     What is required to use Hibernate-native cascade styles like `SAVE_UPDATE`, and
     why are they discouraged in Hibernate 6/7?
   options:
-  - "Nothing special; they are part of jakarta.persistence and fully recommended"
-  - "They require enabling a persistence.xml flag and are the recommended default"
+  - "Nothing special; they live in jakarta.persistence.CascadeType and are fully recommended for all new mappings"
+  - "They require a hibernate.legacy_cascade=true flag in persistence.xml and are the recommended default going forward"
   - "The native @org.hibernate.annotations.Cascade annotation is required, and they are discouraged because Hibernate 6/7 aligns on the JPA/EntityManager API"
-  - "They only work with XML mappings and are mandatory for @OneToMany"
+  - "They only work with hbm.xml mappings and are mandatory whenever you declare a @OneToMany collection association"
   answer: 2
   explanation: |
     Native styles need @org.hibernate.annotations.Cascade and tie to legacy Session
@@ -717,9 +717,9 @@ questions:
     Why is an `addLine(OrderLine l) { lines.add(l); l.setOrder(this); }` helper
     recommended on a bidirectional aggregate?
   options:
-  - "It enables second-level caching of the lines"
-  - "It replaces the need for cascade = PERSIST"
-  - "It forces eager loading of the collection"
+  - "It registers the lines in the second-level cache region so repeated loads skip the database"
+  - "It replaces the need for cascade = PERSIST by implicitly persisting each added line at flush"
+  - "It forces the collection to load eagerly the moment the parent Order is fetched from the DB"
   - "It keeps both sides of the association in sync so the FK is set and the managed collection is correct"
   answer: 3
   explanation: |
@@ -735,10 +735,10 @@ questions:
     Why must a collection be LOADED (initialized) for orphan-removal dirty checking
     to detect a removed element?
   options:
-  - "Because orphan removal is disabled on lazy collections"
-  - "Because uninitialized collections are always treated as empty and everything is deleted"
+  - "Because orphan removal is silently disabled on any collection mapped with FetchType.LAZY"
+  - "Because an uninitialized proxy collection is always treated as empty, so every existing row would be deleted"
   - "Because Hibernate diffs the current contents against the snapshot it captured when the persistent collection was initialized"
-  - "Because dirty checking runs only on EAGER associations"
+  - "Because dirty checking runs only on EAGER associations that were fully materialized at load time"
   answer: 2
   explanation: |
     Orphan detection compares the live persistent collection against the snapshot
@@ -753,10 +753,10 @@ questions:
   question: |
     Which statement about cascade types is CORRECT?
   options:
-  - "There is a CascadeType.FLUSH that propagates em.flush()"
+  - "There is a CascadeType.FLUSH constant that propagates em.flush() down to the associated children"
   - "There is no default cascade; you must opt in per association"
-  - "CascadeType.ALL automatically enables orphanRemoval"
-  - "@ManyToOne cascades REMOVE by default"
+  - "CascadeType.ALL automatically enables orphanRemoval on the annotated collection as well"
+  - "@ManyToOne cascades REMOVE by default whenever the owning side declares the join column"
   answer: 1
   explanation: |
     No cascade happens unless declared. There is no CascadeType.FLUSH (flush walks
@@ -772,10 +772,10 @@ questions:
     children deleted when the order is deleted. Which approach guarantees the
     callback fires?
   options:
-  - "A database ON DELETE CASCADE constraint"
-  - "A native SQL bulk DELETE via em.createNativeQuery"
+  - "A database ON DELETE CASCADE constraint generated on the child foreign key column"
+  - "A native SQL bulk DELETE issued through em.createNativeQuery against the child table"
   - "cascade = REMOVE (or orphanRemoval) so Hibernate deletes each child and fires @PreRemove"
-  - "Truncating the table on schema regeneration"
+  - "Truncating the child table during hbm2ddl schema regeneration at application startup"
   answer: 2
   explanation: |
     JPA lifecycle callbacks fire only when Hibernate performs the delete per entity.
@@ -791,9 +791,9 @@ questions:
     In one phrase, what extra behavior does `orphanRemoval = true` add that
     `CascadeType.REMOVE` does NOT provide?
   options:
-  - "It cascades persist to new children"
-  - "It makes the association eager"
-  - "It adds a database ON DELETE CASCADE constraint"
+  - "It cascades persist to brand-new children that were added to the collection since the last flush"
+  - "It makes the association fetch eagerly so the collection is always fully loaded up front"
+  - "It generates a database ON DELETE CASCADE constraint on the child foreign key at schema creation"
   - "It deletes a child when it is dereferenced/removed from the collection, even if the parent is not removed"
   answer: 3
   explanation: |
@@ -850,9 +850,9 @@ questions:
     commit. Why does this throw a ConstraintViolationException?
   options:
   - "The ActionQueue runs ordinary entity deletes LAST (after inserts), so the INSERT fires while the old row still exists, tripping the unique constraint"
-  - "persist and remove cannot be mixed in one transaction"
-  - "Hibernate never flushes deletes and inserts in the same transaction"
-  - "The slug column must be @Version-annotated to allow reuse"
+  - "persist and remove target opposite lifecycle states and cannot be mixed in a single transaction boundary"
+  - "Hibernate never flushes pending deletes and inserts within the same transaction, deferring one to the next"
+  - "The slug column must be @Version-annotated before Hibernate will permit its value to be reused across rows"
   answer: 0
   explanation: |
     At flush the ActionQueue executes by action type, not call order: inserts run
@@ -869,9 +869,9 @@ questions:
     key usually succeed, whereas remove-then-persist of a top-level entity sharing a
     unique key fails?
   options:
-  - "Orphan removal disables unique constraints during flush"
-  - "Orphan removal defers the insert to a second transaction"
-  - "New children are never checked against unique constraints"
+  - "Orphan removal temporarily drops and re-adds the unique constraint around each flush cycle"
+  - "Orphan removal defers the replacement child's insert to a separate second transaction after commit"
+  - "New children reached through orphan-removal collections are never validated against unique constraints"
   - "OrphanRemovalAction runs FIRST in the ActionQueue (before inserts), while ordinary EntityDeleteAction runs LAST (after inserts)"
   answer: 3
   explanation: |
@@ -887,10 +887,10 @@ questions:
   question: |
     In the Hibernate ActionQueue, in what order are these executed at flush?
   options:
-  - "Exactly the order the EntityManager methods were called"
+  - "Exactly the order the EntityManager persist/merge/remove methods were invoked in the transaction"
   - "Orphan-removal deletes, then inserts, then updates, then collection actions, then ordinary deletes"
-  - "All deletes first, then all inserts, then all updates"
-  - "Inserts first, then all deletes (orphan and ordinary together), then updates"
+  - "All deletes first (orphan and ordinary alike), then all inserts, then all updates, then collection actions"
+  - "Inserts first, then all deletes (orphan and ordinary together), then updates and collection actions last"
   answer: 1
   explanation: |
     Hibernate orders by action type to satisfy FK dependencies: OrphanRemovalAction,
@@ -907,9 +907,9 @@ questions:
     collection. What changes in the emitted SQL and DDL?
   options:
   - "The child FK is generated with 'on delete cascade'; deleting the parent removes children in a single DB-driven statement, and Hibernate no longer loads the collection"
-  - "Hibernate still issues per-row DELETEs but batches them automatically"
-  - "It creates a database trigger that logs each child deletion"
-  - "It converts the mapping to @ElementCollection"
+  - "Hibernate still issues one DELETE per row but transparently groups them into a single JDBC batch send"
+  - "It installs a database AFTER-DELETE trigger on the child table that logs and removes each deleted line"
+  - "It converts the @OneToMany mapping into an @ElementCollection of embeddable value rows behind the scenes"
   answer: 0
   explanation: |
     @OnDelete makes hbm2ddl emit the FK with 'on delete cascade', pushing the
@@ -924,9 +924,9 @@ questions:
     What do you LOSE by using `@OnDelete(OnDeleteAction.CASCADE)` instead of JPA
     `cascade=REMOVE` for child deletion?
   options:
-  - "Nothing — it is behaviorally identical, just faster"
-  - "Support for @OneToMany mappings"
-  - "The ability to delete the parent at all"
+  - "Nothing — it is behaviorally identical to cascade=REMOVE, just executed with fewer SQL round trips"
+  - "Support for @OneToMany mappings, since @OnDelete is only legal on single-valued @OneToOne associations"
+  - "The ability to delete the parent entity at all, because the DB constraint takes ownership of the row"
   - "@PreRemove/@PostRemove callbacks, second-level-cache eviction of the children, and optimistic-lock @Version checks — because the DB does the delete, bypassing the persistence context"
   answer: 3
   explanation: |
@@ -944,9 +944,9 @@ questions:
     Hibernate mappings?
   options:
   - "@org.hibernate.annotations.OnDelete(action = OnDeleteAction.CASCADE), with OnDeleteAction in org.hibernate.annotations"
-  - "jakarta.persistence.CascadeType.REMOVE on the @JoinColumn"
-  - "@ForeignKey(onDelete = CASCADE) from jakarta.persistence"
-  - "@OnDelete is part of jakarta.persistence 3.2"
+  - "jakarta.persistence.CascadeType.REMOVE declared directly on the @JoinColumn of the owning side"
+  - "@ForeignKey(onDelete = CASCADE) from jakarta.persistence applied to the child join column"
+  - "@OnDelete became a standard part of the jakarta.persistence 3.2 annotation set with Hibernate 7"
   answer: 0
   explanation: |
     @OnDelete and OnDeleteAction (values CASCADE, NO_ACTION; older RESTRICT) are
@@ -962,9 +962,9 @@ questions:
     runs `em.createQuery("delete from Order o where o.id=:id").executeUpdate()`.
     What happens to the child OrderLines?
   options:
-  - "They are deleted too, because cascade=ALL applies to bulk deletes"
-  - "The query is rejected because the entity has cascaded children"
-  - "orphanRemoval deletes them since the parent is gone"
+  - "They are deleted too, because cascade=ALL is applied by Hibernate even to set-based bulk delete statements"
+  - "The query is rejected at parse time because the target entity declares cascaded orphan-removal children"
+  - "orphanRemoval detects the parent is gone and schedules a DELETE for each of the now-parentless lines"
   - "They are NOT deleted — bulk JPQL bypasses cascade and orphanRemoval, so you get an FK violation or orphaned child rows"
   answer: 3
   explanation: |
@@ -980,10 +980,10 @@ questions:
     You must delete an Order and its thousands of lines efficiently. Which approach
     is the set-based pattern that avoids per-row cascade deletes?
   options:
-  - "em.remove(order) with cascade=REMOVE"
+  - "Call em.remove(order) with cascade=REMOVE and let Hibernate walk the managed graph"
   - "Two bulk JPQL deletes: children by FK first, then the parent — accepting that callbacks and L2-cache sync are bypassed"
-  - "Call order.getLines().clear() then em.flush()"
-  - "Iterate the collection calling em.remove on each line"
+  - "Call order.getLines().clear() then em.flush() to trigger orphan-removal deletes"
+  - "Iterate the loaded collection calling em.remove on each individual line entity"
   answer: 1
   explanation: |
     Manual bulk deletes (delete children by order_id, then the parent) turn N+1
@@ -999,10 +999,10 @@ questions:
     An Order has 200 lazily-loaded lines and `cascade=REMOVE`. How many SQL
     statements does `em.remove(order)` roughly generate, and why?
   options:
-  - "1 — Hibernate issues a single cascading DELETE"
+  - "1 — Hibernate compiles the cascade into one recursive DELETE that walks the whole FK graph"
   - "2 — one for lines, one for the order, using set-based deletes"
   - "About 202 — a SELECT to load the collection, 200 per-row child DELETEs, then the parent DELETE"
-  - "0 — deletion is deferred to the database via the FK"
+  - "0 — nothing runs now; deletion is deferred to the database's FK constraint at commit time"
   answer: 2
   explanation: |
     Cascade REMOVE operates on managed entities, so Hibernate first SELECTs the
@@ -1017,10 +1017,10 @@ questions:
     A child entity in an orphan-removal collection has a `@Version` column. What does
     each per-row DELETE look like on flush?
   options:
-  - "delete from OrderLine where id=?"
+  - "delete from OrderLine where id=?  — the @Version column is ignored entirely for DELETE statements"
   - "delete from OrderLine where id=? and version=?  — the version predicate enforces optimistic locking"
-  - "update OrderLine set deleted=true where id=?"
-  - "delete from OrderLine where order_id=? for all rows at once"
+  - "update OrderLine set deleted=true, version=version+1 where id=?  — a soft-delete is applied instead of a physical row removal"
+  - "delete from OrderLine where order_id=? for all orphaned rows at once, with no per-row version check emitted"
   answer: 1
   explanation: |
     With an optimistic-lock @Version column, Hibernate appends the version to the
@@ -1036,9 +1036,9 @@ questions:
     LineDetail. You persist a new Order graph. What is inserted?
   options:
   - "The whole graph — Order, OrderLines, and LineDetails — because cascade is transitive through each declaring association"
-  - "Only the Order and its OrderLines; LineDetails are ignored"
-  - "Only the Order; cascade never goes past one level"
-  - "Nothing, because multi-level cascade requires cascade=ALL everywhere"
+  - "Only the Order and its OrderLines; the LineDetails are ignored because cascade stops after the first nested association"
+  - "Only the Order itself; cascade never propagates past one level and each deeper hop must be persisted by hand"
+  - "Nothing is inserted, because multi-level transitive cascade only works when every association uses cascade=ALL"
   answer: 0
   explanation: |
     Cascade is recursive: it follows each association's own cascade settings down the
@@ -1054,10 +1054,10 @@ questions:
     How does Hibernate avoid infinite recursion when cascading across a bidirectional
     or cyclic entity graph?
   options:
-  - "It limits cascade depth to a fixed constant (default 10)"
-  - "It refuses to cascade on bidirectional associations"
+  - "It caps cascade recursion at a fixed depth (default 10 levels) and aborts the traversal beyond that"
+  - "It refuses to cascade across bidirectional associations, requiring you to break them into unidirectional ones"
   - "It tracks the set of already-visited entities during the cascade traversal so each is processed once"
-  - "It requires @JsonIgnore to break the cycle"
+  - "It requires you to annotate one side with @JsonIgnore so the serializer breaks the reference cycle"
   answer: 2
   explanation: |
     During a cascade the provider records visited entities, so an entity reachable by
@@ -1074,8 +1074,8 @@ questions:
     Address?
   options:
   - "update Address set person_id = null where id=?"
-  - "It throws because you cannot null an orphan-removal @OneToOne"
-  - "No SQL; the Address is only detached"
+  - "It throws an IllegalStateException because a @OneToOne with orphanRemoval forbids setting the reference to null"
+  - "No SQL runs at all; the old Address is merely evicted from the persistence context and left in the table"
   - "delete from Address where id=?  — dereferencing the owned child schedules its deletion"
   answer: 3
   explanation: |
@@ -1092,9 +1092,9 @@ questions:
     removing an entity from a `@OneToMany(orphanRemoval=true)`?
   options:
   - "@ElementCollection elements are value types with no identity, so their DELETE from the collection table is automatic — there is no cascade or orphanRemoval attribute"
-  - "You must set orphanRemoval=true on the @ElementCollection too"
-  - "@ElementCollection removal only nulls the FK, it never deletes"
-  - "They behave identically; @ElementCollection is just shorthand for @OneToMany"
+  - "You must also declare orphanRemoval=true on the @ElementCollection, otherwise removed values remain as dangling rows"
+  - "Removing from an @ElementCollection only nulls the owning FK column; the value row is never physically deleted"
+  - "They behave identically at flush time; @ElementCollection is really just compact shorthand for a @OneToMany of entities"
   answer: 0
   explanation: |
     Element collections hold value types (embeddables/basics) with no independent
@@ -1111,10 +1111,10 @@ questions:
     You call `lines.clear()` then `lines.addAll(sameLogicalRows)` and flush. What SQL
     is most likely?
   options:
-  - "Surgical DELETEs only for rows that truly changed"
-  - "No SQL, because the contents are logically the same"
+  - "Surgical DELETEs only for the rows that truly changed, because the bag diffs contents by primary key"
+  - "No SQL runs, because Hibernate detects the collection contents are logically identical and skips the flush"
   - "delete from OrderLine where order_id=? (all rows) followed by INSERTs for every element — a full recreate"
-  - "A single UPDATE per row to refresh values"
+  - "A single UPDATE per row to refresh the changed column values in place without deleting anything"
   answer: 2
   explanation: |
     A bag has no per-row identity Hibernate can diff, so clear()+addAll() degenerates
@@ -1130,10 +1130,10 @@ questions:
     Same PersistentBag with orphanRemoval. You instead call `lines.remove(oneLine)`
     and flush. What SQL runs?
   options:
-  - "A full delete-all then re-insert of the survivors"
-  - "update OrderLine set order_id=null where id=?"
+  - "A full delete-all of the collection followed by a re-insert of every surviving line"
+  - "update OrderLine set order_id=null where id=?  — the removed line is disowned rather than deleted"
   - "A targeted `delete from OrderLine where id=?` for just that line"
-  - "Nothing until the parent is removed"
+  - "Nothing runs on this flush; the DELETE waits until the parent Order is itself removed"
   answer: 2
   explanation: |
     Removing a single element is detected as an orphan and deleted surgically
@@ -1149,9 +1149,9 @@ questions:
     Why can this produce extra UPDATE statements compared with a bidirectional mapping
     where the child owns the FK?
   options:
-  - "Unidirectional mappings always use a join table, which is slower"
-  - "It forces EAGER loading, adding SELECTs"
-  - "Unidirectional @OneToMany disables batching entirely"
+  - "Unidirectional @OneToMany mappings always fall back to a hidden join table, which needs an extra write per row"
+  - "A @JoinColumn on a @OneToMany forces the collection to load EAGERLY, adding a SELECT that a mappedBy mapping avoids"
+  - "Unidirectional @OneToMany silently disables JDBC statement batching, so every child write becomes its own round trip"
   - "Because the child does not own the FK, Hibernate may INSERT children then UPDATE their FK (and null-then-reset it on changes) instead of setting it in the insert"
   answer: 3
   explanation: |
@@ -1168,10 +1168,10 @@ questions:
     Book and Author have a `@ManyToMany`. You mistakenly set `cascade=CascadeType.ALL`
     and call `em.remove(book)`. What is the danger beyond deleting join rows?
   options:
-  - "It only deletes the book_author join rows, which is always safe"
+  - "It only deletes the book_author join rows, which is always safe because the Author entities are left untouched"
   - "It cascades REMOVE to the Author entities, deleting authors that other books still reference (data loss / FK violations)"
-  - "It converts the relationship to @OneToMany"
-  - "It throws because @ManyToMany ignores cascade"
+  - "It quietly rewrites the @ManyToMany into a @OneToMany so the authors become privately owned by the book"
+  - "It throws a MappingException at flush because cascade=ALL is not a legal attribute on a @ManyToMany association"
   answer: 1
   explanation: |
     Removing the book's association would only delete join-table rows, but
@@ -1187,10 +1187,10 @@ questions:
     For a properly-mapped `@ManyToMany` (no REMOVE cascade), what SQL runs when you
     remove one Author from `book.getAuthors()` and flush?
   options:
-  - "delete from Author where id=?"
-  - "update Author set book_id=null where id=?"
+  - "delete from Author where id=?  — the dereferenced author entity is physically removed from its table"
+  - "update Author set book_id=null where id=?  — the author's owning foreign key is nulled but the row survives"
   - "delete from book_author where book_id=? and author_id=?  — only the join-table link is removed"
-  - "Nothing; @ManyToMany links can't be removed by collection mutation"
+  - "Nothing runs; @ManyToMany links can only be broken by an explicit em.remove, not by mutating the collection"
   answer: 2
   explanation: |
     Mutating a @ManyToMany collection changes only the association, so Hibernate
@@ -1205,10 +1205,10 @@ questions:
     A helper does `removeLine(l){ lines.remove(l); l.setOrder(null); }`. With
     `orphanRemoval=FALSE`, what SQL results on flush?
   options:
-  - "delete from OrderLine where id=?"
+  - "delete from OrderLine where id=?  — the removed line is physically deleted even without orphanRemoval"
   - "update OrderLine set order_id=null where id=?  (or a NOT NULL violation) — the child survives, disowned"
-  - "No SQL runs at all"
-  - "A dereferenced-collection exception"
+  - "No SQL runs at all; dropping the line from the list is a purely in-memory change with no flush effect"
+  - "A dereferenced-collection exception, because nulling the back-reference of a managed child is illegal"
   answer: 1
   explanation: |
     Without orphanRemoval, dropping the child and nulling its back-reference just
@@ -1223,9 +1223,9 @@ questions:
     Same `removeLine` helper, but now `orphanRemoval=true`. What changes?
   options:
   - "Hibernate now issues DELETE FROM OrderLine WHERE id=? instead of nulling the FK"
-  - "Nothing changes; both settings null the FK"
-  - "It throws because setOrder(null) conflicts with orphan removal"
-  - "It cascades the delete up to the Order"
+  - "Nothing changes between the two settings; both simply issue an UPDATE that nulls the child's foreign key"
+  - "It throws an exception because calling setOrder(null) on the child directly conflicts with orphan removal"
+  - "It cascades the delete upward and removes the parent Order along with the single dropped line"
   answer: 0
   explanation: |
     The lines.remove(l) is detected by the orphan-removal dirty check, so the child is
@@ -1241,10 +1241,10 @@ questions:
     In Hibernate 6/7, what is the status of the native `Session.saveOrUpdate()` /
     `replicate()` methods that back cascade styles SAVE_UPDATE and REPLICATE?
   options:
-  - "They are the recommended API for all new code"
-  - "They were removed entirely in Hibernate 6"
+  - "They are the officially recommended API for all new code and the JPA persist/merge methods now delegate to them"
+  - "They were removed entirely in Hibernate 6, so any mapping using SAVE_UPDATE fails to bootstrap the SessionFactory"
   - "They are deprecated in favor of the JPA persist/merge API; prefer JPA cascade unless you truly need a native Session op"
-  - "They are required for any @OneToMany mapping"
+  - "They are still required for any @OneToMany mapping, because JPA merge cannot reattach a detached child collection"
   answer: 2
   explanation: |
     Hibernate 6 deprecates saveOrUpdate/replicate in favor of the JPA
@@ -1259,10 +1259,10 @@ questions:
     A candidate claims Jakarta Persistence 3.2 (the Hibernate 7 baseline) added a new
     CascadeType. What is correct?
   options:
-  - "True — it added CascadeType.ORPHAN"
-  - "True — it added CascadeType.LOCK to match Hibernate"
+  - "True — it added CascadeType.ORPHAN, finally folding orphanRemoval into the standard cascade enum"
+  - "True — it added CascadeType.LOCK to align the JPA enum with Hibernate's native pessimistic-lock cascade"
   - "False — Jakarta Persistence 3.2 added no new CascadeType values; the set is still PERSIST, MERGE, REMOVE, REFRESH, DETACH (+ ALL)"
-  - "True — it added CascadeType.REPLICATE"
+  - "True — it added CascadeType.REPLICATE to standardize Hibernate's cross-database replicate operation"
   answer: 2
   explanation: |
     Jakarta Persistence 3.2 introduced no new cascade constants. The JPA set remains
@@ -1278,9 +1278,9 @@ questions:
     deleted line. You also want single-statement parent deletes for performance. Why
     are these two goals in tension?
   options:
-  - "They aren't; @OnDelete fires @PostRemove too"
-  - "@PostRemove requires disabling cascade entirely"
-  - "Callbacks only fire on inserts, so deletion strategy is irrelevant"
+  - "They aren't in tension; a DB-driven @OnDelete cascade still fires the entity's @PostRemove callback for each child"
+  - "Firing @PostRemove requires disabling cascade entirely and deleting every child through a manual em.remove loop"
+  - "Lifecycle callbacks only ever fire on inserts and updates, so the chosen deletion strategy is irrelevant to them"
   - "Single-statement deletion means @OnDelete (DB FK cascade) or bulk JPQL, both of which bypass the persistence context and never fire @PostRemove; firing the callback requires per-entity Hibernate deletes"
   answer: 3
   explanation: |
@@ -1297,9 +1297,9 @@ questions:
     After a bulk JPQL `delete from OrderLine where ...`, a later `em.find` in the same
     context or another transaction returns a line you just deleted. Why?
   options:
-  - "The delete silently failed"
-  - "The bulk delete is only applied at commit, not immediately"
-  - "find always ignores deletes"
+  - "The bulk delete silently failed because JPQL cannot target a table that has cached rows in the L2 region"
+  - "The bulk delete is only staged and does not touch the database until the surrounding transaction commits"
+  - "em.find always reads from the first-level cache and ignores DELETEs issued during the same persistence context"
   - "Bulk DML bypasses the persistence context and second-level cache, so stale entities can remain cached; you should evict the L2 region / clear the context"
   answer: 3
   explanation: |
@@ -1318,9 +1318,9 @@ questions:
     cascade/orphanRemoval setting?
   options:
   - "delete from order_tags where order_id=? and tag=?  — and no cascade/orphanRemoval is needed or available"
-  - "update order_tags set tag=null — orphanRemoval must be true"
-  - "delete from Tag where value='vip' — cascade=REMOVE required"
-  - "Nothing runs unless you call em.remove"
+  - "update order_tags set tag=null where order_id=?  — and orphanRemoval=true must be set for the row to clear"
+  - "delete from Tag where value='vip'  — a separate Tag entity table is updated and cascade=REMOVE is required"
+  - "Nothing runs until you explicitly call em.remove on the element, since value types are not dirty-checked"
   answer: 0
   explanation: |
     Element-collection values have no identity; removing one deletes the row from the
@@ -1335,10 +1335,10 @@ questions:
     You add `@OrderColumn` to Order.lines (was a plain-List PersistentBag). How does
     this affect the SQL when you remove a middle element with orphanRemoval on?
   options:
-  - "It makes no difference; bags and ordered lists delete identically"
+  - "It makes no difference at all; @OrderColumn is purely a read-time sort hint, so a bag and an ordered list always emit byte-for-byte identical DELETE statements"
   - "Hibernate can now identify rows by position/id and issue a surgical DELETE (plus index-shifting UPDATEs) rather than recreating the whole collection"
-  - "It forces a full delete-all then insert-all"
-  - "It disables orphan removal"
+  - "It forces Hibernate to delete every row in the collection and re-insert them all, because maintaining the @OrderColumn index requires rebuilding the list from scratch"
+  - "It silently disables orphan removal for that collection, so dereferenced elements are no longer deleted and merely have their order_index column reset to null"
   answer: 1
   explanation: |
     With @OrderColumn Hibernate maintains an index and can locate individual rows, so
@@ -1355,10 +1355,10 @@ questions:
     and later merges a reconstructed Order whose `lines` list is empty. Mapping is
     `orphanRemoval=true`. What is the risk?
   options:
-  - "Nothing; uninitialized collections are ignored by merge"
+  - "Nothing; merge automatically skips any collection whose reconstructed contents differ from the managed snapshot, leaving the existing lines fully intact in the database"
   - "merge reconciles the (empty) collection against the DB and treats every existing line as an orphan, silently DELETEing all of them"
-  - "It throws a LazyInitializationException that prevents any data loss"
-  - "It duplicates all the lines"
+  - "It throws a LazyInitializationException the instant merge touches the empty collection, which safely aborts the whole operation before any child rows can be deleted"
+  - "It re-inserts a duplicate copy of every existing line, because merge always treats an incoming detached collection as a set of brand-new transient rows to persist"
   answer: 1
   explanation: |
     On merge, Hibernate copies the detached collection state onto the managed

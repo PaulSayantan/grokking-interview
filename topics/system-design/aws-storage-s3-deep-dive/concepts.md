@@ -82,6 +82,17 @@ What it does **NOT** cover — common interview traps:
 - Consistency is **per key**, not a global snapshot; a LIST + GET of many keys is not
   an atomic view of the bucket.
 
+**Conditional writes (2024 GA) — "can S3 be a lock?"** S3 now supports
+**`If-None-Match: *` on PUT**: the write succeeds only if the key does **not** already
+exist, otherwise it fails with `412 Precondition Failed`. Two writers racing to create
+the same key → exactly one wins, the other gets 412 — a real **compare-and-swap on a
+single key** that prevents overwrite races (e.g. "first uploader claims this slot")
+without a separate lock table. **But the honest caveat interviewers want:** it is
+**single-key only** — it is *not* a multi-object transaction, not a mutex you can hold
+and release, and not a fencing token. For anything spanning multiple objects or needing
+lease/heartbeat semantics, coordination still belongs in **DynamoDB conditional
+writes** or a real lock table.
+
 **Trade-off / design impact.** Strong consistency means you can use S3 as the source
 of truth in a pipeline without a separate coordination store — e.g. a Lambda triggered
 by an event notification can immediately read the object. But you still must not treat
@@ -92,13 +103,15 @@ writes) or a lock table.
 
 ## Storage classes and cost latency trade-offs
 
-All classes share the same **11 nines (99.999999999%) durability** (except One
-Zone-IA, which is still 11 nines of durability *within its one AZ* but loses data if
-that AZ is destroyed). What differs is **availability SLA, minimum billing
-constraints, per-GB price, and retrieval latency/cost**.
+Most classes share the same **11 nines (99.999999999%) durability** — *except the
+single-AZ classes*, **One Zone-IA** and **Express One Zone**, which store data in just
+one Availability Zone: still highly durable *within* that AZ, but data is lost if that AZ
+is destroyed (no multi-AZ redundancy). What otherwise differs across classes is
+**availability SLA, minimum billing constraints, per-GB price, and retrieval latency/cost**.
 
 | Class | Use case | Availability (design) | Min duration | Min billable size | Retrieval latency | Retrieval fee |
 |---|---|---|---|---|---|---|
+| **Express One Zone** | Latency-critical, high-QPS, single-AZ | 99.95% (single AZ) | none | none | single-digit ms (~10x faster) | none (higher per-request price) |
 | **Standard** | Hot, frequently accessed | 99.99% | none | none | ms (immediate) | none |
 | **Standard-IA** | Infrequent, needs instant access | 99.9% | 30 days | 128 KB | ms (immediate) | per-GB retrieval |
 | **One Zone-IA** | Re-creatable, infrequent | 99.5% | 30 days | 128 KB | ms (immediate) | per-GB retrieval |
@@ -116,6 +129,26 @@ on observed access.
 Standard-IA ~$0.0125; Glacier Instant ~$0.004; Glacier Flexible ~$0.0036; Deep Archive
 ~$0.00099. Deep Archive is ~20x cheaper than Standard for storage — but you pay for
 retrieval and wait hours.
+
+**S3 Express One Zone + directory buckets (know it exists in 2026).** Launched Nov
+2023, this is the newest class and the one a senior interviewer expects on a "deep
+dive." It targets **latency-sensitive, high-request-rate** workloads — ML training
+shuffle, analytics scratch/spill, interactive session data — delivering **single-digit
+millisecond, ~10x lower request latency** than Standard and hundreds of thousands of
+requests/sec per bucket. The trade-offs:
+- **Single AZ.** You pick the AZ (co-locate it with your compute to kill network hops).
+  That means **no multi-AZ durability protection** — treat it like One Zone-IA for
+  data you can regenerate, not your only copy of crown-jewel data.
+- **Different bucket type + API model.** It uses **directory buckets**, not the flat
+  general-purpose namespace: a distinct bucket type with a hierarchical/directory key
+  model and a session-token-based auth (`CreateSession`) for the fast path — you don't
+  just flip a storage class on an existing bucket.
+- **Inverted cost shape.** **Lower per-GB storage than Standard-IA** but **higher
+  per-request price** — the opposite of the archive classes. It wins when requests-per-
+  GB is high (many small hot reads), loses for cold bulk.
+- **Pick it when** latency and QPS dominate and the data is co-located with compute and
+  re-creatable; **skip it** for durable multi-AZ storage of record (use Standard) or
+  cheap cold data (use Glacier tiers).
 
 **Key trade-offs / gotchas interviewers probe:**
 - **Standard-IA/One Zone-IA min 128 KB, 30-day floor.** Storing millions of tiny
@@ -135,6 +168,20 @@ retrieval and wait hours.
 - **Early-deletion charges:** deleting/transitioning IA before 30d, Glacier before
   90d, Deep Archive before 180d incurs a pro-rated charge. Churny data should stay in
   Standard or Intelligent-Tiering.
+
+> [!WARNING]
+> **Worked example — the IA tiny-file trap (why "cheaper per GB" backfires).** You
+> have **10,000,000 objects × 5 KB each** and move them to Standard-IA to save money.
+> - *Actual data:* 10,000,000 × 5 KB = 50,000,000 KB ≈ **50 GB**.
+> - *What IA bills:* IA rounds each object up to a **128 KB minimum**, so
+>   10,000,000 × 128 KB = 1,280,000,000 KB = **1,280 GB (1.28 TB) billable** — 25.6× the
+>   real bytes.
+> - *IA cost:* 1,280 GB × $0.0125 = **$16.00/mo** (plus a 30-day-minimum floor, so
+>   deleting early buys you nothing).
+> - *Standard cost for the same real data:* 50 GB × $0.023 = **$1.15/mo**.
+> - **Result: IA costs ~14× more than Standard here** ($16.00 vs $1.15). IA only wins on
+>   *large* objects; for a swarm of tiny objects, pack them into fewer big files (gzip/
+>   Parquet) or keep them in Standard / Intelligent-Tiering.
 
 ---
 
@@ -175,7 +222,12 @@ data" in interview terms.
 **How S3 achieves it:** every object (in multi-AZ classes) is **redundantly stored
 across a minimum of three Availability Zones** within the Region. S3 uses erasure
 coding / replication under the hood, continuously verifies data with checksums, and
-self-heals from bit rot and device/AZ failure. Because AZs are physically separate
+self-heals from bit rot and device/AZ failure. **Erasure coding intuition:** instead
+of keeping 3 full copies (200% overhead), S3 splits an object into *N* data shards plus
+*M* parity shards (Reed-Solomon math, like RAID) and spreads all *N+M* across AZs; the
+original is reconstructable from *any N* of the shards, so it tolerates losing *M*
+shards (or a whole AZ's worth) while paying only ~*M/N* extra storage instead of a full
+2x–3x — durability of many-way replication at a fraction of the byte overhead. Because AZs are physically separate
 data centers with independent power/network, the loss of an entire AZ does not cause
 data loss or (for multi-AZ classes) unavailability.
 
@@ -245,6 +297,15 @@ for objects **> 100 MB** and requires it above 5 GiB.
 - **Gotcha:** if you never call Complete or Abort, the uploaded parts **persist and are
   billed** as storage forever. Always set a lifecycle rule to **abort incomplete
   multipart uploads** after N days.
+- **Worked example — "you're uploading a 5 TB file, what part size?"** The cap is
+  **10,000 parts**, so the minimum part size is total size ÷ 10,000:
+  5 TiB / 10,000 = (5 × 1024 × 1024 MiB) / 10,000 = 5,242,880 MiB / 10,000 ≈
+  **524 MiB per part** (round up to ~525 MiB+ to leave headroom). Flip it around: if you
+  naively keep the **default 5 MiB** part size, 10,000 × 5 MiB = 50,000 MiB ≈ **50 GiB**
+  is the largest object you can finish before you hit the 10,000-part wall — the
+  `CompleteMultipartUpload` fails past that. **Takeaway: scale part size with object
+  size** (a common rule is ~part size = max(5 MiB, objectSize/10,000)), don't hard-code
+  a tiny constant.
 
 **Byte-range GET.** `Range: bytes=start-end` fetches only part of an object. Enables
 parallel downloads (fetch ranges concurrently), resumable downloads, and reading just a
@@ -525,6 +586,17 @@ Storage price is often *not* the dominant cost — **data transfer out (egress)*
 (PUT/GET/lifecycle transitions) × per-request price + egress GB × transfer price +
 (KMS requests, replication transfer, monitoring/analytics fees). At scale, request and
 egress costs frequently dwarf raw storage.
+
+**Worked example — egress dwarfs storage.** Say you host **100 TB** in S3 Standard and
+serve **500 TB/month** of downloads straight to the internet:
+- *Storage:* 100 TB = 100 × 1024 GB = 102,400 GB × $0.023 = **~$2,355/mo**.
+- *Egress:* 500 TB = 500 × 1024 GB = 512,000 GB × ~$0.09/GB = **~$46,080/mo**
+  (before tiered volume discounts).
+- **Egress is ~20× the storage bill.** This is why "just store it in S3" is the easy
+  part and *serving* it is the cost driver — and why fronting the bucket with CloudFront
+  (S3-origin transfer is free, CloudFront per-GB is lower and cached) or using a VPC
+  gateway endpoint for in-AWS consumers is where the real savings live, not shaving the
+  per-GB storage class.
 
 ---
 

@@ -112,12 +112,33 @@ every real node has a predecessor. It removes the special-case branch for "am I 
 the head?" — the #1 source of linked-list bugs.
 
 ```python
-dummy = Node(0)
-dummy.next = head
-prev = dummy
-# ... splice/delete uniformly; head may change without special handling ...
-return dummy.next   # the (possibly new) real head
+def remove_all(head, v):          # delete every node whose value == v
+    dummy = Node(0)
+    dummy.next = head
+    prev = dummy
+    curr = head
+    while curr:
+        if curr.val == v:
+            prev.next = curr.next   # unlink; prev does NOT advance
+        else:
+            prev = curr             # keep node; prev advances onto it
+        curr = curr.next
+    return dummy.next               # the (possibly new) real head
 ```
+
+**Worked trace — `remove_all(1 -> 2 -> 2 -> 3, v=2)`.** `prev` starts at `dummy` (`→1`):
+
+| `curr` | match? | action | list after |
+|---|---|---|---|
+| `1` | no | `prev = 1` | `d -> 1 -> 2 -> 2 -> 3` |
+| first `2` | yes | `prev.next = curr.next` → `1 -> (2) -> 3`; `prev` stays `1` | `d -> 1 -> 2 -> 3` |
+| second `2` | yes | `prev.next = 3`; `prev` stays `1` | `d -> 1 -> 3` |
+| `3` | no | `prev = 3` | `d -> 1 -> 3` |
+
+Return `dummy.next = 1`. Now delete the head instead — `remove_all(2 -> 1, v=2)`: `prev`
+is still `dummy`, so `prev.next = 1` drops the old head with **no `if curr == head` branch**.
+That uniformity is the whole payoff: `prev` (which begins at the sentinel) is what advances,
+and the head-deletion case is just the ordinary case.
 
 Use it whenever the head might be inserted before or deleted (merge, remove-Nth, partition,
 remove-duplicates, reorder). It makes the code uniform and shorter, at the cost of one
@@ -147,6 +168,20 @@ def reverse(head):
 - **Time O(n), space O(1).** Single pass.
 - The `nxt = curr.next` save on line 1 is essential: once you set `curr.next = prev` you've
   lost the rest of the list unless you saved it. Forgetting this is the classic bug.
+
+**Worked trace — reverse `1 -> 2 -> 3`.** Watch the three pointers each iteration; the
+"reversed so far" column is what `prev` heads:
+
+| Step | `nxt` (saved) | after `curr.next = prev` | `prev` | `curr` | reversed so far |
+|---|---|---|---|---|---|
+| start | — | — | `None` | `1` | (empty) |
+| 1 | `2` | `1 -> None` | `1` | `2` | `1 -> None` |
+| 2 | `3` | `2 -> 1` | `2` | `3` | `2 -> 1 -> None` |
+| 3 | `None` | `3 -> 2` | `3` | `None` | `3 -> 2 -> 1 -> None` |
+
+Loop ends when `curr` is `None`; return `prev = 3`, the new head. Note each `nxt` save
+rescues the tail we're about to orphan — drop line 1 and after step 1 you can never reach
+node `2` again.
 
 Recursive version (O(n) time, **O(n) stack space** — the recursion depth is the list
 length, so it can stack-overflow on long lists):
@@ -194,6 +229,20 @@ while fast and fast.next:
 # slow is the middle
 ```
 
+**Worked trace — even-length `1 -> 2 -> 3 -> 4`.** Both start at `1`:
+
+| Iteration | condition `fast and fast.next` | `slow` moves to | `fast` moves to |
+|---|---|---|---|
+| 1 | `fast=1`, `fast.next=2` ✓ | `2` | `3` |
+| 2 | `fast=3`, `fast.next=4` ✓ | `3` | `None` |
+| 3 | `fast=None` ✗ — stop | — | — |
+
+`slow` lands on `3`, the **second** of the two middles (`2` and `3`). To get the **first**
+middle (`2`) instead, start `fast` one node ahead — `slow = head; fast = head.next` — then
+with the same loop `slow` advances only once (to `2`) before `fast` reaches `4`/`None`.
+This split point is off-by-one-sensitive: reorder/palindrome problems that reverse the
+*second* half want the first-middle variant so the two halves are `[1,2]` and `[3,4]`.
+
 ### Detect a cycle (does the list loop?)
 If there is a cycle, the fast pointer eventually laps the slow one and they **meet inside
 the loop**; if fast hits `null`, there is no cycle. This is O(n) time, O(1) space — vs. a
@@ -209,12 +258,60 @@ while fast and fast.next:
 return False
 ```
 
+**Why fast moves exactly 2 (and why they can't skip past each other):** once both pointers
+are inside the loop, fast gains **exactly one node on slow every iteration** (fast +2, slow
++1 → gap shrinks by 1). A gap that decreases by 1 each step must eventually hit 0 — they
+land on the same node; it can never jump from 1 to −1 and overshoot. If fast stepped by 3
+the gap would change by 2 per step and could skip from a gap of 1 to −1 (mod L), so meeting
+is no longer guaranteed. Step-2 is the smallest speed that both guarantees a meeting and
+gives the clean cycle-start congruence below.
+
+**Worked trace — `1 -> 2 -> 3 -> 4 -> 2` (tail links back to `2`, loop length `L=3`).**
+
+| Iteration | `slow` | `fast` | meet? |
+|---|---|---|---|
+| start | `1` | `1` | — |
+| 1 | `2` | `3` | no |
+| 2 | `3` | `2` (`4`→`2`) | no |
+| 3 | `4` | `4` (`2`→`3`→`4`) | **yes** |
+
+They meet at node `4`. On a null-terminated list `fast` (or `fast.next`) would reach `None`
+first and the loop exits `False`.
+
 ### Find the cycle's start node
 After a meeting point is found, reset one pointer to the head and advance **both one step at
 a time**; they meet at the cycle's entry node. (Why: if the non-cyclic prefix has length
 `a`, and the meeting point is `b` nodes into the loop of length `L`, the math works out so
 that `a ≡ (L − b) mod L`, meaning a pointer from the head and a pointer from the meeting
 point converge exactly at the loop entry.)
+
+**Deriving the congruence.** When they meet, slow has walked `d = a + b` (reach the entry,
+then `b` into the loop). Fast walked `2d` and, being in the loop, is `a + b` plus some whole
+number of laps: `2d = d + nL`, so `d = nL`. Substitute: `a + b = nL`, hence
+`a = nL − b = (L − b) mod L`. So the leftover distance from the meeting point to the entry
+(`L − b`) equals `a` modulo full laps — walk `a` steps from either the head or the meeting
+point and both land on the entry.
+
+**Concrete trace.** List `n1 -> n2 -> [n3] -> n4 -> n5 -> n6 -> back to n3`; prefix `a = 2`
+(`n1,n2`), entry `n3`, loop `n3,n4,n5,n6` so `L = 4`. Phase 1 (slow +1, fast +2 from `n1`):
+
+| Iter | `slow` | `fast` |
+|---|---|---|
+| 1 | `n2` | `n3` |
+| 2 | `n3` | `n5` |
+| 3 | `n4` | `n3` (`n5→n6→n3`) |
+| 4 | `n5` | `n5` (`n3→n4→n5`) — **meet** |
+
+Meeting node `n5` is `b = 2` nodes into the loop (`n3`=0, `n4`=1, `n5`=2). Check the
+congruence: `(L − b) mod L = (4 − 2) mod 4 = 2 = a` ✓; and `d = a + b = 4 = 1·L` ✓. Phase 2,
+reset `p = head = n1`, keep `slow = n5`, step both +1:
+
+| Step | `p` | `slow` |
+|---|---|---|
+| 1 | `n2` | `n6` |
+| 2 | `n3` | `n3` — **meet at entry** |
+
+Both land on `n3`, the cycle start, after exactly `a = 2` steps.
 
 ```python
 # after slow is fast (meeting point):
@@ -253,6 +350,22 @@ def merge(l1, l2):
 - **Time O(n + m), space O(1)** (splicing existing nodes, no new allocation).
 - Merging **k** sorted lists: use a min-heap of the k current heads for O(N log k) total
   (N = total nodes), or pairwise/divide-and-conquer merging for the same bound.
+- **`<=` vs `<` is a stability choice.** Using `<=` (ties → take from `l1`) keeps equal keys
+  in their original relative order — a **stable** merge, which is exactly what merge sort
+  relies on to be a stable sort. Flip it to `<` and equal elements from `l2` jump ahead of
+  `l1`'s, breaking stability.
+
+**Worked trace — merge `l1 = 1 -> 4` and `l2 = 2 -> 3`.** `tail` starts at `dummy`:
+
+| Step | compare | spliced onto tail | list so far | `l1` | `l2` |
+|---|---|---|---|---|---|
+| 1 | `1 <= 2` ✓ | `1` | `1` | `4` | `2 -> 3` |
+| 2 | `4 <= 2` ✗ | `2` | `1 -> 2` | `4` | `3` |
+| 3 | `4 <= 3` ✗ | `3` | `1 -> 2 -> 3` | `4` | `None` |
+| 4 | `l2` empty — exit loop | — | `1 -> 2 -> 3` | `4` | — |
+
+`tail.next = l1 or l2` attaches the leftover `4`: final `1 -> 2 -> 3 -> 4`. Return
+`dummy.next`.
 
 ## Common bugs & gotchas
 
@@ -268,6 +381,10 @@ def merge(l1, l2):
   final node's `next = null` produces an infinite loop.
 - **Comparing values vs. identity.** In cycle detection compare node **identity**
   (`is`/`==` reference), never values, since values can repeat.
+- **Leftover carry in digit-add problems.** After both lists end, a remaining carry needs an
+  extra node — e.g. `5 + 5`: `5+5 = 10`, emit digit `0`, carry `1`; both lists are now empty
+  but you must append a final `1`, giving `0 -> 1` (the number 10). Loop on
+  `while l1 or l2 or carry`, not just `while l1 or l2`.
 
 ## Interview Problems
 

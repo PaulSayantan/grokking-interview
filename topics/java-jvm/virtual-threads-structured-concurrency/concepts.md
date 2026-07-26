@@ -65,6 +65,34 @@ try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
 } // close() waits for all tasks (ExecutorService is AutoCloseable since Java 19)
 ```
 
+### Worked example: "scales to the bottleneck, not the thread count"
+
+Put numbers on it. Say **10,000 requests arrive concurrently**, and each one spends
+**200 ms waiting on a database** and **5 ms burning CPU** (≈ 205 ms total). You have an
+**8-core box**.
+
+**Platform-thread-per-request:** you need one OS thread parked on each in-flight request →
+**~10,000 OS threads**. At ~1 MB of stack each that is **~10 GB of stack memory** — you OOM
+(or exhaust native memory) long before you get there. Even if the memory existed, the kernel
+context-switching 10,000 threads shreds throughput. The ceiling is the **thread count**, and
+it is far below what the DB could actually take.
+
+**Virtual-thread-per-request:** the carrier pool stays at **~8 OS threads** (~8 MB of stacks).
+At any instant, of the 10,000 virtual threads, `200/205 ≈ 97.6 %` (~9,760 of them) are
+**unmounted**, sitting on the heap waiting for the DB — holding *zero* OS threads. Only the
+`5/205 ≈ 2.4 %` doing CPU work compete for the 8 carriers. Memory drops from **~10 GB to ~8 MB**.
+
+Now apply **Little's Law** (`in-flight = throughput × latency`, so `throughput = in-flight / latency`)
+to find the *new* ceiling — which is no longer threads:
+
+- If the **DB** can serve 10,000 concurrent queries, throughput ≈ `10,000 / 0.205 s ≈ 48,000 req/s`,
+  capped by DB concurrency.
+- If instead the **8 cores** are the limit (each request needs 5 ms of CPU), throughput ≈
+  `8 / 0.005 s = 1,600 req/s`, capped by CPU.
+
+Either way the limiting resource is now a **real** resource you can reason about and scale
+(DB pool, cores), not an artificial "we ran out of threads" wall. That is the whole pitch.
+
 ---
 
 ## Virtual threads versus platform threads
@@ -109,6 +137,29 @@ common pool used by parallel streams). Its parallelism defaults to the number of
 - On completion of the blocking operation, the virtual thread is submitted back to the scheduler and
   eventually **remounted** — possibly on a *different* carrier thread.
 
+```text
+   V1   V2   V3   V4   V5   ...        virtual threads (millions, most parked)
+    |         |         |
+    v         v         v
+ [ C1 ]    [ C2 ]    [ C3 ]            carrier threads (≈ #cores, e.g. 8)
+
+Step 1: V1 mounted on C1, runs until it blocks on I/O.
+Step 2: V1's stack is copied to the heap (a "continuation"); V1 is UNMOUNTED.
+        C1 is now free and immediately picks up V2.
+Step 3: I/O completes → V1 is resubmitted to the scheduler and REMOUNTED —
+        possibly on a DIFFERENT carrier (say C3), not necessarily C1.
+```
+
+**How far can the pool grow? (compensation.)** The scheduler is a `ForkJoinPool` whose
+*parallelism* defaults to the core count (say 8). When a carrier is legitimately blocked in a
+way the JDK can detect (via a `ManagedBlocker`), the pool **temporarily spins up an extra
+platform thread to compensate**, so all cores stay busy — but only up to
+`jdk.virtualThreadScheduler.maxPoolSize` (**default 256**). This compensation is exactly what
+**pinning defeats**: a pinned carrier cannot be compensated the same way. Concretely, if
+parallelism = 8 and all **8** carriers are pinned on `synchronized` DB calls, **no other virtual
+thread can be scheduled at all** until one of them unpins — a throughput collapse that looks
+like a deadlock.
+
 Consequences and gotchas:
 - The carrier's thread identity is not the virtual thread's identity. Do **not** cache carrier identity
   across a blocking point.
@@ -150,6 +201,18 @@ try {
 Detect pinning with `-Djdk.tracePinnedThreads=full` (or `short`). In JDK 21 the recommended fix is to
 **replace `synchronized` with `ReentrantLock`** around blocking calls, or narrow the `synchronized`
 region so no blocking happens inside it.
+
+**Pinning is not just *your* `synchronized`.** A few more gotchas a senior candidate should name:
+- **`Object.wait()` inside a `synchronized` block also pins** (it releases the monitor logically but the
+  wait still happens on a pinned carrier in JDK 21).
+- **Library / JDK / driver code counts too.** An older JDBC driver, connection pool, or logging
+  framework that holds a `synchronized` monitor across its blocking call pins your carrier even though
+  *your* code has no `synchronized`. This is why you profile the *real dependency stack* with
+  `-Djdk.tracePinnedThreads`, not just audit your own source.
+- **Not every blocking call unmounts cleanly.** Socket NIO parks the virtual thread properly, but some
+  **legacy synchronous file I/O** (`java.io.FileInputStream`/`FileOutputStream`) and certain filesystem
+  operations are serviced by handing the work to a temporary carrier rather than truly unmounting — so
+  heavy blocking file I/O does not scale as freely as socket I/O.
 
 > **Version note:** This `synchronized`-pinning limitation was **later removed by JEP 491 in JDK 24
 > (2025)**, where virtual threads can unmount even inside `synchronized`. In **JDK 21 (the LTS this
@@ -230,6 +293,18 @@ dbPermits.acquire();
 try { return db.query(sql); } finally { dbPermits.release(); }
 ```
 
+**What actually happens with 10,000 tasks + `Semaphore(10)`:** exactly **10** tasks hold a permit
+and hit the DB; the other **9,990** call `acquire()`, block, and are **unmounted virtual threads**
+parked on the heap — costing only a few KB of heap each, **zero OS threads**. As each of the 10
+finishes and calls `release()`, one parked virtual thread is unparked and takes its place.
+
+Contrast with a `newFixedThreadPool(10)` of platform threads: it *also* caps DB concurrency at 10,
+but the other 9,990 tasks sit in a **queue behind 10 OS threads** — they are not yet running as
+anything, so there is no per-task thread identity, no live stack, no thread dump entry until one is
+dequeued. The Semaphore version preserves the **one-virtual-thread-per-task** identity (clean stack
+traces, structured concurrency, scoped values) while capping the scarce resource at 10 — you get the
+concurrency limit *without* re-imposing a thread-count limit.
+
 Also, **do not cache expensive per-thread objects in pooled `ThreadLocal`s** with virtual threads — with
 millions of threads that pattern explodes memory. This is why scoped values were introduced.
 
@@ -281,6 +356,15 @@ Response handle() throws InterruptedException, ExecutionException {
     }
 }
 ```
+
+> **Version caveat — the API surface changed after JDK 21.** The subclass-based shape above
+> (`new StructuredTaskScope.ShutdownOnFailure()`, `throwIfFailed()`) is **JDK-21-preview-specific**.
+> In later previews the API was reworked: the subclasses were replaced by a static factory
+> `StructuredTaskScope.open(...)` that takes a `Joiner` strategy (e.g.
+> `Joiner.awaitAllSuccessfulOrThrow()` for fail-fast, `Joiner.anySuccessfulResultOrThrow()` for
+> racing), with `scope.join()` returning the result directly. This is the shape in the JDK 25 preview
+> (JEP 505). If you are on JDK 23/24/25, the exact method names below will not compile — check your JDK's
+> `StructuredTaskScope` Javadoc for the API version you have.
 
 Built-in policies (in the JDK 21 preview API):
 - **`ShutdownOnFailure`** — fail fast: the first subtask that throws cancels the others (invoke-all,
@@ -371,6 +455,7 @@ Key points for interviews:
 - JEP 425: Virtual Threads (Preview, JDK 19) — https://openjdk.org/jeps/425
 - JEP 436: Virtual Threads (Second Preview, JDK 20) — https://openjdk.org/jeps/436
 - JEP 453: Structured Concurrency (Preview, JDK 21) — https://openjdk.org/jeps/453
+- JEP 505: Structured Concurrency (Fifth Preview, JDK 25) — reworked API: `StructuredTaskScope.open(...)` + `Joiner` strategies replace the `ShutdownOnFailure`/`ShutdownOnSuccess` subclasses — https://openjdk.org/jeps/505
 - JEP 446: Scoped Values (Preview, JDK 21) — https://openjdk.org/jeps/446
 - JEP 428/437: Structured Concurrency (Incubator, JDK 19/20)
 - JEP 491: Synchronize Virtual Threads without Pinning (JDK 24) — https://openjdk.org/jeps/491

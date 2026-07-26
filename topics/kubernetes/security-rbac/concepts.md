@@ -58,12 +58,39 @@ flowchart LR
    *before* persistence. **Mutating** admission runs first (can modify the object, e.g. inject
    a sidecar, set defaults), then **Validating** admission (can only accept/reject, e.g. Pod
    Security Standards, ResourceQuota, custom policy). Admission only runs for requests that
-   create/modify/delete objects (not plain reads).
+   create/modify/delete objects (not plain reads). One senior nuance: mutating webhooks are **not
+   strictly ordered** and one may be **re-invoked** (`reinvocationPolicy: IfNeeded`) after a later
+   webhook further mutates the object, so don't assume a single clean pass; **validating** admission
+   always runs against the final, post-mutation object.
 
 > [!INTERVIEW]
 > "A user gets `401` vs `403` — what's the difference?" → **401** = authentication failed (we
 > don't know who you are — bad/expired cert or token). **403** = authenticated fine, but RBAC
 > (or another authorizer) denied the action. Different stage, different fix.
+
+**Worked example — one request through all three stages.** `jane@corp.com` (a human logged in
+via OIDC, whose token carries `groups: ["dev-team"]`) runs `kubectl get pods -n dev`. Assume the
+`pod-reader` Role and the `read-pods-dev` RoleBinding shown later in this doc exist in namespace
+`dev`.
+
+1. **AuthN.** The OIDC authenticator validates the JWT's signature against the issuer, then maps
+   claims → identity: username `jane@corp.com`, groups `["dev-team"]`. The API server also injects
+   the built-in group `system:authenticated`. No permission is granted yet — just identity.
+2. **AuthZ (RBAC).** The request is decomposed into attributes: `verb=list`, `resource=pods`,
+   `apiGroup=""` (core), `namespace=dev` (a bare `kubectl get pods` is a **list**, not a `get`).
+   RBAC scans bindings that apply in `dev`: the RoleBinding `read-pods-dev` has a subject
+   `kind: Group, name: dev-team` — **jane's `dev-team` group matches**. Its `roleRef` points to
+   Role `pod-reader`, whose rule is `apiGroups:[""], resources:["pods","pods/log"],
+   verbs:["get","list","watch"]`. The request `("", pods, list)` satisfies that rule
+   (`""` ∈ apiGroups **and** `pods` ∈ resources **and** `list` ∈ verbs) → **Allow**, short-circuit.
+3. **Admission.** `list` is a read, so admission plugins are skipped entirely. Result: **200 OK**.
+
+**Now the contrasting 403.** Same jane runs `kubectl delete pod web-0 -n dev`. AuthN is identical.
+At AuthZ the attributes are now `verb=delete, resource=pods, apiGroup="", namespace=dev`. The only
+matching binding is still `read-pods-dev → pod-reader`, whose verbs are `get/list/watch` — **`delete`
+is not in that list**, so this rule does not match. No other binding grants jane `delete pods` in
+`dev`, every authorizer returns NoOpinion, and deny-by-default kicks in → **403 Forbidden**. Note it
+never reached admission: authorization failed first.
 
 ---
 
@@ -153,6 +180,14 @@ and mounted it. That changed significantly:
   auto-creates** a token Secret when you create a ServiceAccount. Creating an SA gives you
   *no* Secret by default.
 
+| | **Legacy Secret token** | **Projected bound token** |
+|---|---|---|
+| Expiry | never | time-bound (default ~1h) |
+| Rotation | none (static) | kubelet auto-rotates before expiry |
+| Audience scoping | none (valid for any audience) | audience-bound (`aud` claim) |
+| Object binding | none | bound to the Pod (dies when Pod is deleted) |
+| Blast radius if leaked | large — works until SA/CA rotated | small — expires, wrong-audience rejected |
+
 Consequences:
 
 - **Get a token on demand:** `kubectl create token build-bot -n ci` returns a short-lived
@@ -217,6 +252,28 @@ metadata:
     eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/s3-read-only
 ```
 
+**Worked example — trace the IRSA token exchange.** A Pod in namespace `data` uses ServiceAccount
+`s3-reader` (annotated above with `role-arn: .../s3-read-only`) and wants to read an S3 bucket.
+Follow the claims:
+
+1. **Projection.** The kubelet projects a bound SA token into the Pod. Because this is a
+   cloud-federation token, its claims are `iss: https://oidc.eks.../id/EXAMPLE` (the cluster's OIDC
+   provider URL), `aud: sts.amazonaws.com`, and
+   `sub: system:serviceaccount:data:s3-reader` (namespace + SA name — the same string RBAC uses).
+2. **SDK call.** The AWS SDK in the container reads the injected `AWS_ROLE_ARN` and
+   `AWS_WEB_IDENTITY_TOKEN_FILE` env vars and calls
+   `sts:AssumeRoleWithWebIdentity(RoleArn=.../s3-read-only, WebIdentityToken=<the JWT>)`.
+3. **Signature check.** STS fetches the JWKS from the cluster's registered OIDC provider (the `iss`
+   URL) and verifies the JWT's signature — proving the cluster minted it and it isn't forged.
+4. **Trust-policy match.** The IAM role `s3-read-only` has a trust policy with
+   `Condition: StringEquals { "oidc...:aud": "sts.amazonaws.com",
+   "oidc...:sub": "system:serviceaccount:data:s3-reader" }`. STS checks the token's `aud` and `sub`
+   claims against these — **both must match exactly**. (A common failure: annotating the wrong SA,
+   or the trust policy naming a different namespace, yields the token's `sub` ≠ the condition →
+   `AccessDenied`.)
+5. **Temp creds.** STS returns short-lived credentials (access key + secret + session token, ~1h);
+   the SDK uses them for the S3 call. No static keys ever lived in the cluster.
+
 > [!INTERVIEW]
 > "How does a Pod get AWS permissions without baked-in access keys?" → The cluster is an OIDC
 > provider; the Pod's projected SA token is a signed JWT the cloud IAM trusts. IAM exchanges
@@ -275,6 +332,31 @@ rules:
   resources: ["pods", "pods/log"] # a subresource: pods/log, pods/exec
   verbs: ["get", "list", "watch"]
 ```
+
+**How a single rule matches (the cross-product gotcha).** Within one rule, the values inside each
+list are **ORed**, but the three dimensions are **ANDed**: a request is authorized by the rule only
+if its `apiGroup` is in `apiGroups` **AND** its `resource` is in `resources` **AND** its `verb` is
+in `verbs`. That means a multi-value rule grants the **full cross product**, not paired-up
+combinations. A student's overall permissions are then the **union** of every rule in every
+Role/ClusterRole bound to them.
+
+**Worked example — enumerate the cross product.** Consider one rule:
+
+```yaml
+- apiGroups: ["", "apps"]
+  resources: ["pods", "deployments"]
+  verbs: ["get"]
+```
+
+This authorizes **every (apiGroup × resource) pair for the verb `get`** — all 2×2 = 4 combinations:
+`(core, pods, get)`, `(core, deployments, get)`, `(apps, pods, get)`, `(apps, deployments, get)`.
+It does **not** matter that `pods` actually live in the core group and `deployments` in `apps`; RBAC
+does no such pairing. So this rule *also* authorizes the nonsensical `(apps, pods, get)` and
+`(core, deployments, get)` — harmless because those objects don't exist, but proof the match is a
+blind cross product. What it does **not** grant: any `list`, `watch`, `create`, or `delete` on
+either resource (verb not in the list), so `kubectl get deployments` succeeds while
+`kubectl get deployments -w` (a watch) is denied. To grant only the two *real* pairings you'd need
+**two separate rules**, one per apiGroup.
 
 - **Verbs**: `get`, `list`, `watch`, `create`, `update`, `patch`, `delete`,
   `deletecollection` (plus special ones like `impersonate`, `bind`, `escalate`, `use`).
@@ -414,6 +496,32 @@ aggregationRule:
 rules: []          # controller manages these; do not hand-edit
 ```
 
+The snippet above is only the **consumer** — the empty shell whose `rules` get filled. Here is the
+**producer** that gets pulled in: any ClusterRole carrying the matching label.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-endpoints
+  labels:
+    rbac.example.com/aggregate-to-monitoring: "true"   # matches the selector above
+rules:
+- apiGroups: [""]
+  resources: ["services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+```
+
+**Trace:** you `kubectl apply` this `monitoring-endpoints` role. The RBAC aggregation controller
+sees its label matches `monitoring`'s `clusterRoleSelectors`, so it copies those three rules into
+`monitoring`'s `rules` field automatically — `kubectl get clusterrole monitoring -o yaml` now shows
+the services/endpoints/pods rules even though you never edited `monitoring`. Add a second labeled
+role later (say for `configmaps`) and its rules join the aggregate too; delete a labeled role and
+its rules disappear from `monitoring`. This is exactly how you **extend the built-in `edit`/`view`**:
+label a small ClusterRole granting your CRD's verbs with
+`rbac.authorization.k8s.io/aggregate-to-edit: "true"`, and everyone already bound to `edit` can now
+manage your CRD — no binding changes needed.
+
 **Default (user-facing) ClusterRoles** shipped with every cluster:
 
 | ClusterRole | Grants |
@@ -510,10 +618,14 @@ The API server injects several special usernames/groups that RBAC can bind to:
 
 Gotchas:
 
-- **Anonymous access:** the API server enables anonymous auth by default; unauthenticated
-  requests become user `system:anonymous` in group `system:unauthenticated`. They only get
-  what RBAC grants that identity (by default: a tiny discovery allowlist like
-  `/healthz`, `/version`). Binding real permissions to `system:unauthenticated` or
+- **Anonymous access:** the API server enables anonymous auth by default **unless the
+  authorization mode is `AlwaysAllow`** (disable it explicitly with `--anonymous-auth=false`);
+  unauthenticated requests become user `system:anonymous` in group `system:unauthenticated`.
+  They only get what RBAC grants that identity (by default: a tiny discovery allowlist like
+  `/healthz`, `/version`, via the `system:public-info-viewer` binding). Newer clusters can
+  harden this further with an `AuthenticationConfiguration` file that restricts anonymous
+  requests to a fixed endpoint allowlist (the `AnonymousAuthConfigurableEndpoints` feature,
+  stable in v1.34). Binding real permissions to `system:unauthenticated` or
   `system:authenticated` is dangerous — the latter includes *everyone with any credential,
   including every ServiceAccount*.
 - **`system:masters` bypasses meaningful RBAC scoping** — it's hard-bound to cluster-admin and

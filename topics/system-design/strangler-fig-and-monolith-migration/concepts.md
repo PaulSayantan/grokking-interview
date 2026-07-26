@@ -161,6 +161,25 @@ to find weakly-connected components; look for tables that are *not* widely joine
 with **leaf** capabilities (notifications, reporting, PDF generation) to build muscle and
 tooling before tackling the transactional core (orders, payments) last.
 
+**Worked example — ranking an e-commerce monolith.** Modules: *orders, payments,
+notifications, reporting, inventory*. Score each on coupling and value, then read off the
+order:
+
+| Module | Coupling to core | Value / churn | Verdict |
+|---|---|---|---|
+| **Notifications** | Leaf — only *consumes* "order placed" events; writes nothing others read | High churn (new channels, templates) | **Extract 1st** — emit-only, clear owner, safe to get wrong |
+| **Reporting** | Read-only; can run off a replica/read model | Medium | **2nd** — no writes to reconcile, builds CDC/read-model muscle |
+| **Inventory** | Moderate — orders decrement stock, but via a narrow "reserve/release" API | High (Black-Friday scaling) | **3rd** — real coupling but a clean seam exists |
+| **Orders** | Joined to payments, inventory, customer everywhere | Highest | **Late** — transactional heart; needs sagas |
+| **Payments** | Deeply entangled, regulated, joined into orders | Highest, but risk-dominated | **Last** — extract only after tooling and confidence are proven |
+
+The judgement to voice in an interview: *"I'd pull **notifications** out first — it's a
+leaf that only reacts to events, so a bug can't corrupt an order, and it gives us a real
+end-to-end strangler slice (proxy route + outbox + parallel run) to harden our tooling.
+**Payments** goes last: it's the transactional core, it's joined into everything, and it's
+regulated — I want every tool battle-tested before I touch it."* That is the rubric applied,
+not just recited.
+
 > [!WARNING]
 > A common anti-pattern is extracting the easiest *technical* layer first — e.g. pulling
 > out "the data access layer" as a service. That creates a distributed monolith: chatty,
@@ -230,6 +249,33 @@ Key rules:
 
 GitHub's `Scientist` library is the canonical tool: it runs the "control" and "candidate"
 in random order, compares, swallows candidate exceptions, and reports mismatches.
+
+**Worked example — triaging a divergence.** You are re-implementing a pricing engine.
+Request comes in for **Cart X** (one item at \$19.995 list, 0% tax). Both paths run; the
+comparator logs:
+
+```
+cart=X  legacy=$19.99  new=$20.00  DIVERGENT
+```
+
+Is this a bug in the new code, or a bug in the *old* code you are now fixing? Investigate
+the one input: the true price is \$19.995. The legacy engine **truncated** to \$19.99; the
+new engine **rounds half-up** to \$20.00. Half-up rounding is the correct accounting rule,
+so *legacy was the bug*. This is an **acceptable diff** — you don't block cutover; you
+document it, get finance/product sign-off, and **update the comparison baseline** to treat
+this class of penny-rounding as expected (otherwise it drowns the diff log in noise).
+
+Contrast a **real regression**. Same cart, but the customer has a 10%-off loyalty coupon:
+
+```
+cart=X  legacy=$18.00  new=$20.00  DIVERGENT
+```
+
+Here the new engine returned the *undiscounted* price — it forgot to apply the loyalty
+discount. That is a correctness loss, not a rounding nicety. **Block the cutover**, fix the
+new engine, and only promote once the diff rate for that scenario returns to zero. The
+discipline: every divergence is either "old was wrong → rebaseline" or "new is wrong →
+fix and re-run" — you never cut over with an unexplained diff.
 
 ## Dark launching and shadow traffic
 
@@ -350,7 +396,29 @@ COMMIT;                          -- both or neither; relay/CDC ships the outbox 
 Migration-specific uses:
 
 - **Backfill + tail**: snapshot existing data into the new DB, then CDC-stream ongoing
-  changes so the new store stays current while you migrate readers.
+  changes so the new store stays current while you migrate readers. **The classic trap is
+  the gap between "snapshot done" and "streaming started."** If you snapshot first and
+  *then* subscribe to the log, any write in that window is lost forever. The fix is to
+  capture the **log position first**: record the binlog coordinate / Postgres LSN *before*
+  taking the snapshot, then after the snapshot replay the log from that saved position.
+  You will re-apply some changes the snapshot already contained — that is fine *because
+  consumers are idempotent* (upsert by primary key). Debezium's default
+  "initial snapshot then stream" mode does exactly this: it marks the offset, snapshots,
+  then tails from the mark, so no change is ever missed. Worked timeline:
+
+  ```
+  t0  record LSN = 1000                     (bookmark the log)
+  t1  order 42 -> PLACED committed @ LSN 1000, and its row is copied by the snapshot
+  t2  snapshot rows -> new DB               (order 42 = PLACED copied)
+  t3  live write: order 42 -> SHIPPED @ LSN 1001   (happens DURING snapshot)
+  t4  snapshot completes
+  t5  replay log from LSN 1000: re-see PLACED@1000 (no-op upsert; snapshot already had it),
+      then apply SHIPPED@1001
+      new DB now = SHIPPED  ✓  (correct; the PLACED overlap was harmless, the gap was zero)
+  ```
+
+  Had you bookmarked *after* the snapshot (say LSN 1001+), the SHIPPED write at t3 would
+  fall in the blind gap and the new DB would be stuck at PLACED forever.
 - **Direction of sync**: early on the monolith DB is authoritative and you sync *to* the
   new service; after cutover you may sync *back* to the monolith for not-yet-migrated
   consumers. Two-way sync is risky (loops) — prefer one authoritative writer per datum.
@@ -368,10 +436,25 @@ The reason incremental migration is *safe* is that every step is reversible. Bak
 - **Expand/contract (parallel change) for schema**: change schemas in
   backward-compatible steps — *expand* (add new column/table, write both), *migrate*
   (backfill, switch reads), *contract* (drop old) — so you can roll back at any stage and
-  never take a breaking change in one shot.
+  never take a breaking change in one shot. The key safety property, phase by phase:
+
+  | Phase | Schema state | Writes | Reads | Safe to roll back? |
+  |---|---|---|---|---|
+  | **Expand** | old + new column both exist | both (dual-write in-row) | old column | Yes — new column unused by readers |
+  | **Migrate** | both exist | both | switch to new column | Yes — old column still populated, flip reads back |
+  | **Contract** | drop old column | new only | new | Only *after* a bake period — this is the irreversible step |
+
+  Notice reads never depend on a column that is about to disappear: you only drop the old
+  column *after* reads have moved off it and stayed healthy. Roll back = flip reads back to
+  the old column, which is still being written.
 - **Data rollback is the hard part.** Routing rolls back cheaply; *data written by the new
-  service* may not exist in the old store. Keep CDC syncing both ways during the risky
-  window, or design the new writes to be replayable back into the monolith.
+  service* may not exist in the old store. Note this seems to conflict with the "prefer one
+  authoritative writer, avoid two-way loops" rule above — the reconciliation is: you do
+  **not** run steady-state bidirectional sync. Instead, **replay the new service's change
+  log back into the monolith on rollback**, tagging each replayed change with its origin so
+  the monolith's CDC does not re-emit it back to the new service (origin/source filtering).
+  That one-directional, loop-guarded replay makes new writes recoverable without creating
+  the write-write loop that continuous two-way sync would.
 - **Small blast radius**: because each slice is small, a failed cutover affects one
   capability, not the whole system.
 

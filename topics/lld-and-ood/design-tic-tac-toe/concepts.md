@@ -189,6 +189,24 @@ That's O(1) time per move for O(N) extra space per player. It works because a pl
 only on a line that passes through the move they just made — you never need to look at
 other lines. This is the same idea as LeetCode 348 (*Design Tic-Tac-Toe*).
 
+*Worked trace — X wins on the main diagonal (N = 3).* All of X's counters start at zero.
+O's moves touch only O's counters, so X's structures below never move on O's turns:
+
+| X's move | `rowCounts[X]` | `colCounts[X]` | `diag[X]` (r==c) | `antiDiag[X]` (r+c==2) | max counter |
+|---|---|---|---|---|---|
+| — (start) | `[0,0,0]` | `[0,0,0]` | 0 | 0 | 0 |
+| X → (0,0) | `[1,0,0]` | `[1,0,0]` | **1** | 0 | 1 |
+| X → (1,1) | `[1,1,0]` | `[1,1,0]` | **2** | 1 | 2 |
+| X → (2,2) | `[1,1,1]` | `[1,1,1]` | **3** ← == N | 1 | **3 → WIN** |
+
+The third move lands on `(2,2)`: `rowCounts[X][2]` and `colCounts[X][2]` go to 1, and
+since `r == c` the diagonal counter ticks to 3 — which equals N, so `checkWin` returns
+true immediately, no board scan. Note `antiDiag[X]` reached 1 (not 0): the center `(1,1)`
+sits on *both* diagonals since `1+1 == N−1 == 2`, so it bumped both diagonal counters — but
+it never got near N, so it didn't cause a false win. Had X instead played `(0,2)`, `(1,1)`,
+`(2,0)`, it's `antiDiag[X]` that would climb `1 → 2 → 3` to win. Each counter is just "how
+many of my marks sit on this specific line," and any single line reaching N is a win.
+
 > [!TIP]
 > Mention the naive O(N) check first, then improve it. Interviewers reward the
 > narrated progression ("scan works, but each move only affects 4 lines, so counters
@@ -208,6 +226,21 @@ static factory method is enough — don't build an abstract factory hierarchy fo
 **6. `Move` as an immutable value object.**
 Row/col pairs passed as two `int`s invite transposition bugs; a small immutable `Move`
 (Java `record`) is self-documenting and hashable for history/undo.
+
+### Minimax in one paragraph (the "unbeatable AI")
+
+`MinimaxStrategy` is the standard answer to "make it unbeatable," so be ready to explain it
+even though LLD grades design over algorithms. The idea: recursively play out every legal
+continuation to a terminal board and score it from the AI's perspective — `+1` if the AI
+wins, `−1` if it loses, `0` for a draw. On the AI's own turns it picks the child move with
+the **maximum** score; on the opponent's turns it assumes the opponent picks the
+**minimum** (worst-for-AI) score. So each move is scored by its *worst-case* outcome
+against optimal play — that's why the AI can never be tricked. Because Tic-Tac-Toe is a
+solved forced draw, an optimal AI facing an optimal opponent scores 0 (draws) and beats any
+mistake. The whole 3×3 tree is tiny (≤ 9! ≈ 362,880 leaves, far fewer after pruning), so
+plain minimax is instant; **alpha-beta pruning** — skip a branch once it can't beat a result
+already found — only becomes necessary when N grows and the tree explodes. No changes to
+`ComputerPlayer` or `Game`: it's just another `MoveStrategy`.
 
 ## API and Method Signatures
 
@@ -361,6 +394,13 @@ class Game {
 Check the draw condition **after** the win check: the final move onto a full board can
 still be a winning move.
 
+`checkWin` reads all four counters even when the last move wasn't on a diagonal — this is
+safe-but-redundant, not a bug. An off-line diagonal counter can't have reached `size`
+unless a move actually landed on that diagonal, so testing it never yields a false positive.
+If you want the code to mirror the "only lines through the move" intuition exactly, guard
+the diagonal reads with the same conditions `applyMove` uses (`m.row() == m.col()` and
+`m.row() + m.col() == size - 1`); otherwise leave the note and move on.
+
 ## Extensibility
 
 The follow-ups an interviewer will throw at you, and why this design absorbs them:
@@ -371,8 +411,13 @@ The follow-ups an interviewer will throw at you, and why this design absorbs the
 - **Connect-K on N×N (win = K in a row, K < N).** This *breaks* the simple counters —
   full-line counts can't detect K consecutive marks mid-line. Say so honestly: fall back
   to an O(K) check that walks up to K−1 cells in each of the 4 directions through the last
-  move. Encapsulate it behind a `WinChecker` interface (`CounterWinChecker` for K == N,
-  `DirectionalScanWinChecker` for K < N) so `Board` stays closed for modification —
+  move. Concretely, for K = 3 on a 5×5 board, suppose X just played `(2,2)` and the row is
+  `. X X X .` (cols 1,2,3 are X). Take the horizontal axis: walk left from `(2,2)` —
+  `(2,1)` is X (count 1), `(2,0)` is empty, stop; walk right — `(2,3)` is X (count 1),
+  `(2,4)` is empty, stop. Total = 1 (left) + 1 (right) + 1 (the placed cell) = 3 == K →
+  win. Repeat the same two-way walk for the vertical and both diagonal axes; the first axis
+  reaching K wins. Encapsulate it behind a `WinChecker` interface (`CounterWinChecker` for
+  K == N, `DirectionalScanWinChecker` for K < N) so `Board` stays closed for modification —
   Strategy applied a second time.
 - **Undo a move (Command pattern preview).** `Game` already keeps a `Deque<Move>` history.
   Full undo means reifying each move as a command object with `execute()`/`undo()` that

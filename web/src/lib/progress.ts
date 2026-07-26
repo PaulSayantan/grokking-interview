@@ -34,7 +34,14 @@ export const STREAK_GRACE_DAYS = 1;
 /** Mastery tiers derived from a subtopic's best accuracy. */
 export type MasteryLevel = "none" | "attempted" | "familiar" | "mastered";
 
-/** One question's latest outcome. `correct` = most recent answer was right. */
+/**
+ * One question's latest outcome + spaced-repetition schedule.
+ *
+ * SRS fields (interval/due/reps/lapses) are OPTIONAL so records written by the
+ * pre-SRS build still load: readers default them (see `srsOf`). `recordAnswers`
+ * backfills them on the next answer, so the schema migrates lazily with no
+ * destructive rewrite of existing localStorage.
+ */
 export interface AnswerRecord {
   /** Most recent answer correct? Drives the review-missed pool. */
   correct: boolean;
@@ -43,6 +50,54 @@ export interface AnswerRecord {
   topic_slug: string;
   /** epoch ms of the last time this question was answered. */
   ts: number;
+  /** SRS: current interval in days (0 before first schedule). */
+  interval?: number;
+  /** SRS: epoch ms when this question is next due for review. */
+  due?: number;
+  /** SRS: consecutive correct reviews (resets to 0 on a lapse). */
+  reps?: number;
+  /** SRS: total times answered wrong after being learned. */
+  lapses?: number;
+}
+
+/**
+ * Spaced-repetition intervals in DAYS. A correct answer advances one step; a
+ * wrong answer drops back to the first step. Leitner-style, deliberately simple
+ * (no ease factor) — the goal is durable recall, not exam-grade SM-2 tuning.
+ */
+export const SRS_INTERVALS = [1, 3, 7, 14, 30] as const;
+const DAY_MS = 86_400_000;
+
+/** SRS view of a record with all optional fields defaulted. */
+export function srsOf(r: AnswerRecord): { interval: number; due: number; reps: number; lapses: number } {
+  return {
+    interval: r.interval ?? 0,
+    // A record with no schedule yet is treated as due now (ts, or 0).
+    due: r.due ?? r.ts ?? 0,
+    reps: r.reps ?? 0,
+    lapses: r.lapses ?? 0,
+  };
+}
+
+/**
+ * Given the prior schedule and whether this review was correct, compute the
+ * next {interval, due, reps, lapses}. Correct: step to the next interval and
+ * schedule `due = now + interval days`. Wrong: reset to the first interval,
+ * `due = now + 1 day`, increment lapses.
+ */
+export function nextSchedule(
+  prev: { interval: number; reps: number; lapses: number },
+  correct: boolean,
+  now: number,
+): { interval: number; due: number; reps: number; lapses: number } {
+  if (correct) {
+    // Advance: find the current interval's position, step forward one (capped).
+    const idx = SRS_INTERVALS.findIndex((d) => d >= prev.interval);
+    const nextIdx = idx < 0 ? 0 : Math.min(idx + 1, SRS_INTERVALS.length - 1);
+    const interval = SRS_INTERVALS[prev.interval === 0 ? 0 : nextIdx];
+    return { interval, due: now + interval * DAY_MS, reps: prev.reps + 1, lapses: prev.lapses };
+  }
+  return { interval: SRS_INTERVALS[0], due: now + SRS_INTERVALS[0] * DAY_MS, reps: 0, lapses: prev.lapses + 1 };
 }
 
 export interface StreakRecord {
@@ -116,7 +171,21 @@ export function recordAnswers(
   const map = readAnswers();
   const ts = Date.now();
   for (const e of entries) {
-    map[e.id] = { correct: e.correct, domain: e.domain, topic_slug: e.topic_slug, ts };
+    // Advance the spaced-repetition schedule from whatever the prior record held
+    // (defaults for a first-ever or pre-SRS record via srsOf).
+    const prior = map[e.id];
+    const prevSrs = prior ? srsOf(prior) : { interval: 0, due: 0, reps: 0, lapses: 0 };
+    const sched = nextSchedule(prevSrs, e.correct, ts);
+    map[e.id] = {
+      correct: e.correct,
+      domain: e.domain,
+      topic_slug: e.topic_slug,
+      ts,
+      interval: sched.interval,
+      due: sched.due,
+      reps: sched.reps,
+      lapses: sched.lapses,
+    };
   }
   writeJSON(ANSWERS_KEY, map);
 }
@@ -140,6 +209,39 @@ export function missedCount(filter?: { domain?: string; topic_slug?: string }): 
   return missedIds(filter).length;
 }
 
+// --- Spaced repetition: due queue --------------------------------------------
+
+/**
+ * IDs whose spaced-repetition `due` time has arrived (<= now), optionally scoped
+ * to a domain / subtopic. This is the "Due today" review pool — it spans every
+ * question the learner has ever answered, surfacing each when its interval elapses.
+ * Sorted most-overdue first so the highest-value reviews come up first.
+ */
+export function dueIds(
+  filter?: { domain?: string; topic_slug?: string },
+  now: number = Date.now(),
+): string[] {
+  const map = readAnswers();
+  const rows: { id: string; due: number }[] = [];
+  for (const id in map) {
+    const r = map[id];
+    if (filter?.domain && r.domain !== filter.domain) continue;
+    if (filter?.topic_slug && r.topic_slug !== filter.topic_slug) continue;
+    const { due } = srsOf(r);
+    if (due <= now) rows.push({ id, due });
+  }
+  rows.sort((a, b) => a.due - b.due); // most overdue first
+  return rows.map((r) => r.id);
+}
+
+/** Count of questions currently due for spaced-repetition review. */
+export function dueCount(
+  filter?: { domain?: string; topic_slug?: string },
+  now: number = Date.now(),
+): number {
+  return dueIds(filter, now).length;
+}
+
 // --- Mastery ---------------------------------------------------------------
 
 /**
@@ -155,9 +257,17 @@ export interface SubtopicMastery {
   level: MasteryLevel;
 }
 
+/**
+ * Minimum questions seen before a subtopic can be called "mastered". Guards
+ * against a single lucky answer (1/1 = 100%) reading as green "mastered" — you
+ * need real evidence. Below this floor a high accuracy caps at "familiar".
+ */
+export const MASTERY_MIN_SEEN = 5;
+
 export function masteryLevel(pct: number, seen: number): MasteryLevel {
   if (seen === 0) return "none";
-  if (pct >= 80) return "mastered";
+  // "Mastered" requires both high accuracy AND enough evidence to trust it.
+  if (pct >= 80 && seen >= MASTERY_MIN_SEEN) return "mastered";
   if (pct >= 50) return "familiar";
   return "attempted";
 }

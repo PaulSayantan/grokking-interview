@@ -75,6 +75,32 @@ Extract the nouns and give each a single responsibility:
 > Any design with `switch (piece.getType())` scattered through the game logic fails the
 > Open/Closed test: adding a fairy-chess piece would mean editing every switch.
 
+## Coordinate Convention
+
+Pin the board-to-array mapping once, up front, and reference it everywhere. The single most
+common source of off-by-one and wrong-direction bugs in a chess implementation is a
+convention that drifts mid-design ("wait, is row 0 rank 1 or rank 8?"). This document fixes:
+
+- `grid[row][col]`, both indices `0..7`.
+- **`grid[0][0]` = a8** (top-left from White's seat), **`grid[7][7]` = h1** (bottom-right).
+- **Row increases downward**: `row = 8 − rank`, so rank 8 → row 0, rank 1 → row 7.
+- **Col = file**: `col = file − 'a'`, so file a → col 0, file h → col 7.
+
+A few squares in this mapping, reused by every trace below:
+
+| Square | rank, file | `[row][col]` |
+|---|---|---|
+| a8 | 8, a | `[0][0]` |
+| e8 | 8, e | `[0][4]` |
+| e4 | 4, e | `[4][4]` |
+| e2 | 2, e | `[6][4]` |
+| e1 | 1, e | `[7][4]` |
+| h1 | 1, h | `[7][7]` |
+
+Because White starts on ranks 1–2 (rows 7–6) and advances toward rank 8 (row 0), **White
+pawns move in direction `dir = −1`** (decreasing row) and Black pawns in `dir = +1`. That is
+exactly the `dir = (color == WHITE) ? -1 : 1` in the code skeleton.
+
 ## Class Diagram
 
 ```mermaid
@@ -250,6 +276,39 @@ The heart of `Game.makeMove`. Walk the interviewer through the ordered checks:
 8. **Status update:** compute opponent's state — check, checkmate, stalemate — and notify
    observers.
 
+**Worked trace — one legal move and one illegal (pinned) move.** Take this position, White
+to move (using the `[row][col]` convention above):
+
+- White: King e1 `[7][4]`, Bishop e2 `[6][4]`, Knight g1 `[7][6]`.
+- Black: Rook e8 `[0][4]` (aimed down the e-file, currently blocked by the bishop).
+
+*Move A — Knight g1→f3* (`[7][6]`→`[5][5]`): `dr=|5−7|=2`, `dc=|5−6|=1`.
+
+| Step | Check | Result |
+|---|---|---|
+| 1 | Game active? | `ACTIVE` → pass |
+| 2 | Piece at g1 is White, turn is WHITE | pass |
+| 3 | f3 empty → no self-capture | pass |
+| 4 | `Knight.canMove`: `dr*dc = 2*1 = 2` | `true` |
+| 5 | Path clearance | knight jumps → skipped |
+| 6 | Simulate Nf3, is e1 attacked by BLACK? Rook e8's ray down the e-file still hits the bishop on e2 first | `false` → king safe |
+| 7–8 | Execute, record, flip turn, evaluate status | move stands |
+
+Verdict: **legal.**
+
+*Move B — Bishop e2→d3* (`[6][4]`→`[5][3]`): `dr=|5−6|=1`, `dc=|3−4|=1`.
+
+| Step | Check | Result |
+|---|---|---|
+| 1–3 | active, White's turn, d3 empty | pass |
+| 4 | `Bishop.canMove`: `dr==dc==1 > 0` | `true` |
+| 5 | `isPathClear(e2,d3)`: adjacent, no square between | `true` |
+| 6 | Simulate Bxd3. Now the e-file e2–e7 is empty, so `isSquareAttacked(e1, BLACK)` casts the rook's ray e8→e1 unobstructed → hits the King | `true` → **leaves own king in check** |
+
+Verdict: **illegal**, rejected at step 6 — the bishop was *pinned*. Note that steps 1–5 (the
+pseudo-legal checks) all passed; only the simulate-and-test in step 6 caught it. That is the
+whole point of separating pseudo-legal from legal — no special "am I pinned?" code exists.
+
 **Pawn geometry deserves its own paragraph** — it's the piece most likely to expose a shaky
 design, because its capture rule differs from its movement rule:
 
@@ -297,6 +356,30 @@ generate-and-test:
 Don't try to enumerate "can the king run, can the checker be captured, can the check be
 blocked" as separate hand-coded cases — the generate-and-test loop covers all three
 uniformly, including double check (where only king moves can help) for free.
+
+**Worked trace — a back-rank mate.** Position, Black to move (coordinates as above):
+
+- Black: King g8 `[0][6]`, Pawns f7 `[1][5]`, g7 `[1][6]`, h7 `[1][7]` (the king's own pawns
+  form the wall that traps it).
+- White: Rook e8 `[0][4]`, King g1 `[7][6]` (off to the side, irrelevant here).
+
+First, is Black in check? `isSquareAttacked(g8, WHITE)`: the rook on e8 casts a ray along
+rank 8 — e8 → f8 `[0][5]` (empty) → g8. It reaches the king unobstructed. **In check.**
+
+Now generate-and-test every Black move; each must leave g8 un-attacked to escape mate:
+
+| Candidate move | Why it fails |
+|---|---|
+| K g8→f8 `[0][5]` | Still on rank 8; rook ray e8→f8 (adjacent) hits it → attacked |
+| K g8→h8 `[0][7]` | King vacates g8, so rook ray e8→f8→g8→h8 is now clear to h8 → attacked |
+| K g8→f7/g7/h7 | All occupied by Black's own pawns → not even pseudo-legal |
+| Pawn f7→f6/f5, g7→g6/g5, h7→h6/h5 | Pawn pushes go toward rank 6/5; none land on f8, so the rook's rank-8 ray to g8 is untouched → king still attacked |
+
+No Black piece attacks e8 (king isn't adjacent; pawns can't capture backward), so the rook
+**cannot be captured**; nothing can reach f8, so the check **cannot be blocked**. Every
+candidate simulation leaves the king attacked → the loop returns "no legal move exists."
+In check **and** no legal move → **CHECKMATE**. Notice the loop never enumerated "run /
+capture / block" as cases — it just tried every move and found all illegal.
 
 **Stalemate = NOT in check AND no legal move exists.** Same loop, opposite check condition.
 Result is a draw, not a win — a classic correctness trap.
@@ -355,6 +438,48 @@ hard-code queen). Design points:
   subclass model. (This is the one spot where the Strategy-composition alternative shines —
   it would swap a strategy instead — acknowledge and move on.)
 - Undo must restore the pawn, another reason `Move` records what happened.
+
+**Concrete `Move` objects — where the abstraction bends.** Filling in the actual fields makes
+the execute/undo branching tangible (coordinates as above):
+
+*Kingside castle, White* — one atomic `Move`, `type = CASTLE_KINGSIDE`, that records **both**
+pieces it moves:
+
+```
+Move {
+  from = e1 [7][4],  to = g1 [7][6],  moved = King(WHITE),   // primary king hop
+  rookFrom = h1 [7][7],  rookTo = f1 [7][5],                 // rook the same move drags
+  captured = null,
+  type = CASTLE_KINGSIDE,
+  kingWasFirstMove = true,  rookWasFirstMove = true          // for undo, see below
+}
+```
+
+Execute sets four cells (e1, h1 empty; g1, f1 filled) in one step; undo reverses all four.
+
+*En passant, White pawn e5 captures Black pawn on d5* — Black has just played d7→d5, so the
+en-passant target square is d6:
+
+```
+Move {
+  from = e5 [3][4],  to = d6 [2][3],       // the capturing pawn lands on d6...
+  moved = Pawn(WHITE),
+  captured = Pawn(BLACK),
+  capturedSquare = d5 [3][3],              // ...but the captured pawn sat on d5, NOT on 'to'
+  type = EN_PASSANT
+}
+```
+
+The trap: naive undo restores `captured` onto `to` (d6) and corrupts the board. Storing
+`capturedSquare = d5` separately from `to = d6` is what makes en-passant undo correct — the
+one rule where captured square ≠ destination square.
+
+**Undo must restore state, not just squares.** Because `hasMoved` flips only forward, the
+`Move` also snapshots the *prior* first-move flags (`kingWasFirstMove` / `rookWasFirstMove`
+above, or a `firstMoveOfPiece` boolean for a normal move). `unmovePiece` restores them;
+otherwise undoing a king's first move would silently leave `hasMoved = true` and destroy
+castling rights forever. Same goes for the prior en-passant-target square if you cache it
+FEN-style.
 
 ## API and Method Signatures
 
@@ -467,6 +592,16 @@ public class Pawn extends Piece {
         if (dc == 1 && dr == dir && !targetEmpty)                      // capture
             return true;
         return false;   // en passant handled by MoveValidator with history context
+    }
+
+    /** A pawn threatens its two forward diagonals regardless of occupancy,
+        and never the square it pushes to — so this diverges from canMove. */
+    @Override
+    public boolean attacks(Board board, Position from, Position to) {
+        int dir = (color == Color.WHITE) ? -1 : 1;     // white moves up
+        int dr = to.row() - from.row();
+        int dc = Math.abs(to.col() - from.col());
+        return dc == 1 && dr == dir;                   // diagonals only, occupancy ignored
     }
 }
 

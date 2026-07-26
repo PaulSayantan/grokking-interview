@@ -40,8 +40,10 @@ List<Author> authors = em.createQuery(
     .getResultList();
 ```
 
-Hibernate parses this into its **Semantic Query Model (SQM)** — an AST of the query in
-terms of the entity model — and then translates SQM to SQL for the configured dialect:
+Hibernate parses this into its **Semantic Query Model (SQM)** — an **abstract syntax tree
+(AST)**, i.e. a structured, in-memory tree representation of the query, expressed in terms
+of the entity model rather than tables — and then translates SQM to SQL for the configured
+dialect:
 
 ```sql
 select a.id, a.name, a.version
@@ -116,15 +118,18 @@ CriteriaBuilder cb = em.getCriteriaBuilder();
 CriteriaQuery<Author> cq = cb.createQuery(Author.class);
 Root<Author> author = cq.from(Author.class);
 
-List<Predicate> filters = new ArrayList<>();
+List<Predicate> filters = new ArrayList<>();   // row filters -> WHERE
 if (name != null) {
     filters.add(cb.like(author.get(Author_.name), name + "%"));  // metamodel: Author_.name
 }
-if (minBooks != null) {
-    Join<Author, Book> b = author.join(Author_.books);
-    filters.add(cb.gt(cb.count(b), minBooks));
-}
 cq.select(author).where(cb.and(filters.toArray(new Predicate[0])));
+
+if (minBooks != null) {
+    // An aggregate (COUNT) is illegal in WHERE — it belongs in HAVING with a GROUP BY.
+    Join<Author, Book> b = author.join(Author_.books);
+    cq.groupBy(author);
+    cq.having(cb.gt(cb.count(b), minBooks));
+}
 
 List<Author> result = em.createQuery(cq).getResultList();
 ```

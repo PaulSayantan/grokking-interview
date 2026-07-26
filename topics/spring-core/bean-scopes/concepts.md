@@ -1,7 +1,8 @@
 # Bean Scopes
 
 A **bean scope** controls the *lifecycle and visibility* of the object(s) that the Spring
-IoC container creates from a single bean definition: how many instances exist, when they
+**IoC (Inversion of Control) container** — the container that creates and wires your objects
+instead of your code doing it — creates from a single bean definition: how many instances exist, when they
 are created, how long they live, and which callers share them. A bean *definition* is a
 recipe; the scope decides how many objects that recipe produces and who sees each one.
 
@@ -101,6 +102,36 @@ are destroyed when the container shuts down.
   satisfy that eager dependency — unless the **injection point itself** is `@Lazy` (which
   injects a proxy and defers the target's creation to first method call).
 
+#### Worked example: how the three-level cache breaks a setter cycle
+
+Take two singletons that need each other by **setter/field** injection — `A` has a `B`, `B`
+has an `A`. Watch Spring resolve it (`getSingleton` / the three maps in
+`DefaultSingletonBeanRegistry`):
+
+1. `getBean("a")` → `a` not in `singletonObjects`. Mark `a` **"currently in creation"** and
+   run its **constructor** (no args, so this succeeds) → raw `A` object exists.
+2. Before populating `A`'s fields, Spring stores an **`ObjectFactory` for `a` in
+   `singletonFactories`** — this can hand out the *early*, not-yet-initialized `A`.
+3. Populate `A` → `A` needs `B` → `getBean("b")`.
+4. `b` not present → mark `b` in creation, construct raw `B`, put `B`'s factory in
+   `singletonFactories`.
+5. Populate `B` → `B` needs `A` → `getBean("a")`.
+6. `getSingleton("a")`: miss in `singletonObjects`, miss in `earlySingletonObjects`, **HIT in
+   `singletonFactories`** (from step 2). Spring calls that factory → gets the **early `A`
+   reference**, moves it to `earlySingletonObjects`, drops the factory. Returns early-`A` to `B`.
+7. `B.setA(earlyA)` completes → `B` finishes init (`@PostConstruct` etc.) → **promoted to
+   `singletonObjects`**. `getBean("b")` returns the finished `B`.
+8. Back in step 3: `A.setB(B)` completes → `A` finishes init → **promoted to
+   `singletonObjects`**. Because the early reference *is* the same object, the `A` that `B`
+   holds is the finished `A`. Both beans fully wired.
+
+**Why the constructor cycle can't do this:** with constructor injection, step 1 can never
+finish — `A`'s constructor demands a `B` *before any `A` object exists*, so there is nothing
+to expose in `singletonFactories` at step 2. Creating `B` then re-enters creation of `A`,
+finds it "in creation" with **no early reference to hand out**, and throws
+`BeanCurrentlyInCreationException`. The cache only works because a setter cycle lets Spring
+publish a half-built instance; a constructor cycle has no half-built instance to publish.
+
 ---
 
 ## Prototype scope
@@ -147,6 +178,8 @@ majority of beans. Prototypes are comparatively rare in typical applications.
 - **`@Scope("prototype")` on a `@Bean` factory method** produces a new instance per lookup,
   but only if the method is *called through the container*. Inside a `@Configuration` class,
   calling one `@Bean` method from another is intercepted by the CGLIB-enhanced config proxy
+  (**CGLIB** = *Code Generation Library*, which Spring uses to generate a runtime subclass of
+  a class so it can intercept its method calls without needing an interface)
   and routed through `getBean`, so prototype semantics are preserved; calling a prototype
   `@Bean` method on a `@Configuration(proxyBeanMethods = false)` "lite" config, or via a
   plain `@Component`, is a *direct* Java call that bypasses the container and returns a plain
@@ -156,6 +189,15 @@ majority of beans. Prototypes are comparatively rare in typical applications.
   not at startup — the opposite of the fail-fast singleton behavior.
 - A prototype **injected by `ObjectProvider.stream()`** into a collection is materialized once
   per stream call; each terminal operation that pulls elements creates fresh instances.
+- **Prototypes do NOT leak — the container's forgetting them is what makes them GC-eligible.**
+  A common misconception is that "no destruction callback" means prototypes accumulate like
+  singletons. The opposite: because the container keeps **no reference** after handing the
+  instance over, a prototype becomes eligible for garbage collection the moment the *client*
+  drops its reference. The only gap is deterministic cleanup of external resources (files,
+  sockets, native handles) that GC won't release for you — that is what `@PreDestroy` would
+  have handled and why you clean those up yourself. Contrast with **web scopes**, which *do*
+  fire destruction callbacks: a `request`/`session`-scoped bean gets its `@PreDestroy` invoked
+  when the request completes or the session is invalidated.
 
 ---
 
@@ -179,8 +221,19 @@ only usable when there is a bound web request/session on the thread.
   (there can be several contexts in one app), and it is **exposed as a `ServletContext`
   attribute**, visible to plain servlet code.
 - **websocket** — bound to a WebSocket session; applies to **STOMP-over-WebSocket**
-  applications. Typically declared with a scoped proxy because it's injected into
-  longer-lived beans.
+  applications. (**STOMP** = *Simple Text Oriented Messaging Protocol*, a lightweight
+  message framing that Spring layers on top of raw WebSockets to give them a
+  publish/subscribe, message-broker-style API.) Typically declared with a scoped proxy
+  because it's injected into longer-lived beans.
+
+**Why these scopes exist (intuition).** Your controllers and services are singletons —
+one instance shared by *every* user's request at once. So where does per-user or
+per-request state live? You cannot put it in a singleton field (all users would clobber
+each other's data), and threading it through every method call as arguments is tedious.
+`session` scope gives each *user* their own instance (a shopping cart that persists across
+their clicks); `request` scope gives each *HTTP request* its own instance (a correlation-id
+holder that must NOT bleed into the next request). The container manages the lifetime and
+routes each caller to the right instance for you.
 
 ```java
 @Component
@@ -188,8 +241,12 @@ only usable when there is a bound web request/session on the thread.
 public class RequestContextHolderBean { }
 
 @Component
-@SessionScope
-public class ShoppingCart { }
+@SessionScope                 // one instance per user's HttpSession
+public class ShoppingCart {
+    private final List<String> items = new ArrayList<>();
+    public void addItem(String sku) { items.add(sku); }
+    public List<String> getItems() { return items; }
+}
 ```
 
 ### Web setup and thread binding
@@ -347,6 +404,68 @@ Scoped proxies are the *usual* solution for **web scopes** (injecting a `request
 bean into a singleton), because the shorter-lived bean often doesn't even exist at singleton
 wiring time.
 
+#### Worked example: one proxy, a different backing instance per user
+
+A singleton `CartController` injects a `@SessionScope ShoppingCart cart`. At startup Spring
+wires **one** CGLIB proxy object into that field — call it `cartProxy`. That reference never
+changes. Now trace three requests (`RequestContextHolder` holds the request/session bound to
+the current thread; `ObjectFactory` is the creator Spring registered for the `ShoppingCart`
+definition):
+
+1. **User A, request 1** (session `S_A`, thread `t1`): `DispatcherServlet` binds `S_A` to
+   `t1`. Controller calls `cart.addItem("book")` → really `cartProxy.addItem(...)`. The proxy
+   asks `RequestContextHolder` for the current session → `S_A`. It looks up session attribute
+   `scopedTarget.cart` in `S_A` → **miss**. So it invokes the `ObjectFactory` → creates +
+   inits a fresh `ShoppingCart` (`cart#1`, runs `@PostConstruct`), stores it under
+   `scopedTarget.cart` in `S_A`, then forwards `addItem("book")` to it. `cart#1.items = [book]`.
+2. **User A, request 2** (same session `S_A`, thread `t2`): binds `S_A` to `t2`. Controller
+   calls `cart.addItem("pen")`. Proxy → current session `S_A` → look up `scopedTarget.cart` →
+   **HIT: `cart#1`**. Forwards. `cart#1.items = [book, pen]`. Same object identity as request
+   1 even though a different thread served it — because identity is keyed on the *session*,
+   not the thread and not the proxy.
+3. **User B, request 1** (different session `S_B`, thread `t3`): binds `S_B`. Controller calls
+   `cart.getItems()`. Proxy → current session `S_B` → look up `scopedTarget.cart` in `S_B` →
+   **miss** → `ObjectFactory` creates `cart#2`, stores it in `S_B`, forwards. `cart#2.items =
+   []` — User B sees an empty cart, fully isolated from User A's `cart#1`.
+
+So `cartProxy` (a singleton) is stable, but each `cart.method()` call resolves the backing
+instance *at call time* from whatever session is bound to the thread: `cart#1` for User A
+(across both requests), `cart#2` for User B. That is the whole point of the proxy — it lets a
+long-lived singleton hold a field that transparently maps to the right short-lived instance.
+When `S_A` is invalidated, Spring fires `cart#1`'s destruction callback and drops it.
+
+The per-call resolution — same proxy, different backing instance depending on which session
+is bound to the thread — looks like this:
+
+```mermaid
+sequenceDiagram
+    participant Ctrl as CartController (singleton)
+    participant Proxy as cartProxy (singleton CGLIB proxy)
+    participant RCH as RequestContextHolder
+    participant Store as Session attribute store
+    Note over Ctrl,Store: User A, request 1 (session S_A on thread t1)
+    Ctrl->>Proxy: cart.addItem("book")
+    Proxy->>RCH: current session?
+    RCH-->>Proxy: S_A
+    Proxy->>Store: get scopedTarget.cart in S_A
+    Store-->>Proxy: miss -> ObjectFactory creates cart#1 (@PostConstruct), cache in S_A
+    Proxy-->>Ctrl: forwarded to cart#1  [book]
+    Note over Ctrl,Store: User A, request 2 (same S_A on thread t2)
+    Ctrl->>Proxy: cart.addItem("pen")
+    Proxy->>RCH: current session?
+    RCH-->>Proxy: S_A
+    Proxy->>Store: get scopedTarget.cart in S_A
+    Store-->>Proxy: HIT cart#1
+    Proxy-->>Ctrl: forwarded to cart#1  [book, pen]
+    Note over Ctrl,Store: User B, request 1 (session S_B on thread t3)
+    Ctrl->>Proxy: cart.getItems()
+    Proxy->>RCH: current session?
+    RCH-->>Proxy: S_B
+    Proxy->>Store: get scopedTarget.cart in S_B
+    Store-->>Proxy: miss -> ObjectFactory creates cart#2, cache in S_B
+    Proxy-->>Ctrl: forwarded to cart#2  []
+```
+
 ### Solution 3 — `@Lookup` / Method Injection
 
 Let the container **override an abstract or concrete method** to return a fresh prototype on
@@ -394,7 +513,9 @@ usually cleaner.
   of `NullPointerException` on uninitialized proxy fields). Since Spring 4.0+/objenesis the
   target's constructor is bypassed for the proxy, so a no-arg constructor is not strictly
   required, but the *concrete class* must still be non-final.
-- **Ordering with AOP.** A scoped proxy and other AOP proxies (transactions, security) stack;
+- **Ordering with AOP.** A scoped proxy and other **AOP** (Aspect-Oriented Programming —
+  Spring's mechanism for wrapping beans in proxies to inject cross-cutting behavior like
+  transactions and security) proxies (transactions, security) stack;
   the scoped proxy sits at the injection point and resolves the target, then the target's own
   advice applies. Mixing `proxyMode = INTERFACES` with class-based AOP elsewhere can surface
   `ClassCastException`/proxy-type mismatches if code casts the injected proxy to the concrete

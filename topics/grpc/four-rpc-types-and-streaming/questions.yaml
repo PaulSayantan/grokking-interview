@@ -11,9 +11,9 @@ questions:
       type a given method is?
     options:
       - "Four types, fixed at schema-compile time by the presence of the stream keyword on the request and/or response"
-      - "Three types, chosen at runtime by a flag in the request metadata"
-      - "Four types, chosen by the client library at connection time"
-      - "Two types (sync and async), selected by the generated stub"
+      - "Three types, negotiated at runtime by a flag set in the request metadata during the initial handshake"
+      - "Four types, selected by the generated client library when the channel first connects to the server"
+      - "Two types (synchronous and asynchronous), selected by which variant of the generated stub you call"
     answer: 0
     explanation: |
       gRPC has exactly four RPC types (unary, server-streaming, client-streaming,
@@ -62,7 +62,7 @@ questions:
     question: |
       How does a single gRPC call (of any of the four types) map onto HTTP/2?
     options:
-      - "Each message becomes its own HTTP/2 stream"
+      - "Each individual message becomes its own separate HTTP/2 stream with its own stream id"
       - "Each direction of the call uses a separate HTTP/2 connection"
       - "Unary calls use HTTP/2 but streaming calls fall back to a raw TCP socket"
       - "The entire call — all messages in both directions plus the final status — is one HTTP/2 stream"
@@ -81,7 +81,7 @@ questions:
       that precede each message payload inside HTTP/2 DATA frames?
     options:
       - "A 4-byte message length followed by a 1-byte checksum"
-      - "A 5-byte little-endian message length"
+      - "A single 5-byte little-endian unsigned message length field"
       - "A 1-byte compressed flag followed by a 4-byte big-endian message length"
       - "A 1-byte message-type tag followed by a 4-byte sequence number"
     answer: 2
@@ -98,9 +98,9 @@ questions:
       What does the first (compressed-flag) byte of a gRPC length-prefixed
       message indicate?
     options:
-      - "A bitmask naming which compression algorithm was used"
-      - "The protobuf wire type of the first field"
-      - "Whether this is the last message in the stream"
+      - "A bitmask naming which specific compression algorithm (gzip, snappy, or deflate) was applied"
+      - "The protobuf wire type and field number of the first field in the encoded payload"
+      - "Whether this is the final message in the stream, signalling the receiver to stop reading"
       - "Whether the payload is compressed (1) or not (0), using the algorithm named in the grpc-encoding header"
     answer: 3
     explanation: |
@@ -173,7 +173,7 @@ questions:
       - "The client sends a special sentinel message with an empty body"
       - "The server counts messages until it reaches a count sent in metadata"
       - "The client half-closes (HTTP/2 END_STREAM), which the server observes as io.EOF on Recv"
-      - "The connection is closed and reopened for the response"
+      - "The underlying connection is closed and then reopened by the client to receive the response"
     answer: 2
     explanation: |
       The client explicitly half-closes (CloseAndRecv / CloseSend), setting HTTP/2
@@ -188,9 +188,9 @@ questions:
       On a bidirectional streaming RPC, does gRPC guarantee that the Nth response
       corresponds to the Nth request?
     options:
-      - "Yes, gRPC pairs each request with a response automatically"
-      - "Yes, but only if both sides use the same message type"
-      - "Only when the deadline is disabled"
+      - "Yes, gRPC transparently pairs each request with its response by tagging them with an internal sequence id"
+      - "Yes, but only when both directions are declared with the same message type in the .proto definition"
+      - "Only when the call's deadline is disabled, which lets gRPC buffer and align the two directions"
       - "No — the two directions are independent streams; you must correlate them in application code if needed"
     answer: 3
     explanation: |
@@ -207,9 +207,9 @@ questions:
       overwhelm a slow consumer's memory?
     options:
       - "HTTP/2 flow-control windows: when the receiver's window fills, the sender's writes block"
-      - "A fixed 100-message buffer per stream in the gRPC library"
-      - "TCP Nagle's algorithm coalescing small writes"
-      - "The application must implement its own ack protocol; gRPC provides none"
+      - "A fixed 100-message ring buffer per stream inside the gRPC library that drops overflow messages"
+      - "TCP Nagle's algorithm, which coalesces small writes and thereby throttles the producer's send rate"
+      - "The application must implement its own ack protocol; gRPC provides no built-in backpressure at all"
     answer: 0
     explanation: |
       gRPC inherits HTTP/2 flow control. Each stream (and the connection) has a
@@ -224,9 +224,9 @@ questions:
       A client decides mid-stream that it no longer wants a long server-streaming
       response. What happens on the wire when it cancels?
     options:
-      - "It sends a GOAWAY frame that closes the whole connection"
-      - "It sends a FIN on the TCP socket, aborting all in-flight RPCs"
-      - "It sets a cancelled flag in the next request message"
+      - "It sends an HTTP/2 GOAWAY frame that gracefully closes the whole underlying connection and all its streams"
+      - "It sends a TCP FIN on the socket, which aborts every in-flight RPC multiplexed on that connection"
+      - "It sets a cancelled boolean flag in the header of the next request message it sends on the stream"
       - "It sends an HTTP/2 RST_STREAM frame (CANCEL) that tears down just that stream; the server's context fires Done"
     answer: 3
     explanation: |
@@ -244,9 +244,9 @@ questions:
       what ordering does the receiver observe?
     options:
       - "A then B — messages within one direction of one stream are delivered in send order"
-      - "Undefined order; you must add sequence numbers"
-      - "B then A, because gRPC uses a LIFO send buffer"
-      - "They may be merged into a single message"
+      - "Undefined order; the transport may reorder them, so you must add explicit sequence numbers to recover order"
+      - "B then A, because gRPC drains its per-stream send buffer in last-in-first-out order before flushing"
+      - "They may be coalesced into a single combined message when they fit within one HTTP/2 DATA frame"
     answer: 0
     explanation: |
       gRPC guarantees per-direction, per-stream ordering: messages arrive in the
@@ -280,9 +280,9 @@ questions:
       balancing and rolling deploys compared to unary calls?
     options:
       - "Because the whole stream is pinned to one backend and connection for its entire lifetime"
-      - "Because streaming disables TLS"
-      - "Because streaming responses cannot be compressed"
-      - "Because HTTP/2 forbids more than one stream per connection"
+      - "Because opening a long-lived stream disables TLS session resumption on that connection"
+      - "Because streamed responses cannot be compressed, so they saturate the backend's outbound bandwidth"
+      - "Because HTTP/2 forbids more than one concurrent stream per connection once streaming begins"
     answer: 0
     explanation: |
       A stream lives on one HTTP/2 stream on one connection to one backend for its
@@ -297,10 +297,10 @@ questions:
     question: |
       What is the difference between half-closing a stream and cancelling it?
     options:
-      - "They are synonyms in gRPC"
-      - "Half-close aborts the RPC; cancel just pauses it"
+      - "They are interchangeable synonyms in gRPC that both end the RPC in exactly the same way"
+      - "Half-close aborts the RPC immediately with CANCELLED, while cancel merely pauses it until it is resumed"
       - "Half-close means 'no more messages from me' while the RPC stays alive; cancel tears the whole RPC down"
-      - "Half-close applies only to the server; cancel only to the client"
+      - "Half-close is available only to the server side, while cancellation is available only to the client side"
     answer: 2
     explanation: |
       Half-close (END_STREAM) signals a sender is done sending but the RPC
@@ -315,9 +315,9 @@ questions:
       A bidirectional stream hangs forever. Both peers are blocked calling Recv,
       each waiting for the other to Send. What is the root cause and typical fix?
     options:
-      - "A TLS renegotiation loop; disable mTLS"
-      - "The max-message-size is too small; raise it"
-      - "HPACK header compression corruption; disable compression"
+      - "A TLS renegotiation loop stalls the handshake; the fix is to disable mTLS on the stream"
+      - "The configured max-message-size is too small to hold a queued message; raise it on both peers"
+      - "HPACK header-compression state corruption blocks the frames; disable compression to recover"
       - "Mutual blocking / deadlock; run the send loop and receive loop concurrently on each side"
     answer: 3
     explanation: |
@@ -333,10 +333,10 @@ questions:
       In a Go client consuming a server-streaming RPC, what does stream.Recv()
       returning io.EOF mean?
     options:
-      - "A network error occurred and the call failed"
-      - "The client must call Recv again to retry"
+      - "A transport error occurred mid-stream and the call failed with UNAVAILABLE"
+      - "The client should call Recv again to retry receiving the interrupted message"
       - "The server cleanly ended the stream (status OK); there are no more messages"
-      - "The deadline expired"
+      - "The call's configured deadline expired before the server finished responding"
     answer: 2
     explanation: |
       io.EOF is the clean end-of-stream signal: the server finished sending and
@@ -351,9 +351,9 @@ questions:
       A client tries to send a single 40 MiB message on a server with the default
       4 MiB max receive message size. What typically happens?
     options:
-      - "The message is silently truncated to 4 MiB"
-      - "gRPC automatically splits it into multiple messages"
-      - "The message is compressed until it fits"
+      - "The message is silently truncated to the 4 MiB limit and the rest is dropped"
+      - "gRPC automatically splits it into several 4 MiB messages and reassembles them"
+      - "The message is transparently gzip-compressed until it fits under the limit"
       - "The RPC fails with RESOURCE_EXHAUSTED because it exceeds the max message size"
     answer: 3
     explanation: |
@@ -371,9 +371,9 @@ questions:
       name being invoked?
     options:
       - "Always POST; the gRPC method is in the :path pseudo-header as /package.Service/Method"
-      - "GET for unary, POST for streaming; method in a query parameter"
-      - "Always PUT; the method is in a grpc-method header"
-      - "The verb varies by RPC type; the method is in the request body"
+      - "GET for unary and POST for streaming; the method name rides in a URL query parameter"
+      - "Always PUT; the invoked method name travels in a dedicated grpc-method request header"
+      - "The verb varies by RPC type; the method name is embedded in the request body"
     answer: 0
     explanation: |
       gRPC always uses POST. The fully qualified method is encoded in the HTTP/2
@@ -387,9 +387,9 @@ questions:
     question: |
       Which scenario is the best fit for a client-streaming RPC?
     options:
-      - "Fetching a user's profile by id"
-      - "A realtime chat room with many participants"
-      - "Subscribing to a live price feed"
+      - "Fetching a single user's profile record by its unique id in one quick round trip"
+      - "A realtime chat room where many participants exchange messages back and forth continuously"
+      - "Subscribing to a live market price feed that pushes continuous updates to the client"
       - "Uploading a large file as a sequence of chunks that the server aggregates into one summary response"
     answer: 3
     explanation: |
@@ -406,10 +406,10 @@ questions:
       call to service B. The client cancels the A call. What must A do so B's work
       is also cancelled?
     options:
-      - "Nothing; gRPC cancels all downstream calls globally"
-      - "Close the entire connection to B"
+      - "Nothing; gRPC automatically cancels all downstream calls globally across the whole call tree"
+      - "Close the entire underlying connection to B, which aborts every RPC multiplexed on it"
       - "Propagate the incoming context to the outbound call to B, so cancellation flows downstream"
-      - "Send a special cancel message on the B stream"
+      - "Send a special application-level cancel message as the last request on the B stream"
     answer: 2
     explanation: |
       Cancellation propagates through the context. If A passes its incoming ctx to
@@ -424,10 +424,10 @@ questions:
       True or false: a long-lived server-streaming subscription monopolizes the
       TCP connection so no other RPCs can use it.
     options:
-      - "True — one stream fully occupies the connection"
-      - "True, unless compression is enabled"
+      - "True — a single active stream fully occupies the underlying TCP connection until it ends"
+      - "True, unless per-message compression is enabled, which frees the connection for other calls"
       - "False — HTTP/2 multiplexes many streams over one connection, so other RPCs run concurrently"
-      - "False, but only if the subscription is idle"
+      - "False, but only while the subscription is idle and not actively pushing any messages"
     answer: 2
     explanation: |
       HTTP/2 multiplexes many independent streams over one connection. A streaming
@@ -442,9 +442,9 @@ questions:
     question: |
       Which statement about gRPC stream delivery guarantees is correct?
     options:
-      - "gRPC guarantees exactly-once delivery of every message"
-      - "gRPC guarantees a total global order across all streams on a connection"
-      - "gRPC guarantees at-most-once delivery and never re-sends"
+      - "gRPC guarantees exactly-once delivery of every message, deduplicating any retried sends automatically"
+      - "gRPC guarantees a single total global order across every stream multiplexed on the connection"
+      - "gRPC guarantees at-most-once delivery and never re-sends a message under any circumstances"
       - "gRPC guarantees per-direction ordering within a stream but not exactly-once; a retried RPC may re-send messages"
     answer: 3
     explanation: |
@@ -460,10 +460,10 @@ questions:
       How does a gRPC receiver find message boundaries, given that a message may
       span multiple HTTP/2 DATA frames?
     options:
-      - "By a delimiter byte sequence between messages"
-      - "By assuming one message per DATA frame"
+      - "By scanning for a reserved delimiter byte sequence inserted between consecutive messages"
+      - "By assuming exactly one whole message is carried per HTTP/2 DATA frame it receives"
       - "By the 4-byte length prefix in each length-prefixed message, independent of DATA frame boundaries"
-      - "By a message count sent in the HEADERS frame"
+      - "By reading a total message count advertised up front in the request HEADERS frame"
     answer: 2
     explanation: |
       The 4-byte big-endian length prefix tells the receiver exactly how many
@@ -479,10 +479,10 @@ questions:
       In an async gRPC API (e.g. Java/C-core), why is it wrong to call onNext in a
       tight loop to push a large server stream as fast as possible?
     options:
-      - "Because onNext is only allowed once per RPC"
-      - "Because onNext requires a new HTTP/2 stream each time"
+      - "Because onNext may legally be invoked only once per RPC, so a loop throws an error"
+      - "Because each onNext call opens a brand-new HTTP/2 stream, exhausting the connection's limit"
       - "Because it ignores the isReady/onReady flow-control signal and buffers unboundedly in memory"
-      - "Because onNext blocks the entire server event loop by design"
+      - "Because onNext synchronously blocks the entire shared server event loop by design"
     answer: 2
     explanation: |
       Async APIs expose flow control via isReady()/onReadyHandler. Pushing with
@@ -497,10 +497,10 @@ questions:
     question: |
       Which application is the canonical fit for bidirectional streaming?
     options:
-      - "A one-shot config fetch"
-      - "A batch import that returns a single summary"
+      - "A one-shot configuration fetch that returns the current settings in a single response"
+      - "A batch import of many records that returns just one aggregated summary at the end"
       - "A realtime chat where both sides send and receive messages independently and continuously"
-      - "A paginated search API"
+      - "A paginated search API that returns one bounded page of results per request token"
     answer: 2
     explanation: |
       Bidi shines for full-duplex, long-lived, independent send/receive workloads:
@@ -515,10 +515,10 @@ questions:
       In a server-streaming handler, a slow client cannot keep up with the
       messages the server produces. What happens when the server calls Send?
     options:
-      - "Send fails immediately with UNAVAILABLE"
+      - "Send fails immediately with an UNAVAILABLE status because the client cannot keep up"
       - "Send blocks (backpressure) until the client's flow-control window reopens; this is expected, not an error"
-      - "gRPC drops the oldest queued messages to make room"
-      - "The server automatically switches to a unary response"
+      - "gRPC silently drops the oldest queued messages to make room for newer ones"
+      - "The server automatically switches from streaming to a single buffered unary response"
     answer: 1
     explanation: |
       Backpressure from HTTP/2 flow control causes Send to block when the receiver
@@ -534,9 +534,9 @@ questions:
       only ends when the deadline fires. What is the most likely bug?
     options:
       - "The client never half-closes, so the server's Recv loop never sees io.EOF"
-      - "The server used the wrong compression algorithm"
-      - "The client sent too few messages"
-      - "The response message type is larger than the request type"
+      - "The server negotiated the wrong compression algorithm and cannot decode the requests"
+      - "The client sent too few request messages for the server to reach its minimum batch"
+      - "The response message type is declared larger than the request type in the .proto"
     answer: 0
     explanation: |
       If the client forgets to half-close (CloseSend/CloseAndRecv), the server's
@@ -551,10 +551,10 @@ questions:
       How does a gRPC server end an RPC — does it half-close its send direction
       separately from completing the call?
     options:
-      - "Yes, it half-closes, then later sends a separate completion signal"
+      - "Yes, it first half-closes its send direction, then later sends a separate completion signal"
       - "No — it ends the RPC by sending trailers with grpc-status, which closes its direction and completes the call at once"
-      - "It closes the underlying TCP connection to end the call"
-      - "It sends an empty final message that the client treats as the end"
+      - "It closes the underlying TCP connection to signal to the client that the call is over"
+      - "It sends an empty final sentinel message that the client interprets as end-of-stream"
     answer: 1
     explanation: |
       The server does not half-close separately. It ends the whole RPC by emitting
@@ -568,10 +568,10 @@ questions:
     question: |
       Which statement about gRPC cancellation is most accurate?
     options:
-      - "Cancellation rolls back any side effects the server already performed"
+      - "Cancellation transactionally rolls back any side effects the server already performed"
       - "Cancellation is best-effort and racy — the server may have already produced work; it controls the stream, not distributed transactions"
-      - "Cancellation guarantees the server never started processing"
-      - "Cancellation is only possible before the first message is sent"
+      - "Cancellation guarantees the server never started processing the request at all"
+      - "Cancellation is only possible before the very first message is sent on the stream"
     answer: 1
     explanation: |
       Cancellation tears down the stream but is best-effort: in-flight work and
@@ -585,10 +585,10 @@ questions:
     question: |
       How does a client's deadline relate to cancellation on a stream?
     options:
-      - "Deadlines are unrelated to cancellation"
+      - "Deadlines are entirely unrelated to cancellation and use a separate wire mechanism"
       - "When the grpc-timeout elapses, the client cancels the call and it ends with DEADLINE_EXCEEDED"
-      - "Deadline expiry pauses the stream until the client resumes it"
-      - "Deadlines only apply to unary calls, not streams"
+      - "Deadline expiry merely pauses the stream until the client explicitly resumes it later"
+      - "Deadlines only apply to unary calls and are ignored on any of the streaming RPC types"
     answer: 1
     explanation: |
       A deadline is effectively an automatic cancellation: once grpc-timeout
@@ -605,9 +605,9 @@ questions:
       HTTP/2 stream?
     options:
       - "No — a unary call is still a full HTTP/2 stream: HEADERS, one DATA message, half-close, response, trailers"
-      - "Yes — unary calls skip HTTP/2 and use a lightweight request/response socket"
-      - "Yes — unary calls omit trailers entirely"
-      - "No — but unary calls use HTTP/1.1 while streaming uses HTTP/2"
+      - "Yes — unary calls skip HTTP/2 entirely and use a lightweight dedicated request/response socket"
+      - "Yes — unary calls omit trailers entirely and carry grpc-status in the response HEADERS instead"
+      - "No — but unary calls run over HTTP/1.1 while only the streaming types require HTTP/2"
     answer: 0
     explanation: |
       Unary is not a special transport. It is a full HTTP/2 stream with request
@@ -623,10 +623,10 @@ questions:
       During a client-streaming upload, can the server send its response and close
       before the client has finished sending all its chunks?
     options:
-      - "No, the server must always wait for the client's half-close first"
+      - "No, the server must always wait for the client's explicit half-close before responding"
       - "Yes — e.g. it validates an early chunk and rejects; a robust client checks the return of every Send"
-      - "No, doing so violates the HTTP/2 spec"
-      - "Yes, but only for unary RPCs"
+      - "No, sending a response before the client half-closes violates the HTTP/2 specification"
+      - "Yes, but early responses like this are only permitted on plain unary RPCs"
     answer: 1
     explanation: |
       The server may respond and set status before the client half-closes (for
@@ -662,10 +662,10 @@ questions:
       spread across backends and that must survive backend restarts gracefully,
       which approach is often best?
     options:
-      - "One long server stream of all 200k rows"
+      - "One long-lived server stream that emits all 200k rows in a single open-ended subscription call"
       - "A paginated unary API (request + page_token) so each page is an independent, load-balanced, retryable call"
-      - "A bidirectional stream where the client acks each row"
-      - "A single unary call returning all 200k rows in one repeated field"
+      - "A bidirectional stream where the client sends an explicit ack for every one of the 200k rows it receives"
+      - "A single unary call that returns all 200k rows at once in one giant repeated field in the response"
     answer: 1
     explanation: |
       Pagination via unary + page_token keeps each call short, independently
@@ -680,10 +680,10 @@ questions:
     question: |
       On a bidi stream, which ordering is NOT guaranteed by gRPC?
     options:
-      - "The order of the client's own messages relative to each other"
-      - "The order of the server's own messages relative to each other"
+      - "The order of the client's own outbound messages relative to one another within its own direction"
+      - "The order of the server's own outbound messages relative to one another within its own direction"
       - "A global interleaving order between the client's messages and the server's messages"
-      - "That each direction's messages arrive in send order"
+      - "That each direction's messages are delivered to the peer in the exact order they were sent"
     answer: 2
     explanation: |
       Each direction is independently ordered, but there is no defined global
@@ -697,10 +697,10 @@ questions:
     question: |
       In the gRPC message length prefix, how is the 4-byte length encoded?
     options:
-      - "Little-endian signed 32-bit"
+      - "Little-endian signed 32-bit, so the low-order byte of the length arrives first on the wire"
       - "Big-endian (network byte order) unsigned 32-bit"
-      - "Variable-length varint like protobuf field tags"
-      - "ASCII decimal digits"
+      - "A variable-length base-128 varint, exactly like the length delimiter protobuf uses for field tags"
+      - "ASCII decimal digits terminated by a newline, the way HTTP/1.1 chunked-transfer sizes each chunk"
     answer: 1
     explanation: |
       The length is a 4-byte big-endian (network byte order) unsigned 32-bit
@@ -715,10 +715,10 @@ questions:
       In unary and server-streaming RPCs, when does the client half-close its send
       direction?
     options:
-      - "Only after it receives the full response"
+      - "Only after it has received and fully consumed the server's complete response and trailers"
       - "Automatically right after sending its single request message, since it has nothing more to send"
-      - "It never half-closes; the server does"
-      - "After an explicit CloseSend call the application must make"
+      - "It never half-closes at all; only the server ever half-closes its direction in these RPC types"
+      - "Only after the application explicitly calls CloseSend, which is mandatory for every RPC type"
     answer: 1
     explanation: |
       Because the client sends exactly one request in unary and server-streaming,
@@ -734,10 +734,10 @@ questions:
       What is the recommended way for a server streaming handler to behave when
       the client cancels?
     options:
-      - "Ignore it and finish producing all messages"
+      - "Ignore the cancellation entirely and keep producing every remaining message until the loop finishes"
       - "Check for cancellation (ctx.Done / isCancelled) in the stream loop, stop work, release resources, and return promptly"
-      - "Throw an unhandled exception to crash the request thread"
-      - "Retry the whole stream from the beginning"
+      - "Throw an unhandled exception to deliberately crash the request-handling thread and force a teardown"
+      - "Restart the whole stream from the very first message and replay all responses to the client again"
     answer: 1
     explanation: |
       A cancellation-aware handler observes the cancelled context in its loop and
@@ -751,10 +751,10 @@ questions:
     question: |
       Which header identifies a request as gRPC on the wire?
     options:
-      - "Accept: application/grpc"
-      - "X-Grpc: true"
+      - "An Accept: application/grpc request header that the server echoes back to confirm gRPC handling"
+      - "A custom X-Grpc: true request header that gRPC clients attach to every outbound call for routing"
       - "content-type: application/grpc (with variants like application/grpc+proto)"
-      - "Upgrade: grpc/2.0"
+      - "An Upgrade: grpc/2.0 header sent to switch the plain HTTP/1.1 connection into gRPC framing mode"
     answer: 2
     explanation: |
       gRPC requests carry content-type: application/grpc (optionally with a
@@ -770,10 +770,10 @@ questions:
       A team confuses the per-message compressed-flag byte with the grpc-message
       trailer. Which statement correctly distinguishes them?
     options:
-      - "They are the same field viewed at different layers"
+      - "They are ultimately the same underlying field, just surfaced by different layers of the gRPC stack"
       - "The compressed-flag is a 1-byte per-message framing field (0/1); grpc-message is a human-readable error description sent in trailers"
-      - "grpc-message holds the compression algorithm name; the flag holds the error text"
-      - "Both live in the HEADERS frame before the body"
+      - "grpc-message carries the negotiated compression algorithm name while the flag byte carries the error text"
+      - "Both live together in the leading HEADERS frame that the server sends before any of the response body"
     answer: 1
     explanation: |
       The compressed flag is the first byte of each length-prefixed message and
@@ -787,10 +787,10 @@ questions:
     question: |
       Why are automatic retries harder for streaming RPCs than for unary RPCs?
     options:
-      - "Streaming RPCs cannot carry a deadline"
+      - "Streaming RPCs are unable to carry a deadline, so the retry layer has no timeout to bound its attempts"
       - "A stream may have made partial progress (messages sent/received), so replaying it is not a clean idempotent redo"
-      - "HTTP/2 forbids retrying any stream"
-      - "Streaming RPCs use a different status-code set"
+      - "HTTP/2 explicitly forbids resending any stream once its stream id has been closed with RST_STREAM"
+      - "Streaming RPCs report failures using a completely different status-code set that the retry policy can't map"
     answer: 1
     explanation: |
       A failed stream may already have exchanged messages or produced side effects,
@@ -823,9 +823,9 @@ questions:
       A single RST_STREAM sent to cancel one gRPC call on a multiplexed connection
       affects what?
     options:
-      - "All streams on that connection"
-      - "The whole TCP connection is reset"
-      - "Only streams created after it"
+      - "Every stream on that connection, aborting all the other RPCs multiplexed alongside the cancelled one"
+      - "The whole underlying TCP connection is reset, forcing every peer to reconnect from scratch"
+      - "Only the streams that were created after the cancelled one, leaving earlier in-flight streams running"
       - "Only the one stream identified by that stream id; other multiplexed RPCs are unaffected"
     answer: 3
     explanation: |
@@ -842,10 +842,10 @@ questions:
       receive window full) while the client is blocked writing (server's receive
       window full), and neither is reading. What is this, and how is it avoided?
     options:
-      - "A protobuf encoding error; regenerate the stubs"
+      - "A protobuf encoding mismatch between the peers; regenerate both sets of stubs from the shared .proto"
       - "A flow-control deadlock; avoid it by always reading (draining) concurrently while writing"
-      - "Expected head-of-line blocking; nothing can be done"
-      - "A TLS buffering issue; disable encryption"
+      - "Expected HTTP/2 head-of-line blocking that is inherent to the protocol, so nothing can be done about it"
+      - "A TLS record-buffering issue in the transport; disable encryption on the stream to let the frames flow"
     answer: 1
     explanation: |
       If both peers write without reading, each fills the other's flow-control
@@ -860,10 +860,10 @@ questions:
       Which is a genuine advantage of server streaming over a unary call returning
       a large repeated field?
     options:
-      - "It guarantees exactly-once delivery"
-      - "It is always faster end-to-end"
+      - "It guarantees exactly-once delivery of each item by deduplicating any messages that get retried"
+      - "It is always faster end-to-end because streamed responses skip the per-message length-prefix framing"
       - "The consumer can process items incrementally with bounded memory and sees the first item before the last is ready"
-      - "It removes the need for deadlines"
+      - "It removes the need for deadlines, since a streaming call manages its own lifetime without a timeout"
     answer: 2
     explanation: |
       Streaming delivers incrementally: the receiver processes one message at a

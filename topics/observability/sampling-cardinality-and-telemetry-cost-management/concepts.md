@@ -51,6 +51,26 @@ The trap is that the *most expensive* telemetry is often the *least useful*: a f
 success logs at INFO, or a metric labelled by `request_id`. Cost management is therefore
 mostly about **keeping signal and shedding noise**, not blanket reduction.
 
+**Worked example — "telemetry > service cost" is not hyperbole.** Take a service doing
+10,000 req/s, each request producing a 20-span trace, each span ~1 KB on the wire:
+
+- Spans/sec = 10,000 × 20 = **200,000 spans/s**
+- Bytes/s = 200,000 × 1 KB = **200 MB/s**
+- Per day = 200 MB/s × 86,400 s ≈ **17.3 TB/day** (200 × 86,400 = 17,280,000 MB)
+- Per month ≈ 17.3 TB × 30 ≈ **518 TB/month**. At a typical ~$0.10/GB ingest that's
+  ~$51,800/month **just to ingest traces** — likely more than the fleet running the service.
+- Head- or tail-sample the boring traces to 5% (keep errors/slow at 100%) and that ingest
+  bill drops to roughly **$2,600/month** — a ~20× cut for the same debugging power.
+
+**Worked example — metric RAM and the cardinality bomb.** Prometheus rule of thumb: an
+active series costs ~**1–3 KB of RAM** (head chunk + index entry).
+
+- 1,000,000 active series ≈ **1–3 GB RAM** just for the head/index — manageable.
+- Now add a `user_id` label with ~1,000,000 distinct values to a metric that was 1,000
+  series: series count = 1,000 × 1,000,000 = **1,000,000,000 series** → at ~2 KB each that
+  is ~**2 TB of RAM** → instant OOM. Same request volume, one bad label, three orders of
+  magnitude more cost. This is why cardinality — not request rate — is the metrics cost axis.
+
 > [!INTERVIEW]
 > A strong senior answer frames cost per signal: "Metrics cost scales with **cardinality**,
 > not request volume — a counter incremented a billion times is still one series. Traces
@@ -147,6 +167,46 @@ The distinction is **aggregation time**:
 
 **Exemplars** (below) are the cheap bridge: keep the *metric* low-cardinality, but attach a
 sampled `trace_id` so you can jump from the spiking histogram bucket to an actual slow trace.
+
+---
+
+## Exemplars: the cheap metrics-to-traces bridge
+
+Here's the tension exemplars resolve: you *want* to know "which request caused this p99
+spike?", but the request ID that would answer it is exactly the unbounded label you must
+never put on a metric. An **exemplar** sidesteps this — it hangs a single sampled example
+(a `trace_id` plus the raw observed value) *off* a metric sample, without turning it into a
+new series. The metric stays low-cardinality; you still get one clickable path down to a
+representative raw trace.
+
+In the **OpenMetrics** exposition format an exemplar is appended to a sample after a `#`,
+as a label set plus a value and optional timestamp:
+
+```
+# HELP http_request_duration_seconds Request latency
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{le="0.5"} 12345 # {trace_id="4bf92f3577b34da6a3ce929d0e0e4736"} 0.48 1.6e9
+```
+
+Read that line: the `le="0.5"` bucket has counted 12,345 observations; the part after `#`
+says "one of those observations had value **0.48s**, at timestamp 1.6e9, and belonged to
+trace **4bf9…**." The `trace_id` lives *only* in the exemplar — it is **not** a metric label,
+so it adds **zero** new series.
+
+- **Storage.** Prometheus keeps exemplars in a **fixed-size in-memory circular buffer**
+  (not the TSDB), enabled with `--enable-feature=exemplar-storage`. Each is ~100 bytes and
+  the buffer holds a bounded total, so the newest exemplars overwrite the oldest. Cost is a
+  flat, pre-sized memory cap — nothing like a per-series explosion.
+- **The click-through story.** Alert fires on `histogram_quantile(0.99, ...)` → you open the
+  latency panel and see the p99 bucket spike → Grafana renders the bucket's exemplars as dots
+  → click a dot → it carries the `trace_id` → jump straight into that slow trace in the
+  tracing backend. One reference bytes-cheap enough to attach to every histogram, yet it
+  turns an aggregate "something is slow" into a concrete "*this* trace, here's why".
+
+> [!TIP]
+> Exemplars are the missing rung between the two signals: metrics tell you *that* the p99
+> moved, the exemplar hands you *one real trace* that lived in the moved bucket. Attach them
+> to your latency histograms and error counters — the ones you actually alert on.
 
 ---
 
@@ -291,6 +351,16 @@ processors:
   `numeric_attribute`, `string_attribute`, `boolean_attribute`, `trace_state`,
   `span_count`, `and`, `composite`, `always_sample`.
 
+**Worked example — sizing the buffer.** Memory ≈ (traces held) × (avg spans/trace) ×
+(bytes/span). With `num_traces=50000`, ~20 spans/trace, ~1 KB/span:
+50,000 × 20 × 1 KB = **~1 GB buffered per collector** — plausible. But check it against
+traffic: the buffer must hold every in-flight trace for a full `decision_wait`. At
+100,000 traces/sec × 30 s `decision_wait` you'd need to hold 100,000 × 30 =
+**3,000,000 traces in flight** — 60× more than `num_traces=50000`, so the circular buffer
+evicts (and silently drops) the oldest ~98% *before* they're ever evaluated. Rule:
+**size `num_traces` ≈ traces/sec × decision_wait**, or shorten `decision_wait`, or add
+collector instances behind trace-ID-aware load balancing.
+
 ```mermaid
 flowchart LR
   A[Spans arrive] --> B{Buffer by trace_id<br/>hold decision_wait}
@@ -325,8 +395,24 @@ you can recover true totals by scaling up (a kept trace "represents" 1/p traces)
 - Con: **volume is unbounded** — a 10x traffic spike = 10x sampled data (and 10x cost) at
   the worst possible moment. Rare events at low volume may be missed entirely.
 
-**Rate-limiting sampling** — keep at most *N traces per second*, usually via a **leaky/token
-bucket**. Jaeger's rate limiter: `rate=2.0` → ~2 traces/sec.
+**Worked example — recovering true totals from a sample.** You sample at 5%, so p = 0.05
+and each kept trace carries a weight of 1/p = **20** (it "stands in" for 20 real traces).
+You look at your kept data and count **4 errored traces**. Estimated real errors =
+4 × 20 = **~80 errors** actually happened. Because the keep decision is a uniform hash of
+the trace ID, that scale-up is unbiased: over enough traffic the 5% sample really is 5% of
+*every* category, so multiplying by 20 recovers totals for any slice.
+
+**Why rate-limiting breaks that math.** Rate-limiting keeps at most N/sec, so the effective
+p depends on traffic. Say you keep 100 traces/sec: at 2,000 req/s the effective p = 100/2000
+= **5%** (weight 20), but during a 10× spike to 20,000 req/s the same 100/sec cap means
+p = 100/20000 = **0.5%** (weight 200). If you naively multiply the whole window by a fixed
+1/p you over- or under-count by 10×, because the weight silently changed mid-window. That
+non-uniformity is exactly why rate-limited samples can't be reliably scaled back to totals.
+
+**Rate-limiting sampling** — keep at most *N traces per second*, usually via a **token
+bucket** (allows short bursts up to the bucket capacity, then throttles to the refill rate;
+contrast a leaky bucket, which smooths to a strict constant rate with no burst). Jaeger's
+rate limiter: `rate=2.0` → ~2 traces/sec.
 
 - Pro: **hard ceiling on cost** regardless of traffic — predictable bills.
 - Con: the *sampled fraction varies with load*, so it's **not statistically uniform**;

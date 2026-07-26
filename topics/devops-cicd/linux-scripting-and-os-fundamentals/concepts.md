@@ -175,6 +175,30 @@ Why `pipefail` matters: without it, `curl badurl | tee out.txt` reports **succes
 - `local x=$(cmd)` masks `cmd`'s failure because `local`'s own exit status (0) wins — split
   the declaration from the assignment.
 
+**Worked example — the `local` trap.** Run both under `set -e`:
+
+```bash
+set -e
+bad() { local x=$(false); echo "still here: $x"; }   # false exits 1
+bad
+echo "script continued"
+```
+
+`false` exits `1`, but the line is one *command*: the `local` builtin. `local` runs, ignores
+the failure of the substitution, and returns **its own** exit status — `0`. `set -e` sees a
+`0` and does not abort, so the script prints `still here:` **and** `script continued`. The
+`false` failure vanished. Fix it by splitting declaration from assignment:
+
+```bash
+set -e
+good() { local x; x=$(false); echo "unreachable: $x"; }
+good
+echo "unreachable too"
+```
+
+Now `x=$(false)` is its own command whose exit status is `1` (the substitution's), so `set
+-e` fires: the function aborts at the assignment and neither `echo` runs.
+
 Add `trap 'echo "failed at line $LINENO" >&2' ERR` for diagnostics and
 `trap cleanup EXIT` to guarantee cleanup on any exit path.
 
@@ -198,6 +222,29 @@ cmd 2>/dev/null      # discard stderr
 **Order matters:** `> file 2>&1` sends stdout to the file *then* points stderr at "wherever
 stdout now goes" (the file). Reversing it — `2>&1 > file` — points stderr at the *terminal*
 (stdout's original target) and only stdout to the file. This is a favorite gotcha.
+
+**Worked example.** Take a command that writes `OUT` to stdout and `ERR` to stderr:
+
+```bash
+gen() { echo OUT; echo ERR >&2; }   # OUT→fd1, ERR→fd2
+```
+
+Trace both orderings. The mental model: **`2>&1` means "make fd2 point wherever fd1 points
+*right now*"** — it copies fd1's *current* target, it does not bind fd2 to the file.
+
+```bash
+gen > f.txt 2>&1
+# step 1: > f.txt      → fd1 now points at f.txt
+# step 2: 2>&1         → fd2 copies fd1's CURRENT target = f.txt
+# result: f.txt contains BOTH lines; terminal shows nothing
+
+gen 2>&1 > f.txt
+# step 1: 2>&1         → fd2 copies fd1's CURRENT target = the TERMINAL
+# step 2: > f.txt      → fd1 now points at f.txt (fd2 stays on the terminal)
+# result: f.txt contains only OUT; ERR still prints on the terminal
+```
+
+Same two redirections, opposite outcome, purely because of order.
 
 **Pipes** connect one command's stdout to the next's stdin: `ps aux | grep nginx | wc -l`.
 Pipes carry **stdout only** — errors on stderr bypass the pipe unless you `2>&1` first.
@@ -235,7 +282,8 @@ The bread-and-butter filters. Know these cold:
 - **`sort`** — `-n` numeric, `-r` reverse, `-k2` by 2nd field, `-u` unique, `-h`
   human-readable sizes.
 - **`uniq`** — collapse **adjacent** duplicates (so `sort | uniq` first); `-c` count,
-  `-d` only dupes. `sort access.log | uniq -c | sort -rn | head` = top lines.
+  `-d` only dupes. `sort access.log | uniq -c | sort -rn | head` = most frequent **whole
+  lines** (for a specific column like the client IP, extract it first with `awk` — see below).
 - **`wc`** — `-l` lines, `-w` words, `-c` bytes.
 - **`tr`** — translate/delete chars: `tr 'A-Z' 'a-z'`, `tr -d '\r'`.
 - **`head`/`tail`** — first/last N lines (`-n`). **`tail -f`** follows a growing file live
@@ -244,6 +292,30 @@ The bread-and-butter filters. Know these cold:
 
 The canonical one-liner interviewers love: *"top 10 client IPs in an access log"* →
 `awk '{print $1}' access.log | sort | uniq -c | sort -rn | head`.
+
+**Worked example — trace it on 4 log lines.** The first field of each line is the client IP:
+
+```
+10.0.0.7 - - [.. ] "GET /"
+10.0.0.9 - - [.. ] "GET /"
+10.0.0.7 - - [.. ] "GET /x"
+10.0.0.7 - - [.. ] "GET /y"
+```
+
+Watch the data transform at each stage:
+
+```
+awk '{print $1}'   sort           uniq -c        sort -rn
+10.0.0.7           10.0.0.7        3 10.0.0.7      3 10.0.0.7
+10.0.0.9     →     10.0.0.7   →    1 10.0.0.9   →  1 10.0.0.9
+10.0.0.7           10.0.0.7        (grouped→counted)  (ranked)
+10.0.0.7           10.0.0.9
+```
+
+The `sort` **before** `uniq` is not optional: `uniq -c` only counts *adjacent* runs, so
+without sorting first the three `10.0.0.7` lines (which arrive non-adjacent) would count as
+separate groups. The final `sort -rn` (numeric, reverse) ranks by the count `uniq -c`
+prepended, so the busiest IP floats to the top — `head` then keeps the top N.
 
 ---
 
@@ -277,6 +349,31 @@ df -h | awk 'NR>1 && $5+0 > 80 {print $6, $5}'   # mounts over 80% full
 `-F` sets the field separator, `NR` = record (line) number, `NF` = field count, `BEGIN`/`END`
 blocks run before/after processing. Rule of thumb: **`grep` to find lines, `sed` to edit
 lines, `awk` to work with columns/aggregate.**
+
+**Worked example — trace `df -h | awk 'NR>1 && $5+0 > 80 {print $6, $5}'`.** Feed it two
+lines (the header plus one data row):
+
+```
+Filesystem     Size  Used Avail Use% Mounted on      ← NR=1 (header)
+/dev/xvda1      20G   17G    3G  85% /               ← NR=2 (data)
+```
+
+For each line awk splits on whitespace and assigns fields:
+
+| Field | `$1` | `$2` | `$3` | `$4` | `$5` | `$6` (`$NF`) |
+|---|---|---|---|---|---|---|
+| NR=2 | `/dev/xvda1` | `20G` | `17G` | `3G` | `85%` | `/` |
+
+Now step through the condition:
+
+1. **`NR>1`** — on the header `NR` is `1`, so `1>1` is false and the header is skipped. On
+   the data row `NR` is `2`, so `2>1` is true. (This is the idiom for "ignore the header row".)
+2. **`$5+0`** — `$5` is the *string* `"85%"`. Adding `0` forces **numeric context**, and
+   awk parses the leading digits and stops at the first non-digit: `"85%"` → `85`. (Without
+   `+0`, comparing the string `"85%"` numerically is unreliable.) Then `85 > 80` is true.
+3. Both sides of `&&` are true, so the action fires: `print $6, $5` → **`/ 85%`**.
+
+So a filesystem 85% full prints `/ 85%`; a 40%-full one fails `$5+0 > 80` and prints nothing.
 
 ---
 
@@ -346,8 +443,20 @@ chown deploy:web app.log # owner deploy, group web
 chmod -R 750 /srv/app    # recursive
 ```
 
-Octal digit = sum of r(4)+w(2)+x(1): `7`=rwx, `6`=rw-, `5`=r-x, `4`=r--, `0`=---. A leading
-digit sets special bits: **setuid (4)**, **setgid (2)**, **sticky (1)**. The **sticky bit**
+Octal digit = sum of r(4)+w(2)+x(1): `7`=rwx, `6`=rw-, `5`=r-x, `4`=r--, `0`=---.
+
+**Worked example — compute the octal from a requirement.** "Owner full, group read+execute,
+others nothing":
+
+- owner `rwx` = 4+2+1 = **7**
+- group `r-x` = 4+0+1 = **5**
+- other `---` = 0+0+0 = **0**
+
+→ `chmod 750 file`. Reason the other common ones the same way: a secret/config file readable
+only by its app user and its group is `rw-` / `r--` / `---` = 6/4/0 → `chmod 640`; an SSH
+private key is `rw-`/`---`/`---` = 6/0/0 → `chmod 600`.
+
+A leading digit sets special bits: **setuid (4)**, **setgid (2)**, **sticky (1)**. The **sticky bit**
 on `/tmp` (`1777`) means only a file's owner can delete it even though the dir is
 world-writable. **setuid** on a binary makes it run as the file's owner (that's how
 `passwd`/`sudo` work) — a big security-review area.

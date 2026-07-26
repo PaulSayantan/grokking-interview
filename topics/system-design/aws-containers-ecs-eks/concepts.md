@@ -89,6 +89,28 @@ modes) and its weakness (no CRDs/operators, no rich ecosystem of Helm charts,
 fewer knobs than Kubernetes). Task definitions being immutable revisions makes
 rollbacks trivial (deploy the previous revision) — a nice property.
 
+**Worked example — how a rolling deploy actually behaves.** Take `desired = 10`
+and watch how `minimumHealthyPercent` / `maximumPercent` (percentages of desired)
+gate the rollout:
+
+- **100% / 200% (default for LB services — availability-first).** Floor = 100% x 10
+  = **10 running**; ceiling = 200% x 10 = **20 tasks max**. ECS can launch up to 10
+  *new* tasks alongside the 10 old ones (up to 20 total), waits for the new ones to
+  pass health checks and register with the target group, *then* drains and stops old
+  tasks. Zero capacity dip, but you transiently pay for ~2x tasks and need ENI/IP
+  headroom for 20.
+- **50% / 100% (in-place, cost-first).** Ceiling = 100% x 10 = **10** (no extra
+  capacity ever), floor = 50% x 10 = **5**. ECS must stop old tasks *first* to make
+  room — it drains down to 5, launches 5 new into the freed slots, then repeats. No
+  surge cost, but you run at reduced capacity mid-deploy (a burst can hurt).
+
+**Circuit breaker.** With `deploymentCircuitBreaker` enabled, ECS watches for
+**consecutive failed task launches** (tasks that never reach a steady healthy
+state, e.g., crash-loop or failing health checks). Once it trips it **stops the
+rollout and, with `rollback: true`, auto-redeploys the last known-good task
+definition revision** — so a bad image doesn't silently churn forever eating your
+20-task ceiling.
+
 ---
 
 ## EKS managed Kubernetes core concepts
@@ -181,6 +203,17 @@ default, configurable up to 200 GB** (platform 1.4.0+). Supports **ARM64
 - No GPUs; no privileged mode; no host-level daemonsets; no `docker exec` into the
   host; limited to supported CPU/memory combos; larger cold-start than warm EC2
   (image pull + micro-VM boot, often several to tens of seconds).
+
+**What dominates cold start.** Break it into two parts: (1) **micro-VM boot** —
+Firecracker starts in well under a second, so this is rarely the problem; (2)
+**image pull** — pulling and unpacking layers from ECR, which scales with image
+size. A 200 MB image might pull in a few seconds; a **2-3 GB image (fat base +
+ML/runtime deps) can take 20-40 s** on a fresh task, and that pull dominates the
+cold start. Because a warm EC2 host already has cached layers, it skips the pull
+entirely. **This is why the fix for slow Fargate scale-out is image work, not
+compute:** slim the base image, split/cache layers, and use **SOCI (lazy loading)**
+so the container starts while layers stream in on demand rather than after a full
+pull.
 - EKS-on-Fargate specifics: **one pod per node/micro-VM** (no bin-packing, no
   DaemonSets — sidecars must be in-pod), no privileged containers, no
   `hostNetwork`/`hostPort`, EBS support via CSI came later, classic node-level
@@ -230,6 +263,29 @@ node is bounded by ENIs x IPs-per-ENI** for the instance type. At scale this
 subnets / secondary CIDRs, **prefix delegation** (assign /28 prefixes to ENIs to
 pack far more pods per node), or custom networking. This is the EKS analog of the
 ECS ENI-limit problem.
+
+**Worked calc — "how many pods fit on an m5.large?"** (the classic numeric probe).
+The AWS formula is **maxPods = ENIs x (IPs-per-ENI − 1) + 2**. The `−1` is because
+one IP per ENI is the ENI's primary address (not usable by a pod); the `+2` covers
+host-networking pods like `aws-node` and `kube-proxy` that don't consume a
+secondary IP.
+
+- **m5.large** supports **3 ENIs x 10 IPs/ENI**.
+- maxPods = 3 x (10 − 1) + 2 = 3 x 9 + 2 = 27 + 2 = **29 pods**.
+
+So a beefy-CPU m5.large stalls at **29 pods** even with CPU/RAM to spare — pure
+IP starvation. Now turn on **prefix delegation**: each secondary slot becomes a
+**/28 prefix = 16 IPs** instead of 1 IP. The same 3 ENIs x 9 usable slots now carry
+3 x 9 x 16 = 432 IPs, so the binding constraint flips to the **hard cap of 110
+pods/node** (Kubelet's default `--max-pods` guardrail for smaller instances).
+Prefix delegation took the node from **29 → 110 pods (~3.8x)** without a bigger
+subnet. This is exactly why "we ran out of pods but the box was idle" is answered
+with *prefix delegation*, not *bigger instances*.
+
+**ECS analog (ENI trunking).** An m5.large's raw ENI cap allows only a couple of
+`awsvpc` tasks per host. Turn on `awsvpcTrunking` and the same m5.large jumps to
+**~10 tasks**; an m5.xlarge to **~26** — a 5-10x lift with no instance change, same
+"free CPU but no placement" symptom, same class of fix.
 
 **Trade-off.** `awsvpc`/VPC-CNI gives first-class VPC networking and security
 groups per workload, at the cost of IP/ENI planning. Alternatives (bridge mode,
@@ -461,6 +517,20 @@ cell (bounded blast radius), and you can do **cell-by-cell (wave) deployments** 
 a bad deploy hits one cell before promotion. Trades some efficiency and routing
 complexity for dramatically better fault isolation and safe rollout.
 
+```mermaid
+flowchart TB
+    R[Thin routing layer<br/>maps customer/shard to cell]
+    R --> A[Cell A<br/>cluster + data + LB<br/>shards 0-33]
+    R --> B[Cell B<br/>cluster + data + LB<br/>shards 34-66]
+    R --> C[Cell C<br/>cluster + data + LB<br/>shards 67-99]
+    A -.->|bad wave deploy<br/>fails HERE only| A
+```
+
+A bad deploy rolled out **wave-by-wave** lands on Cell A first; if it regresses,
+only Cell A's ~1/3 of customers are affected and you halt before promoting to B and
+C. The routing layer stays deliberately thin (little logic, high availability) so
+it isn't itself a shared fate for all cells.
+
 **Availability zones.** Always spread tasks/nodes across **≥3 AZs** and use the
 service scheduler's AZ **spread** strategy; the load balancer is regional and only
 routes to healthy targets. An AZ failure should cost you ~1/3 capacity, not an
@@ -493,6 +563,30 @@ mostly steady 24/7:
   + small team favors Fargate. Always include *ops cost* (engineer time) in TCO,
   not just the AWS bill — this is the answer interviewers want.
 
+**Worked dollar math (same 20 x 1 vCPU / 2 GB workload, 24/7).** Use ~730 hr/mo
+and current us-east-1 Linux/x86 rates (as of 2026 — quote "roughly" in an interview):
+
+- **Fargate on-demand** = $0.04048/vCPU-hr + $0.004445/GB-hr.
+  - vCPU: 20 vCPU x $0.04048 x 730 hr = **~$591/mo**
+  - Memory: 40 GB x $0.004445 x 730 hr = **~$130/mo**
+  - **Total ≈ $721/mo**, zero host ops.
+- **EC2 on-demand.** Each task reserves 1 vCPU/2 GB. An **m5.xlarge** is 4 vCPU / 16
+  GB, so it bin-packs ~4 tasks (4 vCPU / 8 GB used — CPU-bound; leave a sliver for
+  the ECS agent). 20 tasks → **5 x m5.xlarge**. At ~$0.192/instance-hr:
+  5 x $0.192 x 730 = **~$701/mo**. Notice: on-demand EC2 is *barely* cheaper than
+  Fargate here (~3%) — the naive "EC2 is way cheaper" belief is wrong once you can't
+  bin-pack perfectly and still carry patching/scaling ops.
+- **The real levers are Spot + Savings Plans.** Same 5-instance fleet on **Spot at
+  ~70% off**: $701 x 0.30 ≈ **$210/mo → ~3.4x cheaper than Fargate**, but
+  interruptible. A 3-yr **Compute Savings Plan (~30% off)** on an on-demand base:
+  $701 x 0.70 ≈ **$490/mo**.
+
+> [!KEY-TAKEAWAY]
+> The "EC2 beats Fargate" story is really a "Spot + Savings Plans + tight
+> bin-packing" story. At plain on-demand with imperfect packing the two are near
+> parity (~$700 vs ~$721/mo), so the gap you sell in an interview (~2-3x) comes from
+> Spot/commitment discounts — which you pay for in ops and interruption handling.
+
 ---
 
 ## Failure modes and how the design degrades
@@ -516,6 +610,14 @@ mostly steady 24/7:
   cell/wave deployments to limit blast radius.
 - **Spot interruption:** Fargate Spot / EC2 Spot can be reclaimed on 2-minute
   notice — only for interruptible/replicated workloads; keep an on-demand base.
+  Reaction path to design around: AWS emits a **rebalance recommendation** (early,
+  before the notice) then the **2-minute interruption notice**; on that signal
+  Karpenter/ECS **cordons and drains** the node/task (stops new placements, sends
+  SIGTERM so pods finish in-flight work within the grace period), **reschedules the
+  replicas onto other capacity**, and — because you kept an **on-demand base** as a
+  capacity floor — the service never drops below its minimum even if Spot is
+  reclaimed cluster-wide. Keep graceful-shutdown handlers short enough to finish
+  inside 2 minutes.
 
 ---
 

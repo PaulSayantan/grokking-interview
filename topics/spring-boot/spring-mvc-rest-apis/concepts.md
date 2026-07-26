@@ -75,6 +75,28 @@ Client → Embedded Tomcat connector → Servlet Filter chain
        → HandlerInterceptor.postHandle/afterCompletion → Filter chain → Client
 ```
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant F as Filter chain
+    participant D as DispatcherServlet
+    participant I as Interceptor
+    participant H as Controller (handler)
+    participant M as HttpMessageConverter
+    C->>F: HTTP request
+    F->>D: doFilter → dispatch
+    D->>D: HandlerMapping selects handler+interceptors
+    D->>I: preHandle() (in order)
+    I-->>D: true (proceed)
+    D->>H: HandlerAdapter invokes method
+    H-->>D: return value (no exception)
+    D->>I: postHandle() (reverse order — SKIPPED if handler threw)
+    D->>M: write body / render view
+    D->>I: afterCompletion() (reverse order — ALWAYS runs if preHandle passed)
+    D->>F: unwind
+    F->>C: HTTP response
+```
+
 Key ordering facts often tested:
 - **Filters run outside the DispatcherServlet**; interceptors run inside it (they
   only see requests that reached the DispatcherServlet).
@@ -292,6 +314,34 @@ state at all.
 - Why it matters: network retries, at-least-once delivery, and load balancers can
   replay requests; idempotent endpoints tolerate that safely.
 
+**Worked example — an Idempotency-Key surviving a retry.** A client charges a card
+and, to be retry-safe, generates a UUID once and sends it on every attempt:
+
+```
+Attempt 1  POST /payments        Idempotency-Key: 4f1a-...c9   { amount: 5000 }
+```
+
+1. Server looks up key `4f1a-...c9` in its idempotency store → **miss**.
+2. It processes the charge, persists `{key → (status 201, body {id:"pay_88", amount:5000})}`,
+   and returns `201 Created`.
+3. The response is lost (client socket times out at 30s). The card *was* charged.
+
+The client, seeing no response, retries with the **same** key:
+
+```
+Attempt 2  POST /payments        Idempotency-Key: 4f1a-...c9   { amount: 5000 }
+```
+
+4. Server looks up `4f1a-...c9` → **hit**. Instead of charging again, it *replays* the
+   stored outcome: returns the original `201` + `{id:"pay_88"}` (some designs return
+   `200`). The customer is charged **once**, not twice.
+
+Contrast the failure modes: if attempt 2 arrives with the same key but a *different*
+body (`amount: 9000`), the server should reject with **409 Conflict** (a key must map
+to one request). And if two attempts race concurrently, the store insert must be atomic
+(e.g. a unique constraint on the key) so the second blocks or 409s rather than
+double-charging.
+
 ---
 
 ## PUT vs PATCH vs POST
@@ -311,6 +361,15 @@ state at all.
   or JSON Patch (RFC 6902, an array of ops). `Content-Type: application/merge-patch+json`
   or `application/json-patch+json`.
 - Trap: sending a partial body with PUT can wipe unspecified fields — that's PATCH semantics.
+- **Success status — 200 vs 204**: return `200 OK` with the updated representation when
+  the client benefits from the server-computed state (new `updatedAt`, normalized
+  fields); return `204 No Content` (empty body) when the client already has everything
+  and you want to save bandwidth. Both are valid for a successful PUT/DELETE/PATCH.
+- **Cacheability**: only GET (and HEAD) responses are cacheable by default; PUT, PATCH,
+  DELETE, and POST responses are **not** cached by intermediaries, and a successful
+  PUT/DELETE/POST *invalidates* cached entries for the target URI. This is part of why
+  URI-path versioning (`/v2/users/42`) plays nicely with caches — each version is a
+  distinct, independently-cacheable GET URL.
 
 ---
 
@@ -352,6 +411,31 @@ Strategies (in default priority):
   serve both based on `Accept`.
 - `produces`/`consumes` on `@RequestMapping` further constrain negotiation.
 
+**Worked example — which header triggers 406 vs 415.** Start with an app that has
+only Jackson JSON on the classpath (the Boot default), one endpoint
+`GET/POST /users`:
+
+```
+Read  →  GET /users            Accept: application/xml
+      ←  406 Not Acceptable        (client WANTS xml; no converter can WRITE xml → 406)
+
+Write →  POST /users           Content-Type: application/xml   <user>...</user>
+      ←  415 Unsupported Media Type (client SENT xml; no converter can READ xml → 415)
+```
+
+Mnemonic: **`Accept` (what I want back) drives 406** on the *response* side; **`Content-Type`
+(what I'm sending) drives 415** on the *request* side. Now add
+`jackson-dataformat-xml` to the classpath and re-run the read with **no other code
+change**:
+
+```
+Read  →  GET /users            Accept: application/json   ←  200  {"users":[...]}
+Read  →  GET /users            Accept: application/xml    ←  200  <users>...</users>
+```
+
+The *same* controller method now serves either representation purely off the `Accept`
+header, because a writable XML converter is present.
+
 ```properties
 spring.mvc.contentnegotiation.favor-parameter=true
 spring.mvc.contentnegotiation.parameter-name=format
@@ -372,6 +456,30 @@ spring.mvc.contentnegotiation.parameter-name=format
 - **Offset pagination pitfall**: deep offsets are slow (DB scans and discards rows)
   and can skip/duplicate rows when data mutates between pages; keyset/cursor
   pagination (WHERE id > lastId) avoids this.
+
+  **Worked example — the cost of page 50,000 (size 20).** `?page=50000&size=20`
+  becomes:
+
+  ```sql
+  -- OFFSET pagination
+  SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 1000000;
+  ```
+
+  Offset = `page × size = 50000 × 20 = 1,000,000`. The DB must walk the index/rows,
+  **produce and throw away the first 1,000,000 rows**, then return rows 1,000,001–
+  1,000,020 — it reads ~1,000,020 rows to hand back 20. Cost grows linearly with
+  depth: page 100,000 discards ~2,000,000. Keyset instead remembers the last id seen
+  (say `id = 1000000`) and jumps straight there via the index:
+
+  ```sql
+  -- keyset / seek pagination
+  SELECT * FROM orders WHERE id > 1000000 ORDER BY id LIMIT 20;
+  ```
+
+  The index seeks directly to `id > 1000000` and reads **only ~20 rows** — constant
+  cost no matter how deep the page. Trade-off: you lose random "jump to page N" access
+  (you can only page forward/backward from a cursor), which is usually fine for
+  infinite-scroll / "next" UIs.
 - Filtering: query params (`?status=ACTIVE&minAge=18`), or Spring Data
   `Specification`/QueryDSL/`Example` for dynamic predicates.
 - Return metadata via `PagedModel` (Spring HATEOAS / Spring Data) to keep the
@@ -517,6 +625,17 @@ built-in exception → ProblemDetail conversion with
 
 ## Bean validation & method validation
 
+The reason the same-looking `@Valid`/`@Min` can return 400 in one place and 500 in
+another comes down to **who does the validating**. `@Valid` on a `@RequestBody` is
+checked by the **MVC argument-binding machinery** as it constructs the object from the
+JSON — a binding failure is "bad input from the client," so 400 is by design. A bare
+constraint like `@Min` on a `@RequestParam`, historically, was checked by an **AOP
+proxy wrapped around the whole controller method** (Bean Validation's method
+validation) — a violation there is a *container-level* method failure that, unhandled,
+bubbles up as a raw 500. Spring 6.1 folded that second path into MVC itself so it now
+also yields a clean 400. Keep that "MVC binding vs AOP proxy" split in mind and the
+table below reads as consequence rather than trivia.
+
 Two distinct validation paths exist and they throw **different** exceptions —
 a classic senior trap:
 
@@ -557,6 +676,34 @@ handler but uses the stored value instead of re-invoking it.
 | `ResponseBodyEmitter` / `SseEmitter` | container thread | any thread calling `emitter.send()` |
 | `StreamingResponseBody` | container thread | executor thread writing raw `OutputStream` |
 | `Mono`/`Flux` (via ReactiveAdapterRegistry) | container thread | writes still **blocking** on the async executor (not WebFlux non-blocking I/O) |
+
+**Worked example — one `DeferredResult` request, thread by thread.** A controller
+returns a `DeferredResult<Order>` and hands the handle to a service that awaits a
+Kafka reply; nothing sets the result inline:
+
+```
+t=0ms    http-nio-8080-exec-3  request arrives, filters run, DispatcherServlet maps it,
+                               controller returns DeferredResult (NOT the value) →
+                               request.startAsync(); exec-3 is RELEASED to the pool.
+t=0–4s   (no container thread is holding this request; exec-3 serves other traffic)
+t=4020ms kafka-listener-2      reply lands; code calls deferredResult.setResult(order).
+t=4021ms http-nio-8080-exec-7  container performs an ASYNC dispatch onto a FRESH thread;
+                               it re-maps the handler but uses the stored `order` instead
+                               of re-invoking the controller, then the message converter
+                               writes the JSON body. Response goes out on exec-7.
+```
+
+Note **three different threads** touched this one request: exec-3 (initial), a
+listener thread (produced the result), exec-7 (async dispatch, wrote the body).
+
+Now the ThreadLocal trap falls out directly. A timing interceptor that does
+`start.set(now())` in `preHandle` stores it on **exec-3**'s ThreadLocal. But
+`afterCompletion` runs on the ASYNC dispatch — **exec-7** — whose ThreadLocal for
+`start` is empty (or worse, holds a leftover value from an unrelated request exec-7
+served earlier). So the measured "duration" is garbage: null/NPE, or wildly wrong.
+That is why timing must implement `AsyncHandlerInterceptor` (which fires
+`afterConcurrentHandlingStarted` on exec-3) or carry the start time on the request
+attribute, not a ThreadLocal.
 
 **Gotchas:**
 - Filters must be `asyncSupported=true` and mapped for the `ASYNC` dispatch or the
@@ -671,6 +818,44 @@ Conditional requests let clients cache and avoid redundant transfers.
   preventing lost updates.
 - ETags interact with compression/proxies; a weak ETag (`W/"..."`) signals
   semantic (not byte-for-byte) equivalence.
+
+**Worked example — reads (304) then a write conflict (412).** The client first
+fetches a resource:
+
+```
+Round 1 →  GET /users/42
+        ←  200 OK
+           ETag: "v3"
+           { "id": 42, "name": "Ada", "email": "ada@x.com" }        (full body sent)
+```
+
+The client caches `"v3"`. Later it revalidates, sending the tag it holds back:
+
+```
+Round 2 →  GET /users/42
+           If-None-Match: "v3"
+        ←  304 Not Modified                                          (empty body)
+```
+
+Server compares `If-None-Match: "v3"` against the current ETag `"v3"` → equal → it
+sends **304 with no body**, saving the payload. (If the resource had since changed to
+`"v5"`, the tags differ → **200** with the fresh body and `ETag: "v5"`.)
+
+Now an optimistic-concurrency write. Between the client's read and its write, another
+user edited user 42, so the server is now at `"v5"`:
+
+```
+Write   →  PUT /users/42
+           If-Match: "v3"
+           { "name": "Ada Lovelace", ... }
+        ←  412 Precondition Failed                                   (write rejected)
+```
+
+The server compares `If-Match: "v3"` against the current `"v5"` → **not equal** → it
+refuses with **412**, so the client's update (built from stale `"v3"` data) cannot
+silently overwrite the newer `"v5"` edit. This is exactly a lost-update prevention: the
+client must re-GET (getting `"v5"` + the newer state), re-apply its change, and PUT
+again with `If-Match: "v5"`.
 
 ---
 

@@ -280,6 +280,25 @@ sequenceDiagram
 > decoupling makes it safer on the hottest tables. PostgreSQL's analog for
 > rewrite-heavy changes is `pg_repack` / `pg_squeeze`.
 
+**Shared constraints and the foreign-key gotcha.** This is the "what actually breaks
+with these tools?" follow-up interviewers reach for. Both tools:
+
+- **Need a unique/primary key to chunk on** — they page through the table by that key,
+  so a table with no suitable unique key can't be migrated.
+- **Roughly double disk usage** during the migration, because the full ghost/shadow copy
+  coexists with the original until the swap. A 400 GB table needs ~400 GB free.
+- **Handle foreign keys badly — the single most common real-world failure.** Because the
+  cut-over is a `RENAME` of the ghost table into place, any *child* table whose FK
+  references the original table points at the wrong object after the swap.
+  - **gh-ost effectively does not support tables that are referenced by foreign keys**
+    (its FK support is off/experimental); teams usually drop the FK, migrate, and
+    re-add it, or avoid gh-ost for such tables.
+  - **pt-osc requires `--alter-foreign-keys-method`**: `rebuild_constraints` drops and
+    re-creates each child's FK to point at the new table (safe but slow, and briefly
+    holds a metadata lock on children), while `drop_swap` is faster but leaves a tiny
+    window where the constraint/table is inconsistent and is riskier. Neither is free —
+    you must choose, and each has a distinct failure mode.
+
 ---
 
 ## Adding NOT NULL and defaults safely
@@ -392,7 +411,12 @@ resumable** chunks.
   paused backfill continues from where it stopped rather than restarting.
 - **Avoid lock escalation & long transactions:** short batches keep the number of
   locked rows and the transaction age bounded; in Postgres, long transactions also
-  block `VACUUM` from reclaiming dead tuples and hold back the xmin horizon.
+  block `VACUUM` from reclaiming dead tuples and hold back the xmin horizon — meaning
+  `VACUUM` cannot remove old row versions that might still be visible to your
+  long-running transaction (the oldest transaction ID still in play is the "xmin
+  horizon"), so dead tuples pile up and the table bloats and slows down. Yet another
+  reason to keep each batch a short, quickly-committing transaction. (See
+  `transactions-acid-isolation-levels` for the MVCC mechanics.)
 
 ```sql
 -- Batched, resumable, idempotent backfill loop (pseudocode around SQL)
@@ -404,6 +428,28 @@ UPDATE users
    AND email_address IS NULL;     -- idempotent guard
 -- commit; set :last_id += 5000; sleep if replica lag high; repeat until no rows
 ```
+
+**Worked example — the "1 B-row table" backfill math.** This is exactly the arithmetic
+an interviewer wants when they say "backfill a billion rows." Take 5,000-row batches:
+
+- Batch count: `1,000,000,000 / 5,000 = 200,000` batches.
+- Per-batch cost: say each `UPDATE` of 5k rows commits in ~20 ms, and you sleep ~50 ms
+  between batches to let replicas catch up → **70 ms per batch**.
+- Wall-clock: `200,000 × 70 ms = 14,000,000 ms = 14,000 s ≈ 3.9 hours`.
+
+Now double the batch size to 10,000 rows to "go faster":
+
+- Batch count halves: `1,000,000,000 / 10,000 = 100,000` batches.
+- But each batch does twice the work, ~40 ms, plus the same 50 ms sleep → **90 ms**.
+- Wall-clock: `100,000 × 90 ms = 9,000,000 ms = 9,000 s = 2.5 hours`.
+
+So doubling the batch cut total time from ~3.9 h to ~2.5 h — but each transaction now
+holds row locks ~2× longer and ships ~2× the WAL/redo per commit, so **replica lag and
+lock-hold time rise with batch size**. That is the real trade-off: batch size is a
+throughput-vs-lag dial, not a "bigger is always better" knob. The disciplined move is to
+pick a batch size, then make the *sleep* adaptive — tie it to observed replication lag
+(e.g. skip the sleep while lag < 1 s, back off to 200–500 ms once lag crosses a
+threshold) so throughput self-limits to whatever the replicas can absorb.
 
 > [!WARNING]
 > `UPDATE ... LIMIT` without an ordered key, or `OFFSET`-based paging, leads to skipped

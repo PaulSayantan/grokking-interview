@@ -90,6 +90,41 @@ references.
   versions (JDK 21+) shifted to a scheme with load *and* store barriers for the
   generational design.
 
+**Worked example: tracing one self-healing load.** Take an *illustrative* colored
+pointer layout (exact bit positions changed across versions — the idea is what
+matters):
+
+```
+ 63 ............... 45 | 44      | 43      | 42       | 41 .............. 0
+ [   unused (zero)    ][Marked0 ][Marked1 ][Remapped ][   42-bit heap offset  ]
+```
+
+Only one color bit is the "good" (current) color at any moment. Say the current
+phase's good color is **Remapped**. Trace an object `O` getting relocated:
+
+1. **Before.** A field holds a reference to `O` at heap offset `0x0001000`, tagged
+   with the *previous* good color `Marked0`. Bit view: `Marked0=1, Remapped=0,
+   addr=0x0001000`.
+2. **GC relocates `O`** concurrently to offset `0x0005000` and records a forwarding
+   entry in the relocation table: `0x0001000 → 0x0005000`. The stale field is
+   **not** touched yet — that's the whole point (no STW pass to fix every pointer).
+3. **App thread loads the field** (`Object x = holder.field;`). The **load barrier**
+   fires: it masks off the color bits and asks "is this the good color?" The
+   pointer's color is `Marked0`, but the good color is `Remapped` → **bad color →
+   slow path.**
+4. **Slow path (self-healing).** The barrier looks up offset `0x0001000` in the
+   forwarding table, finds `0x0005000`, **rewrites the in-memory field** to a
+   pointer with `Remapped=1, addr=0x0005000`, and returns that healed reference.
+5. **Next load of the same field** sees color `Remapped` = good color → **fast path,
+   zero fixup.** The cost of relocation is paid lazily, once, by the first reader.
+
+Contrast one load under **G1's SATB write barrier**: G1 doesn't intercept *reads* at
+all. Instead, when the app *overwrites* a reference field during concurrent marking,
+the write barrier records the *old* value into a log so the marker still visits it
+(preserving the "snapshot at the beginning"). G1 then updates all references during a
+**STW evacuation pause** — which is exactly why its pause grows with the live set,
+while ZGC's healing is spread across mutator reads and stays heap-independent.
+
 **Generational ZGC (JDK 21, JEP 439).** The original ZGC was
 *single-generation*: it marked and relocated the *entire* heap every cycle.
 Because "most objects die young" (the weak generational hypothesis), this wasted
@@ -107,6 +142,15 @@ handling of high allocation rates — while keeping the sub-millisecond pauses.
   heap headroom for concurrent relocation, and multi-mapping); needs enough spare
   CPU to keep GC threads ahead of allocation, otherwise **allocation stalls**
   occur. Generational ZGC substantially reduces the footprint/CPU cost.
+
+**Gotcha: "concurrent everything" ≠ truly pauseless.** ZGC still has a handful of
+**short STW pauses** — chiefly **mark start** (scan thread stacks / GC roots),
+**mark end**, and **relocate start**. What makes them sub-millisecond is that they
+only scan **roots** (thread stacks, globals) — work that is `O(number of threads)`,
+**not `O(heap)` or `O(live set)`**. The heavy lifting (concurrent marking, concurrent
+relocation, reference processing) happens while the app runs. So the honest answer to
+"is ZGC pauseless?" is: *no — it has bounded root-scanning pauses whose duration is
+independent of how big the heap is*, which is what actually delivers the SLA.
 
 **Gotcha.** ZGC does **not** aim for maximum throughput. If your workload is
 batch/throughput-bound with generous pause budgets, Parallel or G1 may deliver
@@ -135,6 +179,27 @@ either itself or its relocated copy, so reads/writes indirected through it. Newe
 Shenandoah versions replaced this with **load-reference barriers (LRB)** to
 reduce overhead. Concurrent evacuation copies live objects to new regions while
 mutators run; barriers ensure mutators see the up-to-date copy.
+
+**Intuition — the "forwarding slot."** Think of the Brooks word as a mandatory
+mail-forwarding sticker on every object. Trace it:
+
+1. Object `O` is created with a header that includes a forwarding slot. Normally
+   that slot **points to `O` itself** — "I still live here." Every read/write of a
+   field first dereferences the slot (one extra indirection), lands back on `O`, and
+   proceeds.
+2. GC evacuates `O` to a copy `O'` *while the app runs*. It flips `O`'s forwarding
+   slot to **point to `O'`** — "I've moved; forward my mail to `O'`."
+3. Any mutator that still holds the old `O` reference reads/writes a field: it
+   follows the slot, is transparently redirected to `O'`, and operates on the current
+   copy. No STW pass had to rewrite every reference first — the indirection *is* the
+   fix-up.
+
+That single extra word is what lets relocation be concurrent — but it costs **one
+header word per object** (memory) plus **an indirection on every access** (time),
+even when nothing has moved. **Load-reference barriers (LRB)** removed the always-on
+extra word by doing the forwarding check in a barrier on reference loads instead
+(closer in spirit to ZGC's load barrier), so the common "nothing moved" case gets
+cheaper.
 
 **Shenandoah vs ZGC (a very common interview question).**
 - Both are concurrent, low-pause, region-based, compacting collectors with pauses
@@ -213,6 +278,56 @@ Typical path: **0 (interpret) → 3 (C1 + profiling) → 4 (C2)**. Profiling at 
 **back-edge counters** (loop iterations); crossing thresholds triggers
 compilation. On-Stack Replacement (**OSR**) lets a long-running loop be replaced
 by compiled code *mid-execution* without waiting for the method to be re-entered.
+
+**Worked example: what actually triggers C2?** Under tiered defaults the key knobs
+are `-XX:Tier3InvocationThreshold` (~200), `-XX:Tier4InvocationThreshold` (~5000),
+and `-XX:CompileThreshold`-style back-edge counters (loop iterations). *(These values
+are approximate and version-dependent — quote the mechanism, not exact numbers.)*
+Trace a method `hot(int)` called in a loop:
+
+```
+for (int i = 0; i < 20_000; i++) sum += hot(i);
+```
+
+- Calls **1..~200**: level **0**, interpreted. Invocation + back-edge counters climb.
+- At **~200 invocations**: crosses Tier3 threshold → JVM queues a **level-3 (C1 +
+  profiling)** compile. `hot` now runs as profiled machine code, recording branch
+  probabilities and receiver types.
+- At **~5000 invocations** with a hot profile: crosses Tier4 → queues a **level-4
+  (C2)** compile using that profile. `hot` now runs as fully optimized code.
+- **OSR twist:** if `hot` had contained its *own* long loop, the back-edge counter
+  could trip a compile *while the method is still on the stack* — the JVM compiles an
+  OSR version and swaps execution into it mid-loop, rather than waiting for the next
+  call. That's why a single `main()` with one giant loop still gets compiled.
+
+**Worked example: a monomorphic inline that deopts.** Suppose:
+
+```java
+interface Shape { double area(); }
+// For the whole warm-up, only Circle is ever loaded.
+double total(List<Shape> shapes) {
+    double t = 0;
+    for (Shape s : shapes) t += s.area();   // virtual call
+    return t;
+}
+```
+
+1. During profiling, C2 sees **every** receiver at the `s.area()` call site is a
+   `Circle` → the site is **monomorphic**. C2 speculates "this is always `Circle`,"
+   **inlines `Circle.area()` directly**, and drops in a cheap type guard (a "class
+   check") plus an **uncommon trap** on the else branch.
+2. Steady state: the loop runs inlined `Circle` arithmetic with no virtual dispatch —
+   fast.
+3. **Then a `Square` is loaded and enters the list.** On the next iteration the type
+   guard fails → the uncommon trap fires → **deoptimization**: C2's compiled `total`
+   is discarded, the frame is rebuilt for the **interpreter**, and execution resumes
+   there safely.
+4. The method re-profiles (now **bimorphic**), and C2 recompiles a version that
+   handles both types (e.g., inlining both behind a two-way guard). **Observed
+   effect:** a brief, transient latency dip right after the new class appears —
+   exactly the "deopt during class loading" bump the section below warns about. This
+   is *why* deopt must exist: it lets C2 make the aggressive `Circle`-only bet in the
+   common case without ever being *wrong* when the assumption breaks.
 
 **Inlining (advanced).** The single most important optimization: the compiler
 copies a callee's body into the caller, eliminating call overhead and, crucially,
@@ -347,6 +462,37 @@ advantage over heavyweight sampling/instrumenting profilers.
   `@Category`, etc. — your app's domain events land alongside JVM events.
 - Analyze with **JMC**, or on the command line with **`jfr print`** /
   **`jfr summary`**.
+
+**Worked example: reading JFR to solve the p99 spike (follow-up #14).** You dump a
+recording during the incident and run `jfr summary rec.jfr`. An *illustrative*
+GC-event excerpt:
+
+```
+Event Type                         Count   Bytes/Avg Duration
+jdk.GarbageCollection                412    -
+jdk.G1MMU (pause target 200ms)       ...
+jdk.GCPhasePause  (max)                1    1240 ms   <-- outlier
+jdk.ObjectAllocationOutsideTLAB      388    avg 20.4 MB  <-- large!
+jdk.G1HeapRegionInformation          ...    Humongous: 47 regions
+```
+
+Reason from evidence → hypothesis → action:
+
+1. **Evidence:** most G1 pauses hug the 200 ms goal, but one **1240 ms** pause blows
+   past it, and there's a burst of `ObjectAllocationOutsideTLAB` events averaging
+   ~20 MB each, matching dozens of **Humongous** regions. On a 64 GB heap G1 sizes
+   regions at 32 MB (heap/~2048, capped at 32 MB), so the humongous threshold is
+   16 MB (half a region) — those ~20 MB objects are **humongous**, allocated straight
+   into old-gen regions and prone to forcing expensive collections.
+2. **Hypothesis:** periodic **humongous allocations** (e.g., a big buffer/array built
+   every few minutes) trigger costly collections and occasional full-GC-like pauses —
+   the source of the p99 spike.
+3. **Action:** first, **fix the allocation** — stream/chunk the large buffer or reuse
+   a pooled one so each object drops under the 16 MB humongous threshold (region size
+   is already at G1's 32 MB cap here, so you can't just raise `-XX:G1HeapRegionSize`
+   to grow past it). If pauses must be flat regardless of allocation shape, **switch
+   to generational ZGC** (`-XX:+UseZGC`) — its pauses are heap-independent. Re-measure
+   with a fresh recording to confirm the outlier is gone.
 
 **JFR vs traditional profilers (advanced).** Traditional sampling profilers
 (e.g., attaching via JVMTI) often suffer **safepoint bias** — samples are only

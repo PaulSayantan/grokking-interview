@@ -384,7 +384,7 @@ different seats book in parallel:
 // AFTER (correct): per-seat lock, minimal critical section
 class Seat {
     private final ReentrantLock lock = new ReentrantLock();
-    private volatile boolean booked;
+    private boolean booked;                // no volatile: every access is lock-guarded
     private User bookedBy;
 
     boolean tryBook(User user) {
@@ -411,7 +411,10 @@ class BookingService {
 
 Why this design: the lock lives *inside* `Seat` (encapsulation + fine granularity), the
 critical section is tiny, booking seat A never blocks booking seat B, and the service holds a
-`ConcurrentHashMap` so lookups are concurrent. If a booking spans *multiple* seats, acquire
+`ConcurrentHashMap` so lookups are concurrent. Note `booked` is **not** `volatile` — every
+read and write happens under the lock, and the lock already provides visibility (an unlock
+happens-before the next lock), so `volatile` would be redundant here. `volatile` earns its
+keep only for a flag read on a path that *bypasses* the lock. If a booking spans *multiple* seats, acquire
 their locks in a **consistent order** (by seat id) to avoid deadlock — or model the multi-seat
 reserve optimistically with a rollback on partial failure.
 

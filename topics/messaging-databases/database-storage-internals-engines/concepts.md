@@ -32,6 +32,20 @@ range scan walks siblings without re-descending the tree. That last property is 
 (not plain B-trees, which store data in every node) dominate: range queries and ordered
 scans are cheap.
 
+```mermaid
+flowchart TB
+  Root["Root / branch<br/>keys: 50 | 100 (separators)"]
+  Root -->|< 50| L1["Leaf: 10,20,30 → rows"]
+  Root -->|50–100| L2["Leaf: 50,60,70 → rows"]
+  Root -->|> 100| L3["Leaf: 110,120 → rows"]
+  L1 <-.sibling link.-> L2
+  L2 <-.sibling link.-> L3
+```
+
+Interior nodes hold only separator keys and child pointers (no rows); the **leaf level** holds
+the rows (or row pointers) and is stitched into a doubly-linked list, so a range scan finds
+the first leaf via the tree and then walks siblings left/right without re-descending.
+
 Key facts an interviewer expects:
 
 - **Height is very small.** With fan-out of hundreds per page, a tree of billions of rows is
@@ -44,6 +58,22 @@ Key facts an interviewer expects:
 - **Splits and merges** keep the tree balanced: inserting into a full page splits it into
   two half-full pages and pushes a separator key up; deletes can merge underfull pages. Splits
   are the source of B+tree write amplification and fragmentation.
+
+**Worked example — why 4 levels holds tens of billions of rows.** Start with fan-out. A
+16 KB page minus header holds interior entries of `(separator key + child pointer)`; if a key
+averages ~24 bytes and a pointer ~6 bytes, that is ~30 bytes/entry, so one page routes to
+`16384 / 30 ≈ 500` children. Now count capacity per level (each level multiplies by the
+fan-out):
+
+- 1 level (root is a leaf): ~500 rows
+- 2 levels: `500² = 250,000` rows
+- 3 levels: `500³ = 125,000,000` (~125 M) rows
+- 4 levels: `500⁴ = 62,500,000,000` (~62.5 B) rows
+
+So a **4-level** B+tree indexes ~62 billion rows. A point lookup reads 4 pages — but the root
+and its ~500 children (2 upper levels ≈ 501 pages ≈ 8 MB) are almost always resident in the
+buffer pool, so only the bottom 1–2 page reads actually hit disk. That is the "~1 physical
+I/O per point lookup" claim, made concrete.
 
 **Clustered vs secondary index.** In InnoDB the table *is* a B+tree keyed by the primary
 key — this is the **clustered index**, and the leaf holds the full row. A secondary index
@@ -83,7 +113,13 @@ several places, newest-to-oldest, until it finds the key. To keep this bounded, 
 use:
 
 - **Per-SSTable Bloom filters** so a read can skip a file that definitely does not contain
-  the key (turns "check every file" into "check only files that might match").
+  the key (turns "check every file" into "check only files that might match"). A Bloom filter
+  answers "**definitely not present**" or "**maybe present**" — it never gives a false
+  negative, only false positives. Sizing is a RAM-vs-accuracy dial: at ~10 bits/key the
+  false-positive rate is ~1%, so for a key that isn't in a file the filter is right 99% of the
+  time and the read skips the SSTable's block index and disk read entirely. Concretely, a
+  point lookup for a missing key across 6 SSTables does `6 × 1% ≈ 0.06` expected wasted probes
+  instead of 6. The cost: 10 bits/key × 1 B keys = ~1.25 GB of RAM for the filters.
 - **Sparse block indexes / fence pointers** to jump to the right block within an SSTable.
 - **Compaction**: a background process that merges multiple SSTables into fewer, larger,
   non-overlapping ones, discarding overwritten values and **tombstones** (delete markers).
@@ -108,6 +144,18 @@ flowchart LR
 |---|---|---|---|
 | **Leveled** (RocksDB default, Cassandra LCS) | Non-overlapping levels, each ~10x the previous; key exists in ≤1 SSTable per level | Low **read** & **space** amplification | High **write** amplification (~10–30x) |
 | **Size-tiered / Tiered** (Cassandra STCS, default HBase) | Merge SSTables of similar size into a bigger one | Low **write** amplification | High **space** amp (transient 2x) & **read** amp |
+| **Time-Window (TWCS)** (Cassandra time-series) | Buckets SSTables by time window; never compacts across windows | Cheap TTL expiry, no cross-window rewrite | Only fits time-ordered / TTL data |
+
+**TWCS — the right answer for time-series.** The [!INTERVIEW] callout below cites time-series
+and event logs as the flagship LSM workload; the follow-up an interviewer asks is *"which
+compaction strategy?"* **Time-Window Compaction Strategy** groups SSTables into time buckets
+(say, one per day) and only ever compacts within a bucket. When a bucket's data ages past its
+TTL, the *whole* SSTable is dropped as a unit — no scan, no merge, no tombstone churn. This
+sidesteps the tombstone-scan pathology in the warning below: with leveled or size-tiered
+compaction, expiring a day of TTL'd rows means writing a tombstone per key and scanning past
+them until compaction reclaims them; with TWCS the expired window's files simply disappear.
+Never use plain leveled compaction for append-only time-series — it rewrites old, immutable
+data over and over for no benefit.
 
 Deletes are subtle: an LSM cannot erase a key in place, so it writes a **tombstone**. The
 key is only truly gone once compaction has processed every SSTable containing an older
@@ -134,6 +182,34 @@ factors* — how much more work the engine does than the logical operation impli
 - **Space amplification (SA):** bytes on disk ÷ bytes of live logical data. B+trees waste
   space via partially-full pages and fragmentation; LSMs hold obsolete versions/tombstones
   until compaction, and tiered compaction transiently doubles space.
+
+**Worked example — where "~10–30x" write amplification comes from.** In leveled compaction
+each level is ~10x the size of the one above (L1 = 10× L0, L2 = 10× L1, …), and a key exists
+in at most one SSTable per level. A single logical byte written to the memtable does *not* get
+written once — it is rewritten every time it is pushed down a level during compaction. To
+merge one file *into* the next level, the compactor reads the incoming file plus the
+overlapping files in the target level (the ~10x-larger level, so ~10 files' worth of
+overlapping data) and writes the merged result back. So each level-transition writes roughly
+**~10 bytes for every 1 byte pushed down** (the fan-in overhead), and the byte survives
+~7 levels on its way to the bottom:
+
+```
+1 byte in memtable
+ └─ flush to L0 ...................... write 1×
+ └─ compact L0→L1 (10x fan-in) ....... write ~10× of the merged data
+ └─ compact L1→L2 .................... ~10×
+ └─ ... down to ~L6/L7
+```
+
+You don't literally get `10 × 7`; the fan-in factor and how much data each byte co-mingles
+with vary, but summing the per-level rewrites lands in the **~10–30x** range for a typical
+7-level tree — that is the number, and now you can say where it comes from. Contrast **tiered
+compaction**: it waits for ~N same-size SSTables and merges them in one pass — read N tables,
+write 1 — so a byte is rewritten far fewer times (low WA). But during that merge both the N
+inputs and the 1 output exist on disk simultaneously, so live data is transiently duplicated
+→ **~2x space amplification** at the moment of compaction. That is the RUM trade in a single
+worked pair: leveled spends *writes* to buy low *space+read*; tiered spends *space+read* to
+buy low *writes*.
 
 The **RUM conjecture** (Athanassoulis et al., 2016) states you can optimize for at most two
 of **R**ead, **U**pdate, and **M**emory (space) overhead at the expense of the third — there
@@ -206,8 +282,8 @@ are now safely in the data files." Its two jobs:
 Engines spread checkpoint I/O over time to avoid a "write storm" that stalls foreground work:
 
 - **PostgreSQL:** `checkpoint_timeout` (default 5 min) and `max_wal_size` trigger
-  checkpoints; `checkpoint_completion_target` (default 0.9) spreads the flush over ~90% of the
-  interval. A background writer trickles out dirty pages between checkpoints.
+  checkpoints; `checkpoint_completion_target` (default 0.9 since PostgreSQL 14; it was 0.5 in
+  older versions) spreads the flush over ~90% of the interval. A background writer trickles out dirty pages between checkpoints.
 - **InnoDB:** does **fuzzy (sharp-free) checkpointing** continuously via page-cleaner threads,
   driven by how full the redo log is (adaptive flushing). It tracks the oldest un-flushed
   change with an LSN watermark so redo can be trimmed.
@@ -240,6 +316,13 @@ server layer (above the storage engine), used for **replication** and point-in-t
 not crash recovery. So a committed MySQL transaction is written to *both* the InnoDB redo log
 (engine, physical, for durability) and the binlog (server, logical, for replication),
 coordinated by an internal **two-phase commit** so they never disagree after a crash.
+The XA-style flow is: (1) InnoDB writes its redo record and marks the transaction **PREPARE**;
+(2) the **binlog** event is written and fsynced; (3) InnoDB writes the redo **COMMIT** marker.
+On crash recovery MySQL scans redo for transactions stuck in PREPARE and resolves each by the
+binlog: **if the binlog event is present, commit it; if absent, roll it back.** The binlog is
+thus the tie-breaker, which is why the binlog fsync (step 2) is the durable decision point,
+and `binlog_group_commit` batches those fsyncs while preserving a single commit order shared
+by the engine and replicas.
 PostgreSQL has no separate binlog: its single WAL serves both crash recovery *and* streaming
 replication.
 
@@ -435,6 +518,17 @@ throughput, so every engine exposes knobs to relax it.
 - **Group commit:** engines batch the fsyncs of many concurrent commits into one flush, so
   fsync cost is amortized across the group — this is why concurrency can *raise* commit
   throughput.
+
+**Worked example — how many commits/sec?** (figures approximate). One `fsync` on a spinning
+disk costs ~one rotation-plus-settle, roughly **5–10 ms**. Single-threaded, each commit waits
+its own fsync, so throughput is `1 / 0.008 s ≈ 125` durable commits/sec — and adding threads
+barely helps if each still forces its own flush. On enterprise SSD/NVMe an fsync is ~**tens of
+microseconds** (say 50 µs), i.e. `1 / 0.00005 ≈ 20,000` commits/sec. Now turn on **group
+commit** on the spinning disk: if 100 transactions are in-flight when the flush fires, one
+~8 ms fsync durably commits all 100, so effective throughput jumps from ~125 to
+`100 / 0.008 ≈ 12,500` commits/sec — a ~100x gain purely from batching, with each commit still
+fully durable. That is why "just add concurrency" is a real answer to a commit-throughput
+question, and why a low-latency flush device changes the math by orders of magnitude.
 
 > [!WARNING]
 > Relaxing fsync (`synchronous_commit=off`, `innodb_flush_log_at_trx_commit=2`) trades a

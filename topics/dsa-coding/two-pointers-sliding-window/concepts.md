@@ -134,6 +134,14 @@ def longest_unique(s):
     return best
 ```
 
+Note that the code above uses the **"jump-left" optimization**: instead of shrinking
+`left` one step at a time, the `last` map tells you exactly where the duplicate sat, so
+you leap `left` straight to `last[c] + 1`. The guard `last[c] >= left` matters because a
+character's previous occurrence may already be *outside* the current window — in that case
+it isn't a duplicate anymore, so don't move `left` backward. (Example: in `"abba"`, when
+the second `a` arrives `left` is already at 2, but `last['a'] == 0 < 2`, so we keep `left`
+where it is rather than jumping it back to 1.)
+
 Two common shrink styles:
 - **"Shrink while invalid"** (longest problems): grow right; while constraint broken,
   move left. Answer is the max window seen.
@@ -144,13 +152,63 @@ Two common shrink styles:
 **Complexity:** `O(n)` time (amortized — `left` and `right` each advance ≤ n times),
 `O(k)` space for the window-state structure (k = distinct elements / alphabet size).
 
+### Worked example: Minimum Window Substring (shrink-while-valid)
+
+The canonical "shrink while valid" problem: find the shortest substring of `s` that
+contains every character of `t` (with multiplicity). The mechanic that trips people up is
+knowing *when the window is valid*. Track a `need` count per required char, a `required`
+= number of distinct chars still to satisfy, and a `have` = how many of those are
+currently satisfied. The window is valid exactly when `have == required`.
+
+```python
+def min_window(s, t):
+    need = {}
+    for c in t: need[c] = need.get(c, 0) + 1
+    required = len(need)
+    window = {}
+    have = 0
+    best = (float('inf'), 0, 0)   # (length, l, r)
+    left = 0
+    for right, c in enumerate(s):
+        window[c] = window.get(c, 0) + 1
+        if c in need and window[c] == need[c]:
+            have += 1
+        while have == required:                       # valid → try to shrink
+            if right - left + 1 < best[0]:
+                best = (right - left + 1, left, right)
+            lc = s[left]
+            window[lc] -= 1
+            if lc in need and window[lc] < need[lc]:
+                have -= 1
+            left += 1
+    return "" if best[0] == float('inf') else s[best[1]:best[2]+1]
+```
+
+Trace on `s = "ADOBECODEBANC"`, `t = "ABC"`: `need = {A:1, B:1, C:1}`, `required = 3`.
+Tracking only the counts that matter (`A`, `B`, `C`) and `have`:
+
+| step | char in | window A/B/C | have | action |
+|---|---|---|---|---|
+| r=0 | A | 1/0/0 | 1 | grow |
+| r=3 | B | 1/1/0 | 2 | grow |
+| r=5 | C | 1/1/1 | **3** | valid → window `[0..5]`="ADOBEC" len **6** = best; drop `A`, have→2, left=1 |
+| r=10 | A | 1/2/1 | **3** | valid → `[1..10]` len 10 (not better); shrink D,O,B,E off (each still valid) to left=5, len 6 = tie; drop `C`, have→2, left=6 |
+| r=12 | C | 1/1/1 | **3** | valid → `[6..12]`="ODEBANC" len 7; shrink `O`(left=7), `D`(left=8)→"EBANC" len **5** = best; `E`(left=9)→"BANC" len **4** = best; drop `B`, have→2, left=10 |
+
+The candidate windows shrink **ADOBEC (6) → EBANC (5) → BANC (4)**; the answer is
+`"BANC"`. Notice the two distinct events: `have` *increases* only when a count first
+*reaches* its `need` (window `A` hitting 1), and *decreases* only when a removal drops a
+count *below* `need` (dropping the last `C` or `B`) — a surplus like `B:2` never touches
+`have`, which is why you can safely shrink past redundant characters.
+
 ## Sliding Window: fixed-size
 
 **Recognition signal:** "subarray/substring **of size k**" — max sum of k consecutive
 elements, averages, anagram checks.
 
-Keep the window exactly `k` wide: when `right - left + 1 > k`, advance `left` by one. Add
-the entering element's contribution, subtract the leaving one — never re-sum the window.
+Keep the window exactly `k` wide: for each new `right`, the element that leaves is always
+`a[right - k]`, so `left` is implicit and you never need a separate variable. Add the
+entering element's contribution, subtract the leaving one — never re-sum the window.
 
 ```python
 # Max sum of any window of size k
@@ -169,8 +227,11 @@ def max_sum_k(a, k):
 > **Longest Repeating Character Replacement** and **anagram-in-string** are window problems
 > where the state is a **frequency count** of characters in the window. The window is valid
 > when `windowLen - maxFreq <= k` (chars you'd need to replace). You don't even have to
-> decrement `maxFreq` when shrinking — the answer only grows when a *larger* valid window
-> appears, so a stale `maxFreq` never overstates the result.
+> decrement `maxFreq` when shrinking — because this window never *shrinks*: `left` advances
+> in lockstep with `right`, so the window width is monotonically non-decreasing. A stale
+> (too-large) `maxFreq` can therefore only keep the window the *same* width, never let it
+> grow wider than the best genuinely-valid window seen — so it cannot fabricate a larger
+> answer.
 
 ## Prefix Sum: O(1) range queries
 
@@ -221,6 +282,22 @@ def subarray_sum_k(a, k):
 subarrays that start at index 0. Same trick with `running % k` solves "subarray sums
 divisible by k".
 
+**Trace** on `a = [1, -1, 1]`, `k = 1` (a negative is included on purpose). Start
+`seen = {0:1}`, `running = 0`, `count = 0`:
+
+| x | running | look up `running - k` | seen has it? | count | seen after |
+|---|---|---|---|---|---|
+| 1 | 1 | `1 - 1 = 0` | yes, `seen[0]=1` → **+1** | 1 | `{0:1, 1:1}` |
+| -1 | 0 | `0 - 1 = -1` | no | 1 | `{0:2, 1:1}` |
+| 1 | 1 | `1 - 1 = 0` | yes, `seen[0]=2` → **+2** | 3 | `{0:2, 1:2}` |
+
+Final `count = 3`. The three subarrays summing to 1 are `[1]` (index 0), `[1]` (index 2),
+and the whole `[1,-1,1]`. Watch the `{0:1}` seed *fire* on the very first step: the prefix
+`[1]` itself equals `k`, and the only way to count it is a start-boundary of prefix-sum 0 —
+that is what the seed represents. On the third step the running prefix `1` has now been
+seen at *two* earlier boundaries (before index 0 with sum 0, and after index 0 with sum 1),
+so the lookup adds **2**, correctly capturing both `[1,-1,1]` and the trailing `[1]`.
+
 > [!WARNING]
 > **Do not** reach for a sliding window when the array has **negative numbers** and you
 > need an exact sum — expanding the window can *decrease* the sum, so the "shrink when too
@@ -237,6 +314,32 @@ the submatrix from `(0,0)` to `(r-1,c-1)`. Any rectangle sum is then four table 
 sum(r1..r2, c1..c2) = P[r2+1][c2+1] - P[r1][c2+1] - P[r2+1][c1] + P[r1][c1]
 ```
 
+Why four lookups? `P[r2+1][c2+1]` is the whole block from the origin down to the bottom-
+right corner. Subtract the strip *above* the rectangle (`P[r1][c2+1]`) and the strip to the
+*left* (`P[r2+1][c1]`) — but those two strips overlap in the top-left corner block, which
+you've now subtracted **twice**, so add `P[r1][c1]` back once. That is textbook
+inclusion–exclusion.
+
+**Worked example.** Matrix and its prefix table `P` (row/col 0 are the zero-padding):
+
+```text
+a =  1 2 3          P =  0  0  0  0
+     4 5 6               0  1  3  6
+     7 8 9               0  5 12 21
+                         0 12 27 45
+```
+
+Sum of the bottom-right `2×2` block (rows 1..2, cols 1..2 → values `5,6,8,9`):
+
+```text
+P[3][3] - P[1][3] - P[3][1] + P[1][1]
+  = 45   -   6     -   12    +   1     = 28
+```
+
+Check: `5 + 6 + 8 + 9 = 28`. The `-6` peels off the top strip (`P[1][3]` = sum of row 0 =
+`1+2+3`), the `-12` peels off the left strip (`P[3][1]` = col 0 = `1+4+7`), and `+1` restores
+the top-left cell `a[0][0]=1` that both strips removed.
+
 **Complexity:** `O(m·n)` build, `O(1)` per query.
 
 ## Choosing the right pattern
@@ -248,11 +351,19 @@ flowchart TD
     B -->|No, need complement| D["Use a HashMap (see Arrays and Hashing)"]
     A -->|Yes| E{"Fixed window size k?"}
     E -->|Yes| F["Fixed-size sliding window"]
-    E -->|No| G{"All values positive AND asking longest/shortest?"}
-    G -->|Yes| H["Variable-size sliding window"]
-    G -->|"No (negatives, or exact-sum count)"| I["Prefix sum + HashMap"]
+    E -->|No| G{"Is the window constraint a running sum?"}
+    G -->|"No (distinct-count / frequency / replacement)"| H["Variable-size sliding window"]
+    G -->|Yes| K{"All values positive?"}
+    K -->|Yes| H
+    K -->|"No (negatives, or exact-sum count)"| I["Prefix sum + HashMap"]
     A -->|"Many static range-sum queries"| J["Prefix sum array (1D / 2D)"]
 ```
+
+The all-positive gate only applies when the window's constraint is a **running sum**
+(monotone growth is what lets you shrink safely). Distinct-count, frequency, and
+character-replacement windows (Longest Substring Without Repeating Characters, Fruit Into
+Baskets, Longest Repeating Character Replacement) are variable-window problems *regardless*
+of whether values are positive or negative — value positivity is irrelevant there.
 
 | Pattern | Signal | Time | Space | Replaces |
 |---|---|---|---|---|

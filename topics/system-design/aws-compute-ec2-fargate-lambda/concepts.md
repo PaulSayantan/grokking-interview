@@ -331,9 +331,12 @@ cheaper *total* choice. Always frame cost as bill **plus** ops labor **plus**
 opportunity cost of time-to-market.
 
 **Estimation example.** A function: 128 MB, 100 ms avg, 50M invokes/month. GB-seconds
-= 50M × 0.1 s × (128/1024) GB ≈ 625k GB-s → a few dollars of compute + ~$10 request
-charge. Same load steady at, say, 20 req/s continuously could sit on one small
-right-sized instance — compare both before deciding.
+= 50M × 0.1 s × (128/1024) GB ≈ 625k GB-s. At the x86 rate that is
+625,000 × $0.0000166667 ≈ **$10 of compute**, plus 50M × $0.20/1M ≈ **$10 of request
+charge** → **~$20/month** (ignoring the free tier). The same steady 20 req/s could sit
+on one small right-sized instance — e.g. a `t4g.small` at ~$12/mo on-demand (~$5 on a
+1-yr Savings Plan) — so at this load the two are close and reserved EC2 pulls ahead as
+steady traffic rises. Compare both columns before deciding.
 
 ---
 

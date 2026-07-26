@@ -370,7 +370,11 @@ public final class NotificationBroker implements Broker {
         subs.computeIfAbsent(t, k -> new CopyOnWriteArrayList<>()).add(s);
     }
     public void unsubscribe(Topic t, Subscriber s) {
-        subs.getOrDefault(t, List.of()).remove(s);
+        // computeIfPresent so we mutate the real CopyOnWriteArrayList only when the topic
+        // exists. NOTE: getOrDefault(t, List.of()).remove(s) is a trap here — when the topic
+        // is absent it calls remove() on the immutable empty List.of(), throwing
+        // UnsupportedOperationException. (List.of() lists are immutable regardless of size.)
+        subs.computeIfPresent(t, (k, list) -> { list.remove(s); return list; });
     }
     public void publish(Topic t, Notification n) {
         for (Subscriber s : subs.getOrDefault(t, List.of())) {
@@ -405,10 +409,15 @@ public final class NotificationService {
             r = c.send(n, u);
             if (r.status() == Status.SENT) return;
             attempt++;
-            sleep(retryPolicy.nextDelay(attempt));
-        } while (retryPolicy.shouldRetry(attempt, r));
+            if (!retryPolicy.shouldRetry(attempt, r)) break;  // no sleep before dead-lettering
+            sleep(retryPolicy.nextDelay(attempt));            // only between attempts we'll retry
+        } while (true);
         deadLetter(n, u, r);                 // exhausted retries
     }
+    // NOTE: sleep() here blocks a pool thread for the whole backoff window — a simplification
+    // that contradicts the slow-channel-isolation goal above. The non-blocking idiom is to
+    // re-submit the next attempt to a ScheduledExecutorService after nextDelay(attempt), freeing
+    // the worker while it waits.
 }
 ```
 
@@ -427,6 +436,91 @@ public final class RateLimitedChannel implements NotificationChannel {
 }
 ```
 
+## Worked Example: tracing a publish
+
+Reading the skeletons in isolation, it's hard to *see* the pieces cooperate. Let's push one
+concrete event all the way through — subscribe → broker fan-out → per-subscriber preference
+filter → per-channel async delivery → a failed send with two retries → success — and watch
+the state change at every hop.
+
+**Setup.**
+- **Event:** a shipping service raises `OrderShipped` and calls `broker.publish("orders", n)`,
+  where `n` = `Notification{id:"n-42", topic:"orders", title:"Shipped!", priority:NORMAL}`.
+- **Subscribers registered on `"orders"`:** `subs["orders"] = [Alice, Bob]`.
+  - **Alice** — `enabled={EMAIL, SMS}`, `mutedTopics={}`, `digest=false` (push is *not* in her
+    enabled set).
+  - **Bob** — `enabled={EMAIL}`, `mutedTopics={"orders"}`, `digest=false`.
+- **RetryPolicy:** exponential backoff, `base=200ms`, `factor=2`, `maxRetries=3` (retries
+  *after* the first attempt, so up to 4 sends total). `nextDelay(attempt) = base * 2^(attempt-1)`
+  → `200ms, 400ms, 800ms`; `shouldRetry(attempt) = attempt <= 3`.
+
+**Hop 1 — broker fan-out.** `publish("orders", n)` iterates the `CopyOnWriteArrayList`
+snapshot `[Alice, Bob]` and calls `onNotification(n)` on each. No preference logic here — the
+broker only routes.
+
+**Hop 2 — Bob is filtered out.** `Bob.onNotification(n)` → `service.send(n, bob)`. First line:
+`prefs.isMuted("orders")` → **true** → `return`. Bob receives nothing. **Zero channel tasks
+submitted for Bob.**
+
+**Hop 3 — Alice fans out to channels.** `Alice.onNotification(n)` → `service.send(n, alice)`.
+`isMuted("orders")` → false. `enabledChannels() = {EMAIL, SMS}`, so the service submits **two**
+async tasks: `deliverWithRetry(emailChannel, n, alice)` and `deliverWithRetry(smsChannel, n,
+alice)`. (Push is skipped — not in her enabled set.)
+
+**Hop 4a — email: first-try success.**
+
+| iteration | `c.send()` result | attempt | action |
+|---|---|---|---|
+| 1 | `SENT` | 0 | return immediately |
+
+One provider call. Final: `DeliveryResult{status:SENT, attempts:1}`. No sleep, no retry.
+
+**Hop 4b — SMS: two failures then success.** The Twilio gateway times out twice, then recovers:
+
+| iteration | `c.send()` result | attempt after++ | `shouldRetry?` | `nextDelay` → sleep |
+|---|---|---|---|---|
+| 1 | `FAILED` (timeout) | 1 | yes (1 ≤ 3) | `200 * 2^0 = 200ms` |
+| 2 | `FAILED` (timeout) | 2 | yes (2 ≤ 3) | `200 * 2^1 = 400ms` |
+| 3 | `SENT` | — | — | return |
+
+Three provider calls, two waits (200ms + 400ms = 600ms of backoff), delivered on the third.
+Final: `DeliveryResult{status:SENT, attempts:3}`. Note the sleep happens *only between attempts
+that will be retried* — after the success on iteration 3 we `return` before any further wait.
+
+**What if SMS never recovered?** Now all four sends fail: iterations 1–3 `FAILED` with waits
+`200ms, 400ms, 800ms`, then iteration 4 (the last allowed retry) also `FAILED`; `attempt`
+becomes 4, `shouldRetry(4)` → **false** (`4 <= 3` is false), so we `break` *without* a final
+useless sleep and call `deadLetter(n, alice, r)` with `DeliveryResult{status:FAILED,
+attempts:4}` — 4 total sends, 3 backoff waits summing 1.4s. Email's success and SMS's failure
+are independent — one hung channel never blocks the other, because each runs on its own pool
+task.
+
+```mermaid
+sequenceDiagram
+    participant P as Publisher
+    participant B as Broker
+    participant A as Alice (Subscriber)
+    participant S as NotificationService
+    participant E as EmailChannel
+    participant SMS as SmsChannel
+    P->>B: publish("orders", n-42)
+    B->>A: onNotification(n)  %% Bob muted → filtered, no call
+    A->>S: send(n, alice)
+    S->>E: deliverWithRetry (async task)
+    E-->>S: SENT (attempt 1)
+    S->>SMS: deliverWithRetry (async task)
+    SMS-->>S: FAILED → wait 200ms
+    SMS-->>S: FAILED → wait 400ms
+    SMS-->>S: SENT (attempt 3)
+```
+
+> [!TIP]
+> With jitter, each `nextDelay` is spread ±50% to avoid a thundering herd: `200ms` becomes a
+> random pick in `[100ms, 300ms]`, `400ms` in `[200ms, 600ms]`, etc. Same expected curve, but a
+> thousand clients retrying a recovered gateway no longer land in lockstep. Cap the raw delay
+> too (e.g. `cap=5s`): the sequence `200, 400, 800, 1600, 3200, 5000, 5000, …` flattens once
+> `base * 2^(attempt-1)` exceeds the cap.
+
 ## Extensibility
 
 Every follow-up should be "new class implementing an existing interface," not an edit —
@@ -440,7 +534,12 @@ that's Open/Closed made visible.
 - **"Digest / batching: send one daily summary instead of 50 emails."** A
   `DigestSubscriber` (or a `BatchingChannel` decorator) buffers notifications and flushes
   on a schedule; preferences carry a `digest` flag. Immediate vs. digest becomes a
-  preference, not a code branch sprinkled everywhere.
+  preference, not a code branch sprinkled everywhere. *Concretely:* Carol has `digest=true`.
+  Between 8:01am and 7:59am the next day, 50 `OrderShipped`/`PriceDrop` notifications arrive;
+  each hits `DigestSubscriber.onNotification(n)` and is appended to her per-user buffer
+  (`buffer.size()` climbs 1→2→…→50) — **zero emails sent**. At the scheduled 8:00am flush, one
+  task drains the 50-item buffer, renders a single "50 updates" summary template, calls
+  `emailChannel.send()` **once**, and clears the buffer. Net: 50 events collapse to 1 email.
 - **"Priority: CRITICAL bypasses digest and quiet hours."** `Priority` on the
   `Notification`; the service consults it in the preference filter. A `PriorityChannel`
   decorator can also reorder/expedite.

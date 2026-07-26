@@ -13,7 +13,8 @@ wire and in the framework — plus cancellation, the Context object, and how to 
 > relative timeout. It travels as `grpc-timeout` (a remaining-time value, not a wall-clock
 > timestamp — to dodge clock skew), it's decremented and re-propagated at each hop so a
 > downstream call can never outlive its caller, and on expiry the RPC fails with
-> `DEADLINE_EXCEEDED` while the server sees its context cancelled. Cancellation is
+> `DEADLINE_EXCEEDED` while the server's context fires too — reporting `DeadlineExceeded` on
+> expiry, or `CANCELLED` on an explicit client cancel. Cancellation is
 > cooperative: the library won't kill your handler, so long-running handlers must poll the
 > context."*
 
@@ -185,16 +186,23 @@ When the deadline passes:
 2. **Wire:** gRPC sends an HTTP/2 `RST_STREAM` to tear down the stream for that RPC (recall
    gRPC maps one RPC to one HTTP/2 stream; other streams on the connection are unaffected —
    see `networking` for HTTP/2 multiplexing).
-3. **Server side:** the server's RPC **context is cancelled** (the server observes the RPC
-   as `CANCELLED`). The server is *notified* but **not forcibly stopped** — gRPC has no way
-   to interrupt your handler mid-execution.
-4. **Downstream:** because the server's context is now cancelled, any outbound calls made
+3. **Server side:** the server's RPC **context fires** (its `Done()` channel closes). Because
+   the server reconstructs a *local* deadline from `grpc-timeout` (see the wire section), on
+   pure deadline expiry the handler's context error is **`DeadlineExceeded`** — in gRPC-Go
+   `ctx.Err()` returns `context.DeadlineExceeded`, which maps to `DEADLINE_EXCEEDED` (code 4).
+   (An *explicit client cancel* or disconnect, by contrast, surfaces as `Canceled`/`CANCELLED`
+   — see the next section.) Either way the server is *notified* but **not forcibly stopped** —
+   gRPC has no way to interrupt your handler mid-execution. The exact surfaced error can vary
+   slightly by language/implementation, but the deadline-vs-explicit-cancel split holds.
+4. **Downstream:** because the server's context is now done, any outbound calls made
    from that context are cancelled too, propagating the teardown down the chain.
 
 > [!KEY-TAKEAWAY]
-> The **client** sees `DEADLINE_EXCEEDED`; the **server** sees its context/RPC
-> `CANCELLED`. Same event, two viewpoints. The server must *cooperate* by noticing and
-> stopping work — the framework won't kill the handler for you.
+> The **client** sees `DEADLINE_EXCEEDED` (code 4). The **server's** context also fires: on
+> deadline expiry the handler typically observes `DeadlineExceeded`, whereas an explicit client
+> cancel/disconnect surfaces as `CANCELLED` (code 1). Same family of events, distinct triggers.
+> Either way the server must *cooperate* by noticing and stopping work — the framework won't
+> kill the handler for you.
 
 A server that ignores the cancelled context keeps burning CPU, holding DB connections, and
 doing work whose result no one will read — the classic "zombie work" waste. Well-behaved
@@ -216,7 +224,9 @@ func (s *server) Crunch(ctx context.Context, r *pb.Req) (*pb.Resp, error) {
 
 Cancellation is the more general mechanism; deadline expiry is just one trigger. Others:
 the client explicitly cancels, the client disconnects, or an I/O error occurs. In every case
-the effect on the server is the same — its context is cancelled.
+the effect on the server is the same shape — its context becomes *done* and the handler should
+stop (though `ctx.Err()` distinguishes `Canceled` from `DeadlineExceeded`, per the previous
+section).
 
 A client cancels by calling a cancel method on the call/context object; the cancel API takes
 a reason string that surfaces in a client-side error/log. Cancellation is:
@@ -348,8 +358,11 @@ Key distinctions:
 - **"What header carries the deadline and in what form?"** `grpc-timeout`, sent in the request
   HEADERS as a positive integer (≤8 digits) plus a unit code (`H/M/S/m/u/n`) — a *remaining
   duration*, not a wall-clock timestamp, to avoid clock skew.
-- **"Client sees `DEADLINE_EXCEEDED` — what does the server see?"** Its RPC/context is
-  `CANCELLED`. The server is notified but not force-stopped; it must poll the context.
+- **"Client sees `DEADLINE_EXCEEDED` — what does the server see?"** Its context becomes *done*.
+  On plain deadline expiry the handler typically observes `DeadlineExceeded` (gRPC-Go:
+  `context.DeadlineExceeded`), because the server ran its own locally-reconstructed deadline; an
+  *explicit client cancel/disconnect* instead surfaces as `CANCELLED` (code 1). Either way the
+  server is notified but not force-stopped; it must poll the context.
 - **"Why absolute deadlines instead of per-hop timeouts?"** So a shared budget propagates down
   a chain and inner calls can't outlive the caller; a naive relative timeout resets at each hop.
 - **"How does propagation compute the downstream value?"** Remaining time = original deadline −
@@ -372,6 +385,9 @@ Key distinctions:
 - gRPC-over-HTTP2 wire spec (`grpc-timeout`, trailers, `grpc-status`):
   https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
 - gRPC status codes: https://grpc.io/docs/guides/status-codes/
+- gRPC-Go package reference (server context / `status.FromContextError` mapping
+  `context.DeadlineExceeded`→`DEADLINE_EXCEEDED`, `context.Canceled`→`CANCELLED`):
+  https://pkg.go.dev/google.golang.org/grpc
 - gRFC A8 — client-side keepalive:
   https://github.com/grpc/proposal/blob/master/A8-client-side-keepalive.md
 - gRFC A6 — client retries (deadline/retry interplay):

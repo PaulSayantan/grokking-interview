@@ -17,6 +17,12 @@ JPMS answered two long-standing pain points of the Java platform:
    There was no way to say "this package is public *inside* my library but not exported
    to consumers."
 
+**One picture to hang everything on.** Think of a module as a *building*: `requires` is
+which other buildings you hold keys to, `exports` is the public lobby anyone with a key
+may walk into, and `opens` is letting an inspector into the private back rooms (deep
+reflection). A `public` class in a non-exported package is a nice room with no lobby door —
+it exists, but no visitor can reach it.
+
 This document layers from the basic mental model up through migration internals, edge
 cases, and why adoption has been uneven.
 
@@ -48,6 +54,28 @@ longer accessible.
 - **Accessibility**: a type is accessible to M only if (a) it is `public` (or the right
   narrower kind), (b) its package is `exports`ed by N, and (c) M reads N. All three must
   hold.
+
+**How resolution actually works (what "resolved at startup" means).** The runtime does not
+load every module it can find; it computes a *closure* from a set of roots:
+
+1. **Pick the roots.** With `java -m com.acme.app/...`, the root is `com.acme.app`. When you
+   run on the classpath with no explicit main module, the default roots are the platform's
+   standard modules (`java.se` and friends). Flags expand the root set: `--add-modules
+   ALL-MODULE-PATH` adds every module on the module path; `ALL-SYSTEM` adds every platform
+   module.
+2. **Walk the `requires` edges transitively** from each root, pulling in every module reached.
+3. **Bind services**: for each resolved module with `uses S`, add any module that `provides S`
+   (and its own requires closure) to the graph.
+4. **Fail fast** if any required module is missing, if two resolved modules export the *same*
+   package (split package), or if the `requires` edges form a cycle.
+
+Worked trace: roots `= {com.acme.app}`; `app requires com.acme.core`, `core requires
+com.acme.model`, and `app uses com.acme.spi.Codec`. Resolution pulls `app -> core -> model`
+(plus the implicit `java.base` on each), then service-binding adds `com.acme.gzip` because it
+`provides Codec`. Final resolved set: `{app, core, model, gzip, java.base}`. If `model` were
+absent on the module path, startup aborts immediately with `FindException: Module com.acme.model
+not found`, not a lazy `NoClassDefFoundError` deep into the run — that fail-fast is the whole
+point of "reliable configuration".
 
 ## The module-info.java Descriptor
 
@@ -254,6 +282,28 @@ module com.acme.app {
   it you get an empty result / `ServiceConfigurationError` because the module system does
   not add the readability edge to providers.
 
+**Worked trace — loading the service.** With the three modules above resolved, the consumer runs:
+
+```java
+List<Codec> codecs = ServiceLoader.load(Codec.class).stream()
+    .map(ServiceLoader.Provider::get)   // instantiates via no-arg ctor or provider()
+    .toList();
+// codecs = [GzipCodec@...]  — one element
+```
+
+Step by step: `load` scans the *resolved module graph* (not the classpath) for `provides
+Codec` declarations, finds `com.acme.gzip`, and — because `com.acme.app` declared `uses
+Codec` — the system has already added the readability edge `app -> gzip` needed to
+instantiate the impl. Calling `.get()` invokes `GzipCodec`'s public no-arg constructor
+(or its `public static Codec provider()` factory if one exists) and yields one `GzipCodec`
+instance.
+
+Now delete the `uses com.acme.spi.Codec;` line from `com.acme.app`. The exact same call
+returns an **empty stream** (`codecs = []`) — no error at load time, silently nothing —
+because without `uses` the module system never granted `app` readability to any provider,
+so the scan finds no eligible module. This "it compiled, it ran, but ServiceLoader found
+nothing" is the classic modular-services bug interview follow-up #9 probes.
+
 ## Named, Automatic, and Unnamed Modules
 
 This taxonomy is one of the most-tested and most-confusing parts of JPMS.
@@ -270,6 +320,25 @@ an *automatic module*. Its name is derived from the JAR file name (or the
 library authors to reserve a stable name before fully modularizing). It is a bridge: it
 exports everything and reads everything, so it can depend on classpath code — something a
 named module cannot do.
+
+**Worked trace — deriving the name from the file name.** The algorithm: (1) drop the
+`.jar` extension; (2) strip a trailing version segment — the first `-` followed by a digit
+and everything after it; (3) replace every run of non-alphanumeric characters with a single
+`.`; (4) collapse any resulting repeated/edge dots. Example:
+
+```
+jackson-databind-2.15.2.jar
+  -> jackson-databind-2.15.2      (drop .jar)
+  -> jackson-databind             (strip "-2.15.2": first '-' before a digit)
+  -> jackson.databind             (replace '-' run with '.')
+module name = jackson.databind
+```
+
+This is exactly why version-stripping is a gotcha: the version match starts at the first
+`-` that is followed by a digit (`-3.12.0` here), so `commons-lang3-3.12.0.jar` and an
+internal rebuild `commons-lang3-3.12.0-patched.jar` **both** strip to `commons-lang3` ->
+`commons.lang3`. Two modules with the same name on the module path make resolution fail.
+Reserve a distinct name via `Automatic-Module-Name` to avoid the clash.
 
 **Unnamed module — beginner.** All code loaded from the classpath lives in the single
 *unnamed module*. It can read every other module and every package it contains is
@@ -331,6 +400,11 @@ of confusion.
   - `--add-reads M=N` — add a readability edge without editing module-info.
   - `--add-exports M/P=OTHER` — export a package at compile/run time from the command line.
   - `--add-opens M/P=OTHER` — open a package for deep reflection at runtime.
+    The target `OTHER` can be a **module name** *or* the literal **`ALL-UNNAMED`** — the
+    latter is the common real-world case, meaning "grant this to all classpath code."
+    E.g. `--add-opens java.base/java.lang=ALL-UNNAMED` is what build tools (Maven Surefire,
+    mocking libraries) inject so classpath-based frameworks can still reflect into
+    `java.lang` on JDK 17+.
   - `--illegal-access=permit|warn|deny` — see the modern-JDK section below.
 
 ## Accessibility Rules and Why Reflection Broke
@@ -344,6 +418,38 @@ of confusion.
 
 For **deep reflection** (`setAccessible(true)` on non-public members), replace #2 with:
 `N` **opens** `P` (to all or to `M`).
+
+**Worked trace — which condition fails?** `com.acme.web` (module M) wants to use
+`public class Cache` in package `com.acme.core.internal` of module `com.acme.core` (module N).
+Walk the three conditions:
+
+| # | Condition | Holds? |
+|---|-----------|--------|
+| 1 | `Cache` is `public` | Yes |
+| 2 | `com.acme.core` **exports** `com.acme.core.internal` | **NO** — it's an internal pkg, never exported |
+| 3 | `com.acme.web` **requires** `com.acme.core` | Yes |
+
+Two of three hold, but accessibility needs **all three**, so the compiler stops at
+condition #2: `error: package com.acme.core.internal is not visible (package
+com.acme.core.internal is declared in module com.acme.core, which does not export it)`.
+**Flip the failing condition** — add `exports com.acme.core.internal;` (or, better,
+`exports ... to com.acme.web;`) to core's module-info — and now all three hold, so it
+compiles and runs.
+
+**Worked trace — the deep-reflection variant.** Now Jackson (in `com.acme.web`) tries
+`field.setAccessible(true)` on a *private* field of `Cache`. Even after the `exports` fix
+above, condition #2 for reflection is different: it requires `opens`, not `exports`. So you
+get, at runtime:
+
+```
+java.lang.reflect.InaccessibleObjectException: Unable to make field private ...
+cannot access a member of class com.acme.core.internal.Cache with modifiers "private"
+because module com.acme.core does not "opens com.acme.core.internal" to module com.acme.web
+```
+
+Fix: `opens com.acme.core.internal to com.acme.web;` in core's module-info (or the launch flag
+`--add-opens com.acme.core/com.acme.core.internal=com.acme.web`). Note `exports` alone never
+silences this — the two conditions are independent.
 
 **Why existing reflection code broke in Java 9.** Before modules, `setAccessible(true)`
 essentially always succeeded — that's how Jackson read private fields, how Spring injected

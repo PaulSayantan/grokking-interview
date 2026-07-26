@@ -16,8 +16,9 @@ The fundamental theorem of this whole area is that **exact answers to certain qu
 provably require linear space**, while approximate answers require only sublinear (often
 logarithmic or constant-relative) space. Counting distinct elements exactly needs Θ(n)
 space (you must remember every distinct item, or a perfect hash of it); HyperLogLog
-answers it to ~2% in a fixed ~1.5 KB regardless of n. That is not an engineering
-convenience — it is a lower bound you cannot beat with a clever exact algorithm.
+answers it to ~1% in a bounded ~12 KB (Redis's dense p=14 form) that stays constant
+regardless of n. That is not an engineering convenience — it is a lower bound you
+cannot beat with a clever exact algorithm.
 
 The three axes you are trading among:
 
@@ -131,8 +132,13 @@ Failure modes / what breaks first:
   is the actual SSTable read (a FP costs a wasted read, not a wrong answer). If you use a Bloom
   filter's "maybe" as a *final* answer with no backstop, false positives become correctness bugs.
 - **Scaling: you can't shrink or resize** a saturated filter without rebuilding from source.
-  *Scalable Bloom filters* chain progressively larger filters with geometrically tightening FP
-  rates to bound the aggregate error when n is unknown.
+  *Scalable Bloom filters* handle unknown/growing `n` by chaining a series of filters: when the
+  current filter fills, freeze it and add a new, larger one (capacity grows geometrically, e.g.
+  each layer ×2). Crucially each new layer `i` uses a *tighter* target FP `p_i = p_0 · r^i` with
+  `r ≈ 0.8–0.9`, so the geometric series `Σ p_i = p_0/(1−r)` **converges to a bounded aggregate
+  FP** no matter how many layers you add. Trade-off: a query must probe *every* layer (a "not
+  present" is only certain if all layers say no), so query latency and total space grow with the
+  layer count — worth it only when you genuinely can't bound `n` up front.
 
 ## Counting Bloom, Cuckoo, and Quotient Filters
 
@@ -177,7 +183,9 @@ full (long "runs" of shifted slots). Used in storage/genomics (e.g. Squeakr, k-m
 
 **Problem:** count distinct elements (unique visitors, distinct search terms, distinct source
 IPs) over a massive stream. Exact requires storing every distinct value (Θ(n) space).
-HyperLogLog (HLL) estimates cardinality up to billions in a **fixed ~1.5 KB** with ~2% error.
+HyperLogLog (HLL) estimates cardinality up to billions in a **bounded ~12 KB** (Redis's
+dense p=14 form) with ~0.81% standard error; a sparse encoding uses far less only while
+cardinality is low, converting to the fixed dense form at scale.
 
 **Mechanism (intuition first):** hash each element to a uniform bit string. In a random stream
 of hashes, seeing a hash with `ρ` leading zeros suggests you've seen ~`2^ρ` distinct items
@@ -191,9 +199,34 @@ scaled by a bias-correction constant `α_m`:
 E = α_m · m^2 / Σ_j 2^(-M[j])         (harmonic mean damps large-register outliers)
 ```
 
+**Worked trace (m = 4 registers, p = 2 index bits).** The register index is the first `p`
+bits; `ρ` = (leading zeros of the *remaining* bits) + 1. Insert 4 elements (8-bit hashes):
+
+```
+x1 = 00 1.....  -> reg 0, remainder 1....  (0 leading zeros) -> ρ=1  M[0]=1
+x2 = 01 001...  -> reg 1, remainder 001..  (2 leading zeros) -> ρ=3  M[1]=3
+x3 = 01 1.....  -> reg 1, remainder 1....  (0 leading zeros) -> ρ=1  M[1]=max(3,1)=3
+x4 = 10 01....  -> reg 2, remainder 01...  (1 leading zero)  -> ρ=2  M[2]=2
+register array M = [1, 3, 2, 0]   (reg 3 never hit)   true distinct = 4
+```
+
+Now plug in. `Σ_j 2^(-M[j]) = 2^-1 + 2^-3 + 2^-2 + 2^-0 = 0.5 + 0.125 + 0.25 + 1.0 = 1.875`.
+With `α_m = 0.7213 / (1 + 1.079/m) = 0.7213/1.2698 ≈ 0.568` and `m^2 = 16`:
+`E = 0.568 · 16 / 1.875 ≈ 9.09 / 1.875 ≈ 4.85` — close to the true 4 (a real HLL applies a
+small-range/linear-counting correction here; m=4 is far below the m=16384 you'd ship, so this
+just illustrates the mechanism, not the accuracy).
+
+*Why the harmonic mean?* The empty register 3 contributes `2^-0 = 1`, the largest term in the
+sum, and dominates the denominator — pulling the estimate *down*. Conversely, a single lucky
+register with a huge `ρ` (say ρ=30) contributes only `2^-30 ≈ 0`, so it barely moves the sum.
+A plain average of `2^M[j]` would instead be *dominated by that one lucky register* (`2^30`
+swamps everything), wildly overestimating. Harmonic mean weights toward the small terms, so no
+single outlier register can blow up the count — that is the whole variance-reduction trick.
+
 - **Standard error ≈ 1.04 / √m.** With `m = 2^14 = 16384` registers of ~6 bits each →
-  ~12 KB raw, ~1.5 KB compressed → **error ≈ 1.04/128 ≈ 0.81%** (Redis uses p=14, quotes ~0.81%).
-  Halving the error costs 4x the registers (√m in the denominator).
+  ~12 KB in the dense representation → **error ≈ 1.04/128 ≈ 0.81%** (Redis uses p=14, and
+  its dense HLL caps at ~12 KB; a sparse form is smaller only at low cardinality). Halving
+  the error costs 4x the registers (√m in the denominator).
 - **HLL++ (Google)** adds 64-bit hashing (removes the 2^32 ceiling), bias correction for small
   cardinalities, and a **sparse representation** that is exact-ish and tiny for low n, switching
   to dense at scale.
@@ -234,6 +267,27 @@ Error guarantee (for point queries on non-negative streams):
   which is why CMS is accurate for heavy hitters (whose true count >> ε·N) and *unreliable for
   rare keys* (whose true count may be dwarfed by ε·N of noise). Example: ε=0.001, δ=0.001 →
   w≈2718, d≈7 → ~19K counters (~76 KB at 4 bytes) covers a stream of any key-cardinality.
+
+**Worked trace (d = 2 rows, w = 4 columns).** Insert heavy key `A` 100 times and light key
+`B` once. Say the hashes land as: row 0 → `A`→col 1, `B`→col 3 (no collision); row 1 → `A`→col
+2, `B`→col 2 (**they collide**). After the inserts:
+
+```
+        col0 col1 col2 col3
+row0:     0  100    0    1     (A alone in col1; B alone in col3)
+row1:     0    0  101    0     (A and B share col2: 100 + 1 = 101)
+```
+
+- Estimate(A) = min(row0[1], row1[2]) = min(100, 101) = **100** ✓ exact.
+- Estimate(B) = min(row0[3], row1[2]) = min(1, 101) = **1** ✓ — row 1 is inflated to 101 by the
+  collision with `A`, but row 0 didn't collide, so the `min` *discards the polluted row* and
+  recovers B's true count. That is the entire reason you take the min across rows: an estimate is
+  only wrong if `x` collided with a heavy key in **every** row, which the `d` independent hashes
+  make exponentially unlikely.
+- Now imagine a *rare* key `C` (true count 1) that happens to collide with `A` in **both** rows:
+  Estimate(C) = min(101, 101) = 101. Its true count (1) is dwarfed by the `ε·N` noise floor
+  (`N ≈ 101`), so CMS reports garbage for it. This is exactly why CMS is trustworthy for heavy
+  hitters (true count ≫ noise) and **unreliable for rare keys**.
 
 **Heavy hitters / top-k:** CMS + a min-heap of the top-k candidates; on each update, estimate
 and conditionally update the heap. Because CMS over-counts, you may admit a few false heavy
@@ -316,6 +370,32 @@ whose threshold ≈ `(1/b)^(1/r)`. Tuning `b` and `r` trades **false positives (
 comparisons) vs false negatives (missed true dupes)** and sets where the S-curve's steep part
 sits. This is the master trade-off in near-dup systems.
 
+**Worked example (k = 200 signature).** Split as **b = 20 bands of r = 10**. The threshold sits
+at `(1/20)^(1/10) ≈ 0.74`, so the curve should be near-0 well below 0.74 and near-1 well above:
+
+```
+P(candidate) = 1 − (1 − s^r)^b
+s = 0.9:  s^10 = 0.349;  1 − (1−0.349)^20 = 1 − 0.651^20 ≈ 1 − 0.00019 ≈ 0.9998  (~always caught)
+s = 0.5:  s^10 = 0.00098; 1 − (1−0.00098)^20 ≈ 1 − 0.9807 ≈ 0.0194              (~always rejected)
+```
+
+A 51-point Jaccard gap (0.9 vs 0.5) turns into a ~0.9998 vs ~0.019 candidate gap — that steep
+jump is the S-curve doing its job: pairs above ~0.74 almost always become candidates, pairs below
+almost never do.
+
+Now **re-tune to b = 50, r = 4** (still k = 200). The threshold drops to `(1/50)^(1/4) ≈ 0.38`:
+
+```
+s = 0.9:  s^4 = 0.656;   1 − (1−0.656)^50 ≈ 1.0
+s = 0.5:  s^4 = 0.0625;  1 − (1−0.0625)^50 ≈ 1 − 0.9375^50 ≈ 1 − 0.040 ≈ 0.96   (now also a candidate!)
+```
+
+Lowering `r` (fewer rows must match) and raising `b` (more chances to match on *some* band)
+slides the threshold down to 0.38 and floods the candidate set — even 0.5-similar pairs now pass
+~96% of the time. That is precisely the "too many candidate pairs to compare" failure: the fix is
+to **raise `r` / lower `b`** to push the threshold back up, accepting that you'll now miss some
+true near-dupes just below threshold (more false negatives).
+
 **Trade-offs / failure modes:** LSH gives *approximate* nearest neighbors — it can miss true
 near-dupes (false negatives), which for a legal/compliance dedup may be unacceptable but for web
 crawl dedup is fine. Choosing `k`, `b`, `r` wrong either floods you with candidate pairs (compute
@@ -348,6 +428,16 @@ Strengths: provable relative-error bound (t-digest has only empirical accuracy),
 (handled by collapsing lowest buckets / a max-bucket cap), and it assumes positive values
 (latency is fine). DDSketch is often preferred when you need a *guaranteed* error bound on p99
 SLOs; t-digest when you want great tail resolution with minimal fuss.
+
+**Worked number (α = 0.01).** `γ = (1+0.01)/(1−0.01) = 1.01/0.99 ≈ 1.0202`. A latency of 250 ms
+lands in bucket `i = ⌈log_γ(250)⌉ = ⌈log(250)/log(1.0202)⌉ = ⌈276.06⌉ = 277`. That bucket spans
+`[γ^276, γ^277] = [249.68 ms, 254.73 ms]` — a width of ~5 ms, or **~2% of 250** (the two adjacent
+boundaries differ by exactly the factor γ ≈ 1.02, i.e. 2%). The value DDSketch reports for that
+bucket is its representative `2·γ^i/(γ+1) ≈ 252.18 ms`, which is within `|252.18 − 250|/250 ≈
+0.87% < α = 1%` of the truth. The key insight: because buckets grow *geometrically* (each is γ×
+the previous), every bucket has the same *relative* width — so a value at 25 ms and a value at
+2500 ms both get pinned to within ±1%. A fixed-width histogram cannot do this: a 5 ms-wide bucket
+is 2% error at 250 ms but 100% error at 5 ms.
 
 | Method | Error type | Mergeable | Tail accuracy | Guarantee |
 |--------|-----------|-----------|---------------|-----------|
@@ -417,7 +507,7 @@ trace sampling) rather than sampling uniformly.
 | Keep a uniform raw sample | Reservoir sampling | sampling error |
 
 **Setting the error budget:** work backward from the *product* tolerance and the *cost of a
-mistake in each direction*. A unique-visitor dashboard tolerates ±2% (HLL p=14, 1.5 KB); an edge
+mistake in each direction*. A unique-visitor dashboard tolerates ~1% (HLL p=14, ~12 KB); an edge
 rate limiter tolerates over-counting (fails safe → throttle) but not under-counting (lets abuse
 through) — so CMS's over-count bias is a *feature*. An LSM Bloom filter's FP costs one wasted
 disk read, so 1% is fine; a *final-answer* membership check with no backstop needs ~0. Remember
@@ -477,7 +567,8 @@ to detect because it's wrong only occasionally.
 - Bender et al., "Don't Thrash: How to Cache Your Hash on Flash" — quotient filters / RSQF; Pandey
   et al., "A General-Purpose Counting Filter" (CQF, 2017).
 - Flajolet, Fusy, Gandouet, Meunier, "HyperLogLog: the analysis of a near-optimal cardinality
-  estimation algorithm" (2007); Heule, Nunkesser, Hall, "HyperLogLog in Practice" (HLL++, Google, 2013).
+  estimation algorithm" (2007); Heule, Nunkesser, Hall, "HyperLogLog in Practice" (HLL++, Google, 2013);
+  Redis HyperLogLog docs (dense form up to 12 KB, 0.81% standard error, p=14) — redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/.
 - Cormode & Muthukrishnan, "An Improved Data Stream Summary: the Count-Min Sketch and its
   Applications" (2005); Charikar, Chen, Farach-Colton, "Finding Frequent Items in Data Streams"
   (Count-Sketch).

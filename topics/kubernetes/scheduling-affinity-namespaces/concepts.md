@@ -57,6 +57,28 @@ flowchart LR
     B --> K[kubelet on node pulls image,<br/>starts containers]
 ```
 
+**Worked example — how a node actually wins.** Incoming Pod requests **1 CPU / 2Gi** and adds a *soft*
+preference `disktype=ssd`. Two nodes survived filtering, both `4 CPU / 8Gi` allocatable:
+
+| | already requested | with the new Pod | has ssd? |
+|---|---|---|---|
+| **Node A** | 1 CPU / 2Gi | 2 CPU / 4Gi | no |
+| **Node B** | 3 CPU / 6Gi | 4 CPU / 8Gi | yes |
+
+Two scorers run (assume both weighted 1 here; weights are configurable per profile):
+
+- **`NodeResourcesFit`, default `LeastAllocated`** = average of `(allocatable − requested)/allocatable × 100`
+  across CPU+mem, using the post-placement request.
+  - Node A: CPU `(4−2)/4 = 50`, mem `(8−4)/8 = 50` → **50**.
+  - Node B: CPU `(4−4)/4 = 0`, mem `(8−8)/8 = 0` → **0**.
+- **`NodeAffinity` (preferred)**: node matching the `ssd` preference gets 100, the other 0 → Node A **0**, Node B **100**.
+
+Sum: **Node A = 50 + 0 = 50**, **Node B = 0 + 100 = 100** → **Node B wins** — the ssd preference outweighed
+spreading. Drop that preference and it's `50` vs `0`: **Node A wins**, because `LeastAllocated` favors the
+emptier node (spread). Flip the fit strategy to **`MostAllocated`** (`requested/allocatable × 100`) and the
+resource score becomes A `50` / B `100`: **Node B wins even without the preference** — that's bin-packing,
+filling the fuller node so idle nodes can scale down. Ties (equal totals) are broken at random.
+
 Internally this is the **Scheduling Framework**: pluggable extension points run in order —
 `PreFilter → Filter → PostFilter` (PostFilter runs only when filtering found nothing, and is where
 **preemption** lives) `→ PreScore → Score → NormalizeScore → Reserve → Permit → PreBind → Bind →
@@ -170,6 +192,21 @@ spec:
           topologyKey: kubernetes.io/hostname
 ```
 
+**Worked example — the topologyKey bucket.** Cluster: 4 nodes, 2 zones — `node1,node2` in `zone-a`,
+`node3,node4` in `zone-b`. Deploy **3 web replicas** with *required* anti-affinity on
+`topologyKey: kubernetes.io/hostname` (each node is its own bucket):
+
+- **Replica 1** → any node, say `node1`. Bucket `node1` now holds a web Pod.
+- **Replica 2** → filter rejects `node1` (its bucket already has app=web); lands on `node2`.
+- **Replica 3** → rejects `node1`, `node2`; lands on `node3`.
+- **Replica 4** (if you scaled to 4) → three of four node-buckets are occupied and `node4` is free, so it
+  fits. But scale to **5 on this 4-node cluster** and replica 5 finds every hostname bucket taken →
+  **`Pending`**. That's the hard replica cap: *required* hostname anti-affinity ≤ one Pod per node.
+
+Now change **only** `topologyKey` to `topology.kubernetes.io/zone`. The bucket is the whole zone, not the
+node: replica 1 → `zone-a`, replica 2 must avoid `zone-a` → `zone-b`, and **replica 3 is `Pending`** —
+both zone-buckets are occupied and there are only 2 zones. Same selector, coarser bucket, tighter cap.
+
 > [!WARNING]
 > Pod affinity/anti-affinity is **expensive**: the scheduler must compare the incoming Pod against all
 > existing Pods across all domains, which "significantly slows down scheduling in large clusters" per
@@ -219,7 +256,9 @@ Three **effects**:
 
 Kubernetes adds **built-in taints** automatically for node conditions:
 `node.kubernetes.io/not-ready`, `.../unreachable` (both `NoExecute` — this is what evicts Pods off a
-dead node, gated by the default 300s `tolerationSeconds` Kubernetes injects), `.../memory-pressure`,
+dead node, gated by the default 300s `tolerationSeconds` Kubernetes injects; that 300s default is why,
+after a node goes `NotReady`, its Pods stay `Running`/`Terminating` for **~5 minutes** before being
+rescheduled — lower `tolerationSeconds` on latency-critical workloads to fail over faster), `.../memory-pressure`,
 `.../disk-pressure`, `.../pid-pressure`, `.../unschedulable`, `.../network-unavailable`. Control-plane
 nodes carry `node-role.kubernetes.io/control-plane:NoSchedule`, which is why ordinary workloads don't
 land there. Setting `.spec.nodeName` directly bypasses the scheduler (and `NoSchedule`), but the
@@ -322,6 +361,17 @@ Priority does two things:
    those victims, and schedules the incoming Pod. Victims get their **graceful termination period**;
    the incoming Pod's `.status.nominatedNodeName` is set to the target node (though it may ultimately
    land elsewhere).
+
+**Worked example — victim selection.** One node, `4 CPU` allocatable, fully requested by three Burstable
+Pods: **P1** requests 2 CPU (priority 100), **P2** requests 1 CPU (priority 100), **P3** requests 1 CPU
+(priority 500). A new Pod **Pnew** (priority 1000000) requests **2 CPU** and fits nowhere.
+
+`PostFilter` preemption runs on this candidate node:
+
+1. **Only lower-priority Pods are eligible victims** — P1, P2, P3 are all below 1000000, so all three are candidates; the scheduler simulates removing them and checks if Pnew would then fit.
+2. **Free just enough, sparing the highest-priority Pods.** Pnew needs 2 CPU. Two candidate victim sets free enough: `{P1}` (2 CPU) or `{P2, P3}` (1+1 CPU). The scheduler prefers the set that **leaves the highest-priority survivors and evicts the fewest Pods** — `{P1}` is one Pod at priority 100, while `{P2,P3}` is two Pods and would kill the priority-500 P3. So **P1 alone is the victim**: one low-priority Pod, exactly enough freed.
+3. The victims are **deleted gracefully** (their `terminationGracePeriodSeconds`), and Pnew's `.status.nominatedNodeName` is set to this node so lower-priority Pods don't grab the freed space first.
+4. **PDB check is best-effort**: if a PDB on P1 would be violated, the scheduler prefers a victim set that respects it — but if none exists, it **preempts P1 anyway** (availability of the higher-priority Pod wins).
 
 Nuances:
 

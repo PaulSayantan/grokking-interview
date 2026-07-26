@@ -114,6 +114,16 @@ Token (stateless JWT):
 - **Never** put JWTs in `localStorage` if you can avoid it (XSS can read it). Prefer
   `HttpOnly`, `Secure`, `SameSite` cookies so JS cannot read the token; pair with CSRF
   defense (double-submit token or SameSite=strict/lax).
+- **The modern SPA split:** keep the short-lived **access token in memory** (a JS variable,
+  never `localStorage`) and the **refresh token in an `HttpOnly` `Secure` `SameSite` cookie**.
+  JS reads the access token to attach it to API calls, but the long-lived refresh token is
+  invisible to JS. Residual risk: XSS can still exfiltrate the *in-memory* access token
+  while the page is open, but it dies on refresh/tab-close and cannot mint new ones (it
+  can't reach the refresh cookie). Contrast the pure-cookie approach (access token also in
+  an `HttpOnly` cookie): JS never touches any token so XSS can't exfiltrate one, but you
+  now need CSRF defense because the browser auto-attaches the cookie to every request. Each
+  retains a distinct residual risk — in-memory trades a small XSS-exfiltration window for
+  no CSRF surface; pure-cookie trades CSRF exposure for no readable token.
 
 ---
 
@@ -127,6 +137,36 @@ ones: `iss` (issuer), `sub` (subject), `aud` (audience), `exp`, `iat`, `nbf`, `j
 (unique id, useful for denylisting). Symmetric signing (HS256) uses one shared secret;
 asymmetric (RS256/ES256/EdDSA) uses a private key to sign and a public key (published
 via JWKS endpoint) to verify.
+
+**Worked example — decode a real token.** A JWT is three base64url chunks joined by dots:
+`eyJhbGciOiJSUzI1NiIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyXzQyIiwiaXNzIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUuY29tIiwiYXVkIjoiYXBpLmV4YW1wbGUuY29tIiwiZXhwIjoxNzM1Njg5NjAwLCJpYXQiOjE3MzU2ODg3MDB9.<signature-bytes>`
+
+base64url-decode the first two segments (anyone can — it is *not* encrypted):
+
+```
+header  = {"alg":"RS256","kid":"key-1"}
+payload = {"sub":"user_42","iss":"https://auth.example.com",
+           "aud":"api.example.com","exp":1735689600,"iat":1735688700}
+```
+
+So `exp − iat = 1735689600 − 1735688700 = 900 seconds = a 15-minute access token`. The
+verifier fetches the RSA **public** key whose id is `kid:"key-1"` from the issuer's JWKS
+endpoint and checks the signature over `base64url(header) + "." + base64url(payload)`.
+
+**Worked example — trace the RS256 → HS256 algorithm-confusion attack.** The server signs
+with RS256 (private key signs, public key `P` verifies) and `P` is published openly.
+
+1. Attacker takes the header and flips one field: `{"alg":"RS256",...}` → `{"alg":"HS256",...}`.
+2. Attacker edits the payload freely, e.g. `"sub":"user_42"` → `"sub":"admin"`.
+3. Attacker computes `HMAC-SHA256(message, key = the raw PEM bytes of P)` — because `P` is
+   public, the attacker *has* this "secret". This yields a valid HS256 signature.
+4. A naive verifier reads `alg` from the header, sees `HS256`, and calls
+   `verifyHMAC(token, P)` — using the same public key `P` as the HMAC secret. The HMAC
+   matches, so the forged `admin` token is **accepted**.
+
+The bug: the verifier let the *attacker-controlled header* pick the algorithm, and reused
+the public key as an HMAC secret. **Fix: pin the expected algorithm** (`RS256` only) server-side;
+never let `alg` select the verification path, and never feed a public key into an HMAC verifier.
 
 **Pitfalls (interview gold).**
 
@@ -222,6 +262,27 @@ sequenceDiagram
   `code` from redeeming it, because they lack the random `code_verifier`. It was created
   for mobile apps that cannot keep a client secret, and is now recommended for *all*
   clients including SPAs.
+
+**Worked example — why intercepting the `code` is useless under PKCE.** Trace one run with
+concrete values:
+
+1. Client generates a random 43-char `code_verifier`, e.g. `dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk`.
+2. Client derives `code_challenge = base64url(SHA256(verifier))` — a one-way hash, e.g.
+   `E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM`. It sends only the *challenge* on the
+   front channel: `/authorize?...&code_challenge=E9Mel...&code_challenge_method=S256`.
+3. Auth server stashes the challenge with the issued one-time `?code=abc123`, redirected
+   back to the client.
+4. **Attacker intercepts `code=abc123`** (malicious redirect handler, browser history,
+   referer leak) and races to redeem it: `POST /token code=abc123 & code_verifier=???`.
+5. The attacker only saw the *challenge* (`E9Mel...`), never the verifier. To forge a
+   valid `code_verifier` they would have to invert SHA-256 — find an input that hashes to
+   `E9Mel...` — which is computationally infeasible. Their `/token` call fails
+   verification; the stolen `code` is worthless.
+6. The legitimate client sends the real `verifier`; the server recomputes
+   `SHA256(verifier)`, compares to the stored challenge, they match, and tokens are issued.
+
+The insight: the secret (`verifier`) never travels on the interceptable channel — only its
+hash does, and a hash cannot be reversed into the secret.
 - **Client Credentials flow**: no user at all — a service authenticates as itself
   (client_id + secret) to call an API. Used for machine-to-machine / backend jobs.
 - **Device Authorization flow**: for input-constrained devices (TVs) — user enters a
@@ -377,6 +438,30 @@ decrypt data locally with the DEK, then discard the plaintext DEK.
 - AWS KMS, GCP Cloud KMS, HashiCorp Vault all implement this. Managed disk/S3 encryption
   (SSE-KMS) is envelope encryption under the hood.
 
+**Worked example — the KMS-call math.** Say you must encrypt **1,000,000 objects**.
+
+- **Direct KMS (no envelope):** every object is encrypted/decrypted by calling KMS. To
+  read all of them once = **1,000,000 KMS decrypt calls**. AWS KMS is rate-limited (on the
+  order of ~10k–30k req/sec/region depending on key type) and billed per call
+  (~$0.03 per 10,000 requests), so this run is `1,000,000 ÷ 10,000 × $0.03 = $3` *and*
+  can throttle you for ~30–100 seconds at the cap — a hot loop hammering KMS.
+- **Envelope:** you generate one DEK per object (or per tenant), encrypt each object
+  *locally* with AES-GCM, and store the KEK-wrapped DEK alongside. Reading everything =
+  **decrypt each DEK once** — but if you cache decrypted DEKs (say one DEK shared across a
+  tenant's 1M objects) it collapses to **1 KMS call**, then 1,000,000 *local* AES-GCM
+  operations at memory speed (millions/sec on one core). KMS cost drops from $3 and
+  100 s of throttle risk to a single call and effectively zero throttle.
+
+**Worked example — cheap KEK rotation.** Now rotate the master key. Suppose those 1M
+objects are covered by **2,000 DEKs** (one per tenant), and the ciphertext totals **50 TB**.
+
+- **Without envelope**, rotating the key means re-encrypting all **50 TB** of data —
+  read + decrypt + re-encrypt + rewrite petascale storage, hours to days of I/O.
+- **With envelope**, the data stays put. You only re-wrap the **2,000 DEKs** under the new
+  KEK: 2,000 tiny KMS operations (a few KB each), done in seconds. The 50 TB of ciphertext
+  is never touched. *That* is what "rotate the KEK cheaply" means — you re-encrypt keys,
+  not data.
+
 **Trade-offs.**
 
 - **Application-level vs storage-level encryption.** Encrypting at the app layer (before
@@ -413,6 +498,29 @@ so that even a full database dump does not hand attackers the plaintext password
   in an HSM/KMS) adds a layer a DB dump alone cannot bypass.
 - Tune a **work factor** (bcrypt cost, Argon2 memory/iterations) so one hash takes
   ~100–250 ms on your hardware — slow enough to throttle cracking, fast enough for login.
+
+**Worked example — why "fast hash bad" is a number, not a slogan.** Take an 8-character
+*lowercase-only* password. The search space is `26^8 ≈ 2.09 × 10^11` candidates.
+
+- **Fast hash (SHA-256).** A single modern GPU rig brute-forces roughly `10^10`
+  SHA-256/sec. Cracking the whole space:
+  `2.09 × 10^11 ÷ 10^10 ≈ 21 seconds`. The entire keyspace falls in under half a minute —
+  and that is *per stolen hash*, in parallel across every user in the dump.
+- **Slow hash (bcrypt cost 12).** Cost 12 is tuned to ~250 ms/hash, so that same rig
+  manages only `1 ÷ 0.25 = 4 hashes/sec`. Same space:
+  `2.09 × 10^11 ÷ 4 ≈ 5.2 × 10^10 sec ≈ 1,650 years`.
+
+Same password, same attacker — 21 seconds versus ~1,650 years. The only thing that
+changed is *cost per guess*. Now the dial: bcrypt cost is a base-2 exponent, so **cost 13
+doubles the work** — the crack stretches to ~3,300 years, but your *login latency also
+doubles* to ~500 ms and each auth burns twice the CPU. That is the whole tuning tension in
+one line: every +1 of cost doubles both the attacker's pain and your own login bill.
+
+> [!KEY-TAKEAWAY]
+> "Don't use a fast hash" means: at 10^10 guesses/sec a trivially weak password dies in
+> seconds; a 250 ms hash makes the *same* attacker spend centuries. You are buying crack
+> time with login latency — so rate-limit logins and size the auth tier for peak, because
+> a login spike now costs real CPU.
 
 **Trade-offs.**
 

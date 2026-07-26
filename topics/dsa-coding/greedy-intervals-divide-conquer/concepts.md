@@ -77,7 +77,13 @@ largest coin isn't always part of an optimal solution → use DP.
 
 **0/1 knapsack** is the canonical greedy-fails case: taking the highest value/weight ratio
 item first can be suboptimal because you can't take fractions. **Fractional knapsack**, by
-contrast, *is* greedy-solvable (take highest ratio, split the last item).
+contrast, *is* greedy-solvable (take highest ratio, split the last item). *Why fractionability
+restores the greedy-choice property:* when items are divisible you can always fill every last
+unit of remaining capacity with the highest-ratio material available, so no future combination
+can beat "grab as much of the best ratio as fits right now" — the greedy choice is provably
+safe. In 0/1, indivisibility breaks this: a single high-ratio item may be too heavy to fit
+alongside a pair of lower-ratio items that together yield more value, so committing to it can
+block the real optimum — you're forced to consider all subsets (DP).
 
 | Aspect | Greedy | Dynamic Programming |
 |---|---|---|
@@ -110,6 +116,12 @@ Overlap test for two intervals [a1,a2] and [b1,b2] (after sorting so a1 <= b1):
     they overlap  ⟺  b1 < a2        (or <= a2 if touching endpoints count as overlap)
 ```
 
+Whether **touching endpoints** count as overlap flips the answer, and it flips *per problem*:
+in Meeting Rooms, `[1,2]` and `[2,3]` can share one room (a meeting ending at 2 frees the room
+for one starting at 2 → use `<`), whereas many merge-intervals variants merge `[1,2]` and `[2,3]`
+into `[1,3]` (use `<=`). At senior level, clarifying the inclusive-vs-exclusive boundary
+convention up front is expected — don't assume it.
+
 ### Merge Intervals
 
 Sort by start. Walk through; keep a `current` merged interval. If the next interval's
@@ -127,6 +139,16 @@ def merge(intervals):
             out.append([s, e])
     return out
 ```
+
+**Traced on `[[1,5],[2,3],[6,8]]`** (already sorted by start; note `[2,3]` is *nested* inside `[1,5]`):
+
+| Step | Interval | `s <= out[-1][1]`? | Action | `out` after |
+|---|---|---|---|---|
+| 1 | `[1,5]` | — (out empty) | push | `[[1,5]]` |
+| 2 | `[2,3]` | `2 <= 5` ✓ | extend: `end = max(5,3) = 5` | `[[1,5]]` |
+| 3 | `[6,8]` | `6 <= 5` ✗ | push new | `[[1,5],[6,8]]` |
+
+Result: `[[1,5],[6,8]]`. The key subtlety is step 2 — a fully nested interval must **not** shrink the running interval, so we take `max(5,3)=5`, not `3`. Comparing only against `next.start` (not tracking the running `max` end) is the classic bug that breaks on nested inputs.
 
 ### Non-overlapping Intervals (erase the fewest)
 
@@ -146,6 +168,24 @@ selection in disguise — earliest finish leaves the most room. `O(n log n)`.
      Heap size = rooms in use; answer = max heap size. `O(n log n)`.
   2. **Sweep line / chronological events:** create `+1` at each start and `-1` at each end,
      sort all events, sweep accumulating a running count; the peak is the answer.
+
+**Traced on `[[0,30],[5,10],[15,20]]`** (sorted by start). *Min-heap of end times* — heap top = earliest-ending room:
+
+| Meeting | Heap top free by start? | Action | Heap (end times) | Rooms in use |
+|---|---|---|---|---|
+| `[0,30]` | — (empty) | push 30 | `[30]` | 1 |
+| `[5,10]` | `30 <= 5`? no | push 10 | `[10, 30]` | **2** ← peak |
+| `[15,20]` | `10 <= 15`? yes | pop 10, push 20 | `[20, 30]` | 2 |
+
+Answer = peak heap size = **2**. The `[0,30]` meeting hogs one room the whole time; `[5,10]` forces a second room; `[15,20]` reuses the room `[5,10]` vacated at t=10.
+
+Same input via *sweep line* — split into `+1`/`−1` events and sort by time:
+
+```text
+t=0:+1 → 1    t=5:+1 → 2 (peak)    t=10:−1 → 1    t=15:+1 → 2    t=20:−1 → 1    t=30:−1 → 0
+```
+
+Running max = **2** — identical answer. (Tie-break rule when a start and end share a time: process the `−1` end first so a room freed at exactly `t` can be reused at `t`; this matches "touching endpoints share a room.")
 
 ```mermaid
 flowchart LR
@@ -186,6 +226,19 @@ subcalls, `n/b` = subproblem size, and `f(n)` = divide+combine work.
 - **Binary search:** `T(n) = T(n/2) + O(1)` → `Θ(log n)`.
 - **Karatsuba multiplication:** `T(n) = 3T(n/2) + O(n)` → `Θ(n^log2(3)) ≈ Θ(n^1.585)`.
 
+**Worked application — merge sort, `T(n) = 2T(n/2) + O(n)`:**
+1. Read off `a = 2` (two recursive calls), `b = 2` (each on half the input), `f(n) = n`.
+2. Compute the "watershed" exponent: `log_b a = log_2 2 = 1`, so `n^(log_b a) = n^1 = n`.
+3. Compare `f(n) = n` against `n^1`: they're the **same** order, `f(n) = Θ(n^1)` → **Case 2**.
+4. Case 2 tacks on a `log n` factor: `T(n) = Θ(n^1 · log n) = Θ(n log n)`. ✓
+
+Karatsuba the same way: `a=3, b=2`, `log_2 3 ≈ 1.585`, `f(n)=n = O(n^(1.585−ε))` → **Case 1** → `Θ(n^1.585)` (recursion dominates, combine cost is negligible).
+
+The **regularity condition** on Case 3 (in plain words): the combine work `f(n)` must not just be big at the top but must *keep shrinking by a constant factor* as you recurse — `a·f(n/b) ≤ c·f(n)` for some `c < 1`. Almost every polynomial `f(n)` satisfies it; it exists to rule out pathological `f`.
+
+> [!WARNING]
+> The Master Theorem does **not** cover every recurrence — a classic gotcha. `T(n) = 2T(n/2) + n log n` falls in the *gap* between Case 2 and Case 3: `f(n)=n log n` is bigger than `n^1` but not by a polynomial factor `n^ε`, so no case applies. (The Akra–Bazzi method or a recursion tree gives `Θ(n log² n)`.)
+
 ```mermaid
 flowchart TD
     A["Problem of size n"] --> B["Divide into subproblems"]
@@ -202,11 +255,24 @@ Partition around a pivot (like quicksort), but recurse into **only one side** �
 containing rank `k`. Average `T(n) = T(n/2) + O(n) = O(n)`; worst case `O(n²)` with bad
 pivots (mitigated by random pivot or median-of-medians for guaranteed `O(n)`).
 
+**Traced — 2nd-largest in `[3,2,1,5,6,4]`.** 2nd-largest = rank `n−k = 6−2 = 4` in 0-based ascending order (sorted: `1,2,3,4,5,6`, index 4 = `5`).
+- Pivot = `4` (last). Partition → `[3,2,1,4,6,5]`, pivot lands at index **3**. Since `3 < 4`, everything ≤ pivot is settled; **recurse right** on `[6,5]` (indices 4–5).
+- Pivot = `5`. Partition → `[5,6]`, pivot lands at index **4**. `4 == 4` → done, answer = **`5`**. ✓
+
+The pivot's *final index* is its true sorted rank, which alone decides the direction: `rank < k` → recurse right, `rank > k` → recurse left, `==` → stop. Recursing into just one side is why the average cost is `O(n)`, not `O(n log n)`.
+
 ### Maximum Subarray — D&C vs greedy (Kadane)
 
 - **D&C:** best subarray is entirely in the left half, entirely in the right half, or
   **crosses the midpoint**. Compute all three; the crossing sum is a linear scan outward
   from the middle. `T(n) = 2T(n/2) + O(n) = O(n log n)`.
+
+  **Crossing-sum traced on `[-2,1,-3,4,-1,2,1,-5,4]`** (indices 0–8, mid at index 4 = `-1`). A crossing subarray must include the boundary, so the crossing sum = best **suffix of the left part** (ending at mid, index 4) **plus** best **prefix of the right part** (starting at index 5):
+  - *Left suffix, scan leftward from index 4*: `-1`(=−1), `4−1=3` ← **maxSuffix = 3** (indices 3..4), `−3+3=0`, `1+0=1`, `−2+1=−1`. Best = **3**.
+  - *Right prefix, scan rightward from index 5*: `2`(=2), `2+1=3` ← **maxPrefix = 3** (indices 5..6), `3−5=−2`, `−2+4=2`. Best = **3**.
+  - Crossing sum = `maxSuffix + maxPrefix = 3 + 3 = 6`, spanning indices 3..6 = `[4,-1,2,1]`.
+
+  That `6` is the global answer here (it beats any purely-left or purely-right subarray) — the same result Kadane produces. The must-get-right rule: scan outward from the boundary in **both** directions and *add*; the left run ends at mid and the right run starts just after it, so each element is counted exactly once (don't include mid on both sides).
 - **Kadane (DP/greedy):** `curr = max(x, curr + x)`; track the running max. `O(n)`, `O(1)`.
   In interviews, mention D&C to show breadth but code Kadane — it's strictly better.
 
@@ -228,6 +294,16 @@ pivots (mitigated by random pivot or median-of-medians for guaranteed `O(n)`).
 **farthest reachable index** as you sweep. If your current index ever exceeds `farthest`,
 you're stuck → false. Otherwise update `farthest = max(farthest, i + nums[i])`. `O(n)`.
 
+```python
+def canJump(nums):
+    farthest = 0
+    for i, x in enumerate(nums):
+        if i > farthest:          # can't even reach index i
+            return False
+        farthest = max(farthest, i + x)
+    return True
+```
+
 **Jump Game II** ("minimum jumps to reach the end"): a greedy BFS-by-levels. Track the end
 of the current jump's reach (`curEnd`) and the farthest reachable (`farthest`). When `i`
 reaches `curEnd`, you must take another jump, so `jumps++` and `curEnd = farthest`. `O(n)`.
@@ -247,6 +323,43 @@ Why greedy is safe here: within the reach of the current jump, the best next mov
 one that extends `farthest` the most — and you never need to jump *before* you must, so
 committing one jump per "level" is optimal (a BFS shortest-path argument on the implicit
 reachability graph).
+
+## The four hard greedy problems (insight + why it's correct)
+
+These four are the most-failed greedy problems because the trick is memorizable but the
+*defense* is not. Here is the core insight and correctness argument for each.
+
+**Gas Station** ("start index to complete the circuit, or −1"). Greedy: if `sum(gas) <
+sum(cost)`, it's impossible (−1). Otherwise sweep keeping a running `tank`; whenever `tank`
+goes negative at station `i`, reset `start = i+1` and `tank = 0`. *Why the reset point is
+provably the unique answer:* if the tank ran dry going from `start` to `i`, then **no** station
+between `start` and `i` can be a valid start either — each had a running total ≥ the total
+from `start` at that point, so they'd fail even sooner. So you never have to re-examine skipped
+stations; the last reset point is the only candidate, and once total gas ≥ total cost it's
+guaranteed to work.
+
+**Task Scheduler** ("min intervals with cooldown `n` between identical tasks"). The most
+frequent task is the bottleneck: it forces `maxFreq−1` gaps of length `n+1`, and the final
+block holds every task that ties for `maxFreq`. Formula: `(maxFreq−1)*(n+1) + countOfMax`
+(and if that's less than `len(tasks)`, there are no idles, so the answer is just `len(tasks)`).
+*Worked — `tasks = AAABBB, n = 2`:* `maxFreq = 3` (A and B tie), `countOfMax = 2`, so
+`(3−1)*(2+1) + 2 = 2*3 + 2 = 8`. A valid schedule with 8 slots: `A B _ A B _ A B` — each `A`
+(and each `B`) is ≥ 2 apart; the `_` are 2 forced idles. `max(8, 6) = 8`. ✓
+
+**Candy** ("min candies; each child ≥ 1, and a child with a strictly higher rating than a
+neighbor gets more than that neighbor"). Two passes: left-to-right (if `rating[i] > rating[i−1]`,
+`candy[i] = candy[i−1]+1`), then right-to-left (if `rating[i] > rating[i+1]`, `candy[i] =
+max(candy[i], candy[i+1]+1)`). *Why two passes satisfy both constraints:* one pass can only
+enforce the constraint against **one** neighbor; the left pass fixes the "greater than left"
+rule, the right pass fixes "greater than right," and taking the `max` never violates the left
+pass (it only ever raises values). *Worked — `ratings = [1,0,2]`:* start `[1,1,1]`; L2R → index 2
+rises `2>0` so `[1,1,2]`; R2L → index 0 rises `1>0` so `max(1,2)=2` giving `[2,1,2]`, sum = **5**. ✓
+
+**Partition Labels** ("cut the string into max parts so each letter appears in one part").
+Precompute each letter's **last** occurrence. Sweep extending the current part's `end =
+max(end, last[c])`; when `i == end`, close a part. *Why it's correct:* a part can't close until
+you pass the last occurrence of *every* letter seen so far, and once `i` reaches that boundary,
+nothing inside spills out — the greedy earliest-possible cut is safe.
 
 ## Interview Problems
 

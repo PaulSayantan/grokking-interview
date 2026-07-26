@@ -334,8 +334,10 @@ message UpdateOrderRequest {
 }
 ```
 
-**Mechanism:** the mask is a list of field paths (`"order.total"`). The server applies
-*only* the masked fields from the payload and ignores the rest. This gives PATCH-like
+**Mechanism:** the mask is a list of field paths, expressed in `snake_case` and
+**relative to the resource being updated** (the `Order`), not the wrapping request field.
+So the paths are `"total"`, `"status"` — *not* `"order.total"` (AIP-134 convention). The
+server applies *only* the masked fields from the payload and ignores the rest. This gives PATCH-like
 partial-update semantics that are explicit and unambiguous, and it lets read RPCs return
 partial responses (a "read mask") to save bandwidth on large messages. This is the gRPC
 analogue of REST's `PATCH` (cross-ref `rest-api-design`).

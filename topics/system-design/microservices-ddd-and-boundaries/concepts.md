@@ -112,6 +112,43 @@ concurrency**: a version number on the root; a concurrent modification bumps the
 version and the loser retries. This is preferable to pessimistic locks across a
 distributed system.
 
+**Worked example — what's inside the boundary vs what crosses it.** Model an
+order:
+
+```
+Order (aggregate root)          Customer (SEPARATE aggregate)
+  id: 4711                         id: 88
+  customerId: 88   ── by ID ──▶    loyaltyPoints: 1200
+  status: PENDING                  tier: GOLD
+  lines: [                       (owned by a different service/txn)
+    OrderLine{sku:"A", qty:2, price:10.00},   ← value objects,
+    OrderLine{sku:"B", qty:1, price:30.00}    ← no independent identity
+  ]
+  total: 50.00
+  INVARIANT: total == sum(line.qty * line.price)
+```
+
+Now place an order that adds a line `{sku:"C", qty:1, price:5.00}`:
+
+1. `order.addLine(C, 1, 5.00)` runs **inside one transaction**. The root
+   recomputes `total = 2*10 + 1*30 + 1*5 = 55.00` and checks the invariant
+   `55.00 == 55.00` ✓ *before commit*. If a bug produced `total = 50.00`, the
+   transaction aborts — the invariant is enforced synchronously, atomically,
+   within the boundary.
+2. That same commit emits an `OrderLineAdded` / `OrderPlaced` domain event.
+3. "Add 55 loyalty points to customer 88" is **not** part of this transaction.
+   `Customer` is a different aggregate (different `customerId` reference, likely
+   a different service). The loyalty update happens in a *separate* transaction
+   when the Customer side consumes `OrderPlaced` — eventually consistent. If you
+   tried to bump `loyaltyPoints` in the same ACID transaction as the order, you'd
+   have fused two aggregates into one consistency boundary and, across services,
+   turned a local commit into a distributed transaction — exactly the thing the
+   rule forbids.
+
+The `OrderLine`s live *inside* the boundary because the `total` invariant links
+them; `Customer` sits *outside* it, reached only by `customerId`, and the
+cross-boundary effect travels as an asynchronous event.
+
 **Trade-offs.** Small aggregates + eventual consistency between them = high
 concurrency and clean boundaries but the business must accept "the read model
 lags by X ms" and you must design compensations. Large aggregates give you
@@ -184,10 +221,14 @@ reacts and commits its own transaction later.
 
 **Delivery reality.** Publishing an event and committing the aggregate must be
 atomic *relative to each other*, or you get the **dual-write problem**: commit
-succeeds, publish fails (or vice versa), and state diverges. The correct fix is
-the **transactional outbox** (see the saga/outbox subtopic), not a distributed
-transaction across DB and broker. Consumers must be **idempotent** because
-at-least-once delivery is the norm.
+succeeds, publish fails (or vice versa), and state diverges. The naive "just publish to the broker inside the DB
+transaction" does **not** fix this: the broker is a separate system with its own
+commit, so there is no atomicity spanning the DB commit and the broker
+acknowledgement — either can succeed while the other fails. The correct fix is
+the **transactional outbox** (see the saga/outbox subtopic), which keeps both
+writes inside the *one* DB transaction, not a distributed transaction across DB
+and broker. Consumers must be **idempotent** because at-least-once delivery is
+the norm.
 
 **Trade-offs.** Events buy loose coupling and a natural audit log, but you give
 up the ability to reason about a workflow by reading one call stack — logic is
@@ -400,6 +441,9 @@ success probability is `a^N`. At `a = 99.9%` and `N = 10`, that's
 end-to-end. Latency adds up too: end-to-end latency ≥ sum of hop latencies, and
 **tail latency is worse** — with N calls, the chance *at least one* hits its p99
 is `1 - 0.99^N` (≈ 9.6% at N=10), so a request routinely experiences a slow hop.
+(The `0.99` here is a different figure from the `99.9%` availability above: it's
+the definitional "each call has a 1% chance of exceeding *its own* p99," i.e. the
+top 1% of that call's latency distribution — not an availability number.)
 This is the "tail at scale" effect: the more you fan out synchronously, the more
 your typical latency approaches your dependencies' tail.
 
@@ -666,6 +710,43 @@ processing the same request twice has the same effect as processing it once. An
 4. Keys are retained for a **TTL** long enough to cover realistic retry windows,
    then expire.
 
+**Worked trace — a $50 capture, deduped.** Client sends `POST /captures` with
+`Idempotency-Key: abc`, amount `$50`. Dedup table starts empty.
+
+```
+t0  Req#1 (key=abc) arrives.
+    INSERT INTO idempotency(key, status, result)
+        VALUES('abc','in_progress', NULL)      -- succeeds (unique key)
+t1  Req#2 (key=abc, the client's retry) arrives WHILE Req#1 still running.
+    INSERT ... VALUES('abc', ...)  -- UNIQUE CONSTRAINT VIOLATION on 'abc'
+    → Req#2 does NOT execute the capture. It reads the row, sees
+      status='in_progress', and blocks/returns 409-retry.
+t2  Req#1 captures $50 at the PSP, then in the SAME transaction:
+    UPDATE idempotency SET status='done',
+        result='{captured:$50, id:cap_9}' WHERE key='abc'   -- commit
+t3  Req#2 (or a 3rd retry) re-reads row: status='done'
+    → returns the STORED result {captured:$50, id:cap_9}. No second charge.
+```
+
+Net effect: the card is charged **once ($50)**, and every retry returns the
+identical result. The unique constraint on `key` is what serializes the
+concurrent duplicates at t1 — only one INSERT can win.
+
+**Contrast — the buggy "work-then-record" ordering** (why the row must be written
+atomically with the state change):
+
+```
+t0  Req#1 captures $50 at the PSP.        ← money moves
+t1  *** process crashes before recording key 'abc' ***
+t2  Req#1's retry (key=abc) arrives. Dedup table has NO row for 'abc'
+    → it looks brand-new → captures ANOTHER $50.   ← DOUBLE CHARGE
+```
+
+The crash window between "did the work" and "recorded the key" is exactly the
+gap that double-charges. Insert/commit the key in the *same* transaction as (or
+before, as a unique-constraint claim on) the state change so no such window
+exists.
+
 **Subtle failure modes.** If you do the work first and record the key after,
 a crash in between causes double execution — record atomically. If the second
 call arrives *while* the first is still processing, you need a lock/"in-progress"
@@ -743,6 +824,42 @@ can see intermediate states (lost updates, dirty reads, fuzzy reads). Mitigation
 state), **commutative updates**, **reordering** to do the "hard to compensate"
 step last, and **versioning**. Compensations must be idempotent and are
 *semantic* undos (you can't un-send an email — you send an apology).
+
+**Worked trace — order fulfillment saga, failure at step 3.** Orchestrated flow
+`Create Order → Reserve Inventory → Capture Payment → Allocate Shipment`. Each
+box is a *local* commit in its own service; the status column is a **semantic
+lock** flagging in-progress state. Watch the state advance, fail at payment, then
+unwind in reverse:
+
+```
+Step (forward)          Local commit / effect                 Saga state
+──────────────────────────────────────────────────────────────────────────
+1 Create Order          Order#4711 status: PENDING             Order=PENDING
+2 Reserve Inventory     stock: onHand 100 → reserved +2        Inv=RESERVED
+                        Order status: PENDING → RESERVED       Order=RESERVED
+3 Capture Payment       PSP DECLINES card  ✗                   Payment=FAILED
+──────────────────────────────────────────────────────────────────────────
+   step 3 failed → orchestrator runs COMPENSATIONS in REVERSE
+──────────────────────────────────────────────────────────────────────────
+C3 (Payment)            nothing captured → nothing to undo     (no-op)
+C2 Release Inventory    reserved −2 → onHand back to 100        Inv=RELEASED
+C1 Cancel Order         Order status: RESERVED → CANCELLED      Order=CANCELLED
+```
+
+Read the status transitions as one thread: `PENDING → RESERVED → CANCELLED`
+(never reaches `CONFIRMED`). Key things an interviewer probes:
+
+- Compensations fire **in reverse order** of the completed steps (undo inventory
+  *before* cancelling the order), and only for steps that actually committed.
+- Compensations are **semantic undos**, not rollbacks. Releasing inventory is a
+  new forward transaction (reserved −2), not a DB rollback of step 2 — step 2
+  already committed and its locks are long gone.
+- Had the failure been at step 4 (Allocate Shipment) *after* payment captured,
+  C3 would be a **refund** — you cannot "un-capture" money, so you compensate
+  with an offsetting action. Then C2 (release inventory) and C1 (cancel order).
+- Because there's **no isolation**, another request could observe the order in
+  `RESERVED` before compensation completes — hence the semantic-lock status so
+  readers know it's provisional, not final.
 
 **The dual-write problem and the outbox.** A service must atomically (a) commit
 its local state *and* (b) publish an event — but the DB and the message broker

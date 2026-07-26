@@ -28,10 +28,10 @@ questions:
     question: |
       What is a "span" in distributed tracing?
     options:
-      - "The set of HTTP headers used to propagate context"
+      - "The fixed set of W3C HTTP headers used to serialize and propagate trace context between services"
       - "The complete end-to-end record of a request across all services"
       - "A single named, timed unit of work with a start time, duration, status, and attributes"
-      - "A sampling decision made at the collector"
+      - "A tail-based sampling decision made at the collector after buffering all of a trace's spans"
     answer: 2
     explanation: |
       A span represents one operation (an HTTP handler, an RPC, a DB query) with
@@ -45,9 +45,9 @@ questions:
     question: |
       What connects a set of spans into a single trace?
     options:
-      - "They were all created within the same 5-minute window"
-      - "They all have identical span names"
-      - "They were emitted by the same host"
+      - "They were all created within the same rolling five-minute collection window"
+      - "They all carry identical span names generated from the same operation handler"
+      - "They were all emitted by processes running on the same physical host or node"
       - "They all share the same trace_id and are linked by parent/child references"
     answer: 3
     explanation: |
@@ -83,9 +83,9 @@ questions:
       downstream in the request headers so the next service knows its parent."
       What is wrong with this?
     options:
-      - "Nothing — the full span is serialized into the traceparent header"
-      - "Spans are never sent anywhere; they only live in memory"
-      - "Attributes propagate but the trace_id does not"
+      - "Nothing — the full span with all attributes and events is serialized into the traceparent header on every hop"
+      - "Spans are never sent anywhere at all; they live only in the emitting process's memory and are never exported"
+      - "The attributes propagate downstream in the headers, but the trace_id and span_id are deliberately left behind"
       - "Only the SpanContext (IDs + flags + tracestate) propagates; span data is exported separately to the backend"
     answer: 3
     explanation: |
@@ -120,10 +120,10 @@ questions:
       In a trace waterfall (Gantt) view, what does it mean when two child span
       bars overlap in time?
     options:
-      - "The trace is corrupted"
-      - "One span is the parent of the other"
+      - "The trace is corrupted and the overlapping spans should be discarded by the backend"
+      - "One span must be the direct parent of the other, since only parents may overlap children"
       - "Those operations ran concurrently (in parallel)"
-      - "The clocks on those hosts are synchronized"
+      - "The clocks on those two hosts are perfectly synchronized to sub-millisecond precision"
     answer: 2
     explanation: |
       Overlapping bars ran concurrently. Bars where one starts only after a
@@ -159,9 +159,9 @@ questions:
       span links are involved?
     options:
       - "Because a span can have multiple causal predecessors via links (e.g. a batch consumer linking many producer spans)"
-      - "Because spans can form cycles when a service calls itself"
-      - "Because the root span has two parents by definition"
-      - "Because links remove the trace_id from child spans"
+      - "Because spans can form directed cycles whenever a service recursively calls itself over the network"
+      - "Because the root span in every trace is required by the spec to have exactly two distinct parents"
+      - "Because adding a link strips the trace_id from all child spans, disconnecting them from the tree"
     answer: 0
     explanation: |
       Parent-child alone yields a tree. Span links let a span reference multiple
@@ -177,9 +177,9 @@ questions:
       When should you model a relationship as a span link rather than
       parent-child?
     options:
-      - "Whenever two spans are in the same service"
-      - "Never — links are deprecated in favor of parent-child"
-      - "Only when spans are in the same thread"
+      - "Whenever two spans happen to be created within the same service process, regardless of their causality"
+      - "Never — span links were deprecated in the OTel spec and fully replaced by parent-child references"
+      - "Only when both spans execute on the exact same thread and share the same thread-local context"
       - "When there is a causal relationship but the parent is not synchronously blocked on the work (e.g. batch/async/fan-in)"
     answer: 3
     explanation: |
@@ -233,7 +233,7 @@ questions:
       How is the "currently active span" typically tracked within a single
       thread-per-request Java service?
     options:
-      - "In a global static variable shared by all threads"
+      - "In a single global static variable that every request thread reads and overwrites concurrently"
       - "It is not tracked; each span must be passed explicitly to every method"
       - "In the traceparent HTTP header of the incoming request only"
       - "In thread-local storage via the tracer's Context/Scope mechanism"
@@ -253,9 +253,9 @@ questions:
       after work is submitted to a thread pool. What is the most likely cause?
     options:
       - "The Context (thread-local active span) was not captured/restored across the thread boundary"
-      - "The traceparent header was malformed on the network"
-      - "The collector dropped the spans due to sampling"
-      - "Clock skew between the two threads"
+      - "The traceparent header was malformed by the network stack before the pool task was submitted"
+      - "The collector applied tail-based sampling and dropped exactly the pool worker's child spans"
+      - "Clock skew between the submitting thread and the worker thread reset each span's trace_id"
     answer: 0
     explanation: |
       Thread-locals do not follow work onto a different thread. Unless the
@@ -271,10 +271,10 @@ questions:
       Which approach correctly preserves trace context when submitting a task to
       an executor that will run on another thread?
     options:
-      - "Rely on the JVM to copy all thread-locals automatically to worker threads"
-      - "Store the span in a plain static field before submitting"
+      - "Rely on the JVM to automatically copy all InheritableThreadLocal values onto every pooled worker thread"
+      - "Store the active span in a plain static field just before submitting the task to the executor"
       - "Wrap the task with a context-propagating helper (e.g. Context.wrap(Runnable) or a ContextExecutorService)"
-      - "Set the traceparent as a system property"
+      - "Set the traceparent value as a JVM system property that the worker thread reads back at runtime"
     answer: 2
     explanation: |
       OTel and Micrometer provide context-propagating wrappers
@@ -291,9 +291,9 @@ questions:
       In OpenTelemetry's TextMapPropagator model, what do inject and extract do?
     options:
       - "inject writes SpanContext into outgoing carrier headers; extract reads it from incoming headers into a Context"
-      - "inject creates a new trace; extract deletes the old one"
-      - "inject samples the trace; extract exports it"
-      - "Both operate only on in-process thread-locals, never on headers"
+      - "inject starts a brand-new trace with a fresh trace_id; extract terminates and discards the previous caller's trace"
+      - "inject makes the head-based sampling decision for the trace; extract flushes and exports the spans to the backend"
+      - "Both operate purely on in-process thread-local storage and never touch any HTTP or messaging carrier headers"
     answer: 0
     explanation: |
       inject (client side) serializes the SpanContext into the carrier (HTTP/gRPC
@@ -309,9 +309,9 @@ questions:
       are typically created and of what kind?
     options:
       - "A CLIENT span on the caller (egress) and a SERVER span on the callee (ingress)"
-      - "One INTERNAL span shared by both services"
-      - "Only a SERVER span on the callee; the caller creates none"
-      - "Two root spans in two separate traces"
+      - "One INTERNAL span object that both services share and update over the single HTTP connection"
+      - "Only a SERVER span on the callee (ingress); the calling side creates no span for the egress call"
+      - "Two independent root spans, one per service, each living in its own separate trace"
     answer: 0
     explanation: |
       Each hop usually produces a CLIENT span on the calling side and a matching
@@ -326,9 +326,9 @@ questions:
       What does the callee's incoming span inherit from the caller so that the
       trace stays connected?
     options:
-      - "A brand-new random trace_id"
-      - "Nothing; each service generates independent traces"
-      - "The caller's attributes and events"
+      - "A brand-new randomly generated trace_id that replaces the caller's on every inbound hop"
+      - "Nothing at all; each service independently generates its own unrelated trace per request"
+      - "A full copy of the caller's span attributes and timestamped events, but not its identity"
       - "The same trace_id and the sampled flag, with the caller's span as parent"
     answer: 3
     explanation: |
@@ -344,10 +344,10 @@ questions:
       A request passes through a proxy that strips unknown headers before
       reaching service B. What do you observe in your tracing backend?
     options:
-      - "One complete trace as normal"
+      - "One complete trace as normal, since the backend re-links the dropped hop using span timestamps"
       - "Service B's spans get merged into an unrelated trace"
       - "The trace breaks at the proxy; B starts a new trace, so you see two disconnected traces"
-      - "All spans are dropped and nothing appears"
+      - "All spans are dropped and nothing appears, since the missing header aborts span export"
     answer: 2
     explanation: |
       If propagation headers are stripped, B cannot extract the caller's
@@ -380,9 +380,9 @@ questions:
       In a W3C traceparent, the trace-flags field is `01`. What does that
       indicate?
     options:
-      - "The trace has exactly 1 span"
-      - "The request failed with error code 1"
-      - "The traceparent version is 1"
+      - "The trace contains exactly 1 span, since the flags field doubles as the span counter"
+      - "The request failed with HTTP-style error code 1 recorded in the flags byte"
+      - "The traceparent is using protocol version 1, which the flags field encodes for the receiver"
       - "Bit 0 (the sampled flag) is set — the caller recorded/sampled this trace"
     answer: 3
     explanation: |
@@ -416,10 +416,10 @@ questions:
       Per the W3C Trace Context spec, when must a vendor ignore an incoming
       traceparent header?
     options:
-      - "When the sampled flag is 0"
-      - "When the tracestate header is absent"
+      - "When the sampled flag is 0, because an unsampled trace must not be forwarded downstream"
+      - "When the tracestate header is absent, since traceparent is only valid when paired with tracestate"
       - "When the trace-id or parent-id is all zeros, or contains non-lowercase-hex characters"
-      - "Whenever the version is 00"
+      - "Whenever the version field is 00, because 00 is a reserved placeholder that vendors must reject"
     answer: 2
     explanation: |
       An all-zeros trace-id or parent-id is invalid, as are disallowed
@@ -434,10 +434,10 @@ questions:
     question: |
       Which statement about the W3C tracestate header is correct?
     options:
-      - "It may contain an unlimited number of entries"
+      - "It may contain an unlimited number of entries, since the spec sets no cap on tracestate list-members"
       - "It holds up to 32 vendor key=value list-members, and a vendor that updates its entry moves it to the left-most position"
-      - "It replaces traceparent as the primary identity header"
-      - "It must be identical on every hop and can never change"
+      - "It replaces traceparent as the primary identity header once at least one vendor entry is present"
+      - "It must be byte-for-byte identical on every hop and can never be modified by an intermediate vendor"
     answer: 1
     explanation: |
       tracestate is a comma-separated list of up to 32 key=value members carrying
@@ -454,9 +454,9 @@ questions:
       the effect on the trace?
     options:
       - "The trace still stitches (traceparent carries identity); you only lose vendor-specific state/hints"
-      - "The trace fractures into two disconnected traces"
-      - "All downstream sampling is forced to 100%"
-      - "The trace_id changes for all downstream spans"
+      - "The trace fractures into two disconnected traces, because tracestate holds the parent linkage"
+      - "All downstream sampling is forced to 100%, since the lost tracestate defaults the sampler to keep-all"
+      - "The trace_id is regenerated for all downstream spans once the tracestate chain is broken"
     answer: 0
     explanation: |
       traceparent carries the shared identity (trace_id, parent span_id, sampled
@@ -471,9 +471,9 @@ questions:
     question: |
       What is the default cross-process propagation format used by OpenTelemetry?
     options:
-      - "B3 (Zipkin) multi-header"
-      - "A proprietary binary protocol"
-      - "Jaeger uber-trace-id"
+      - "B3 (Zipkin) multi-header, enabled by default for backward compatibility with older tracers"
+      - "A proprietary length-prefixed binary protocol negotiated during the first inject/extract handshake"
+      - "Jaeger uber-trace-id, chosen because it packs all four fields into a single compact header"
       - "W3C Trace Context (traceparent/tracestate)"
     answer: 3
     explanation: |
@@ -488,10 +488,10 @@ questions:
     question: |
       In the B3 multi-header format, which header carries the sampling decision?
     options:
-      - "X-B3-TraceId"
-      - "X-B3-ParentSpanId"
+      - "X-B3-TraceId, whose high-order bit is repurposed to carry the sampling decision"
+      - "X-B3-ParentSpanId, which encodes accept/deny in its leading hex digit for the receiver"
       - "X-B3-Sampled (1 = accept, 0 = deny, absent = defer)"
-      - "X-B3-Version"
+      - "X-B3-Version, a required header whose numeric value doubles as the sampling flag"
     answer: 2
     explanation: |
       X-B3-Sampled carries the decision: 1 accept, 0 deny, absent means defer to
@@ -543,9 +543,9 @@ questions:
       break at the mesh boundary. What is the most appropriate fix?
     options:
       - "Register a composite propagator that injects and extracts both W3C and B3"
-      - "Disable tracing on the apps entirely"
-      - "Force all sampling to 100% to compensate"
-      - "Rename every span to include the trace_id"
+      - "Disable tracing on the apps entirely and rely on Istio's B3 spans as the sole source"
+      - "Force all sampling to 100% so the mesh always re-derives the missing parent context"
+      - "Rename every span to embed the trace_id so the backend can re-stitch across the boundary"
     answer: 0
     explanation: |
       A mixed fleet (W3C apps + B3 mesh) needs a composite/multi propagator that
@@ -559,10 +559,10 @@ questions:
     question: |
       What is "baggage" in the context of distributed tracing?
     options:
-      - "The buffered spans a collector holds during tail sampling"
-      - "The exported span attributes stored in the backend"
+      - "The buffered spans a collector holds in memory during tail-based sampling before it decides"
+      - "The exported span attributes stored in the backend and indexed for later trace queries"
       - "Arbitrary application key/value pairs propagated with the request to all downstream services"
-      - "The debug flag that forces a trace to be kept"
+      - "The debug flag inside traceparent that forces a trace to be retained regardless of sampling"
     answer: 2
     explanation: |
       Baggage is a separate propagation mechanism carrying arbitrary
@@ -578,10 +578,10 @@ questions:
       You add `tenant.id` to baggage and expect to filter traces by it in your
       backend, but it does not appear on any span. Why?
     options:
-      - "Baggage is encrypted and cannot be read"
+      - "Baggage values are encrypted in transit and the backend cannot decode them for indexing"
       - "Baggage propagates downstream but is not automatically added to spans; you must explicitly copy it onto a span as an attribute"
-      - "Baggage overwrites the trace_id, so filtering fails"
-      - "Baggage only works with B3, not W3C"
+      - "Baggage overwrites the low bytes of the trace_id, so attribute-based filtering silently fails"
+      - "Baggage is only carried by the B3 propagator and is dropped entirely under W3C Trace Context"
     answer: 1
     explanation: |
       Baggage travels with the request but is not automatically attached to spans
@@ -596,9 +596,9 @@ questions:
       Which is a legitimate concern when using baggage?
     options:
       - "It travels on every hop, so it adds header bytes per request and can leak PII or be trusted unsafely"
-      - "It cannot cross process boundaries"
-      - "It permanently increases the trace_id length"
-      - "It disables sampling for the whole trace"
+      - "It cannot cross process boundaries, so any value set is lost at the first outbound network call"
+      - "It permanently increases the trace_id length, forcing 256-bit ids once any key is added"
+      - "It disables sampling for the whole trace, so every baggage-carrying request is always retained"
     answer: 0
     explanation: |
       Baggage rides on every request, costing header bytes on each hop, and can
@@ -613,9 +613,9 @@ questions:
     question: |
       How does baggage differ from tracestate?
     options:
-      - "They are the same header with different names"
-      - "Baggage is only used in-process; tracestate only cross-process"
-      - "tracestate carries app data; baggage carries vendor data"
+      - "They are the exact same wire header, just aliased under two different names by the spec"
+      - "Baggage is only used for in-process context, while tracestate is only ever sent cross-process"
+      - "tracestate carries your application's data, while baggage is reserved for tracing-vendor state"
       - "Baggage carries your application's key/values; tracestate is reserved for tracing-vendor state and is limited to 32 entries"
     answer: 3
     explanation: |
@@ -631,10 +631,10 @@ questions:
       What does automatic (agent/library) instrumentation give you with no code
       changes?
     options:
-      - "Business-logic spans like processOrder with domain attributes"
-      - "Tail-based sampling at the collector"
+      - "Business-logic spans like processOrder, automatically enriched with your domain attributes"
+      - "Tail-based sampling at the collector, decided after buffering every span of the trace"
       - "Spans and context inject/extract at well-known framework boundaries (HTTP, gRPC, JDBC, Kafka)"
-      - "Clock-skew correction across hosts"
+      - "Automatic clock-skew correction across hosts using the agent's built-in NTP synchronization"
     answer: 2
     explanation: |
       Auto-instrumentation (e.g. the OTel Java agent) hooks common frameworks to
@@ -649,10 +649,10 @@ questions:
     question: |
       Why do teams typically combine automatic and manual instrumentation?
     options:
-      - "Manual instrumentation is required to send data over the network"
+      - "Manual instrumentation is required because the auto agent can create spans but is unable to export them over the network"
       - "Auto gives breadth (every boundary, no code); manual gives depth (business operations that explain why), and both share the same Context so spans nest correctly"
-      - "Automatic instrumentation cannot create client spans"
-      - "Manual instrumentation replaces the need for a collector"
+      - "Automatic instrumentation can only produce server (ingress) spans and is structurally unable to create client (egress) spans"
+      - "Manual instrumentation replaces the need for a collector by sending spans straight to the backend from application code"
     answer: 1
     explanation: |
       Auto-instrumentation covers all the boundaries for free; manual spans add
@@ -668,9 +668,9 @@ questions:
       Where are the most important instrumentation points for producing a useful
       end-to-end trace?
     options:
-      - "Only inside pure CPU-bound functions"
-      - "Only in the logging framework"
-      - "Only at application startup"
+      - "Only inside pure CPU-bound functions, since that is where nearly all meaningful request latency actually accumulates"
+      - "Only in the logging framework, wrapping each log statement so that every emitted line automatically becomes its own span"
+      - "Only at application startup, where the process registers itself once and no per-request instrumentation is ever needed"
       - "At the boundaries where context must cross: inbound handlers, outbound clients/RPC/DB, and message produce/consume"
     answer: 3
     explanation: |
@@ -686,9 +686,9 @@ questions:
       What characterizes head-based sampling?
     options:
       - "The decision is made after the trace completes, based on errors/latency"
-      - "Every span is always kept regardless of load"
+      - "Every span is always kept regardless of load, because head-based sampling only ever drops spans once the trace has finished"
       - "The decision is made at the root when the trace starts and propagated downstream via the sampled flag"
-      - "It requires buffering all spans at the collector"
+      - "It requires buffering all spans at the collector until the root span arrives before the keep-or-drop choice can be made"
     answer: 2
     explanation: |
       Head-based sampling decides at trace start (the root) and encodes the
@@ -703,10 +703,10 @@ questions:
       You want to keep every trace that errored or exceeded 2 s of latency, but
       only 1% of the fast successful ones. Which sampling strategy fits?
     options:
-      - "Head-based sampling at a fixed 1%"
-      - "No sampling — keep everything"
+      - "Head-based sampling at a fixed 1%, which can still preferentially retain the errored and slow traces because it re-evaluates the decision once the outcome is known"
+      - "No sampling — keep everything, which is the only way to guarantee that the interesting slow and errored traces are not statistically lost"
       - "Tail-based sampling, which buffers a trace until completion and decides based on the whole trace"
-      - "Randomly dropping spans at each service independently"
+      - "Randomly dropping spans at each service independently, so that slow or errored spans are the ones most likely to survive the per-service filter"
     answer: 2
     explanation: |
       Only tail-based sampling can decide after the trace completes, so it can
@@ -722,10 +722,10 @@ questions:
       What operational requirement does tail-based sampling impose that
       head-based does not?
     options:
-      - "It requires disabling the sampled flag in headers"
+      - "It requires disabling the sampled flag in headers so that no head decision is ever propagated to downstream services"
       - "It requires that all spans of a given trace reach the same collector instance (trace-id-aware routing) and enough memory to buffer them"
-      - "It requires 128-bit trace-ids specifically"
-      - "It requires each service to make an independent random decision"
+      - "It requires 128-bit trace-ids specifically, because shorter 64-bit ids cannot be buffered and reassembled at the collector"
+      - "It requires each service to make an independent random decision and then reconcile them after the trace has completed"
     answer: 1
     explanation: |
       Tail sampling buffers all of a trace's spans and decides at completion, so
@@ -741,9 +741,9 @@ questions:
       What does OTel's ParentBased(root=TraceIdRatioBased(0.05)) sampler do?
     options:
       - "Respects the parent's sampling decision if there is one; otherwise samples at 5% at the root"
-      - "Samples 5% of spans independently at every service, ignoring parents"
-      - "Keeps 5% of errored traces only"
-      - "Buffers traces at the collector and keeps 5% of slow ones"
+      - "Samples 5% of spans independently at every service, deliberately ignoring the parent's incoming decision on each hop"
+      - "Keeps exactly 5% of errored traces only, evaluating the status code once the root span has finished recording"
+      - "Buffers whole traces at the collector and keeps the slowest 5% by tail latency after every span has arrived"
     answer: 0
     explanation: |
       ParentBased honors the incoming parent's decision (keeping the trace
@@ -758,9 +758,9 @@ questions:
     question: |
       Which statement about sampling and context propagation is correct?
     options:
-      - "When a trace is not sampled, context stops propagating downstream"
-      - "Unsampled traces get a different trace_id at each hop"
-      - "Sampling prevents spans from ever being created"
+      - "When a trace is not sampled, context stops propagating downstream and the traceparent header is dropped from all onward calls"
+      - "Unsampled traces get a freshly regenerated trace_id at each hop, so the identity intentionally changes every time the sampled flag is 0"
+      - "Sampling prevents spans from ever being created, so an unsampled service never even instantiates a span object in memory"
       - "The sampled flag governs whether spans are recorded/exported, but context still propagates so downstream services can make consistent decisions"
     answer: 3
     explanation: |
@@ -778,10 +778,10 @@ questions:
       before its parent (client) span sent the request. What is the most likely
       explanation?
     options:
-      - "The child caused the parent (reverse causality)"
-      - "The trace_id was corrupted"
+      - "The child caused the parent, a genuine case of reverse causality captured faithfully by the tracer"
+      - "The trace_id was corrupted in transit, shifting the recorded start timestamp of the child span backward"
       - "Clock skew between the two hosts' wall clocks"
-      - "The sampled flag was set to 0"
+      - "The sampled flag was set to 0, which offsets the child span's start time relative to its parent"
     answer: 2
     explanation: |
       Span timestamps come from each host's wall clock, and clocks disagree by a
@@ -795,10 +795,10 @@ questions:
     question: |
       How do backends like Jaeger mitigate clock skew when rendering a trace?
     options:
-      - "They discard any span whose timestamp looks off"
+      - "They discard any span whose timestamp looks off, quietly dropping it from the rendered waterfall so causality appears intact"
       - "They apply a skew-adjustment heuristic using the causal constraint that a server span must be contained within its client span"
-      - "They force all hosts to use the same clock at query time"
-      - "They ignore parent-child relationships and sort purely by timestamp"
+      - "They force all hosts to use the same clock at query time by re-fetching each host's live NTP offset during rendering"
+      - "They ignore parent-child relationships and sort purely by raw timestamp, trusting each host's wall clock as authoritative"
     answer: 1
     explanation: |
       Backends use the causal constraint (a server span must fall within its
@@ -814,9 +814,9 @@ questions:
       Why is it unreliable to compute one-way network latency as
       (server_span.start - client_span.start) across two hosts?
     options:
-      - "Because durations are always negative"
-      - "Because the sampled flag zeroes out the timestamps"
-      - "Because trace_ids differ between the spans"
+      - "Because span durations are always recorded as negative values that must be manually inverted before subtracting"
+      - "Because the sampled flag, when set, zeroes out both spans' start timestamps and leaves only the durations behind"
+      - "Because the trace_ids differ between the two spans, so the subtraction is comparing timestamps from unrelated traces"
       - "Because clock skew between hosts makes that difference (and even its sign) untrustworthy"
     answer: 3
     explanation: |
@@ -833,9 +833,9 @@ questions:
       How is trace context typically propagated through a Kafka pipeline?
     options:
       - "The producer injects the SpanContext into the message's record headers; the consumer extracts it"
-      - "Via HTTP traceparent headers on the broker's admin API"
-      - "Kafka automatically shares thread-locals between producer and consumer JVMs"
-      - "Context cannot be propagated through message brokers"
+      - "Via HTTP traceparent headers sent to the broker's admin API, which then relays the context to each subscribed consumer"
+      - "Kafka automatically shares thread-locals between the producer and consumer JVMs over the broker's replication channel"
+      - "Context cannot be propagated through message brokers, so every consumer necessarily begins a brand-new root trace"
     answer: 0
     explanation: |
       For messaging, the same inject/extract applies but the carrier is the
@@ -850,10 +850,10 @@ questions:
       Why do OpenTelemetry messaging conventions often model the consumer span as
       linked to (rather than a child of) the producer span?
     options:
-      - "Because the consumer runs on the same thread as the producer"
-      - "Because links are cheaper to store than parent-child references"
+      - "Because the consumer always runs on the very same thread as the producer, so thread-local parent context is naturally shared"
+      - "Because links are cheaper to store than parent-child references and the broker charges per parent edge it forwards"
       - "Because produce and consume are decoupled in time and can be many-to-one (batch), so a link preserves causality without forcing a blocked parent-child or one giant trace"
-      - "Because the trace_id must change at the broker"
+      - "Because the trace_id must change at the broker, so a parent-child edge across it would be structurally invalid"
     answer: 2
     explanation: |
       The producer does not block on the consumer, delivery can be delayed and
@@ -870,10 +870,10 @@ questions:
       producer span and the consumer span. What does this gap most likely
       represent?
     options:
-      - "A bug in the tracing library"
+      - "A bug in the tracing library that inserts phantom idle time between causally linked spans"
       - "Time the message spent waiting in the queue before being consumed"
-      - "Clock skew of several minutes"
-      - "The sampled flag being toggled off and on"
+      - "Clock skew of several minutes between the producer and consumer host wall clocks"
+      - "The sampled flag being toggled off and then back on midway through the trace, stretching the rendered gap"
     answer: 1
     explanation: |
       Because the producer does not block on the consumer, a trace can legitimately
@@ -888,9 +888,9 @@ questions:
       What is the join key that lets you pivot between metrics (exemplars), logs,
       and traces for the same request?
     options:
-      - "The host IP address"
-      - "The Prometheus scrape timestamp"
-      - "The span name"
+      - "The host IP address, which uniquely stamps every log line, metric sample, and span for one request"
+      - "The Prometheus scrape timestamp, since all three signals for a request land in the exact same scrape interval"
+      - "The span name, which is globally unique per request and therefore reliably joins the three signals together"
       - "The trace_id (and span_id)"
     answer: 3
     explanation: |
@@ -907,9 +907,9 @@ questions:
       let you do?
     options:
       - "Jump from a specific histogram observation (e.g. a slow bucket) directly to an example trace_id for that request"
-      - "Increase the histogram's bucket count automatically"
-      - "Force tail-based sampling on the metric"
-      - "Replace the need for structured logs"
+      - "Increase the histogram's bucket count automatically whenever a slow request lands in the top latency bucket"
+      - "Force tail-based sampling on the metric so the collector retains every trace that lands in a slow bucket"
+      - "Replace the need for structured logs by embedding the full log line inside each histogram bucket sample"
     answer: 0
     explanation: |
       An exemplar attaches a trace_id to specific histogram observations, so from
@@ -924,10 +924,10 @@ questions:
       Besides latency breakdown, what do you get by aggregating many traces
       across a system?
     options:
-      - "A guaranteed reduction in storage costs"
-      - "Automatic clock synchronization"
+      - "A guaranteed reduction in storage costs, since aggregated traces are compressed into a single rollup record"
+      - "Automatic clock synchronization across every host, derived by averaging the span timestamps in each trace"
       - "A service dependency map showing who actually calls whom at runtime"
-      - "The exact number of physical servers in use"
+      - "The exact number of physical servers in use, counted from the distinct host identifiers on the aggregated spans"
     answer: 2
     explanation: |
       Aggregating traces reveals the real runtime call graph — the actual service
@@ -941,10 +941,10 @@ questions:
     question: |
       What are span "events" (a.k.a. span logs)?
     options:
-      - "Separate traces triggered by the span"
+      - "Separate child traces that the span triggers, each exported under its own freshly generated trace_id"
       - "Timestamped annotations scoped to a span, such as a logged exception at a point in time"
-      - "The parent references of a span"
-      - "The propagated baggage entries"
+      - "The parent references of a span, listing every ancestor span_id back up to the trace root"
+      - "The propagated baggage entries that the span forwards downstream to the next service in the request"
     answer: 1
     explanation: |
       Span events are timestamped annotations attached to a span (e.g.

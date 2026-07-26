@@ -122,6 +122,10 @@ What actually distinguishes levels — the two axes interviewers want:
    workaround, is data being lost or corrupted.
 2. **Urgency** — is it actively getting worse, is revenue/SLA/safety on the line.
 
+This table is for orientation; the *named* vendor definitions (PagerDuty's SEV-1/2/3) and
+the **major-incident rule** that couples severity to org activation are developed later in
+*Severity Definitions and the Major-Incident Rule*.
+
 > [!INTERVIEW]
 > "How do you decide severity?" Answer with the **two axes (impact × urgency)** and note
 > that severity is **dynamic** — you set an initial SEV in triage and **re-assess as scope
@@ -246,6 +250,10 @@ Common mitigation levers (reach for the fastest reversible one first):
 | **Scale out / add capacity** | Demand exceeds capacity (slower to take effect) | `reliability-ops/capacity-planning-and-load-management` |
 | **Graceful degradation** (serve stale/partial) | A non-critical dependency is down | `reliability-ops/graceful-degradation-and-fallbacks` |
 
+Most of these levers share a deeper property — they stop impact by acting on *where* the
+problem is rather than *what* the bug is. That **generic-vs-targeted** framing is developed
+in *Generic Mitigations* below.
+
 > [!WARNING]
 > The anti-pattern is **"let me just find the root cause first"** while the site is down.
 > Understandable engineering instinct, wrong incident instinct. Also beware **destroying
@@ -342,6 +350,39 @@ Key relationships and gotchas:
 - **Attack the biggest slice.** If MTTD dominates, invest in detection (observability); if
   MTTA dominates, fix paging/escalation; if MTTMitigate dominates, invest in fast levers
   (one-click rollback, pre-built failover runbooks).
+
+**Worked example — why cutting MTTR is the cheaper lever.** Take a service that fails once
+a month with a 2-hour recovery: MTBF = 30 days = **720 h**, MTTR = **2 h**.
+
+- Baseline: `Availability = 720 / (720 + 2) = 720 / 722 = 0.99723` → **99.72%**.
+- **Lever A — halve MTTR to 1 h** (better runbooks, one-click rollback):
+  `720 / (720 + 1) = 720 / 721 = 0.99861` → **99.86%**. Downtime per failure is literally
+  cut in half.
+- **Lever B — double MTBF to 60 days = 1440 h** (fail half as often), MTTR still 2 h:
+  `1440 / (1440 + 2) = 1440 / 1442 = 0.99861` → **99.86%** — *the same* availability gain.
+
+Both levers land on 99.86%, but **halving MTTR is usually far cheaper than making the
+system fail half as often**: a rollback button and a rehearsed failover are a few
+engineer-weeks, whereas driving MTBF down means eliminating whole classes of latent bugs
+and hardware faults you may not even know about yet. Failures are inevitable; how fast you
+recover is the lever you actually control.
+
+**Worked example — MTTR as a chain of sub-metrics.** One incident, real clock:
+
+| Clock | Event | Sub-metric | Duration |
+|---|---|---|---|
+| 02:00 | Bad config takes effect; errors climb | — | (fault onset) |
+| 02:07 | Burn-rate alert fires | **MTTD** | 7 min |
+| 02:09 | On-call acknowledges the page | **MTTA** | 2 min |
+| 02:19 | Rollback completes; error rate normal | **MTTMitigate** | 10 min |
+| 02:50 | Backfill + cleanup done; incident closed | resolve tail | 31 min |
+
+The **customer-pain window is fault → mitigate = 02:00 → 02:19 = 19 min**; full
+**MTTR = fault → resolved = 02:00 → 02:50 = 50 min**. Within the 19 minutes customers hurt,
+the biggest slice is **mitigate (10 min)**, then **detect (7 min)** — so the highest-leverage
+investment here is a faster lever (pre-staged one-click rollback) plus tighter detection,
+not shaving the 2-minute ack. This is "attack the biggest slice" made concrete: you don't
+optimize MTTR as one blob, you find the dominant link and shrink *that*.
 
 ```mermaid
 flowchart LR
@@ -709,6 +750,14 @@ Numbers that ground the fatigue and preparedness arguments (from Google *SRE*, A
   well-thought-out, documented playbook produced a **roughly 3× improvement in MTTR** for
   on-call responders versus improvising — the single strongest argument for maintaining
   runbooks (own the mechanics in `reliability-ops/on-call-escalation-and-runbooks`).
+
+  **Worked example — the ROI in hours.** A team handling ~**20 incidents/quarter** at ~**6 h**
+  each spends `20 × 6 = 120` engineer-hours/quarter on incident handling. A good runbook that
+  delivers the ~3× improvement cuts per-incident handling to ~2 h, so the same 20 incidents now
+  cost `20 × 2 = 40` hours — **reclaiming ~80 engineer-hours every quarter** (≈2 full
+  engineer-weeks) for the cost of writing and maintaining the runbook. That is why "keep
+  runbooks current" is an investment, not overhead: the abstract "buys back real hours" is a
+  concrete 80-hour line item.
 - **A ~1:1 alert-to-incident ratio** is the declaration-hygiene target: most pages should
   correspond to a real, actionable incident (alert *tuning* is an observability concern —
   see `observability/on-call-alert-fatigue-and-actionable-signals`).

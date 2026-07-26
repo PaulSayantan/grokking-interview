@@ -31,6 +31,16 @@ at `i`**, and the *length* of that range equals the value of the **lowest set bi
 - `lowbit(8) = 0b1000 = 8`, so `tree[8]` covers `a[1..8]`.
 - `lowbit(7) = 1`, so `tree[7]` covers just `a[7]`.
 
+*Why `i & (-i)` is the lowest set bit:* in two's complement, `-i` = flip every bit of
+`i` then add 1. Flipping turns the lowest set bit's trailing zeros into ones; the `+1`
+carries through all of them and lands exactly on that lowest set bit, leaving every
+higher bit as the *complement* of `i`. AND-ing back with `i` therefore keeps only that
+one bit. Example: `i = 12 = 0b…0001100`. Flip every bit → `0b…1110011`, add 1 → `0b…1110100`
+(that's `-12`). AND with the original: `…0001100 & …1110100 = …0000100 = 4`, the lowest
+set bit. Walking up by `i += lowbit(i)` always jumps to the
+next index whose covered range *begins at or before* `i` and *extends past* it — i.e. the
+smallest node that still needs `a[i]` folded in.
+
 ```mermaid
 flowchart TD
   t8["tree[8] covers 1..8"]
@@ -62,6 +72,17 @@ long sum(int i) {                       // prefix sum a[1..i]
 }
 long rangeSum(int l, int r) { return sum(r) - sum(l - 1); }
 ```
+
+**Trace (n = 8).** Watch the index sequence make the walks concrete:
+
+- `sum(6)`: start `i=6`, add `tree[6]` (covers `a[5..6]`); `6 - lowbit(6)=6-2 = 4`, add
+  `tree[4]` (covers `a[1..4]`); `4 - lowbit(4)=4-4 = 0`, stop. Visited `6 → 4 → 0`, so
+  the result is `tree[6] + tree[4] = a[5..6] + a[1..4] = a[1..6]` — exactly the prefix,
+  in 2 steps.
+- `add(3, δ)`: start `i=3`, `tree[3] += δ` (covers `a[3]`); `3 + lowbit(3)=3+1 = 4`,
+  `tree[4] += δ` (covers `a[1..4]`); `4 + lowbit(4)=4+4 = 8`, `tree[8] += δ` (covers
+  `a[1..8]`); `8 + 8 = 16 > n`, stop. Visited `3 → 4 → 8` — precisely the three nodes
+  whose ranges contain index 3, so every prefix sum through 3 stays correct.
 
 | Operation | Time | Space |
 |---|---|---|
@@ -176,6 +197,19 @@ flowchart LR
   **fewer rotations on writes** — which is why Java's `TreeMap`/`TreeSet` and C++'s
   `std::map` use them.
 
+**When one rotation is not enough (the LR case).** A single rotation only fixes an
+*outside* imbalance (left-left or right-right). If the heavy grandchild is on the
+*inside*, one rotation just moves the imbalance to the other side. Concrete AVL insert:
+insert `30`, then `10`, then `20`. After `20`, node `30` has balance factor `+2` (left
+subtree taller) but its left child `10` has balance factor `-1` (its *right* subtree is
+the heavy one) — signs disagree, so it is the **left-right (LR)** case. A plain right
+rotation at `30` would promote `10` and hang `20` under it, still leaving height 2 on one
+side. The fix is two rotations: first a **left rotation on the child `10`**, turning the
+chain `10 → 20` into `20 → 10` so the heavy grandchild moves outside (now LL-shaped);
+then a **right rotation on `30`**, giving the balanced tree with `20` at the root and
+`10`, `30` as leaves. Rule of thumb: rotate first at the child whenever the node's and
+child's balance-factor signs disagree, then at the node.
+
 | Structure | Balance rule | Height bound | Best for |
 |---|---|---|---|
 | Plain BST | none | O(n) worst | teaching only |
@@ -220,6 +254,41 @@ int[] buildLps(String p) {
 }
 ```
 
+The matching loop is the payoff — the text pointer `i` only ever moves forward; on a
+mismatch it is the *pattern* pointer `j` that falls back via `lps`:
+
+```java
+List<Integer> search(String t, String p) {
+    int[] lps = buildLps(p);
+    List<Integer> hits = new ArrayList<>();
+    int j = 0;                                  // chars of p currently matched
+    for (int i = 0; i < t.length(); i++) {      // i NEVER rewinds
+        while (j > 0 && t.charAt(i) != p.charAt(j)) j = lps[j - 1];  // slide pattern
+        if (t.charAt(i) == p.charAt(j)) j++;
+        if (j == p.length()) { hits.add(i - j + 1); j = lps[j - 1]; }  // found; keep going
+    }
+    return hits;
+}
+```
+
+**Trace `p = "abab"` (`lps = [0,0,1,2]`) over `t = "ababcabab"`:**
+
+| `i` | `t[i]` | before | action | after `j` |
+|---|---|---|---|---|
+| 0 | a | `j=0` | match | `1` |
+| 1 | b | `j=1` | match | `2` |
+| 2 | a | `j=2` | match | `3` |
+| 3 | b | `j=3` | match → `j==4`, **hit @ 0**, then `j=lps[3]=2` | `2` |
+| 4 | c | `j=2` | mismatch: `j=lps[1]=0`; still `c≠a` | `0` |
+| 5 | a | `j=0` | match | `1` |
+| 6 | b | `j=1` | match | `2` |
+| 7 | a | `j=2` | match | `3` |
+| 8 | b | `j=3` | match → `j==4`, **hit @ 5** | (2) |
+
+The critical row is `i=4`: after the first hit `j` was reset to 2, the `'c'` mismatches,
+and `j` falls `2 → 0` via `lps` **while `i` stays at 4** — no text character is ever
+re-read, which is what buys the `O(n + m)` bound.
+
 For `p = "ababaca"`, `lps = [0,0,1,2,3,0,1]`. Building `lps` is `O(m)`; the scan is
 `O(n)`; total `O(n + m)` time, `O(m)` space. The same LPS idea powers **Shortest
 Palindrome** (build `lps` of `s + '#' + reverse(s)` to find the longest palindromic
@@ -238,6 +307,36 @@ each length-`m` window of the text; where hashes match, verify with a direct com
 The key is a **rolling hash** — a **polynomial hash** treating the window as a base-`b`
 number mod a large prime — that updates in `O(1)` when the window slides: subtract the
 outgoing character's contribution, multiply by the base, add the incoming character.
+
+Formally, a length-`m` window `c_0 c_1 … c_{m-1}` hashes to
+
+```
+h = (c_0·b^(m-1) + c_1·b^(m-2) + … + c_{m-1}·b^0)  mod p
+```
+
+and sliding one step right (drop `c_out` from the front, append `c_in`) updates it in
+`O(1)`:
+
+```
+h_new = ((h_old − c_out·b^(m-1))·b + c_in)  mod p
+```
+
+**Numeric roll.** Take the string `"31415"`, base `b = 10`, prime `p = 13`, window size
+`m = 3`; treat each character as its digit value.
+
+- Window `"314"` directly: `3·10² + 1·10 + 4 = 314`; `314 mod 13 = 2` (since `13·24 = 312`).
+- Roll to window `"141"`: here `c_out = 3`, `c_in = 1`, and `b^(m-1) mod p = 100 mod 13 = 9`.
+  Working entirely in mod space:
+  `h_new = ((2 − 3·9)·10 + 1) mod 13 = ((2 − 27)·10 + 1) mod 13 = (−25·10 + 1) mod 13 = −249 mod 13`.
+  Bring the negative back into range by adding a multiple of `p`: `−249 + 260 = 11`
+  (`260 = 13·20`), so `h_new = 11`.
+- Cross-check directly: `"141" = 1·100 + 4·10 + 1 = 141`; `141 mod 13 = 11` (since
+  `13·10 = 130`). The rolled value matches the direct value — proof the `O(1)` update is
+  correct.
+
+That intermediate `−249` is the classic pitfall: in a language where `%` can return a
+negative result, you must add `p` (here `+260`) before comparing hashes, or you will miss
+matches.
 
 Average/expected time is `O(n + m)`; **worst case is `O(n·m)`** when hash collisions force
 a full comparison at every position (or with an adversarial modulus). Its real strengths
@@ -260,6 +359,25 @@ single `O(n)` left-to-right pass by maintaining a "Z-box" `[l, r]` — the right
 prefix-match window seen so far — and reusing previously computed values inside it instead
 of recomparing.
 
+**Worked z-array** for `s = "aabxaabxc"` (index 0-based; `z[0]` is left undefined/0 by
+convention):
+
+| i | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|---|
+| s[i] | a | a | b | x | a | a | b | x | c |
+| z[i] | – | 1 | 0 | 0 | **4** | 1 | 0 | 0 | 0 |
+
+- `z[1]`: `s[1]=a` matches prefix `s[0]=a`; `s[2]=b ≠ s[1]=a`, stop → `1`.
+- `z[4]`: `s[4..7]="aabx"` equals the prefix `s[0..3]="aabx"`; `s[8]=c ≠ s[4]=a`, stop
+  → `4`. This sets the Z-box to `[l, r] = [4, 7]`.
+
+**In-box reuse at `i = 5`** (the whole point of the linear pass): `5` sits inside the box
+`[4, 7]`, so instead of comparing from scratch we copy from its mirror. The mirror index
+is `i − l = 5 − 4 = 1`, and `z[1] = 1`. Since `1` is less than the remaining box width
+`r − i + 1 = 7 − 5 + 1 = 3`, the mirror value is fully trusted — `z[5] = 1` with **zero
+character comparisons**. (Had `z[mirror]` reached the box edge, we would resume explicit
+comparison from `r + 1` outward.)
+
 For pattern matching, run the Z-algorithm on `pattern + '#' + text`: any position where
 `z[i] == m` (the pattern length) marks an occurrence of the pattern in the text. It is an
 often-simpler alternative to KMP and directly answers "how long is the prefix that
@@ -274,6 +392,31 @@ even palindromes are handled uniformly) and reusing symmetry: it keeps the **rig
 palindrome** `[center, right]` found so far and initializes each new position's radius
 from its **mirror** across `center`, only expanding beyond what symmetry already
 guarantees.
+
+**Worked example** for `s = "aba"`. Transform to `t = "#a#b#a#"` (separators make every
+palindrome odd-length, so one radius array covers both odd and even cases). The radius
+`p[i]` counts how many characters match on each side of center `i` in `t`:
+
+| i | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| t[i] | # | a | # | b | # | a | # |
+| p[i] | 0 | 1 | 0 | **3** | 0 | 1 | 0 |
+
+`p[3] = 3` at the center `b` means the palindrome spans `t[0..6]` = the whole string; the
+real substring length is exactly `p[3] = 3`, i.e. `"aba"`. When the algorithm reaches
+center `3` it sets the current box to `[center − p, center + p] = [0, 6]`, `right = 6`.
+Now the mirror trick for the next centers:
+
+- `i = 4` (**initialized from its mirror, no expansion**): mirror `= 2·center − i =
+  6 − 4 = 2`, and `p[2] = 0`. Because `p[mirror] = 0` is strictly less than the room left
+  in the box `right − i = 6 − 4 = 2`, symmetry guarantees `p[4] = 0` outright — copied
+  from the mirror with no character comparison.
+- `i = 5` (**must try to expand past the box edge**): mirror `= 6 − 5 = 1`, `p[1] = 1`,
+  but the room left is only `right − i = 6 − 5 = 1`, so the mirror value reaches the box
+  boundary and cannot be trusted beyond it. The algorithm seeds `p[5] = 1` and then
+  attempts to grow: compare `t[5−2]=t[3]='b'` against `t[5+2]=t[7]` (out of range) — the
+  expansion fails, so `p[5]` stays `1`. This is exactly the case where Manacher must fall
+  back to explicit comparison instead of pure copying.
 
 | Approach | Time | Space | Note |
 |---|---|---|---|
@@ -332,6 +475,23 @@ The BIT here is a **cumulative frequency table**: `add` marks a value present, `
 counts how many present values fall in a prefix of the rank space. This same
 frequency-BIT template solves inversion counting and many "count smaller/greater in a
 window" problems.
+
+**Full trace on `nums = [5, 2, 6, 1]`.** Sort the distinct values `[1, 2, 5, 6]` and map
+each to its rank: `1 → 1`, `2 → 2`, `5 → 3`, `6 → 4`. Now sweep right to left over an
+empty BIT; `sum(rank − 1)` counts values already recorded (all of which lie to the right)
+whose rank is strictly smaller:
+
+| step | element | rank | query `sum(rank−1)` | answer | then `add(rank, 1)` — ranks now seen |
+|---|---|---|---|---|---|
+| 1 | `1` (i=3) | 1 | `sum(0) = 0` | **0** | {1} |
+| 2 | `6` (i=2) | 4 | `sum(3) = 1` (only rank 1 seen) | **1** | {1, 4} |
+| 3 | `2` (i=1) | 2 | `sum(1) = 1` (rank 1 seen; rank 4 excluded) | **1** | {1, 2, 4} |
+| 4 | `5` (i=0) | 3 | `sum(2) = 2` (ranks 1 and 2 seen; rank 4 excluded) | **2** | {1, 2, 3, 4} |
+
+Writing each answer back at its original index gives `answer = [2, 1, 1, 0]`. Note step 3:
+even though rank 4 (the `6`) is already in the tree, `sum(1)` only counts the prefix up to
+rank 1, so the larger value is correctly ignored — that prefix cutoff is precisely what
+"smaller" means.
 
 ## Interview Problems
 

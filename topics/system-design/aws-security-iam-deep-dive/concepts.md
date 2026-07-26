@@ -152,6 +152,30 @@ reuse and central change; use inline only when you need a strict 1:1 lifecycle.
 this role" and "what can this role do" are *two separate documents*. A common
 mistake is putting the permissions in the trust policy or vice versa.
 
+**What a real identity policy looks like.** Prose hides the shape; here is a
+minimal, tightly-scoped identity policy (attached to a role or user). Note there is
+**no `Principal`** — identity policies say only *what*, never *who*:
+
+```jsonc
+{
+  "Version": "2012-10-17",          // the policy language date, NOT "today" — always this literal
+  "Statement": [{
+    "Effect": "Allow",              // Allow or Deny
+    "Action": ["s3:GetObject",      // exact operations, not s3:*
+               "s3:PutObject"],
+    "Resource": "arn:aws:s3:::acme-reports/2026/*",  // one prefix, not "*"
+    "Condition": {                  // extra guardrail: only over TLS
+      "Bool": { "aws:SecureTransport": "true" }
+    }
+  }]
+}
+```
+
+Read it as: *this identity may Get/Put objects under the `2026/` prefix of the
+`acme-reports` bucket, and only over HTTPS.* Every load-bearing field (`Action`
+list, ARN prefix, the `Condition`) is a lever for least privilege — widening any
+one of them widens blast radius.
+
 ---
 
 ## Policy evaluation logic
@@ -178,6 +202,16 @@ flowchart TD
     S7 --No--> D6["DENY (implicit / default deny)"]
 ```
 
+> [!WARNING]
+> This flowchart is a **simplified linearization** — a memory aid, not the wire
+> protocol. AWS actually evaluates *all* applicable policies together; there is no
+> guaranteed left-to-right ordering you can quote. In particular, the "resource-based
+> allow short-circuits the boundary/identity check" step only holds cleanly for a
+> **same-account** principal; for **cross-account**, and differently for an IAM user
+> vs an assumed-role session, the identity side must *also* allow. If an interviewer
+> pushes, say "AWS gathers everything and applies these rules" — don't assert a fixed
+> numeric order.
+
 The rules distilled:
 
 1. **Default deny.** No policy → denied.
@@ -199,6 +233,42 @@ enough by itself. For a **cross-account** request, you need **both** an allow in
 *resource's* account (resource-based policy naming the caller) — because each account
 independently authorizes. This "both sides must say yes across accounts" rule is a
 staple advanced question.
+
+### Three requests, worked end-to-end
+
+Nothing cements the rules like running concrete requests through the machine. In
+each, the request is `s3:GetObject` on `arn:aws:s3:::acme-reports/q3.csv`.
+
+**Request 1 — same account, identity allows but an SCP denies.**
+- Identity policy on the role: `Allow s3:GetObject` on the bucket. ✅
+- SCP on the account's OU: `Deny s3:*` outside region `us-east-1`; the call targets
+  `eu-west-1`. ❌
+- Trace: is there an explicit deny anywhere? **Yes — the SCP's `Deny`.** Explicit
+  deny wins before we ever confirm the identity allow matters.
+- **Outcome: DENY.** The identity allow is irrelevant; a cap that *denies* is
+  absolute. (Had the SCP merely *not allowed* the region, same result — SCPs
+  intersect, so anything they don't permit is implicitly denied for member accounts.)
+
+**Request 2 — cross-account, only one side says yes.**
+- Caller is a role in account **A**; bucket lives in account **B**.
+- A's identity policy: `Allow s3:GetObject` on B's bucket. ✅ (caller side)
+- B's bucket policy: does **not** name account A as a principal. ❌ (resource side)
+- Trace: cross-account needs an allow in *both* accounts. B never granted A anything,
+  so B's side is an implicit (default) deny.
+- **Outcome: DENY.** Fix it by adding a bucket-policy statement in B naming A's role
+  (or account) as `Principal`. Only when *both* A-allows and B-allows is it ALLOW.
+
+**Request 3 — same account, explicit deny beats a grant union.**
+- Identity policy: `Allow s3:GetObject` on the bucket. ✅
+- Bucket policy: `Allow s3:GetObject` to this account too (grants are a union, so
+  either alone would do). ✅✅
+- But a second bucket-policy statement: `Deny s3:GetObject` when
+  `aws:SecureTransport` is `false`, and this request came over plain HTTP. ❌
+- Trace: two allows would normally union to ALLOW — but the explicit `Deny` matches,
+  and **explicit deny can never be overridden**.
+- **Outcome: DENY.** Retry over HTTPS and the deny no longer matches, leaving two
+  allows → ALLOW. This is exactly why `aws:SecureTransport` denies are a cheap,
+  bullet-proof TLS mandate.
 
 ---
 
@@ -226,6 +296,31 @@ conditions actually needed. IAM gives you three axes to tighten:
 - `aws:SecureTransport` — force TLS.
 - `aws:CurrentTime`, `s3:prefix`, `dynamodb:LeadingKeys` (row-level security).
 
+**ABAC in one concrete policy.** The "tag on principal matches tag on resource"
+idea is worth seeing as an actual `Condition`. This single statement lets *any*
+principal act on *any* table whose `team` tag equals the caller's own `team` tag:
+
+```jsonc
+{
+  "Effect": "Allow",
+  "Action": ["dynamodb:GetItem", "dynamodb:PutItem"],
+  "Resource": "*",                              // scoping is done by the tag, not the ARN
+  "Condition": {
+    "StringEquals": {
+      // resource's team tag == the principal's team tag
+      "aws:ResourceTag/team": "${aws:PrincipalTag/team}"
+    }
+  }
+}
+```
+
+Trace it: a principal tagged `team=payments` calling `GetItem` on a table tagged
+`team=payments` → `payments == payments` → **Allow**. The same principal hitting a
+table tagged `team=fraud` → `fraud == payments` is false → **implicit deny**. One
+policy, unchanged, correctly gates thousands of tables — but note the whole thing
+collapses if someone can mislabel a resource's `team` tag, which is why ABAC lives
+or dies by tag governance.
+
 **ABAC vs RBAC trade-off.** RBAC (a role/policy per job function) is explicit and
 easy to audit but explodes in policy count as teams and resources grow. ABAC scales
 to huge fleets with a *single* policy ("you may act on resources tagged with your
@@ -243,6 +338,33 @@ A **permission boundary** is a managed policy attached to a *user or role* that 
 the **maximum** permissions that identity's own policies can ever grant. Effective
 permissions = **intersection** of (identity-based policies) ∩ (permission boundary).
 It never grants anything by itself.
+
+**Worked intersection.** Say a role's identity policy allows `s3:*` **and**
+`ec2:*`, but its permission boundary allows `s3:*` only:
+
+```
+identity policy : { s3:*, ec2:* }
+boundary        : { s3:* }
+effective       : { s3:*, ec2:* } ∩ { s3:* }  =  { s3:* }
+```
+
+So a call to `s3:GetObject` → in identity ✅ and in boundary ✅ → **Allow**. A call
+to `ec2:RunInstances` → in identity ✅ but **not** in boundary ❌ → **Deny**. The
+boundary clipped away `ec2:*` even though the identity policy tried to grant it —
+and if instead the boundary allowed `ec2:*` but the identity policy didn't, the
+answer is still Deny (intersection needs *both* sides to allow). A boundary only
+ever shrinks the set, never enlarges it.
+
+Because the identity grant, the boundary, and the SCP all intersect, the effective
+set is only the region where all three overlap:
+
+```mermaid
+flowchart TD
+    I["Identity policy grant<br/>(what you asked for)"] --> E
+    B["Permission boundary cap"] --> E
+    S["SCP cap (org-wide)"] --> E
+    E["✅ Effective = allowed by identity<br/>AND within boundary<br/>AND within SCP"]
+```
 
 The killer use case is **safe permission delegation**: you let developers create
 roles and attach policies (self-service, fast), but you require — via an SCP or a
@@ -277,6 +399,35 @@ guardrails. Neither grants access — both only *filter*.
   **every** S3 bucket and SQS/KMS/STS resource in the org at once, so no data can be
   accessed from outside your org even if someone writes a sloppy bucket policy.
 
+**What a region-lock SCP looks like.** The canonical guardrail — "these accounts
+may only operate in approved regions" — is a `Deny` with a `NotEquals` on the
+request's region:
+
+```jsonc
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenyOutsideApprovedRegions",
+    "Effect": "Deny",
+    "NotAction": [ "iam:*", "sts:*", "cloudfront:*" ], // global services have no region — don't trap them
+    "Resource": "*",
+    "Condition": {
+      "StringNotEquals": {
+        "aws:RequestedRegion": [ "us-east-1", "eu-west-1" ]
+      }
+    }
+  }]
+}
+```
+
+Trace it: an `ec2:RunInstances` in `us-east-1` → requested region *is* in the
+allowed list → the `StringNotEquals` is false → the `Deny` does **not** fire → the
+call proceeds (subject to the account's other allows). The same call in `ap-south-1`
+→ region not in the list → `StringNotEquals` true → **Deny fires → blocked
+org-wide**, unbypassable by any identity policy. The `NotAction` carve-out matters:
+without it you'd also deny global services like IAM (whose requests carry no region),
+locking the account out of itself.
+
 **SCP vs RCP mental model:** SCP = a cap on your *identities* (the caller side);
 RCP = a cap on your *resources* (the resource side). Together they let you assert
 "only my org's principals, and only from approved contexts, can ever touch my org's
@@ -308,6 +459,32 @@ Two properties make them special:
    principal). Forget that statement and you can lock everyone (including yourself)
    out of the key. This is a frequent gotcha.
 
+**What an org-fenced bucket policy looks like.** The single most useful resource
+policy pattern — allow the whole org, deny everyone else — is one `Condition` key:
+
+```jsonc
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": "*",                    // "anyone" — but the Condition below fences it hard
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::acme-reports/*",
+    "Condition": {
+      "StringEquals": { "aws:PrincipalOrgID": "o-abc123def4" } // ONLY principals in this org
+    }
+  }]
+}
+```
+
+Trace it: a role in one of your org's accounts calls `GetObject` →
+`aws:PrincipalOrgID` on the request is `o-abc123def4` → matches → **Allow**. A
+principal in a stranger's account (or an anonymous internet request) → its
+`aws:PrincipalOrgID` is absent or different → `StringEquals` fails → **Deny**. That
+`Principal: "*"` looks scary in isolation but is safe *because* the condition
+collapses it to "my org only" — which is exactly why the pitfalls section warns
+never to write `Principal: "*"` *without* such a condition.
+
 **S3 access control precedence:** among bucket policy, IAM policy, and (legacy) ACLs,
 an explicit deny anywhere wins; grants are a union. Modern best practice is **Block
 Public Access on by default**, disable ACLs (bucket owner enforced), and control
@@ -326,7 +503,30 @@ confused deputy.
 - **External ID** — the vendor requires a unique, per-customer secret string in the
   trust policy `Condition` (`sts:ExternalId`). The attacker doesn't know your
   external ID, so they can't get the vendor to assume your role. This is the standard
-  cross-account third-party pattern.
+  cross-account third-party pattern. The role's **trust policy** (a resource-based
+  policy — note it *does* carry a `Principal`) looks like:
+
+  ```jsonc
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::444455556666:root" }, // the SaaS vendor's account
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "acme-tenant-9f3c1"   // YOUR unique secret; the vendor must send it
+        }
+      }
+    }]
+  }
+  ```
+
+  Trace the attack with this in place: attacker knows your role ARN and asks the
+  vendor's shared service to assume it — but the vendor only presents *its other
+  customer's* external ID (or none), so `sts:ExternalId` fails the `StringEquals`
+  match → **AssumeRole denied**. Only a request carrying `acme-tenant-9f3c1`
+  succeeds, and that value never leaves the you↔vendor setup.
 - **`aws:SourceArn` / `aws:SourceAccount` conditions** — on service-to-service
   resource policies (e.g. an S3 bucket policy allowing CloudTrail, or a KMS key used
   by SNS), pin the *specific* source resource/account so another customer's resource
@@ -347,7 +547,25 @@ Three main patterns, each with distinct trade-offs:
    account A; A's principals assume it and act *as* B. Pros: temporary creds, single
    place to manage, full CloudTrail attribution via session name, works for any
    service. Cons: caller must support role assumption; role chaining caps at 1 h.
-   **The default and recommended pattern.**
+   **The default and recommended pattern.** Both sides must say yes:
+
+   ```mermaid
+   sequenceDiagram
+       participant P as Principal in Account A
+       participant STS
+       participant Role as Role in Account B
+       P->>P: 1. A's identity policy allows sts:AssumeRole on B's role ARN? (caller side)
+       P->>STS: 2. AssumeRole(arn of B's role)
+       STS->>Role: 3. Role's trust policy in B allows Principal = A? (resource side)
+       Role-->>STS: yes
+       STS-->>P: 4. temporary creds (AccessKeyId, SecretAccessKey, SessionToken)
+       P->>Role: 5. act as B, scoped by B-role's permissions policies
+   ```
+
+   If step 1 fails, A never gets to call; if step 3 fails, STS returns
+   `AccessDenied`. Only when *both* the caller-side allow and the resource-side trust
+   line up does A receive credentials — the same "both sides say yes" invariant as
+   the cross-account resource-policy case.
 2. **Resource-based policy (grant the external account directly).** The S3
    bucket/SQS queue/KMS key policy names account A as principal. Pros: no assumption
    step, A uses its *own* credentials; good for data sharing (S3, SNS→SQS fan-out).

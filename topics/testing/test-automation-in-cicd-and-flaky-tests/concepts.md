@@ -77,12 +77,41 @@ techniques cut it:
   machines/CI agents*, each running a disjoint subset, then aggregate results.
   Splitting by historical timing (not by count) balances shards best.
 
+**Why timing beats count (worked example).** Say you have 100 tests across 4
+shards, and total wall-clock is dominated by one fat integration test at 300s
+while the other 99 take 1s each (total work = 300 + 99 = 399s; a perfect split
+would be ~100s per shard).
+
+- **Count-based split** (25 tests/shard): the shard that happens to own the
+  300s test runs `300 + 24×1 = 324s`; the other three run `25×1 = 25s` each.
+  The suite finishes with the slowest shard → **~324s wall-clock**, and three
+  agents sit idle for ~300s. You paid for 4 machines and got almost no speedup.
+- **Timing-based split** (balance by historical duration, not count): put the
+  300s test alone on shard 1; spread the remaining 99s of 1s tests as ~33 per
+  shard on the other three. Shard 1 = 300s, shards 2–4 = ~33s each → **~300s
+  wall-clock**. Here the fat test *is* the floor: no split beats 300s until you
+  make that one test faster.
+
+The lesson generalises: with count-based splitting your wall-clock is set by
+whichever shard drew the heavy tests (high variance); timing-based splitting
+packs shards to near-equal *duration* so the floor is just `total_time / shards`
+(here `399/4 ≈ 100s`) — *unless* a single test exceeds that floor, which is your
+signal to go split or speed up that test.
+
 ```properties
 # JUnit 5 platform config: parallel execution
 junit.jupiter.execution.parallel.enabled=true
 junit.jupiter.execution.parallel.mode.default=concurrent
 junit.jupiter.execution.parallel.config.strategy=dynamic
 ```
+
+`strategy=dynamic` derives the thread count from the available cores × a
+configurable factor (default `1.0` → one thread per core); `strategy=fixed`
+pins an explicit count you supply. Beware setting the factor too high: over-
+subscribing CPUs makes threads contend for cores, which stretches timings
+unpredictably and induces the very timing races parallelism is meant to *expose*
+— so a too-aggressive parallelism level manufactures flakiness rather than
+finding it.
 
 The catch: parallelism *surfaces* latent shared-state and order-dependence bugs.
 A suite that passes serially but fails concurrently was never truly isolated —
@@ -119,6 +148,25 @@ Two design principles that separate mature gates from naive ones:
    gate's value. Flakiness is therefore a *quality-gate* problem, not just a
    test problem.
 
+**What a "mutant" actually is (worked example).** PIT compiles your code, then
+makes thousands of tiny edits to the *bytecode* — each edit is one **mutant**.
+Typical mutations: flip `>` to `>=`, negate a conditional (`if (x)` → `if
+(!x)`), replace `a + b` with `a - b`, or remove a `void` method call entirely.
+Then it re-runs the tests that cover that line:
+
+- If a test now **fails**, the mutant is **killed** — good, an assertion
+  actually noticed the change.
+- If *all* tests still **pass**, the mutant **survived** — the line was
+  *executed* (so it counts toward line coverage) but nothing *asserted* on its
+  effect. Dead-weight coverage.
+
+Concretely: `boolean isAdult(int age) { return age >= 18; }` with only the test
+`assertTrue(isAdult(25))`. PIT mutates `>=` to `>`; `isAdult(25)` is still
+`true`, so the test still passes → **mutant survived**. Only a boundary test
+like `assertTrue(isAdult(18))` kills it. If PIT plants 500 mutants and your
+tests kill 420, **mutation score = 420 / 500 = 84%** — a far harder signal to
+game than 84% line coverage.
+
 > [!TIP]
 > Coverage is a *necessary-not-sufficient* signal: 100% line coverage can still
 > assert nothing. Pair a coverage gate with mutation testing (PIT) to check the
@@ -131,6 +179,23 @@ code and the same inputs, without any change — it is **nondeterministic**. Fla
 tests are corrosive because they destroy trust: once engineers learn that red
 might mean nothing, they stop reading failures, and *real* regressions slip
 through.
+
+**Why flakiness is existential at scale (worked example).** A "tiny" per-test
+flip rate compounds brutally as the suite grows. If each test independently
+passes on correct code with probability `p`, an all-green run of `N` independent
+tests has probability `p^N`. Plug in a flip rate of just 0.1% (`p = 0.999`):
+
+- `N = 200` tests → `0.999^200 ≈ 0.819` → **~82%** of clean runs are green
+  (already ~1 in 5 builds is a false red).
+- `N = 10,000` tests → `0.999^10000 ≈ 0.000045` → **~0.0045%** green.
+
+Read that again: on a 10k-test suite with a 0.1% flip rate, a *correct* commit
+produces a **red build >99.99% of the time** — a green run is roughly a 1-in-
+22,000 event. (Check: `ln(0.999) ≈ -0.0010005`, times 10,000 ≈ `-10.005`, and
+`e^-10.005 ≈ 0.0000452`.) This is the whole reason Google-scale teams treat
+flakiness as an existential threat and invest in per-test flip-rate tracking and
+quarantine — the cost doesn't scale linearly with suite size, it *decays
+exponentially* in it.
 
 Common **causes** (memorise this taxonomy — it is the most-asked flaky
 question):
@@ -217,6 +282,15 @@ usually **masking** a bug rather than fixing it.
   on real networks and third parties that have irreducible transient failures.
   A bounded retry there can be a reasonable *mitigation* — but only paired with
   flakiness tracking so you still see the flip-rate and fix what you can.
+
+> [!WARNING]
+> Before you quarantine or retry, confirm the nondeterminism lives in the *test
+> or its environment*, not in the *code under test*. An intermittent failure in
+> a concurrency test (the **Concurrency** row of the taxonomy) can be a genuine
+> production data race — a real bug that only manifests under certain thread
+> interleavings. Auto-retrying it until green doesn't hide a flaky test; it
+> **ships the race to production**. "The green build lies" is the mild failure
+> mode; "the retry hid a real prod defect" is the one that pages you at 3am.
 
 > [!TIP]
 > A good rule: **retry only at the layer where nondeterminism is legitimately

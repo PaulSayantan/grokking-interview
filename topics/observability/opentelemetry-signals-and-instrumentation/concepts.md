@@ -26,8 +26,8 @@ that wanted to be instrument-agnostic had to pick a side or support both.
 
 In 2019 the two projects **merged into OpenTelemetry**, taking OpenTracing's clean
 API/implementation separation and OpenCensus's batteries-included agents and
-metric support. OTel is now a CNCF project and is (by telemetry) one of the most
-active CNCF projects after Kubernetes.
+metric support. OTel is now a CNCF project and is consistently among the most
+active CNCF projects (by contributor/commit velocity, second only to Kubernetes).
 
 What OTel standardizes:
 
@@ -66,7 +66,10 @@ in the request path and *why* (which downstream call, which span); logs give you
 the detailed *what* with rich context. OTel's differentiator is **correlation**:
 because a trace context flows through the process, logs and metrics recorded during
 a span can carry the same `trace_id`, letting a backend pivot from a spiking metric
-to an exemplar trace to the log lines emitted inside it.
+to an exemplar trace to the log lines emitted inside it. (An **exemplar** is a single
+sampled `trace_id` attached to a metric data point — say, one slow request recorded in
+a latency-histogram bucket — that lets the backend jump from an aggregate metric
+straight to a representative trace.)
 
 > [!TIP]
 > "Events" in OTel are modeled as a **specialized kind of log record** (a log with a
@@ -74,7 +77,9 @@ to an exemplar trace to the log lines emitted inside it.
 
 ## Traces and spans: the data model
 
-A **trace** is a tree (technically a DAG) of **spans**. Each span represents one
+A **trace** is a tree (technically a DAG) of **spans** — the **parent-child** edges
+form a strict tree, and it becomes a DAG only because **Links** can reference other
+spans/traces (e.g. one batch span linking to many producing traces). Each span represents one
 unit of work (an HTTP handler, a DB query, an RPC) and carries:
 
 - **Trace ID** — 16 bytes (32 hex chars), shared by every span in the trace.
@@ -82,7 +87,8 @@ unit of work (an HTTP handler, a DB query, an RPC) and carries:
 - **Parent span ID** — links a span to its caller (root span has none).
 - **Name** — low-cardinality operation name (e.g. `GET /orders/:id`, not the full URL).
 - **Start / end timestamps** — giving duration.
-- **SpanKind** — `SERVER`, `CLIENT`, `PRODUCER`, `CONSUMER`, or `INTERNAL`.
+- **SpanKind** — `SERVER`, `CLIENT`, `PRODUCER`, `CONSUMER`, or `INTERNAL` (in-process
+  work with no remote peer, e.g. a business function or a queue-drain loop).
 - **Attributes** — key-value tags (e.g. `http.request.method=GET`).
 - **Events** — timestamped annotations within the span (e.g. an exception).
 - **Links** — references to other spans/traces (e.g. a batch job processing many
@@ -129,10 +135,53 @@ collection time (good for reading a current value you don't control the cadence 
 A key design point: OTel supports selectable **temporality** — **cumulative**
 (value since start, the way Prometheus thinks) or **delta** (value since the last
 export). Prometheus-style scraping wants cumulative; many push-based/statsd-style
-backends want delta. The SDK can convert. OTel histograms can also be **explicit
-bucket** histograms or **exponential (base-2) histograms** — the latter map onto
-Prometheus **native histograms** and give high-resolution quantiles without
-pre-choosing bucket boundaries.
+backends want delta. The SDK can convert.
+
+**Worked example — same counter, two temporalities.** A `Counter` (`http.requests`)
+is observed at three export points. The running total the SDK holds is
+100 → 150 → 175:
+
+| Export at | Running total | **Cumulative** sends | **Delta** sends |
+|---|---|---|---|
+| t0 | 100 | `100` | `100` (since start) |
+| t1 | 150 | `150` | `50` (150 − 100) |
+| t2 | 175 | `175` | `25` (175 − 150) |
+
+Cumulative re-sends the *whole total each time* (the backend subtracts adjacent
+points to get a rate); delta sends only *what happened since the last export* (the
+backend sums them). Now the process **restarts** right after t2, and the counter
+resets to 0, reaching 30 by the next export t3:
+
+- **Cumulative** now sends `30` — *lower* than the previous `175`. The backend must
+  detect this drop as a counter reset (Prometheus does this automatically) or it
+  would compute a nonsensical negative rate. This is exactly why Prometheus wants
+  cumulative *and* owns reset detection.
+- **Delta** sends `30` at t3 — completely unaffected by the restart, because each
+  export already stands alone. No reset logic needed, but the backend must not lose
+  a single export or the total is permanently wrong.
+
+OTel histograms can also be **explicit bucket** histograms or **exponential (base-2)
+histograms** — the latter map onto Prometheus **native histograms** and give
+high-resolution quantiles without pre-choosing bucket boundaries.
+
+**Intuition — why exponential histograms beat explicit buckets.** With an *explicit*
+histogram you must *guess the boundaries up front*, e.g. `le = 10ms, 50ms, 100ms,
+500ms`. If real latency clusters at 12ms, everything lands in the single 10–50ms
+bucket and you can't tell p50 from p99 inside it — resolution is wherever you happened
+to guess. An *exponential* histogram instead defines bucket boundaries as **powers of
+a base**, where `base = 2^(2^−scale)`, so resolution auto-adapts across the whole range
+without any guessing. Concretely, boundaries are `base⁰, base¹, base²,…`:
+
+| scale | base = 2^(2^−scale) | first few boundaries (ms) |
+|---|---|---|
+| 0 | 2 | 1, 2, 4, 8, 16, 32, … |
+| 1 | √2 ≈ 1.414 | 1, 1.41, 2, 2.83, 4, 5.66, … |
+| 2 | 2^0.25 ≈ 1.189 | 1, 1.19, 1.41, 1.68, 2, … |
+
+Higher scale = more buckets per power of two = finer resolution. The SDK can even
+*downscale* automatically (merge adjacent buckets, lowering the scale) if the observed
+range grows too wide for the bucket budget — so you get fine resolution where the data
+actually is, without ever pre-choosing boundaries.
 
 > [!TIP]
 > Metric quantiles: prefer recording a **Histogram** and computing quantiles in the
@@ -153,6 +202,26 @@ body, attributes, and — crucially — **`trace_id` and `span_id`** pulled from
 active context. That is what makes **trace-log correlation** automatic: a log line
 emitted inside a span is stamped with the trace/span IDs, so a backend can jump from
 a trace waterfall straight to the logs produced during a given span.
+
+**Worked example — one `trace_id` across all three signals.** A checkout request is
+slow. The on-call follows the same `trace_id = 4bf92f3577b34da6a3ce929d0e0e4736`
+through each signal:
+
+1. **Metric** — the `http.server.request.duration` histogram spikes; the 2–4s bucket
+   has an **exemplar** attached: `{value: 3.1s, trace_id: 4bf92f35…, span_id: 00f067aa…}`.
+   The dashboard shows a dot the operator can click.
+2. **Trace** — clicking pivots to that trace's waterfall. `trace_id 4bf92f35…` has a
+   `SERVER` span `GET /checkout` (span `00f067aa0ba902b7`, 3.1s) whose child `CLIENT` span
+   `POST inventory.reserve` (span `b7ad6b7169203331`, 2.9s) is the culprit — the inventory
+   call, not checkout itself.
+3. **Log** — filtering logs by that same `trace_id` surfaces the line emitted inside
+   the inventory span, so it carries that child span's id: `{"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736",
+   "span_id":"b7ad6b7169203331","severity":"WARN","body":"reserve retried 3x: lock
+   contention on sku-42"}`.
+
+Metric → trace → log, no manual ID-copying, because the *same* `trace_id` was stamped
+on the exemplar, the span, and the log record. That end-to-end pivot is OTel's headline
+payoff.
 
 > [!KEY-TAKEAWAY]
 > The OTel Logs model is a **bridge**, not a new logging framework. You keep your
@@ -195,7 +264,27 @@ flowchart LR
 
 **Manual instrumentation** = you write code against the API: start spans, set
 attributes, record metrics. Maximum control and business-meaningful spans, but
-labor-intensive.
+labor-intensive. A minimal manual span looks like:
+
+```python
+tracer = trace.get_tracer("checkout")          # from the API
+
+with tracer.start_as_current_span("reserve_inventory") as span:
+    span.set_attribute("order.id", order.id)    # domain attribute the library can't know
+    try:
+        reserve(order)
+    except OutOfStock as e:
+        span.record_exception(e)
+        span.set_status(Status(StatusCode.ERROR))
+    # span ends automatically when the `with` block exits
+```
+
+The crucial detail: `get_tracer` and `start_as_current_span` come from the **API**. If
+no **SDK** is installed in the process, these calls resolve to a **no-op** tracer —
+`start_as_current_span` returns a dummy span, `set_attribute` does nothing, and the
+whole block costs almost nothing. That is what makes it safe for a shared library to
+call these methods: instrumenting a library imposes near-zero cost on users who never
+wire up an SDK.
 
 **Automatic instrumentation** = the SDK + **instrumentation libraries** wrap common
 frameworks (HTTP servers/clients, gRPC, JDBC, Kafka, Redis, Spring, Express, Flask)

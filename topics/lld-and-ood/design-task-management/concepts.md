@@ -311,6 +311,27 @@ implements a `TaskComponent` interface so a client can call `getEstimate()` on a
 or a parent and get the recursive sum. Composition is real ownership — deleting a parent
 deletes its subtasks.
 
+**Worked example — `getEstimate()` roll-up.** Take a 3-level tree (points shown as `own`):
+
+```
+Epic "Checkout"        own 0
+├── Story "Cart"       own 3
+│   └── "Cart API"     own 4   (leaf)
+├── Story "Payment"    own 5   (leaf)
+└── Story "Receipt"    own 2   (leaf)
+```
+
+`getEstimate()` recurses bottom-up: `Cart API` is a leaf → returns its own `4`. `Cart` has
+one child → `3 + 4 = 7`. `Payment` → `5`, `Receipt` → `2` (both leaves). `Epic` sums its
+three children onto its own 0 → `0 + (7 + 5 + 2) = 14`. The client calls one method on the
+root and gets **14** without knowing the shape of the tree — that is the Composite payoff.
+Now completion: `isComplete()` just reports a task's own status (`status == DONE`). The
+"are all children `DONE`?" check lives in the transition **guard** — when you call
+`transitionTo(DONE, …)` on the `Epic`, it invokes `subtasksAndBlockersResolved()`, which
+requires every subtask and blocker to be `isComplete()`. If `Cart API` is still `IN_PROGRESS`,
+then `Cart` is not resolved, so the guard fails and `transitionTo(DONE, …)` throws — a parent
+cannot close over open descendants.
+
 **Dependencies = directed acyclic graph across tasks.** "A blocks B" is an *edge*, not
 ownership: B may be in another project. Store dependencies as adjacency (`blockedBy` /
 `blocks` sets). Two operations matter:
@@ -320,6 +341,23 @@ ownership: B may be in another project. Store dependencies as adjacency (`blocke
 - **Execution ordering:** produce a valid order respecting "blocked tasks come after their
   blockers" → **topological sort** (Kahn's algorithm or DFS). This is a dsa-coding
   primitive — call it by name, don't re-derive it here.
+
+**Worked example — cycle rejection and execution order.** Three tasks with edges
+`A blocks B` and `B blocks C` (read the edge as "must finish A before B"):
+
+```
+A ──blocks──▶ B ──blocks──▶ C
+```
+
+*Ordering:* Kahn's algorithm starts from nodes with no unmet blocker. Only `A` has zero
+inbound "blocked-by" edges → emit `A`; removing it frees `B` → emit `B`; that frees `C` →
+emit `C`. `executionOrder` returns `[A, B, C]` — every task after its blockers.
+
+*Cycle rejection:* now someone calls `addDependency(A, C)` = "C blocks A". The service runs a
+DFS from the new edge's target following existing `blocks` edges: from `A` → `B` → `C`, and
+`C` is the task we just said blocks `A` — we've reached back to the origin, so the edge would
+close the loop `A → B → C → A`. Reject with `CyclicDependencyException`; the graph stays a
+DAG and `executionOrder` is guaranteed to terminate.
 
 Do not model a dependency as a subtask or vice versa: subtasks decompose *one* piece of
 work; dependencies sequence *independent* pieces. A task can be `BLOCKED` (status) precisely
@@ -344,7 +382,9 @@ topics for mechanics — here we only say *which* and *why*):
   notification delivery (`EmailChannel`, `PushChannel`) is likewise a strategy.
 - **Command for actions (audit + undo)** (dp-command). Requirement: every mutation is
   recorded in an activity log and the last action can be undone. `MoveTaskCommand`,
-  `AssignCommand`, etc., each with `execute()`/`undo()`; a stack gives undo.
+  `AssignCommand`, etc., each with `execute()`/`undo()`; a stack gives undo. Key subtlety:
+  `undo()` restores the captured prior state directly rather than re-running the guarded
+  mutator, because the reverse workflow edge may be illegal (see the WARNING in Code Skeleton).
 - **Factory for task creation** (dp-factory-method). Requirement: creating a "bug" vs. a
   "story" vs. an "epic" sets different defaults/fields — a `TaskFactory` centralizes it so
   callers don't `new` and hand-populate.
@@ -431,8 +471,15 @@ public class Task implements TaskComponent {
             throw new IllegalStateException("open subtasks or unmet dependencies");
         Status prev = this.status;
         this.status = next;
-        this.version++;
         fire(new TaskEvent(this, EventType.STATUS_CHANGED, prev, next, actor));
+    }
+
+    // undo path: restore a captured prior status WITHOUT re-validating the reverse edge,
+    // because the reverse transition (e.g. DONE -> IN_REVIEW) may not be legal in the workflow.
+    synchronized void restoreStatus(Status prior, User actor) {
+        Status cur = this.status;
+        this.status = prior;
+        fire(new TaskEvent(this, EventType.STATUS_CHANGED, cur, prior, actor));
     }
 
     private boolean subtasksAndBlockersResolved() {
@@ -445,6 +492,10 @@ public class Task implements TaskComponent {
     }
     public void addWatcher(TaskObserver o) { watchers.add(o); }
     private void fire(TaskEvent e) { watchers.forEach(w -> w.onEvent(e)); }
+
+    public Status getStatus() { return status; }
+    public long getVersion()  { return version; }            // version at load = the "base"
+    public void bumpVersion() { this.version++; }             // advanced only on successful save
 }
 
 public class Workflow {                                     // per-board, configurable
@@ -473,23 +524,38 @@ public class MoveTaskCommand implements TaskCommand {
     private final User actor;
     private Status from;                                   // captured at execute() for undo
     public void execute() { this.from = task.getStatus(); task.transitionTo(to, wf, actor); }
-    public void undo()    { task.transitionTo(from, wf, actor); }   // reverse move
+    public void undo()    { task.restoreStatus(from, actor); } // restore captured state, NOT a re-validated reverse move
 }
 
 // optimistic-versioning save (see concurrency-in-lld)
+// `incoming.getVersion()` is the base version the client loaded; compare it to the
+// version currently in the repo. Equal => no one else wrote since load, so bump + persist.
 public void saveTask(Task incoming) {
     Task current = repo.get(incoming.getId());
-    if (current.getVersion() != incoming.getBaseVersion())
+    if (current.getVersion() != incoming.getVersion())
         throw new OptimisticLockException(incoming.getId());       // stale — reject/merge
-    repo.put(incoming.bumpVersion());
+    incoming.bumpVersion();                                        // advance token on write
+    repo.put(incoming);
 }
 ```
 
 Notes to narrate: `Task implements TaskComponent`, so `getEstimate()` recurses uniformly
-over the tree; `transitionTo` is the *only* status mutator, so the observer fan-out and
-version bump can never be skipped; `Workflow` is a per-board object, so a new board shape is
-configuration, not code; `MoveTaskCommand` records enough to `undo()`; `saveTask` uses a
-version token instead of a lock.
+over the tree; `transitionTo` is the *only* status mutator, so the observer fan-out can
+never be skipped; the `version` token is advanced on a successful `saveTask` (not on each
+in-memory mutation), so the base version a client loaded stays comparable to the repo copy;
+`Workflow` is a per-board object, so a new board shape is configuration, not code;
+`MoveTaskCommand` records enough to `undo()`; `saveTask` uses a version token instead of a lock.
+
+> [!WARNING]
+> `undo()` must **restore** the captured prior status directly (`restoreStatus`), not call
+> `transitionTo(from, …)`. `transitionTo` re-runs `Workflow.canTransition`, and the reverse
+> edge is frequently one-directional and therefore illegal — `DONE → IN_REVIEW` or
+> `IN_REVIEW → IN_PROGRESS` may not be in the map, so a naive "reverse move" undo would throw
+> `IllegalTransitionException`. Concretely: a `MoveTaskCommand` that took the task
+> `IN_REVIEW → DONE` captures `from = IN_REVIEW`; undoing it needs to put the task back to
+> `IN_REVIEW`, but the workflow above has no `DONE → IN_REVIEW` transition, so re-validating
+> would fail. Undo is a state *restore*, not a new guarded transition — this is the trade-off
+> of guarded mutators: the guard protects forward moves, so undo must bypass it.
 
 ## Concurrency and Edge Cases
 
@@ -500,6 +566,15 @@ Single-process, multi-threaded — raise these before the interviewer does:
   save carries the base version; the second save sees `version` already advanced and gets
   `OptimisticLockException` to retry/merge (cross-ref concurrency-in-lld). Prefer this over a
   per-task lock for a read-heavy board; a lock serializes viewers unnecessarily.
+  **Traced:** repo holds the task at `version = 5`.
+  (1) A loads it → A's base version = 5.
+  (2) B loads it → B's base version = 5.
+  (3) B edits and calls `saveTask`: check `repo.current.version (5) == B.base (5)` ✓, so
+  `bumpVersion()` → repo now stores `version = 6`.
+  (4) A edits and calls `saveTask`: check `repo.current.version (6) == A.base (5)` ✗ →
+  throws `OptimisticLockException`. A never silently overwrites B's write; A must reload the
+  v6 task, re-apply its edit, and save again. Last-write-wins would instead have let A's
+  save clobber B's change with no signal.
 - **Concurrent status transitions.** Two moves race on one task. `transitionTo` is
   `synchronized` and validates against the *current* status, so exactly one wins; the loser's
   precondition no longer holds and it throws — the state machine *is* the guard.
@@ -517,6 +592,23 @@ Single-process, multi-threaded — raise these before the interviewer does:
   guard the column's list mutation (synchronize the reorder) or use position tokens.
 - **Watcher list mutation during notification.** A watcher unsubscribes while an event fans
   out — `CopyOnWriteArrayList` (or a snapshot copy) prevents `ConcurrentModificationException`.
+
+**Two locks, two jobs — how they relate.** The design uses two distinct mechanisms and they
+guard different things. `synchronized transitionTo` protects a *single in-memory `Task`
+instance* against two threads mutating it at the same instant — it's a within-process,
+within-object mutual exclusion. Optimistic versioning protects a *load-modify-save cycle*
+across separate requests/replicas that each hold their own copy of the task and race to
+persist — a cross-request concurrency check at the repository boundary. You need both: the
+`synchronized` block keeps one object's transition atomic; the version token keeps two
+independently-loaded copies from silently overwriting each other on save.
+
+> [!WARNING]
+> `fire()` runs observers synchronously *inside* the `synchronized` block. If a watcher does
+> real I/O (email, Slack, a webhook), that call blocks while holding the task's monitor —
+> stalling every other thread that needs the lock and risking deadlock if the callback ever
+> touches back the task. Dispatch the fan-out asynchronously (hand `TaskEvent`s to an executor
+> or queue) or fire *after* releasing the lock, so a slow notification channel never blocks the
+> state machine. This is the same "don't serialize viewers" principle applied to observers.
 
 ## Extensibility
 
@@ -568,7 +660,10 @@ The follow-ups interviewers actually ask, and why this design absorbs them:
    Observer: `transitionTo` (and other mutators) is the single fan-out point; watchers
    register, `Task` never knows who they are; new channels add zero task code.
 9. **"Add an audit trail and undo."** Command: every mutation is a `TaskCommand` with
-   `execute()/undo()`; the history is the activity log and an undo stack.
+   `execute()/undo()`; the history is the activity log and an undo stack. Watch the gotcha:
+   `undo()` must *restore* the captured prior status, not replay a reverse `transitionTo` —
+   the reverse edge (e.g. `DONE → IN_REVIEW`) is often not a legal workflow transition and
+   would throw, so undo bypasses the guard rather than going through it.
 10. **"Different task types (bug/story/epic) with different defaults."** Factory: `TaskFactory`
     centralizes creation so callers don't `new` and hand-populate divergent defaults.
 

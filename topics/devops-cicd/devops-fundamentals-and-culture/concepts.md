@@ -141,7 +141,15 @@ five pillars:
 | **A** | **Automation** | Automate the repetitive delivery path: builds, tests, deploys, provisioning (CI/CD + IaC). |
 | **L** | **Lean** | Small batch sizes, limit work in progress, eliminate waste, optimise the whole value stream (roots in Lean manufacturing/Toyota). |
 | **M** | **Measurement** | Measure outcomes (DORA metrics, MTTR, flow) to drive improvement — you can't improve what you don't measure. |
-| **S** | **Sharing** | Share knowledge, tooling, and responsibility across dev and ops; blameless postmortems, internal docs, ChatOps. |
+| **S** | **Sharing** | Share knowledge, tooling, and responsibility across dev and ops; blameless postmortems, internal docs, ChatOps (running ops tasks via chat-bot commands so actions and context are visible to the whole team). |
+
+Why small batches (the heart of "Lean") actually help — concretely: a release that bundles
+200 commits and then fails gives you 200 suspects to bisect and a blast radius covering
+everything those 200 changes touched. Deploy those same 200 commits *one at a time* and a
+failure points at exactly one change and caps the damage to that one change's surface area.
+Smaller batches shorten the feedback loop (you learn faster) and shrink risk (you break
+less) at the same time — that is the queueing/blast-radius argument behind Lean's push for
+small batch sizes.
 
 Interview trap: CALMS leads with **Culture**, not Automation. Candidates who list tools
 first are signalling a tools-first (i.e., incomplete) understanding. The "L" is also
@@ -223,6 +231,18 @@ flowchart LR
 > continuous *Deployment* removes the manual gate. Getting this distinction right is a
 > frequent screening question.
 
+> [!INTERVIEW]
+> A senior follow-up is almost guaranteed: *"So why doesn't everyone do Continuous
+> Deployment?"* Removing the human gate is only safe if the automation is trustworthy enough
+> to catch regressions **without** a person looking — which in practice requires: (1) a
+> comprehensive, fast automated test suite you actually trust; (2) progressive delivery
+> (canary or blue-green) so a bad change hits a small % of traffic first; (3) automated
+> rollback triggered by health/error-rate alarms; and (4) feature flags to decouple
+> "deployed" from "released." Many orgs deliberately stay at Continuous *Delivery* and keep
+> the manual gate — you trade a little speed to retain human judgment for high-risk,
+> compliance-sensitive, or regulated changes. The gate is a *choice*, not a failure to
+> automate. (Progressive-delivery mechanics live in `cicd-pipeline-concepts`.)
+
 Pipeline stage mechanics (artifacts, gates, environments, promotion) are covered in depth in
 `cicd-pipeline-concepts`.
 
@@ -250,8 +270,28 @@ year to year, so cite them as *bands*, not gospel):
 |---|---|---|---|---|
 | Deployment frequency | On-demand (multiple/day) | Daily–weekly | Weekly–monthly | < monthly |
 | Lead time for changes | < 1 day | 1 day–1 week | 1 week–1 month | 1–6 months |
-| Change failure rate | ~0–15% | 16–30% | | higher |
-| Recovery time | < 1 hour | < 1 day | < 1 day | > 1 week |
+| Change failure rate | 0–15% | 16–30% | 31–45% | 46–60% |
+| Recovery time | < 1 hour | < 1 day | 1 day–1 week | > 1 week |
+
+**Worked example — computing all four for one team, one month.** Take a team over a 30-day
+month and plug real counts into each formula:
+
+- **Deployment Frequency:** 60 production deploys in 30 days = 60 ÷ 30 = **2 deploys/day**.
+  Multiple per day → **Elite** (on-demand).
+- **Lead Time for Changes:** a commit is merged at 09:00, clears CI + acceptance tests +
+  staging, and is live in prod at 11:30. 11:30 − 09:00 = **2.5 hours** → under a day →
+  **Elite**. (Compute this *per change* and report the median, not the average, so one
+  stuck change doesn't skew it.)
+- **Change Failure Rate:** of those 60 deploys, 6 needed a hotfix or rollback.
+  CFR = 6 ÷ 60 = 0.10 = **10%** → inside the 0–15% band → **Elite**. (Note: had it been 6
+  failures out of 30 deploys, CFR = 20% → **High**, not Elite — the *denominator* is total
+  deploys, not failures, so shipping more clean deploys actually *lowers* your rate.)
+- **Recovery Time:** three incidents that month were restored in 20 min, 45 min, and 90 min.
+  Mean = (20 + 45 + 90) ÷ 3 = 155 ÷ 3 ≈ **52 minutes** → under 1 hour → **Elite**.
+
+So this team is Elite on all four — which is the whole point of *Accelerate*: strong
+throughput (2/day, 2.5h lead time) and strong stability (10% CFR, ~52 min recovery)
+co-occur; they are not traded against each other.
 
 Key points interviewers probe:
 
@@ -304,7 +344,9 @@ canonical targets:
 - **Shift-left testing** — run unit/integration/contract tests in CI on every commit, not in
   a big manual QA phase before release. (Where tests run in the pipeline is owned by
   `testing-strategy-in-cicd`.)
-- **Shift-left security ("DevSecOps")** — SAST/SCA/secret-scanning/IaC-scanning in the
+- **Shift-left security ("DevSecOps")** — SAST (Static Application Security Testing —
+  scanning your own source for vulnerabilities) / SCA (Software Composition Analysis —
+  flagging known-vulnerable third-party dependencies) / secret-scanning / IaC-scanning in the
   pipeline instead of a pre-launch pen-test gate. (Owned by `devsecops-and-pipeline-security`.)
 
 **Why:** the cost of fixing a defect grows the later it is found; catching it at commit is
@@ -358,7 +400,7 @@ principles; Platform Engineering is the productisation of the DevOps/self-servic
 |---|---|---|---|
 | Origin | Community/culture movement (~2009) | Google's engineering practice (Ben Treynor, ~2003; *SRE book* 2016) | ~2020s formalisation (Team Topologies, IDP movement) |
 | Core idea | Break dev/ops silo; optimise end-to-end flow (a *philosophy*) | "What happens when you ask a software engineer to design an operations function" — apply engineering to reliability with **SLOs & error budgets** (a *prescriptive practice*) | Build an **Internal Developer Platform (IDP)** as a product: paved roads / golden paths that make the right way the easy way |
-| Signature artifacts | CALMS, DORA, CI/CD | SLIs/SLOs, error budgets, toil reduction, blameless postmortems | Self-service portals (e.g. Backstage), golden-path templates, platform-as-product |
+| Signature artifacts | CALMS, DORA, CI/CD | SLIs/SLOs, error budgets, toil reduction (toil = repetitive manual operational work that scales with load and could be automated), blameless postmortems | Self-service portals (e.g. Backstage), golden-path templates, platform-as-product |
 | Relationship | The umbrella philosophy | *Implements* DevOps with concrete reliability engineering | *Enables* DevOps at scale by reducing team cognitive load |
 
 Key one-liners for interviews:

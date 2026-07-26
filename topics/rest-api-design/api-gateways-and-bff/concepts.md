@@ -289,6 +289,19 @@ size), and leaky bucket (smooths to a constant rate). Token bucket is the most
 common gateway default because it permits short bursts while capping average
 rate.
 
+**Token bucket, traced.** Bucket **capacity 100**, refill **10 tokens/sec**.
+Each request costs 1 token; a request is allowed only if a token is available.
+- **t=0:** bucket starts full at **100**. A burst of **100** requests arrives at
+  once → each takes a token → bucket drains **100 → 0**, all 100 **allowed**.
+- **t=0 (101st request):** bucket is **0**, no refill has elapsed → **`429`**.
+- **idle 3s:** refill adds `10 × 3 = 30` tokens (capped at capacity 100) →
+  bucket holds **30**. A new burst → **30** requests pass, the **31st** gets `429`.
+
+Steady-state throughput is pinned to the **refill rate (10/sec)** no matter how
+big the bursts; the **capacity (100)** just sets how large a one-off burst may be.
+This is exactly AWS API Gateway's naming: the **burst limit** *is* the bucket
+size, the **rate limit** *is* the refill rate.
+
 **429 vs 503.** Use **`429`** for *per-client* quota/throttle ("you specifically
 sent too much"); use **`503 Service Unavailable`** (often with `Retry-After`)
 for *server-side* overload/shedding affecting everyone. Don't return `503` for a
@@ -374,6 +387,15 @@ the whole screen** — use per-call timeouts and graceful degradation. This
 resilience logic is exactly why aggregation often lives in a **BFF** (owned by
 the client team) rather than a shared gateway: it encodes product decisions
 about what's "good enough."
+
+The decision rule interviewers push on ("profile fails vs recos fails — same
+response?"): classify each field as **critical** or **enrichment**. *Critical*
+data (identity/profile — the screen is meaningless without it) → **fail the call**
+(5xx) if it's missing. *Enrichment* data (recommendations, badges, "customers
+also bought") → **omit it and still return `200`**. Either way the payload should
+carry a machine-readable marker (e.g. a `partial: true` flag or an `errors[]`
+array naming the dropped fields) so the client can tell "this field was dropped
+due to a failure" apart from "this field is genuinely empty."
 
 **GraphQL as an alternative.** A GraphQL layer is another aggregation approach:
 the client specifies exactly which fields across which services it wants in one
@@ -541,7 +563,13 @@ toolkit:
 - **Per-upstream timeouts.** Every proxied call gets a bounded deadline. Without
   one, a hung backend exhausts the gateway's connection/thread pool and the
   failure spreads. Timeouts should sum to a **latency budget** for the whole
-  request, not be set independently.
+  request, not be set independently. **Traced:** client budget is **2s**. If each
+  hop is given an independent **1s** timeout on a 3-hop chain (gateway→A 1s, then
+  A→B 1s, then B→C 1s), the worst case is `1 + 1 + 1 = 3s` — the chain can spend
+  **3s** on a request the client already abandoned at 2s. Inner deadlines must be
+  *strictly smaller* than the outer budget and shrink as you go deeper: e.g.
+  gateway 2s → A 1.5s → B 1s → C 0.5s, each hop passing its *remaining* budget
+  down (a deadline, not a fresh timeout) so total work never exceeds 2s.
 - **Retries — only on idempotent/safe methods.** Retrying a failed `GET`, `PUT`,
   or `DELETE` is safe (RFC 9110 idempotency). **Retrying a non-idempotent `POST`
   can duplicate a write** (double-charge, double-order). Retry only when the
@@ -550,6 +578,18 @@ toolkit:
   into a **retry storm** that amplifies load 3–4× exactly when the backend is
   weakest. Cap retries as a *percentage of total traffic* (a budget) and add
   jittered exponential backoff.
+
+  **Retry storm, traced.** Backend is failing **50%** of calls; policy retries up
+  to 3× on failure. Start with **1000** client requests:
+  - Attempt 1: 1000 calls → 500 fail.
+  - Retry 1: 500 calls → 250 fail.
+  - Retry 2: 250 calls → 125 fail.
+  - Retry 3: 125 calls → (give up on the ~62 that still fail).
+
+  Upstream calls = `1000 + 500 + 250 + 125 = 1875` — about **1.9×** the offered
+  load, and that surge lands *precisely* when the backend is already half-down. A
+  **10% retry budget** instead caps retries at `0.10 × 1000 = 100` extra calls
+  (1100 total, 1.1×), so a struggling backend can recover instead of being buried.
 - **Circuit breaker.** After a threshold of failures, "open" the breaker and
   fail fast (shed the dependency) instead of piling requests onto a sick
   backend; periodically "half-open" to probe recovery. This bounds blast radius.
@@ -744,9 +784,11 @@ and forgotten "zombie" old versions are a top breach vector.
 - **`Sunset` header (RFC 8594).** Advertises the date/time a resource will stop
   working: `Sunset: Sat, 31 Jan 2026 23:59:59 GMT`. Clients (and tooling) can
   detect the retirement window.
-- **`Deprecation` header (IETF draft).** Signals a resource is deprecated (a
-  boolean or a date), typically paired with a `Link; rel="deprecation"` or
-  `rel="sunset"` pointing to docs and `Sunset`.
+- **`Deprecation` header (RFC 9745).** Signals a resource is deprecated,
+  typically paired with a `Link; rel="deprecation"` or `rel="sunset"` pointing to
+  docs and `Sunset`. Standardized in 2025 as RFC 9745 (Proposed Standard), which
+  supersedes the earlier `draft-ietf-httpapi-deprecation-header` and pins the
+  value to a Structured-Fields Date (e.g. `Deprecation: @1735689600`).
 
 Centralizing this at the gateway means a single, auditable place that knows every
 live route and its lifecycle state — the antidote to zombie APIs.
@@ -888,6 +930,19 @@ Two subtle consequences of fan-out aggregation that senior interviews probe:
   **per-call timeouts within a latency budget**, **hedged requests** (fire a
   duplicate to a second replica after a delay, take the first to answer), and
   degrading non-critical fields.
+
+  **Worked example.** Say each backend independently exceeds its p99 latency (is
+  "slow") **1% of the time** (0.01), and each call is independent. The chance the
+  *whole* fan-out is slow is `1 − (fraction that are all fast)`:
+  - **N = 1:** `1 − 0.99¹ = 0.01` → **1%** slow (the client sees the backend's own p99).
+  - **N = 10:** `1 − 0.99¹⁰ = 1 − 0.9044 = 0.0956` → **~9.6%** slow.
+  - **N = 50:** `1 − 0.99⁵⁰ = 1 − 0.605 = 0.395` → **~39%** slow.
+
+  So fanning out to 10 healthy backends turns a per-service **p99** event into
+  roughly a client-side **p90** event (slow ~1-in-10 requests); at 50 backends
+  nearly *2 in 5* requests hit a slow tail. The fleet is fine — the *composition*
+  is what degrades, which is why you need timeouts + hedging, not just faster
+  backends.
 - **Composition consistency.** Aggregating across services merges data captured at
   **different points in time** — there is **no cross-service transaction**. A
   merged payload can show a total that doesn't match its line items, or a count
@@ -1018,6 +1073,9 @@ the edge) is the same, just measured in tokens.
   https://www.rfc-editor.org/rfc/rfc9651
 - **RFC 8594 — The Sunset HTTP Header Field**:
   https://www.rfc-editor.org/rfc/rfc8594
+- **RFC 9745 — The Deprecation HTTP Response Header Field** (Proposed Standard,
+  2025; supersedes the deprecation-header draft):
+  https://www.rfc-editor.org/rfc/rfc9745
 - **RFC 8693 — OAuth 2.0 Token Exchange**: https://www.rfc-editor.org/rfc/rfc8693
 - **IETF draft — OAuth 2.0 for Browser-Based Applications** (token-handling BFF):
   https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/

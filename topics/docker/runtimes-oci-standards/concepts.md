@@ -290,6 +290,33 @@ Exceeding a memory cgroup limit triggers the kernel OOM killer → the process d
 container exits **137** (128 + 9) with `OOMKilled=true` in `docker inspect`. CPU limits, by
 contrast, *throttle* (never kill) — the container just runs slower.
 
+**Worked example — how `--cpus=1.5` is actually enforced.** CFS (the Completely Fair Scheduler)
+works in fixed **periods**. The default period is `cpu.cfs_period_us = 100000` µs (100 ms of
+wall-clock time). `--cpus=1.5` sets the **quota** to `cpu.cfs_quota_us = 150000` µs — the container
+may burn **150 ms of CPU-time per 100 ms of wall clock**. On a multi-core box that CPU-time can come
+from several cores in parallel, so 150 ms per 100 ms window = **1.5 cores** of throughput.
+
+Now trace a **4-thread** CPU-hungry process under that limit, one 100 ms period:
+
+- 4 threads run on 4 cores, spending CPU-time at 4 ms per 1 ms of wall clock.
+- The 150 ms quota is exhausted after `150 / 4 = 37.5 ms` of wall clock.
+- For the remaining `100 − 37.5 = 62.5 ms` of the period, the cgroup is **throttled**: every thread
+  is descheduled until the period rolls over and the quota refills.
+- The kernel bumps `nr_throttled` and adds to `throttled_time` (visible in
+  `/sys/fs/cgroup/.../cpu.stat`).
+
+So the process gets 1.5 cores *on average* but in a bursty stop-start pattern — CPU work completes,
+latency spikes during the throttled tail, and **nothing is killed**. Contrast the memory limit:
+overshoot there is fatal (SIGKILL → 137), overshoot on CPU is merely slow.
+
+**`--cpus` vs `--cpu-shares` vs `--cpuset`.** These answer different questions. `--cpus` is a *hard
+cap* (absolute ceiling, enforced even on an idle host). `--cpu-shares` is a *relative weight* that
+only bites under contention: two containers at `--cpu-shares=1024` and `--cpu-shares=512` competing
+for one saturated core split it `1024 : 512 = 2 : 1` — the first gets ≈0.667 core, the second
+≈0.333 core; but if the second is idle, the first may use the whole core (shares set no ceiling).
+`--cpuset-cpus=0,1` *pins* to specific physical cores (useful for cache locality / NUMA), a
+placement knob rather than a rate limit.
+
 ---
 
 ## Capabilities: slicing up root
@@ -327,7 +354,7 @@ For multi-tenant or untrusted workloads, two OCI-compatible runtimes add a stron
 | Runtime | Binary | Isolation mechanism | Trade-off |
 |---|---|---|---|
 | **runc** (default) | `runc` | Namespaces + cgroups, shared host kernel | Fastest, thinnest boundary |
-| **gVisor** (Google) | `runsc` | A **user-space kernel** that intercepts syscalls (via ptrace/KVM) and re-implements them, so the container rarely touches the host kernel | Stronger isolation, some syscall-heavy perf cost + compatibility gaps |
+| **gVisor** (Google) | `runsc` | A **user-space kernel** that intercepts syscalls (via a pluggable platform — **systrap** (seccomp `SIGSYS`-trap) is the default since mid-2023, **KVM** for bare-metal, and the legacy **ptrace** platform now deprecated) and re-implements them, so the container rarely touches the host kernel | Stronger isolation, some syscall-heavy perf cost + compatibility gaps |
 | **Kata Containers** | `kata-runtime` | Each container runs in a **lightweight microVM** with its *own* guest kernel (via QEMU/Firecracker) | VM-grade isolation, higher startup/memory overhead |
 
 Both plug in as OCI runtimes, so you select them per workload:
@@ -366,6 +393,27 @@ host.
 - **Limitations:** can't bind ports < 1024 without extra config, some storage-driver and networking
   performance overhead, and features needing real root (certain mounts, some `--privileged` uses)
   don't work.
+
+**Worked example — what `/etc/subuid` actually maps.** Say `/etc/subuid` contains
+`alice:100000:65536` (start host uid 100000, span 65536 ids). When alice starts a rootless
+container, the user namespace installs this uid map:
+
+| Inside container | Host uid | Meaning |
+|---|---|---|
+| uid 0 (`root`) | 100000 | "root" inside — but a nobody outside |
+| uid 1 | 100001 | |
+| uid 33 (`www-data`) | 100033 | |
+| … | … | (linear offset) |
+| uid 65535 | 165535 | top of the range (`100000 + 65535`) |
+
+Trace the payoff. A process running as **uid 0 inside** can `chown`, `kill`, and write files freely
+*within the container* — to the kernel those actions are performed by host uid 100000, and every
+file in the container's rootfs is owned somewhere in 100000–165535, so the checks pass. Now suppose
+that process **escapes** the container. The kernel still sees it as **host uid 100000** — an
+ordinary unprivileged user. It cannot read `/etc/shadow` (owned by real root, uid 0), cannot write
+`/root`, cannot load kernel modules. That is precisely why rootless "root" is safe: container-root
+is a *mapped* root, not the host's uid 0. (A rootful daemon skips this map — container uid 0 **is**
+host uid 0, so an escape is instant host root.)
 
 **Rootless ≠ `USER` in a Dockerfile.** `USER 1000` (running the *app process* as non-root inside
 the container) is good practice and independent, but the daemon/runtime may still be root. **Rootless
@@ -417,7 +465,7 @@ default (daemonless); Docker offers rootless mode as an opt-in install.
   [Rootless mode](https://docs.docker.com/engine/security/rootless/),
   [Alternative runtimes](https://docs.docker.com/engine/daemon/alternative-runtimes/),
   [Runtime privilege and capabilities](https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities)
-- [gVisor docs](https://gvisor.dev/docs/) · [Kata Containers docs](https://katacontainers.io/)
+- [gVisor docs](https://gvisor.dev/docs/) ([platforms — systrap default](https://gvisor.dev/docs/architecture_guide/platforms/)) · [Kata Containers docs](https://katacontainers.io/)
 - Linux man pages — [`namespaces(7)`](https://man7.org/linux/man-pages/man7/namespaces.7.html),
   [`cgroups(7)`](https://man7.org/linux/man-pages/man7/cgroups.7.html),
   [`capabilities(7)`](https://man7.org/linux/man-pages/man7/capabilities.7.html)

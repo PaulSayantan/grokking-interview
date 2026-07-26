@@ -114,7 +114,12 @@ Key facts interviewers probe:
   **cumulative** ("less than or equal to"). This is why `histogram_quantile()` can
   interpolate — it's the *classic* histogram. **Native (exponential) histograms** are a
   newer single-series representation with dynamically-sized exponential buckets, far more
-  storage-efficient and no need to pre-pick bucket boundaries.
+  storage-efficient and no need to pre-pick bucket boundaries. The mechanism: bucket
+  boundaries follow a fixed exponential *schema* (each bucket is a constant relative width
+  wider than the last — e.g. schema 3 gives boundaries ~10% apart), so they are *computed
+  from the schema*, not stored per series. A single series carries dynamically-populated
+  buckets covering any range with constant relative error, instead of the operator guessing
+  a dozen `le` boundaries up front — hence one series where classic histograms need many.
 - Each unique `metric_name{labels}` combination is one **time series**. Every label value
   multiplies the series count — the root of the **cardinality** problem.
 - **OpenMetrics** is the standardized/IETF descendant of this format (it adds things like a
@@ -123,10 +128,39 @@ Key facts interviewers probe:
 - **Exemplars** (trace IDs attached to a bucket sample) can be appended with `#` on a
   metric line in the OpenMetrics format, linking metrics to traces.
 
+**Worked example — deriving p95 from those buckets.** Take the histogram above:
+`_count = 10000`, cumulative buckets `le=0.1 → 8000`, `le=0.5 → 9500`, `le=1 → 9900`,
+`le=+Inf → 10000`. To find p95, `histogram_quantile(0.95, …)` computes the target rank
+`0.95 × 10000 = 9500`, then finds the **first bucket whose cumulative count ≥ 9500** — that
+is `le=0.5` (cumulative 9500). It interpolates **linearly within that bucket's range
+`(0.1, 0.5]`**, assuming samples are spread evenly across it: the bucket spans cumulative
+counts 8000→9500, and rank 9500 sits at the very top, so p95 ≈ **0.5s**. Try p90 to see the
+interpolation move: target rank `9000` still lands in `(0.1, 0.5]`, at fraction
+`(9000−8000)/(9500−8000) = 1000/1500 ≈ 0.667` of the way in, so p90 ≈
+`0.1 + 0.667×(0.5−0.1)` ≈ **0.37s**. The catch: accuracy is capped by bucket width — with a
+huge gap between `le=0.1` and `le=0.5`, every percentile in that band is a straight-line
+guess. Native histograms exist precisely to shrink that error.
+
+**Worked example — why one label can blow up cardinality.** Series count is the *product*
+of every label's distinct-value count. Say `http_requests_total` carries `method` (5
+values) × `code` (6) × `endpoint` (200) × `instance` (50): that is
+`5 × 6 × 200 × 50 = 300,000` distinct series from a **single** metric name — already heavy
+but bounded. Now someone adds a `user_id` label with 100,000 distinct values:
+`300,000 × 100,000 = 30,000,000,000` (30 **billion**) potential series. The head block and
+inverted index grow roughly with *active* series, so the process OOMs or the TSDB grinds.
+This is why `metric_relabel_configs` with `action: labeldrop` (strip `user_id` before
+storage) or `action: drop` (discard the whole metric) exists — you cannot un-explode
+cardinality after the fact, so you gate it at ingest. **Rule: never put an unbounded,
+per-request identity (user ID, request ID, full URL, email) in a label.**
+
 > [!WARNING]
 > A `counter` must be **monotonically increasing** (it only resets to 0 on process
-> restart). PromQL's `rate()`/`increase()` detect and correct for those resets. Never
-> expose a value that can decrease as a counter — use a `gauge`.
+> restart). PromQL's `rate()`/`increase()` detect and correct for those resets. Concrete
+> trace: a counter reads `100 → 150 → (process restart) → 20` across a window. A naive
+> `last − first` would give `20 − 100 = −80` (an absurd negative spike). `rate()`/`increase()`
+> instead spot that `20 < 150` can only mean a reset, so they treat the post-restart series
+> as continuing from 0 and sum the two legs: `(150 − 100) + (20 − 0) = 70`. Never expose a
+> value that can decrease as a counter — use a `gauge`.
 
 ---
 
@@ -344,6 +378,16 @@ horizontally scale storage. **Remote storage** solves both:
 - **`remote_read`** — Prometheus can query historical data back from a remote endpoint at
   query time, merging it with local data.
 
+**What happens when the remote endpoint is down or slow?** `remote_write` reads from the
+**WAL** and buffers/retries; it does **not** block or slow local scraping or the local
+TSDB, so your dashboards and alerts driven off local data keep working through a remote
+outage. The buffer is **not unbounded**, though: each remote queue is bounded by
+`queue_config` (`max_shards`, `capacity`, `max_samples_per_send`), and the WAL itself is
+truncated on the normal schedule. If the outage outlasts WAL retention or the queue fills,
+Prometheus **drops** the oldest pending samples — you get a gap in the *long-term* store,
+but the local 15d data is intact. This is the classic senior follow-up: local monitoring
+survives; only the remote copy loses the samples spanning the outage.
+
 Long-term/scale-out systems that consume this:
 
 | System | Model / how it scales | Note |
@@ -380,6 +424,20 @@ Consequences and the scaling toolkit:
 
 - **Vertical first.** A single modern Prometheus handles millions of active series; give it
   more CPU/RAM/disk before anything fancy.
+
+**Capacity rule of thumb (approximate — verify against your own workload).** Two back-of-
+envelope estimates interviewers expect:
+  - **Memory** scales roughly with *active* series — order of a **few KB per active series**
+    (chunks in the head + inverted index + overhead). So **1M active series ≈ a few GB of
+    head RAM** (call it ~3–8 GB depending on churn and query load); 5M series pushes you
+    toward tens of GB.
+  - **Disk** ≈ `active_series × samples_per_second × bytes_per_sample × retention_seconds`.
+    Plug in **1M series @ 15s interval** (so `1/15 ≈ 0.0667` samples/s each) at
+    **~1.5 bytes/sample** compressed, over **15d** (`15 × 86400 = 1,296,000 s`):
+    `1,000,000 × 0.0667 × 1.5 × 1,296,000 ≈ 1.3 × 10^11 bytes ≈ 130 GB`. That is the order
+    of magnitude — expect ~100–200 GB for 1M series at 15d, and it scales linearly with
+    series count, scrape frequency, and retention. Halve the interval to 7.5s and disk
+    roughly doubles.
 - **Functional sharding.** Split scraping by team/service/region across multiple Prometheus
   servers (each owns some jobs). Use `hashmod` relabeling to shard a huge job across
   servers.

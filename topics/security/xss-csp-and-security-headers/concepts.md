@@ -130,6 +130,37 @@ context-*aware* encoding is the real fix (OWASP XSS Prevention Cheat Sheet).
 | URL / query param | `<a href="/x?q=DATA">` | URL-encode (percent-encode) the value |
 | CSS value | `<style>a{color:DATA}</style>` | CSS-escape; better: don't put user data in CSS |
 
+### Worked example: one payload, inert in one context, code-execution in the other
+
+Take the attacker value `</script><script>alert(1)</script>` and follow it into two places.
+
+**Context A — HTML body, HTML-entity encoded.** Encoding turns `<`→`&lt;`, `>`→`&gt;`,
+`/` stays, so the emitted markup is:
+```
+<div>&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;</div>
+```
+The HTML parser decodes the entities back to the *characters* `</script><script>alert(1)</script>`
+and paints them as visible text. No tag is created, nothing runs. **Inert — this is the right
+encoding for this context.**
+
+**Context B — JS string literal, escaped for JS only.** A developer emits the value inside a
+script and reasons "it's a JS string, so I'll JS-escape the quotes and backslashes." That
+escaping leaves `</script>` untouched (it contains no quote or backslash):
+```
+<script>var x='</script><script>alert(1)</script>';</script>
+```
+Now trace the browser: the HTML *tokenizer* runs **before** the JS lexer and, inside a
+`<script>` element, scans the raw bytes for the literal sequence `</script>`. It finds one
+immediately after `var x='`, so it **closes the script element right there** — `var x='` is a
+syntactically incomplete (and ignored) script — and then parses the very next bytes,
+`<script>alert(1)</script>`, as a brand-new script element that **executes**. JS-string
+escaping never had a chance, because the breakout happens one parser layer up.
+
+Same value, same "I encoded it" intent — inert in the HTML body, arbitrary code execution in
+the script context. That is why the JS-context rule *also* mandates encoding `<`, `>`, `&`
+(so `</script>` becomes `<\/script>` and never reaches the tokenizer as a close tag — see the
+JS/JSON section), and why "just escape it" is meaningless without naming the context.
+
 Two gotchas interviewers probe: (1) **encoding for the wrong context is still a vuln** —
 HTML-encoding a value that is placed inside a `<script>` block does nothing to stop
 `</script><script>…`. (2) **Nested contexts** (a URL inside an HTML attribute inside a JS
@@ -294,6 +325,38 @@ blocking injected ones**. Options, worst to best:
   matching ones. Great for static inline scripts (no server-side per-request work); awkward
   when content changes.
 
+### Worked example: watch the browser allow/block each tag
+
+Suppose the server sends this header on a fresh response:
+```
+Content-Security-Policy: script-src 'nonce-Ab3xK9'
+```
+and renders one legitimate inline script, while an attacker has managed to reflect two of
+their own `<script>` tags into the same page. The browser evaluates each `<script>` it
+parses against the policy:
+
+| Tag the parser encounters | nonce attribute vs header `Ab3xK9` | Verdict |
+|---|---|---|
+| `<script nonce="Ab3xK9">initApp()</script>` (your tag) | equal | **ALLOWED** — `initApp()` runs |
+| `<script>steal()</script>` (injected) | none present | **BLOCKED** |
+| `<script nonce="guess">steal()</script>` (injected) | `guess` ≠ `Ab3xK9` | **BLOCKED** |
+
+The attacker can inject markup, but cannot inject the *right nonce*: it is a fresh ~128-bit
+random value the server picked for this one response, so guessing it is infeasible and it is
+gone by the next response.
+
+**Hash variant.** For a static inline script the policy pins the digest of its exact bytes.
+The inline block `console.log('hi')` has `SHA-256 = 1ohZFo3B9w3UOFBbfx6JSomkpkME90iPs1r/qXzvX7Y=`
+(base64), so the header reads:
+```
+Content-Security-Policy: script-src 'sha256-1ohZFo3B9w3UOFBbfx6JSomkpkME90iPs1r/qXzvX7Y='
+```
+The browser computes SHA-256 over the script's characters, base64-encodes it, and allows the
+block only on an exact match. Change a single byte — e.g. add a space, `console.log('hi') ` —
+and the digest becomes a completely different value that no longer matches, so the browser
+**blocks** it. That byte-exactness is why hashes are perfect for unchanging inline scripts and
+painful for anything a template regenerates.
+
 Nonce vs hash: **nonce** suits server-rendered pages that can inject a fresh value per
 response; **hash** suits static content and CDNs/edge caching where you can't set a
 per-request nonce. Both are vastly stronger than host allowlists.
@@ -325,6 +388,25 @@ Content-Security-Policy:
   by trusted code).
 - The trailing `https:` and `'unsafe-inline'` are **fallbacks** for older browsers that
   don't understand `strict-dynamic`; supporting browsers ignore them.
+
+### Worked example: how trust propagates (and where it stops)
+
+Policy: `script-src 'nonce-Ab3xK9' 'strict-dynamic'`. Trace two script loads on the page:
+
+1. `<script nonce="Ab3xK9" src="/bootstrap.js">` — nonce matches → **allowed**. It becomes a
+   *trusted* script.
+2. Inside `bootstrap.js`: `const s = document.createElement('script'); s.src = 'https://cdn.tld/dep.js'; document.head.appendChild(s);`
+   → **allowed**. `dep.js` carries no nonce, but it was created *by* already-trusted code, and
+   `'strict-dynamic'` propagates that trust to scripts a trusted script inserts. The chain
+   continues: if `dep.js` in turn injects `plugin.js`, that is allowed too.
+3. Attacker reflects `<script src="https://cdn.tld/evil.js"></script>` straight into the HTML
+   → **BLOCKED**. It has no nonce, and it was inserted by the HTML *parser*, not by trusted
+   code — so `'strict-dynamic'` never blesses it.
+
+Now contrast the old host-allowlist version, `script-src 'self' https://cdn.tld`: step 3's
+`evil.js` comes from `cdn.tld`, which is on the allowlist, so it would be **allowed** — the
+attacker wins just by picking a script URL on any allowlisted host. `'strict-dynamic'` closes
+exactly that hole: origin no longer matters, *who inserted the script* does.
 
 This is the policy OWASP and Google recommend: it's easier to maintain (no host list),
 harder to bypass, and scales. Add `require-trusted-types-for 'script'` to also close DOM
@@ -527,6 +609,26 @@ Defenses (OWASP DOM Clobbering Prevention Cheat Sheet):
 > injection — now what?" senior question.
 
 ## Mutation XSS (mXSS) Internals
+
+Intuition first: think of the browser's HTML parser as *autocorrect that rewrites your text
+every time it re-reads it*. The sanitizer reads "version 1" of the markup, decides it is
+clean, and hands it off — but the browser silently rewrites it into "version 2" on insertion,
+and version 2 is executable. The sanitizer approved a string that no longer exists by the time
+the page runs it.
+
+Here is a concrete before/after. Suppose a sanitizer allows `<style>` and `<a>` and receives
+this inside an SVG (foreign-content) context:
+```
+<svg><style><a title="</style><img src=x onerror=alert(1)>">
+```
+Parsed *as SVG*, `<style>` is a foreign-content element and its contents are treated as inert
+text, so the sanitizer sees a `<style>` node whose text is `<a title="</style><img ...>"` — no
+`<img>`, no event handler, **looks clean, approved**. But when that subtree is re-serialized
+and re-parsed into the *HTML* namespace (what happens when it's assigned to `innerHTML` in a
+normal HTML document), `<style>` is now HTML rawtext: the parser ends the style element at the
+literal `</style>`, and the trailing bytes are re-read as HTML markup — materializing a real
+`<img src=x onerror=alert(1)>` that **fires**. The dangerous element was never in the version
+the sanitizer inspected; the parser *created* it on reinsertion.
 
 **Mutation XSS (mXSS)** exploits the fact that the browser's HTML parser is *not*
 idempotent: when you assign a string to `innerHTML`, the browser parses it, and when that

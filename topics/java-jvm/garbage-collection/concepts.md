@@ -108,8 +108,43 @@ Young Generation                         Old Generation
 
 **Allocation and aging:** new objects go into Eden. A minor GC copies survivors from Eden + the
 active survivor space into the *other* survivor space, incrementing each object's **age**. When an
-object's age exceeds `MaxTenuringThreshold` (or the survivor space overflows), it is **promoted** to
-Old. Large objects may be allocated directly in Old (or in G1/ZGC as **humongous**/large objects).
+object's age exceeds `MaxTenuringThreshold` (default **15**, or the survivor space overflows), it is
+**promoted** to Old. Large objects may be allocated directly in Old (or in G1/ZGC as
+**humongous**/large objects).
+
+**How allocation stays fast *and* thread-safe — TLABs.** If Eden allocation is just "bump a shared
+pointer," how do hundreds of threads bump it at once without a lock on every `new`? The answer is the
+**Thread-Local Allocation Buffer**: each thread is handed its own private slab of Eden (say 512 KB)
+and bumps *its own* pointer with no synchronization at all — allocation is a pointer add and a bounds
+check, effectively lock-free. Only when a thread's TLAB is exhausted does it hit the shared path
+(a single atomic bump to carve a fresh TLAB out of Eden), and objects too big for a TLAB are
+allocated straight into shared Eden (or Old). This is why allocation rate is cheap until you either
+churn through TLABs quickly or allocate many large objects.
+
+> [!KEY-TAKEAWAY]
+> **Worked minor-GC trace.** Heap: Eden = 256 MB, S0 = S1 = 32 MB, `MaxTenuringThreshold = 15`,
+> and assume ~5% of each Eden's worth of objects is still live at collection time.
+>
+> - **Threads allocate** into Eden (via their TLABs) until Eden's 256 MB is full → **minor GC #1** fires.
+> - GC traces live objects. Live ≈ 5% × 256 MB ≈ **12.8 MB**. It **copies** those (plus anything live in
+>   the active survivor space, S0 — empty on the first pass) into **S1**, sets their **age = 1**, then
+>   wipes Eden and S0 in one shot (just reset the bump pointers — nothing to sweep).
+>   S1 now holds ~12.8 MB of a 32 MB space. Cost was proportional to the **12.8 MB copied**, not the 256 MB scanned.
+> - Eden fills again → **minor GC #2**: copies Eden's new ~12.8 MB of survivors *and* whatever of S1's
+>   objects are still alive into **S0** (roles flip). Objects that came from S1 age **1 → 2**; fresh
+>   Eden survivors get age 1. Repeat, flipping S0↔S1 each time.
+> - An object referenced by a long-lived cache keeps surviving. After it lives through **15** minor GCs
+>   its age is 15; on the **16th**, age would exceed `MaxTenuringThreshold = 15`, so instead of copying
+>   it into a survivor space again the GC **promotes** it to Old. That is the intended path: short-lived
+>   garbage never leaves Eden; genuinely long-lived objects graduate to Old after ~15 cycles.
+>
+> **Premature-promotion case (the pathology).** Now suppose a traffic spike leaves **40 MB** live after
+> one minor GC, but the target survivor space is only **32 MB**. The 32 MB fits; the extra **8 MB
+> overflows** and is promoted straight to Old at **age 1** — far too young. Worse, HotSpot targets only
+> ~50% survivor occupancy (`TargetSurvivorRatio`), so when survivors blow past ~16 MB it **dynamically
+> lowers the effective tenuring threshold** (e.g. to 2 or 3), promoting *even more* objects early. The
+> result is **old-gen fills up with objects that were about to die** → frequent old-gen/full GCs and
+> latency spikes. The fix is usually a bigger young gen (or survivor spaces), not more old gen.
 
 **Why generations help:** collecting only the young gen means work proportional to the few live
 young objects, not the whole heap — very cheap and frequent. The old gen is scanned rarely.
@@ -118,6 +153,19 @@ young objects, not the whole heap — very cheap and frequent. The old gen is sc
 references *into* the young gen as roots, but scanning all of old gen would defeat the purpose. The
 solution is a **write barrier** that records such references in a **card table** (Parallel/G1 mark
 "dirty cards") or **remembered sets** (per-region, G1/ZGC). The minor GC only scans dirty cards.
+
+**Worked card-table trace.** Divide the heap into fixed **512-byte cards**; the card table is a
+byte array with one entry per card (so a 1 GB old gen needs a ~2 MB table — cheap). Now the app runs
+`oldObj.cache = youngObj` where `oldObj` sits in old gen. On that field write the JIT-emitted **write
+barrier** fires: it computes the card for `oldObj`'s address (`cardIndex = (oldObj_addr - heapBase) >> 9`,
+since 2⁹ = 512) and stamps `cardTable[cardIndex] = DIRTY`. At the next minor GC the collector does
+**not** walk the entire old gen looking for old→young pointers; it scans only the handful of cards
+marked dirty, treats the old→young references it finds there as extra roots, and clears the marks.
+Concretely: with a 4 GB old gen that would be ~8 million cards, but if only 300 fields were written
+since the last GC, the collector inspects ~300 cards instead of 8 million — that is the whole point.
+G1 refines this with a **per-region remembered set** that tracks which regions hold references *into*
+a given region (finer-grained, so it can collect one region without scanning others), at the cost of
+more bookkeeping than a single global card table.
 
 - **Historical note (JDK 8, PermGen removed):** the permanent generation (class metadata) was
   removed in Java 8 and replaced by **Metaspace**, which lives in native memory. This is not part of
@@ -252,6 +300,27 @@ throughput and predictable, moderate pauses (tens to low-hundreds of ms). Good f
 - Uses **colored pointers** (metadata bits stored in the 64-bit reference) and **load barriers** to
   relocate objects concurrently and "self-heal" references. (ZGC is 64-bit only.)
 
+**How concurrent relocation actually works (load-barrier trace).** The hard question: if the GC moves
+object `X` from address `A` to `A'` *while the app is running*, what stops a thread from reading the
+stale copy at `A`? A **colored pointer** reserves a few high bits of every reference as metadata
+(marked, remapped, etc.), and *every time application code loads a reference*, a **load barrier**
+runs first. Trace one read:
+> 1. GC is relocating `X`: it copies `X` from `A` to `A'` and leaves a **forwarding pointer** at the
+>    old slot `A` saying "I now live at `A'`."
+> 2. A mutator thread executes `Point p = obj.location;` — this loads a reference still pointing at `A`
+>    and tagged with a stale color. The load barrier inspects the color, sees the "not yet remapped"
+>    bit set → **slow path**.
+> 3. The barrier follows the forwarding pointer at `A` to `A'`, and — crucially — **writes `A'` back
+>    into `obj.location`** ("self-healing"). The thread proceeds with the correct, current address.
+> 4. The *next* time any thread loads `obj.location`, the color is already good → **fast path**, no
+>    fix-up. So each stale reference is repaired at most once, lazily, by whoever touches it first.
+>
+> Shenandoah reaches the same goal differently: historically a **Brooks forwarding pointer** (an extra
+> header word on every object that points to its current location — to itself if not moved) plus a
+> **load-reference barrier**; a read dereferences through that word so it always lands on the live copy.
+> Either way the STW work is only O(roots), because the expensive part — visiting and repointing the
+> whole heap — happens lazily and concurrently as the app dereferences things.
+
 **Version history — be precise:**
 - **Experimental in JDK 11** (JEP 333), Linux/x64 only.
 - **Production-ready in JDK 15** (JEP 377).
@@ -319,6 +388,16 @@ This is the central GC trade-off and a favorite interview theme.
 
 - **Throughput** = fraction of total time spent running application code (not GC). Maximized by
   doing GC work in big efficient batches, even if each pause is long. **Parallel GC** wins here.
+
+**Worked throughput math (read it off a GC log).** Over a **60 s** (60,000 ms) window you observe
+**10 minor GCs at 20 ms each** plus **1 full GC of 400 ms**. Total GC time = 10 × 20 + 400 = **600 ms**.
+Throughput = (60,000 − 600) / 60,000 = 59,400 / 60,000 = **99.0%**, i.e. **1.0% GC overhead**. Common
+targets are **>95%** (comfortable) up to **>99%** (throughput-critical). This ties directly to
+`-XX:GCTimeRatio=n`, which sets a goal of GC time = 1/(1+n): to target that same 1% overhead you set
+**n = 99** (1/(1+99) = 1/100 = 1%); the default `n = 99` for Parallel GC is exactly this 1% goal,
+while a laxer `n = 19` would allow 1/20 = 5% GC time. Note that latency and throughput can disagree:
+that single 400 ms full GC barely dents throughput (still 99%) yet may blow a p99.9 latency SLA — so
+always look at *both* the aggregate percentage *and* the worst individual pause.
 - **Latency** = length and predictability of individual pauses (tail latency, p99/p99.9). Minimized
   by doing work concurrently in small increments. **ZGC/Shenandoah** win here.
 - **Footprint** = memory/CPU overhead. Concurrent collectors use more (barriers, extra heap headroom,
@@ -484,6 +563,10 @@ failure), and **allocation rate**. Tools: GCeasy, GCViewer, JDK Mission Control 
 14. How do write barriers and card tables / remembered sets solve old→young references?
 15. Which Java version made generational ZGC available and how do you enable it? (JDK 21, JEP 439,
     `-XX:+UseZGC -XX:+ZGenerational`.)
+16. Does every `new` allocate on the heap? (No — the JIT's **escape analysis** can prove an object
+    never escapes its method, then apply **scalar replacement** to explode it into local variables in
+    registers/stack, eliminating the allocation entirely. It's opportunistic and not guaranteed, so
+    treat it as a bonus, not a design assumption.)
 
 ## References
 

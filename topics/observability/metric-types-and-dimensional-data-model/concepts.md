@@ -148,6 +148,27 @@ You query a quantile by wrapping the *rate of the buckets* in `histogram_quantil
 histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
 ```
 
+**Worked example — how `histogram_quantile` turns those buckets into a p95.** Take the
+numbers above. Total count = 34588, so the p95 sits at rank `0.95 × 34588 = 32858.6`.
+Scan the cumulative buckets to find where that rank lands: `le="0.3"` holds 32723 (too few)
+and `le="1.0"` holds 34561 (enough), so the p95 falls **inside the (0.3s, 1.0s] bucket**.
+Now linearly interpolate across that bucket's boundaries, assuming the 32858.6 − 32723 =
+135.6 "extra" observations are spread evenly through the 34561 − 32723 = 1838 observations in
+the bucket:
+
+```
+p95 ≈ 0.3 + (32858.6 − 32723) / (34561 − 32723) × (1.0 − 0.3)
+    = 0.3 + (135.6 / 1838) × 0.7
+    = 0.3 + 0.0516
+    ≈ 0.35 s
+```
+
+Notice how coarse this is: everything from 0.3s to 1.0s is treated as uniformly distributed,
+so the true p95 could be anywhere in that 700ms-wide band and we just picked ~0.35s. If your
+SLO is "p95 < 0.5s", a bucket that straddles 0.5s can't tell you which side of the line you're
+on — which is exactly why you **choose bucket boundaries that bracket your SLO thresholds**
+(add an `le="0.5"` here) instead of leaving a wide gap.
+
 Key properties and gotchas:
 
 - **Buckets are counters** — that's why you `rate()` them first, to get per-second bucket
@@ -192,6 +213,20 @@ estimator). That has two consequences:
 
 The `_sum` and `_count` of a summary **are** aggregatable (they're counters), so a fleet
 average latency still works; only the pre-computed quantiles are trapped per-series.
+
+**Worked example — why `avg(p99)` is nonsense.** Two pods behind the same load balancer:
+
+- Box A is idle: 10 requests, all fast, `p99 = 5ms`.
+- Box B is hammered: 10,000 requests, slow, `p99 = 800ms`.
+
+Averaging the two reported quantiles gives `avg(p99) = (5 + 800) / 2 = 402.5ms`. But no
+request in the fleet actually experienced ~400ms as its 99th-percentile latency — the number
+is a fiction, because box A (10 requests) and box B (10,000 requests) get equal weight in the
+average despite contributing 1000× different traffic. The *true* fleet p99 is over all
+10,010 requests: the slowest 1% (≈100 requests) are dominated entirely by box B, so the real
+fleet p99 is right up near **800ms**, not 402ms. A histogram avoids this by summing the raw
+bucket counts of both boxes into one combined distribution first, then computing a single
+quantile over all 10,010 observations — which correctly lands near 800ms.
 
 ---
 
@@ -244,6 +279,19 @@ resolution costs you one series per bucket. **Native histograms** (Prometheus) /
   means finer resolution. A special `zero_count` bucket with a `zero_threshold` handles
   values at/near zero.
 
+**Worked example — what `scale` actually buys you.** Take OTel `scale=3`. Then
+`base = 2**(2**-3) = 2**(1/8) = 2**0.125 ≈ 1.0905`, so each bucket is about **9% wider than
+the previous one**. Bucket boundaries march up geometrically: …, 1.0000, 1.0905, 1.1892,
+1.2968, 1.4142, … Every bucket has the *same* relative width (~9%), so a value at 10ms and a
+value at 10s both land in a bucket that pins them to within ~9% of their magnitude — a fixed
+**~9% relative error at any latency scale**. Bump to `scale=4` and `base = 2**(1/16) ≈
+1.0443`, halving the relative error to ~4.4% (finer resolution, still one series). Contrast a
+classic fixed bucket like `le="1.0"` with the next at `le="10"`: a value of 9.5s and a value
+of 1.1s both fall in the same bucket, so the relative error explodes to nearly 900% for
+values far from the lower boundary. That is the "uniform relative resolution" win made
+concrete: exponential buckets keep the error percentage constant instead of letting it blow
+up between widely-spaced fixed boundaries.
+
 The property that makes them powerful: **perfect subsetting / mergeability**. Buckets at a
 higher resolution map exactly onto buckets at a lower resolution, so two exponential
 histograms (even at different scales) can be merged *without error* by downscaling to the
@@ -276,6 +324,26 @@ cases.
 - **`increase(v[window])`** = total increase over the window; it is exactly
   `rate(v[window]) * window_seconds` — syntactic sugar, easier for humans to read
   ("~500 errors in the last hour").
+
+**Worked example — reset detection on a real scrape sequence.** Say a counter is scraped
+every interval and reads `100, 130, 10, 40` (the process restarted between the 2nd and 3rd
+scrape, sending it back toward 0). A naive "last minus first" delta would give
+`40 − 100 = −60` — a negative, nonsensical rate. `rate()` instead walks consecutive pairs and
+treats any drop as a reset:
+
+```
+100 → 130 : 130 ≥ 100 → normal increase          +30
+130 →  10 :  10 < 130 → RESET; the counter fell, so it restarted at 0 and
+            climbed back to 10 → count the post-reset value              +10
+ 10 →  40 :  40 ≥  10 → normal increase                                  +30
+```
+
+So the counted increase is `30 + 10 + 30 = 70` over the window — positive and correct, instead
+of the bogus `40 − 100 = −60`. The subtlety students miss: the reset step contributes `+10` (the
+value climbed after the restart, i.e. `0 → 10`), **not** the pre-reset `130`. Equivalently,
+Prometheus's correction is `(last − first) + Σ(pre-reset values) = (40 − 100) + 130 = 70`. (`rate()`
+then divides by the window seconds and extrapolates to the window edges; the key point is that
+reset detection turns a would-be negative into the true increase.)
 
 Ordering rule with aggregation — a classic trap:
 
@@ -319,6 +387,13 @@ Sums, Histograms, and ExponentialHistograms.
 | Missed data point | Self-healing (next sample has full total) | Permanently lost |
 | Rate computation | Reader subtracts samples | Reader sums deltas |
 | Exemplified by | Prometheus | StatsD |
+
+One gotcha interviewers like: the **first sample / unknown-start-time problem**. With
+cumulative metrics you need **at least two samples** after a (re)start before `rate()` can
+yield anything — a single cumulative value has nothing to subtract against, so the very first
+scrape of a freshly-started process produces no rate. A reset at time T likewise resets the
+effective start, which is why a `rate()` over a very short window that straddles a restart can
+read empty until a second post-restart sample lands.
 
 Why it matters in practice: **Prometheus's storage model has no concept of delta counters**,
 so when an OpenTelemetry pipeline emits delta metrics you must convert delta → cumulative

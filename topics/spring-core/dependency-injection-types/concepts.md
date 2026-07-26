@@ -16,6 +16,13 @@ collections and maps.
 
 ## IoC and Dependency Injection
 
+You don't build your own power plant to run a toaster — you plug into a socket and the grid
+supplies the power. DI is that socket, and the container is the grid: your class just declares
+"I need a `PaymentGateway`" and something outside hands one in. The pain it removes is concrete:
+before DI, every class `new`-ed its own collaborators, so a class that talked to a database
+dragged a *real* database into every unit test — you couldn't swap in a fake. Handing wiring to
+the container makes collaborators pluggable and tests trivial.
+
 **Inversion of Control (IoC)** is a general design principle: instead of a component
 constructing or looking up its own collaborators, control over object creation and wiring is
 handed to an external entity (a container or framework). "Inversion" refers to the fact that
@@ -116,6 +123,27 @@ from the container — a form of constructor auto-selection. Exactly one `@Autow
 `required = true` (the default) forbids this multi-candidate behavior, because a required
 constructor must be used.
 
+Worked trace of the greedy selection:
+
+```java
+@Component
+public class ReportBuilder {
+    @Autowired(required = false)
+    public ReportBuilder(DataSource ds, Formatter fmt) { ... } // 2-arg candidate
+    @Autowired(required = false)
+    public ReportBuilder(DataSource ds) { ... }                // 1-arg candidate
+}
+```
+
+- **Container has only a `DataSource` bean (no `Formatter`):** Spring tries the 2-arg
+  constructor first (greediest), can't satisfy `Formatter`, drops it, then tries the 1-arg
+  constructor, satisfies `DataSource` → **picks `ReportBuilder(DataSource)`**.
+- **Container has both a `DataSource` *and* a `Formatter` bean:** the 2-arg constructor is fully
+  satisfiable, so Spring stops there → **picks `ReportBuilder(DataSource, Formatter)`**. It never
+  falls back to the 1-arg one; "greediest *satisfiable*" means most parameters that still resolve.
+- **Container has neither bean:** no candidate is satisfiable and there is no no-arg constructor →
+  `UnsatisfiedDependencyException` at startup.
+
 **Mixing injected beans and resolved values.** Constructor parameters can freely mix
 container-resolved beans with `@Value`-resolved literals/SpEL and `@Qualifier`-narrowed
 candidates. The parameter annotations (`@Value`, `@Qualifier`, `@Lazy`, `@Nullable`) sit on the
@@ -197,6 +225,16 @@ Key details:
   violates the Single Responsibility Principle).
 - Modern IDEs and the Spring team flag field injection with warnings such as "Field injection is
   not recommended."
+
+> [!INTERVIEW]
+> Whichever annotation you place on the field/setter changes *how* Spring resolves it — a common
+> probe. `@Autowired` (Spring) resolves **by type first**, then disambiguates by
+> `@Qualifier`/`@Primary`/bean name. `@Resource` (JSR-250) resolves **by name first** (the field
+> name, or an explicit `name=`), falling back to by-type only if no name matches. `@Inject`
+> (JSR-330) behaves like `@Autowired` — **by type**, with `@Named` as the qualifier. Practical
+> consequence: when two beans of the same type exist, `@Resource private EmailClient smtp;`
+> sidesteps the ambiguity by matching the bean named `smtp` directly, whereas `@Autowired` there
+> throws `NoUniqueBeanDefinitionException` unless you add a `@Qualifier`.
 
 ## Constructor vs Setter vs Field Injection
 
@@ -475,6 +513,30 @@ point is more specific than `@Primary` — if a qualifier matches a specific bea
 ignored for that point. `@Primary` is a factory-wide default; `@Qualifier` is a point-specific
 override.
 
+**Worked trace — "which `PaymentGateway` wins?"** Given three beans of the same type:
+
+```java
+@Component @Primary                 PaymentGateway stripe;   // bean name "stripe"
+@Component @Qualifier("checkout")   PaymentGateway paypal;   // bean name "paypal"
+@Component @Priority(1)             PaymentGateway adyen;    // bean name "adyen"
+```
+
+- **Injection point `@Autowired PaymentGateway gateway;`** (no qualifier). Step 2 collects all
+  three candidates `{stripe, paypal, adyen}`. Step 3 removes nothing. Step 4 has no qualifier, so
+  no narrowing. Step 5: exactly one `@Primary` → **`stripe` wins**, immediately. Steps 6-7 never
+  run.
+- **Injection point `@Autowired @Qualifier("checkout") PaymentGateway gateway;`.** Step 4 narrows
+  the candidate set by the qualifier to just `{paypal}`. The set is now size 1 → **`paypal` wins**.
+  `stripe`'s `@Primary` is irrelevant because the qualifier already resolved a unique bean (this is
+  the "qualifier beats primary" rule).
+- **Now remove `@Primary` from `stripe` and inject the plain `@Autowired PaymentGateway gateway;`.**
+  Step 5 finds no primary. Step 6 checks `@Priority`: only `adyen` has one (`@Priority(1)`), so it
+  is the unique highest-priority candidate → **`adyen` wins**. (If `stripe` also had `@Priority(2)`,
+  `adyen` still wins — lower numeric value = higher priority.)
+- **Ambiguity case:** with no `@Primary`, no `@Priority`, no matching qualifier, and no bean whose
+  name equals the field name (step 7 fails too), the set stays size 3 → step 8 throws
+  `NoUniqueBeanDefinitionException` ("expected single matching bean but found 3: stripe,paypal,adyen").
+
 ## Ordering, @Order vs @Priority, and Tie-Breaking
 
 Two families of "ordering" behavior are frequently conflated:
@@ -506,6 +568,29 @@ singleton factory for A to level 3, begins populating A, creates B, and when B n
 the *early reference* of A from the factory. This is why setter/field cycles resolve but
 **constructor cycles cannot**: with constructor injection the raw instance does not yet exist
 when the dependency is needed, so there is nothing to expose early.
+
+Numbered trace, `A` and `B` each `@Autowired` (setter/field) on the other:
+
+1. `getBean(A)` → A not in level 1. Instantiate A via its no-arg constructor. `rawA` now exists
+   but is *empty* (B still `null`).
+2. Register A's `ObjectFactory` in **level 3** (`singletonFactories`) and mark A "in creation."
+3. `populateBean(A)` starts → A needs B → `getBean(B)`. B is not in any cache, so recurse.
+4. Instantiate B (`rawB`), register B's factory in level 3, `populateBean(B)` starts → B needs A →
+   `getBean(A)`.
+5. A is not in level 1, but it *is* "in creation," so Spring checks level 2 (empty), then **level 3
+   finds A's factory**, calls it to produce the early reference of A, **promotes that reference to
+   level 2** (`earlySingletonObjects`), and injects it into B. B now holds a valid (if not-yet-fully-
+   initialized) A.
+6. B finishes `populateBean` + init callbacks → B moves to **level 1** (`singletonObjects`). The
+   recursive `getBean(B)` returns this finished B.
+7. Back in step 3, A receives the finished B, completes init, and A moves to **level 1**. Because
+   the early A reference in level 2 and the final A are the same object (no proxy), everything is
+   consistent.
+
+Now the **constructor-injection version** of the same cycle: at step 1 you cannot even
+*instantiate* A, because `new A(b)` demands B up front → `getBean(B)` → `new B(a)` demands A →
+back to A, which is still mid-instantiation with **no `rawA` to expose**. Step 5 has nothing in
+level 3 to hand out, so Spring throws `BeanCurrentlyInCreationException` at startup.
 
 Important gotchas:
 

@@ -13,9 +13,9 @@ questions:
       "partitioning" and tenant "isolation"?
     options:
       - "Partitioning is how/where each tenant's data is stored; isolation is the actively enforced mechanism that prevents cross-tenant access"
-      - "They are synonyms; both mean giving each tenant its own database"
-      - "Partitioning is an encryption technique; isolation is a networking boundary"
-      - "Isolation is about storage layout; partitioning is about access control"
+      - "They are synonyms; both simply mean giving each tenant its own dedicated database instance with no shared tables"
+      - "Partitioning is an encryption technique applied per tenant; isolation is a VPC-level networking boundary between tenants"
+      - "Isolation is purely about physical storage layout, while partitioning is the runtime access-control check on each query"
     answer: 0
     explanation: |
       Partitioning buckets data by tenant (rows, tables, schemas, DBs, accounts).
@@ -32,10 +32,10 @@ questions:
       column and relies only on the application adding `WHERE tenant_id = ?`. Why
       does AWS say this provides partitioning but NOT isolation?
     options:
-      - "Because the table is not encrypted at rest"
-      - "Because DynamoDB does not support a tenant_id column"
+      - "Because the shared table is not encrypted at rest with a per-tenant KMS key, so any read returns plaintext rows"
+      - "Because DynamoDB does not support a tenant_id attribute as a non-key column, forcing an unsafe shared layout"
       - "Because a single forgotten or buggy filter clause exposes all tenants' data; nothing enforces the boundary if the app is wrong"
-      - "Because the data is not backed up per tenant"
+      - "Because the shared table cannot be backed up or restored per tenant, so one tenant's data surfaces in another's restore"
     answer: 2
     explanation: |
       The boundary is just a value in a column, enforced only by application code.
@@ -50,9 +50,9 @@ questions:
       Why can IAM enforce item-level tenant isolation on DynamoDB but NOT
       row-level isolation on RDS/Aurora?
     options:
-      - "DynamoDB is newer and has better IAM integration by coincidence"
-      - "RDS is more secure so it doesn't need IAM"
-      - "IAM can enforce rows on RDS only if you enable IAM database authentication"
+      - "DynamoDB is a newer service and simply happens to have deeper IAM integration by coincidence, while RDS predates fine-grained IAM row controls"
+      - "RDS runs inside a private VPC and is inherently more secure, so it does not need IAM to enforce which rows a tenant can read or write"
+      - "IAM can enforce row-level access on RDS only if you turn on IAM database authentication, which maps each individual row to an IAM principal"
       - "The only path to DynamoDB is the AWS API, so IAM sees every request; RDS uses SQL over a driver AWS doesn't own, so IAM sees only control-plane actions, not queries or rows"
     answer: 3
     explanation: |
@@ -70,9 +70,9 @@ questions:
       example best illustrates this coupling?
     options:
       - "If you want IAM to enforce DynamoDB isolation, the tenant id must be the partition (leading) key, which forces a specific data layout"
-      - "If you use S3 you must use bucket-per-tenant"
-      - "If you pick Aurora you cannot use a tenant_id column"
-      - "If you want low cost you must silo every tenant"
+      - "If you store tenant data in S3 you are always forced to use a separate bucket per tenant, never a shared key prefix layout"
+      - "If you pick Aurora you cannot add a tenant_id discriminator column, so pooling many tenants on Aurora is technically impossible"
+      - "If you want the lowest possible cost you are required to silo every tenant onto dedicated infrastructure to avoid noisy neighbors"
     answer: 0
     explanation: |
       The enforcement mechanism (LeadingKeys) requires tenant id to be the leading
@@ -89,9 +89,9 @@ questions:
       correct about the control plane?
     options:
       - "It is where all tenant isolation and RLS enforcement happens"
-      - "It runs a separate copy per tenant"
+      - "It is deployed as a separate, fully isolated copy per tenant so that each tenant gets its own onboarding and metering stack"
       - "It is global and NOT itself multi-tenant; it manages tenants (onboarding, identity, metering) but its own services don't apply tenant isolation"
-      - "It is only the admin web UI and nothing else"
+      - "It is only the customer-facing admin web UI and dashboard, with no backend onboarding, identity, or metering responsibilities"
     answer: 2
     explanation: |
       The control plane manages tenants globally (onboarding, identity, tiering,
@@ -107,10 +107,10 @@ questions:
       KMS key arn, tier}` and is read on every request. Where does this belong and
       what is it?
     options:
-      - "In the application plane; it is the tenant data itself"
+      - "In the application plane; the table holds the tenant's own business records and is queried as the primary data store"
       - "In the control plane; it is the tenant-to-resource map used to resolve where a tenant's data lives"
-      - "It should be deleted for security reasons"
-      - "In the network plane; it is a routing table"
+      - "It should be deleted for security reasons, since caching endpoints and KMS ARNs in one table is itself a cross-tenant leak"
+      - "In the network plane; it is a VPC routing table that steers each tenant's requests to the correct subnet and endpoint"
     answer: 1
     explanation: |
       This is the tenant→resource map, a control-plane artifact realizing the
@@ -124,9 +124,9 @@ questions:
     question: |
       Where does tenant onboarding/provisioning sit relative to the two planes?
     options:
-      - "Purely in the control plane, isolated from application resources"
-      - "Purely in the application plane, with no control-plane involvement"
-      - "It is a separate third plane called the provisioning plane"
+      - "Purely in the control plane, fully isolated from application resources, which it never touches or creates directly"
+      - "Purely in the application plane, with no control-plane involvement, so onboarding runs entirely inside each tenant's own runtime"
+      - "It is a formally defined separate third plane, called the provisioning plane, that AWS documents alongside control and application planes"
       - "It straddles the boundary: onboarding logic (control plane) reaches into the application plane to create per-tenant resources; AWS places the provisioning machinery in the application plane"
     answer: 3
     explanation: |
@@ -143,10 +143,10 @@ questions:
       Which list correctly names AWS's four data-layer isolation sub-models from
       most to least isolated?
     options:
-      - "Pool, bridge-schemas, bridge-databases, silo"
-      - "Bridge, silo, pool, hybrid"
+      - "Pool (shared schema + tenant_id), bridge-schemas, bridge-databases, silo — running from least to most isolated"
+      - "Bridge with separate databases, silo, pool, and a fourth 'hybrid' model that mixes silo and pool per tenant"
       - "Silo (instance per tenant), bridge-databases, bridge-schemas, pool (shared schema + tenant_id)"
-      - "Account-per-tenant, VPC-per-tenant, subnet-per-tenant, container-per-tenant"
+      - "Account-per-tenant, VPC-per-tenant, subnet-per-tenant, container-per-tenant — the four infrastructure isolation tiers"
     answer: 2
     explanation: |
       AWS's four data-tier sub-models, most→least isolated, are silo, bridge with
@@ -164,9 +164,9 @@ questions:
       sub-models compare?
     options:
       - "Pool fastest (insert a row), then bridge (create a schema/DB), then silo slowest (provision an instance/cluster)"
-      - "All are equally fast"
-      - "Silo fastest, then bridge, then pool"
-      - "Bridge-databases fastest, silo second, pool slowest"
+      - "All three onboard at essentially the same speed because provisioning is automated by the control plane in every model"
+      - "Silo fastest (a dedicated instance is pre-warmed per tenant), then bridge in the middle, then pool slowest"
+      - "Bridge-databases fastest (create one database), silo second (attach a spare instance), pool slowest (rebuild the shared schema)"
     answer: 0
     explanation: |
       Pool onboards fastest (a row), bridge is moderate (create DB or schema), silo
@@ -182,9 +182,9 @@ questions:
       all tenants in one PostgreSQL data store. Which sub-model does AWS's matrix
       specifically prefer, and why?
     options:
-      - "Silo — each tenant's instance can be queried independently"
-      - "Pool only, because cross-tenant queries are impossible otherwise"
-      - "Bridge with separate databases — cross-database joins are trivial"
+      - "Silo — a federated query engine can fan out to each tenant's dedicated instance and merge the aggregated results"
+      - "Pool only, because cross-tenant aggregation is technically impossible in any model that keeps tenants in separate schemas"
+      - "Bridge with separate databases — PostgreSQL cross-database joins run natively and need no dblink or FDW setup"
       - "Bridge with separate schemas — all schemas live in one database, so a privileged role can query across them"
     answer: 3
     explanation: |
@@ -201,10 +201,10 @@ questions:
       Which sub-model has the smallest blast radius for a data-tier failure, and
       which has the largest?
     options:
-      - "Pool smallest; silo largest"
+      - "Pool smallest (per-row isolation contains failures); silo largest (a shared cluster fails for everyone at once)"
       - "Silo smallest (failure confined to one tenant); pool largest (all tenants share one failure domain)"
-      - "Bridge-schemas smallest; bridge-databases largest"
-      - "They all have identical blast radius"
+      - "Bridge-schemas smallest (schemas fail independently); bridge-databases largest (all databases crash together)"
+      - "They all have an identical blast radius because AWS replicates every model across three Availability Zones"
     answer: 1
     explanation: |
       Silo confines a failure to one tenant's dedicated resource; pool's shared
@@ -220,10 +220,10 @@ questions:
       DynamoDB has no "database instance" concept. How is a silo model realized on
       DynamoDB?
     options:
-      - "By creating a separate AWS account per tenant automatically"
-      - "By enabling a 'silo mode' flag on the table"
+      - "By automatically creating a separate AWS account per tenant and placing that tenant's tables inside it"
+      - "By enabling a dedicated 'silo mode' table flag that reserves the table's throughput to a single tenant"
       - "By tenant-id-prefixed table names (e.g. tenant42_Orders) plus a per-tenant IAM policy scoped to those tables"
-      - "By using a separate Region per table"
+      - "By pinning each tenant's table to a separate AWS Region so the Regional boundary enforces isolation"
     answer: 2
     explanation: |
       Silo on DynamoDB = dedicated, tenant-prefixed tables plus IAM scoping. There
@@ -239,9 +239,9 @@ questions:
       fails to scale to thousands of tenants?
     options:
       - "AWS account and per-resource limits/quotas plus heavyweight onboarding and fragmented operations cap practical scale"
-      - "DynamoDB and RDS are too slow"
-      - "Silos cannot be encrypted"
-      - "IAM cannot be used with silos"
+      - "DynamoDB and RDS are simply too slow to serve thousands of tenants from any dedicated instance at acceptable latency"
+      - "Silos cannot be encrypted at rest, so security review blocks them well before thousands of tenants are reached"
+      - "IAM roles and policies cannot be attached to per-tenant silo resources, leaving them unauthenticated at scale"
     answer: 0
     explanation: |
       Silo runs into resource/account quotas, table proliferation, slow onboarding
@@ -256,9 +256,9 @@ questions:
       Why can a pure silo deployment use the compute's own instance profile/role
       directly, whereas a pool deployment cannot?
     options:
-      - "Pool compute is always Lambda and Lambda has no role"
-      - "Pool compute uses resource policies instead of roles"
-      - "Silo compute doesn't need any IAM permissions"
+      - "Pool compute always runs on Lambda, and Lambda functions cannot be assigned an execution role of their own"
+      - "Pool compute relies exclusively on resource-based policies attached to each table instead of any IAM role on the compute"
+      - "Silo compute needs no IAM permissions at all because a dedicated instance is unreachable from other tenants by default"
       - "In silo the role only ever touches one tenant's dedicated resource, so the role itself is the boundary; in pool the compute serves all tenants so its role can touch all data and must be narrowed per request"
     answer: 3
     explanation: |
@@ -275,10 +275,10 @@ questions:
       often a silo minus the per-table IAM constraints. What does AWS recommend
       about those constraints in a bridge, and why?
     options:
-      - "Drop the IAM constraints to reduce policy management overhead"
-      - "IAM constraints are only needed in pool, never in bridge"
+      - "Drop the per-table IAM constraints to reduce policy management overhead, since prefixed table names already separate tenants"
+      - "IAM constraints are only ever needed in the pool model, never in bridge, because bridge tables are physically distinct"
       - "Keep the IAM constraints even in bridge, because dropping them converts a partitioning boundary into a potential cross-tenant leak"
-      - "Replace IAM constraints with VPC endpoints"
+      - "Replace the per-table IAM constraints with VPC endpoint policies that restrict which subnet each tenant connects from"
     answer: 2
     explanation: |
       AWS advises keeping the per-table IAM constraints in bridge; without them the
@@ -294,10 +294,10 @@ questions:
       In the "single instance + separate databases via a tenant map" sub-model,
       what is the role of the metadata store (e.g. DynamoDB)?
     options:
-      - "It stores the actual tenant data"
+      - "It stores the actual tenant business records, acting as the primary data store the application queries directly"
       - "It maps tenant_id to the database name (and credentials/secret) so the data-access layer connects to the right database per request"
-      - "It caches query results across tenants"
-      - "It enforces row-level security"
+      - "It caches query results across tenants to speed up shared reads without hitting the databases each time"
+      - "It enforces row-level security by rewriting each query with a tenant predicate before it reaches the database"
     answer: 1
     explanation: |
       The tenant map resolves which database (and credentials) a tenant uses; the
@@ -314,9 +314,9 @@ questions:
       Which mechanism most directly explains this?
     options:
       - "PostgreSQL starts an autovacuum worker per database after autovacuum_naptime, so hundreds of databases mean high background vacuum load"
-      - "RLS policies evaluated on every row"
-      - "The tenant map lookup on every request"
-      - "TLS handshake overhead"
+      - "PostgreSQL RLS policies being evaluated on every row of every tenant database on each read and write"
+      - "The DynamoDB tenant-map lookup performed on every incoming request before the connection is opened"
+      - "The TLS handshake overhead incurred each time the data-access layer opens a fresh per-tenant connection"
     answer: 0
     explanation: |
       Autovacuum operates per database; many databases multiply background workers
@@ -331,10 +331,10 @@ questions:
       What is the main connection-pooling drawback of DB-per-tenant on a single
       instance?
     options:
-      - "DynamoDB connection limits apply"
-      - "Connections cannot use TLS"
+      - "DynamoDB per-table connection limits apply and cap how many tenant databases can be open at once"
+      - "Connections to separate tenant databases cannot use TLS, forcing plaintext pooling across the instance"
       - "You need essentially a pool per database and the total connection count is capped by the DB instance class across all tenants"
-      - "You can only have one connection total"
+      - "You can only ever hold one active connection total to the entire instance, serialized across every tenant"
     answer: 2
     explanation: |
       Each database effectively needs its own pool, and the instance class caps
@@ -350,9 +350,9 @@ questions:
       How does the schema-per-tenant model select the active tenant's data on each
       request in PostgreSQL?
     options:
-      - "By switching AWS accounts"
-      - "By connecting to a different DynamoDB table"
-      - "By adding a tenant_id column filter"
+      - "By switching to a different AWS account per tenant so the account boundary selects that tenant's data"
+      - "By opening a fresh connection to a differently named DynamoDB table for the tenant on each request"
+      - "By appending a WHERE tenant_id = ? predicate to every query against the one shared table"
       - "By setting the active schema per session, e.g. SET search_path / SET SCHEMA (or SET ROLE to a tenant role)"
     answer: 3
     explanation: |
@@ -368,9 +368,9 @@ questions:
       Why does schema-per-tenant interact badly with RDS Proxy?
     options:
       - "SET SCHEMA / SET ROLE cause session pinning, so the connection can no longer be multiplexed across tenants, defeating the proxy's benefit"
-      - "RDS Proxy does not support PostgreSQL"
-      - "RDS Proxy encrypts schemas differently"
-      - "Schemas require IAM authentication that RDS Proxy blocks"
+      - "RDS Proxy does not support PostgreSQL engines, so a schema-per-tenant Postgres database cannot sit behind it"
+      - "RDS Proxy applies a distinct at-rest encryption scheme per schema, corrupting search_path metadata on switch"
+      - "Schema selection requires IAM database authentication, which RDS Proxy blocks for any SET SCHEMA session"
     answer: 0
     explanation: |
       Session-altering statements pin the connection to one client, disabling
@@ -384,10 +384,10 @@ questions:
       An operations reviewer flags schema-per-tenant at 5,000 tenants. Which
       operational cost is MOST specific to this model (versus pool)?
     options:
-      - "Encryption key rotation"
-      - "The 400 KB item-size limit"
+      - "Rotating a distinct KMS encryption key for each of the thousands of tenant schemas on schedule"
+      - "The 400 KB per-item size limit forcing large tenant records to be split across multiple schemas"
       - "Schema sprawl straining the catalog and every DDL migration running N times (once per schema)"
-      - "Cross-Region replication lag"
+      - "Cross-Region replication lag as each tenant schema is streamed to a standby Region independently"
     answer: 2
     explanation: |
       With thousands of schemas, migrations execute per schema and the catalog
@@ -402,10 +402,10 @@ questions:
     question: |
       In the pool (shared-schema) model, what is the tenant boundary made of?
     options:
-      - "A dedicated VPC per tenant"
+      - "A dedicated VPC per tenant whose network boundary keeps each tenant's shared-schema rows apart"
       - "A value in a discriminator column (tenant_id) in shared tables, rather than a physical resource boundary"
-      - "A separate KMS key per row"
-      - "A separate DynamoDB account per tenant"
+      - "A separate KMS encryption key applied to every individual row so decryption gates tenant access"
+      - "A separate DynamoDB-backed account per tenant that physically houses that tenant's shared tables"
     answer: 1
     explanation: |
       Pool co-mingles all tenants in shared tables; the boundary is a tenant_id
@@ -418,9 +418,9 @@ questions:
     question: |
       What is the PRIMARY trade-off of the pool model versus silo?
     options:
-      - "Pool has stronger compliance alignment but higher cost"
-      - "Pool cannot support more than 100 tenants"
-      - "Pool is always slower to query"
+      - "Pool has stronger compliance alignment than silo but pays for it with a much higher per-tenant cost"
+      - "Pool is architecturally capped at 100 tenants before the shared schema must be split into silos"
+      - "Pool is always slower to query because every statement scans across all co-mingled tenants' rows"
       - "Pool maximizes cost efficiency, density, agility, and centralized ops, but has the weakest boundary (largest blast radius, hardest cost attribution, needs active isolation enforcement)"
     answer: 3
     explanation: |
@@ -437,10 +437,10 @@ questions:
       isolation mechanism like RLS or LeadingKeys, rather than app-layer filtering
       alone?
     options:
-      - "Because app-layer filtering is slower"
-      - "Because RLS improves query performance"
+      - "Because app-layer filtering adds parsing latency that RLS avoids by pushing the filter into the planner"
+      - "Because RLS improves query performance by pre-indexing each tenant's rows into a dedicated segment"
       - "Because with app-only filtering, a single forgotten filter is a breach; RLS/IAM makes the database or API refuse cross-tenant reads even when the app forgets"
-      - "Because AWS charges more for app-layer filtering"
+      - "Because AWS bills app-layer filtering at a higher request rate than database-enforced RLS predicates"
     answer: 2
     explanation: |
       The point of RLS/LeadingKeys is a fail-safe backstop that catches
@@ -457,9 +457,9 @@ questions:
       id be in the table design?
     options:
       - "The partition key (the leading key), so dynamodb:LeadingKeys conditions can scope access"
-      - "A regular non-key attribute"
-      - "A GSI sort key"
-      - "An item tag"
+      - "A regular non-key attribute that IAM inspects on each item to decide tenant access"
+      - "The sort key of a global secondary index that LeadingKeys evaluates during a scoped Query"
+      - "An item-level resource tag that IAM condition keys read to constrain per-tenant reads"
     answer: 0
     explanation: |
       dynamodb:LeadingKeys constrains access based on the partition key value, so
@@ -475,9 +475,9 @@ questions:
       tenant, which additional IAM statement is essential to prevent a cross-tenant
       read, and why?
     options:
-      - "Nothing else is needed; LeadingKeys covers all operations"
-      - "An Allow on dynamodb:DescribeTable"
-      - "A Deny on dynamodb:GetItem"
+      - "Nothing else is needed; the LeadingKeys condition already constrains every table operation uniformly"
+      - "An Allow on dynamodb:DescribeTable so the role can read the key schema before each scoped query"
+      - "A Deny on dynamodb:GetItem to force all reads through the LeadingKeys-scoped Query path instead"
       - "An explicit Deny on dynamodb:Scan, because Scan bypasses the partition key and can read the whole table"
     answer: 3
     explanation: |
@@ -493,10 +493,10 @@ questions:
       With a sharded scheme where partition keys look like `tenant42-3`, which IAM
       condition operator scopes a role to just tenant42's shards?
     options:
-      - "ForAllValues:StringEquals with value tenant42"
+      - "StringEquals with the bare value tenant42, relying on exact-match on the full partition key"
       - "ForAllValues:StringLike with value tenant42-* (matching the prefixed/sharded keys)"
-      - "NumericLessThan on the shard suffix"
-      - "DateGreaterThan on the item timestamp"
+      - "NumericLessThan on the numeric shard suffix to keep the role below tenant42's highest shard id"
+      - "DateGreaterThan on the item's created-at timestamp to scope the role to tenant42's recent shards"
     answer: 1
     explanation: |
       Sharded keys share a tenant prefix, so StringLike with tenant42-* matches all
@@ -512,10 +512,10 @@ questions:
       What is the per-physical-partition throughput ceiling on DynamoDB that makes
       a whale tenant a "hot partition" problem?
     options:
-      - "1,000 RCU and 3,000 WCU per partition"
-      - "40,000 RCU and 40,000 WCU per partition"
+      - "1,000 RCU and 3,000 WCU per partition (with the read and write ceilings swapped)"
+      - "40,000 RCU and 40,000 WCU per partition, matching the default per-table account ceiling"
       - "3,000 RCU and 1,000 WCU (strongly consistent) per partition"
-      - "There is no per-partition limit"
+      - "There is no per-partition limit because DynamoDB repartitions hot keys automatically without a cap"
     answer: 2
     explanation: |
       A single physical partition caps at 3,000 RCU / 1,000 WCU (SC; ~6,000 EC
@@ -532,9 +532,9 @@ questions:
       and what do they NOT do?
     options:
       - "Adaptive capacity isolates hot items (up to the partition max) and burst retains up to 300s of unused capacity, but neither removes the hard per-partition ceiling"
-      - "They remove the per-partition ceiling entirely"
-      - "They automatically shard the tenant's data for you"
-      - "They convert the table to on-demand mode"
+      - "They remove the per-partition ceiling entirely by promoting the hot key to its own dedicated partition"
+      - "They automatically write-shard the tenant's data across suffixes and fan out reads on your behalf"
+      - "They silently convert the table from provisioned to on-demand capacity mode when a tenant runs hot"
     answer: 0
     explanation: |
       Adaptive capacity reallocates toward hot items and burst smooths spikes (up
@@ -549,9 +549,9 @@ questions:
       After write-sharding a whale tenant across suffixes `tenant42-1..N`, what
       must reads do, and where is the shard count stored?
     options:
-      - "Reads hit a single partition; shard count is hardcoded in the app"
-      - "Reads query a GSI on tenant_id; the shard count is in a GSI attribute"
-      - "Reads use Scan across the whole table; no mapping is needed"
+      - "Reads hit a single partition and the shard count is hardcoded as a constant compiled into the app"
+      - "Reads query a GSI keyed on tenant_id and pull the current shard count from a GSI projected attribute"
+      - "Reads issue a full-table Scan and merge everything client-side, so no shard mapping needs to be stored"
       - "Reads fan out / parallel-query across all suffixes and merge results; the shard mapping (ShardCount, ShardSize, ShardId[]) is stored in the tenant lookup table"
     answer: 3
     explanation: |
@@ -568,10 +568,10 @@ questions:
       — it's embedded in the ShardID like `tenant42-3`. How does isolation still
       hold under IAM?
     options:
-      - "It doesn't; sharding breaks isolation"
-      - "You must switch to RLS"
+      - "It doesn't; embedding the tenant id in the shard suffix breaks IAM isolation entirely"
+      - "You must abandon IAM and switch to PostgreSQL row-level security to keep the shards isolated"
       - "The StringLike dynamodb:LeadingKeys condition on tenant42-* still scopes access to the tenant's sharded partition keys"
-      - "You must add a tenant_id GSI to restore isolation"
+      - "You must add a tenant_id GSI and scope the condition to that index to restore isolation"
     answer: 2
     explanation: |
       Because the shard suffixes share the tenant prefix, a StringLike LeadingKeys
@@ -587,10 +587,10 @@ questions:
       ProvisionedThroughputExceededException for co-located tenants. Which options
       are legitimate mitigations? (Choose the BEST single answer.)
     options:
-      - "Increase the item-size limit above 400 KB"
+      - "Request a Service Quotas increase to raise the 400 KB item-size limit for the hot tenant's items"
       - "Write-shard the hot tenant, switch to on-demand mode, or promote the whale to its own silo table with dedicated capacity"
-      - "Delete the tenant's data"
-      - "Disable adaptive capacity"
+      - "Delete the noisy tenant's data so the co-located tenants regain the partition's throughput"
+      - "Disable adaptive capacity on the table so DynamoDB stops rebalancing toward the hot partition"
     answer: 1
     explanation: |
       Write sharding, on-demand, or promoting to a silo table all address the hot
@@ -623,10 +623,10 @@ questions:
       starts getting write failures around 10 GB of data. Which limit is being
       hit, and what is the precondition?
     options:
-      - "The 400 KB item limit; it applies to every table"
-      - "The 20 GSI limit"
+      - "The 400 KB per-item size limit, which applies to every table regardless of any secondary index"
+      - "The 20-GSI-per-table limit, hit once a tenant accumulates enough attributes to need many indexes"
       - "The 10 GB item-collection limit, which applies only when the table has a Local Secondary Index (LSI)"
-      - "The 300s burst-capacity limit"
+      - "The 300-second burst-capacity limit expiring, which starts rejecting the tenant's sustained writes"
     answer: 2
     explanation: |
       With an LSI present, all items sharing a partition key (one tenant here) are
@@ -642,9 +642,9 @@ questions:
       tenant_id (the base-table partition key). An engineer adds a GSI partitioned
       on `email` to support login lookups. What is the isolation consequence?
     options:
-      - "None; LeadingKeys automatically scopes the GSI too"
-      - "DynamoDB blocks GSIs on non-key attributes"
-      - "The GSI inherits the base table's RLS"
+      - "None; the LeadingKeys condition automatically propagates to and scopes any GSI on the base table"
+      - "DynamoDB rejects the index because GSIs cannot be partitioned on a non-key attribute like email"
+      - "The GSI transparently inherits the base table's row-level security, keeping login lookups scoped"
       - "The GSI is 'global' — a Query on it spans all partitions across the base table, creating an un-scoped cross-tenant read path"
     answer: 3
     explanation: |
@@ -660,9 +660,9 @@ questions:
       What are the default per-table index limits on DynamoDB?
     options:
       - "20 GSIs (default) and 5 LSIs"
-      - "5 GSIs and 20 LSIs"
-      - "Unlimited GSIs and LSIs"
-      - "1 GSI and 1 LSI"
+      - "5 GSIs and 20 LSIs (the two ceilings swapped from their real values)"
+      - "Unlimited GSIs and LSIs, since DynamoDB adds index partitions on demand with no cap"
+      - "1 GSI and 1 LSI per table, forcing careful index reuse across every access pattern"
     answer: 0
     explanation: |
       Default is 20 GSIs and 5 LSIs per table. LSIs share the base table's
@@ -677,10 +677,10 @@ questions:
       Which is a valid defense against an unscoped-GSI cross-tenant leak in a
       pooled DynamoDB design?
     options:
-      - "Increase provisioned throughput on the GSI"
-      - "Enable point-in-time recovery"
+      - "Increase the GSI's provisioned read and write capacity units so scoped queries never throttle across co-located tenants"
+      - "Enable point-in-time recovery on the base table so any cross-tenant read can be rolled back within the 35-day window"
       - "Keep tenant_id as the GSI partition key, include tenant id in the GSI key schema, or explicitly Deny query actions on that index"
-      - "Move the GSI to a separate Region"
+      - "Move the GSI into a separate Region via global-table replication so the cross-Region boundary keeps each tenant's index entries apart"
     answer: 2
     explanation: |
       The leak is about scoping, so the fix is to make tenant id part of the GSI
@@ -714,8 +714,8 @@ questions:
       PostgreSQL?
     options:
       - "Compare the tenant column to the current PostgreSQL user (a DB user per tenant)"
-      - "Use a trigger that rewrites every query"
-      - "Hardcode the tenant id in the policy"
+      - "Use a BEFORE-SELECT trigger that rewrites every incoming query to append the tenant predicate before the planner sees it"
+      - "Hardcode each tenant's id as a literal inside a separate per-tenant policy compiled at deploy time"
       - "Compare the tenant column to a runtime session variable the app sets per request, e.g. current_setting('app.current_tenant')"
     answer: 3
     explanation: |
@@ -732,10 +732,10 @@ questions:
       Why is this an isolation risk even though RLS is enabled on every tenant
       table?
     options:
-      - "Table owners cannot read any rows"
-      - "RLS only works over TLS connections"
+      - "Table owners can only read rows they inserted themselves, so an owner connection can never see another tenant's data"
+      - "RLS policies are silently disabled whenever the client connects without TLS, so a plaintext owner connection skips them"
       - "The table owner (and superusers / BYPASSRLS roles) bypass RLS by default; you must use FORCE ROW LEVEL SECURITY and connect as a non-owner, non-superuser role"
-      - "Owners are automatically scoped to one tenant"
+      - "Owners are automatically scoped to the tenant named in their PostgreSQL role, so ownership itself enforces the boundary"
     answer: 2
     explanation: |
       RLS does not apply to the table owner/superuser/BYPASSRLS roles unless FORCE
@@ -751,9 +751,9 @@ questions:
       subtle bug reintroduces a cross-tenant leak?
     options:
       - "Reusing a pooled connection for a new request without resetting app.current_tenant, so the new tenant's queries run with the previous tenant's context"
-      - "Enabling RLS on too many tables"
-      - "Using UUID for tenant_id"
-      - "Adding WITH CHECK to the policy"
+      - "Enabling RLS on so many tables that the planner drops the tenant predicate on the least-recently-used ones"
+      - "Using a UUID rather than an integer for tenant_id, which overflows the session variable and matches the wrong tenant"
+      - "Adding a WITH CHECK clause to the policy, which re-evaluates reads against another tenant's rows on write"
     answer: 0
     explanation: |
       If the session variable isn't reset per request, a reused connection serves
@@ -769,9 +769,9 @@ questions:
       current_setting('app.current_tenant')::UUID)`, what does the USING clause
       cover, and how are writes handled?
     options:
-      - "USING covers only DELETEs; writes are unprotected"
-      - "USING protects writes; reads need a separate policy"
-      - "USING is ignored unless you also create a trigger"
+      - "USING covers only DELETE and SELECT; INSERT and UPDATE run unprotected unless you disable RLS"
+      - "USING validates writes against the predicate; reads are unfiltered until you add a matching FOR SELECT policy"
+      - "USING is ignored by the planner unless you also attach a row-rewrite trigger that re-applies the predicate"
       - "USING filters reads and implies a matching WITH CHECK for writes, so inserts/updates must also satisfy the tenant predicate"
     answer: 3
     explanation: |
@@ -786,10 +786,10 @@ questions:
     question: |
       Why does AWS say to enable RLS on EVERY table containing tenant data?
     options:
-      - "Because RLS improves query performance on indexed columns"
+      - "Because RLS improves query performance by pruning non-tenant rows before the index scan on every table"
       - "Because a single table where you forgot to ENABLE RLS is a silent cross-tenant leak"
-      - "Because PostgreSQL requires it for replication"
-      - "Because it reduces storage cost"
+      - "Because PostgreSQL requires RLS on every table before logical replication can stream the tenant rows"
+      - "Because RLS reduces storage cost by compressing each tenant's rows into a separate on-disk segment"
     answer: 1
     explanation: |
       RLS is per table; any tenant-data table without it is fully readable across
@@ -805,10 +805,10 @@ questions:
       In a pooled RDS/Aurora data model, what problem does RDS Proxy primarily
       solve?
     options:
-      - "It enforces row-level security"
-      - "It encrypts data at rest"
+      - "It enforces row-level security by injecting the tenant predicate into each query as it passes through the proxy"
+      - "It encrypts data at rest by re-wrapping each tenant's rows with a per-connection KMS data key at the proxy layer"
       - "It multiplexes and queues database connections to prevent connection exhaustion, since the max connection count is capped by the DB instance class"
-      - "It shards tenants across Regions"
+      - "It shards tenants across Regions by routing each connection to the nearest replica based on the tenant's home Region"
     answer: 2
     explanation: |
       RDS Proxy pools/multiplexes connections to avoid exhausting the instance
@@ -824,9 +824,9 @@ questions:
       (RLS) and RDS Proxy?
     options:
       - "Session-level SET statements cause RDS Proxy session pinning, which disables multiplexing and undercuts the proxy's efficiency"
-      - "SET statements are not supported by PostgreSQL"
-      - "RDS Proxy resets RLS policies automatically"
-      - "RDS Proxy requires one connection per tenant by design"
+      - "SET statements are not supported by PostgreSQL, so the app must instead pass the tenant id as a bind parameter on every call"
+      - "RDS Proxy silently resets all RLS policies to their default USING clause each time a pooled connection is borrowed"
+      - "RDS Proxy requires exactly one dedicated database connection per tenant by design, so multiplexing never applies to RLS"
     answer: 0
     explanation: |
       Setting session variables pins the connection, so it can't be reused across
@@ -842,9 +842,9 @@ questions:
       Given session pinning defeats RDS Proxy multiplexing for a pooled RLS design,
       which mitigation does AWS documentation describe as a last resort?
     options:
-      - "Disable RLS entirely"
-      - "Use one shared session variable for all tenants"
-      - "Move all tenants to DynamoDB"
+      - "Disable RLS entirely and re-add per-tenant WHERE clauses in the application data-access layer"
+      - "Use one shared session variable set to a wildcard tenant so every pooled connection matches all rows"
+      - "Move all tenants to DynamoDB, where LeadingKeys replaces the pinned RLS session state"
       - "Drop the client-side connection pool and make direct, scoped connections per request"
     answer: 3
     explanation: |
@@ -860,10 +860,10 @@ questions:
     question: |
       How is the pool model implemented for tenant data on Amazon S3?
     options:
-      - "One bucket per tenant"
-      - "One object per tenant regardless of size"
+      - "One dedicated bucket per tenant, isolated by the bucket boundary and a distinct bucket policy each"
+      - "One aggregated object per tenant that holds all of that tenant's data regardless of total size"
       - "One shared bucket with a per-tenant key prefix (s3://bucket/${tenantId}/...) scoped by IAM/session policies using s3:prefix and resource ARNs"
-      - "A DynamoDB table that stores the objects"
+      - "A DynamoDB table that stores the objects inline as item attributes instead of using S3 at all"
     answer: 2
     explanation: |
       Prefix-per-tenant in one bucket, isolated with s3:prefix conditions and
@@ -878,10 +878,10 @@ questions:
       What is the constraint on a bucket-per-tenant (S3 silo) design at very large
       tenant counts?
     options:
-      - "S3 buckets cannot have IAM policies"
-      - "Buckets cannot be encrypted"
+      - "S3 buckets cannot have IAM or bucket policies, so per-tenant buckets cannot be access-scoped at all"
+      - "Buckets cannot be encrypted at rest once tenant counts exceed the default account quota"
       - "There is a bounded per-account bucket ceiling (default 10,000, raisable to ~1,000,000) plus heavy per-bucket provisioning/monitoring overhead, so prefix-per-tenant is usually preferred at massive scale"
-      - "Objects in different buckets cannot be listed"
+      - "Objects stored in different buckets cannot be listed together in a single paginated request"
     answer: 2
     explanation: |
       The default general-purpose-bucket quota is now 10,000 per account (raisable
@@ -899,9 +899,9 @@ questions:
       How does prefix-per-tenant on S3 interact with S3 request-rate scaling?
     options:
       - "It helps: S3 scales per prefix (~3,500 write and ~5,500 read requests/sec per prefix), so multiple tenant prefixes increase aggregate throughput"
-      - "It hurts throughput because all prefixes share one limit"
-      - "It has no effect on throughput"
-      - "It forces requests into a single partition"
+      - "It hurts throughput because every prefix in a bucket shares one account-wide request-rate limit"
+      - "It has no effect on throughput because S3 request-rate limits are enforced per bucket, not per prefix"
+      - "It forces all tenant requests into a single index partition, serializing them behind one hot prefix"
     answer: 0
     explanation: |
       S3 request-rate limits are per prefix, so spreading tenants across prefixes
@@ -916,10 +916,10 @@ questions:
       Which newer S3 primitive offers a managed alternative to hand-rolled
       prefix-scoped IAM policies for mapping tenants/identities to data?
     options:
-      - "S3 Intelligent-Tiering"
-      - "S3 Transfer Acceleration"
+      - "S3 Intelligent-Tiering, which moves each tenant's prefix between access tiers to scope who can read it"
+      - "S3 Transfer Acceleration, which routes each tenant through an edge endpoint that also enforces prefix access"
       - "S3 Access Grants (maps identities/tenants to prefix-scoped access, integrates with an IdP)"
-      - "S3 Object Lock"
+      - "S3 Object Lock, which pins a retention policy per tenant prefix and grants access to matching identities"
     answer: 2
     explanation: |
       S3 Access Grants maps identities to prefix-scoped permissions and integrates
@@ -936,9 +936,9 @@ questions:
       tenant-scoped credentials at runtime rather than relying on its execution
       role?
     options:
-      - "Because Lambda cannot have an execution role"
-      - "Because IAM roles expire every 60 seconds"
-      - "Because runtime credentials are cheaper"
+      - "Because a Lambda function cannot be assigned an execution role, so it must fetch credentials from STS at startup"
+      - "Because IAM execution roles expire every 60 seconds and must be re-vended before each tenant request"
+      - "Because runtime STS credentials are billed at a lower rate than a static execution role's API calls"
       - "Because the pooled compute's role can, by construction, touch all tenants' data, so scope must be narrowed per request to the current tenant"
     answer: 3
     explanation: |
@@ -955,9 +955,9 @@ questions:
       over pre-creating one IAM role/policy per tenant?
     options:
       - "Pre-created per-tenant IAM entities hit IAM entity-count limits at scale; a policy template hydrated at runtime and passed as an inline session policy to sts:AssumeRole scales without those limits"
-      - "Pre-created roles are less secure by design"
-      - "Dynamic policies don't require STS"
-      - "Pre-created roles cannot use conditions"
+      - "Pre-created per-tenant roles are inherently less secure because static roles cannot carry any tenant-scoping condition keys"
+      - "Dynamic policies avoid STS entirely by signing each request with the compute's own execution-role credentials instead"
+      - "Pre-created per-tenant roles cannot use IAM condition keys, so they cannot restrict access to a single tenant's data"
     answer: 0
     explanation: |
       Thousands of tenants would exhaust IAM entity limits. The template + inline
@@ -972,10 +972,10 @@ questions:
       In the ABAC/session-tag isolation pattern, which two details make it fail
       closed and leak-resistant?
     options:
-      - "Enabling versioning and MFA delete"
-      - "Using a client-supplied tenant id and a wildcard resource"
+      - "Enabling S3 object versioning and MFA delete so a leaked write can be rolled back before another tenant reads it"
+      - "Reading the tenant id from a client-supplied header and matching it against a wildcard resource ARN in the policy"
       - "Deriving tenantId server-side and passing it as an STS session tag matched by ${aws:PrincipalTag/tenantId}, PLUS a Null condition (missing tag = deny) and an explicit Deny on Scan"
-      - "Granting dynamodb:* on all tables"
+      - "Granting dynamodb:* on all tables and relying on the application layer to filter each query by tenant"
     answer: 2
     explanation: |
       Server-derived tenantId as a session tag, a Null condition that denies when
@@ -990,10 +990,10 @@ questions:
       What does the `"Null": {"aws:PrincipalTag/tenantId": "false"}` condition
       achieve in a tenant-scoping IAM policy?
     options:
-      - "It allows access only when the tenant tag is absent"
+      - "It allows access only when the tenant tag is absent, so untagged internal requests are permitted while tagged ones are blocked"
       - "It denies access when the tenant tag is missing, so a request without tenant context reads nothing instead of everything (fail closed)"
-      - "It nullifies the tenant id for auditing"
-      - "It sets the tenant id to a default value"
+      - "It nullifies the tenant id in the CloudTrail record so audit logs never expose which tenant a request touched"
+      - "It sets the tenant id to a default fallback value whenever the session tag is not supplied by the caller"
     answer: 1
     explanation: |
       The Null condition requires the tenant tag to be present ("false" means the
@@ -1007,9 +1007,9 @@ questions:
     question: |
       What is the operating convention of the runtime "isolation manager" pattern?
     options:
-      - "Cache one broad credential and reuse it across tenants for the pod's lifetime"
-      - "Use the compute's instance profile directly for speed"
-      - "Assume the tenant id from the request path without validation"
+      - "Cache one broad, all-tenant credential at pod startup and reuse it across every tenant for the pod's whole lifetime"
+      - "Use the compute's own instance-profile role directly for every tenant to skip the extra credential-vending round trip"
+      - "Read the tenant id straight from the request URL path and trust it as-is, skipping any server-side validation step"
       - "Always acquire fresh tenant-scoped temporary credentials before accessing any tenant resource, and use only those"
     answer: 3
     explanation: |
@@ -1026,10 +1026,10 @@ questions:
       How is tenant context typically established at login in an AWS SaaS
       (pooled identity)?
     options:
-      - "By storing the tenant id in a cookie only"
-      - "By putting the tenant id in the URL path"
+      - "By writing the tenant id into a browser cookie at login and reading that cookie back on every subsequent request"
+      - "By embedding the tenant id as a path segment in the URL and parsing it out of the route on each incoming request"
       - "By injecting custom claims (tenant id, tier, often policy-store id/role) into the Cognito JWT during registration/onboarding"
-      - "By a separate database lookup on every service hop"
+      - "By performing a fresh lookup against a central tenant database on every single service hop to re-resolve the context"
     answer: 2
     explanation: |
       SaaS Identity binds user→tenant via custom JWT claims injected at onboarding.
@@ -1045,9 +1045,9 @@ questions:
       preferred for tenant context propagation?
     options:
       - "Each service can read tenant context locally from the token without a round-trip lookup, avoiding latency and a central bottleneck"
-      - "It encrypts the payload end to end"
-      - "It eliminates the need for authentication"
-      - "It stores tenant data in the token"
+      - "It encrypts the entire request payload end to end so no downstream microservice can read the tenant's data in transit"
+      - "It removes the need for any authentication at downstream hops because the bearer token itself is treated as implicit trust"
+      - "It stores the tenant's full business records inside the token so each service can serve reads directly from the JWT"
     answer: 0
     explanation: |
       The JWT carries validated tenant context so each service reads it directly —
@@ -1062,9 +1062,9 @@ questions:
       A team uses one shared Cognito user pool for all tenants (pooled identity)
       and hits throttling at peak. What Cognito characteristic explains this?
     options:
-      - "Cognito quotas are per user, so each user is throttled separately"
-      - "Quotas are per app client, so adding clients removes throttling"
-      - "Cognito has no quotas"
+      - "Cognito quotas are enforced per individual user, so each user is throttled on their own separate rate budget"
+      - "Quotas are scoped per app client, so simply registering more app clients spreads the load and removes the throttling"
+      - "Cognito has no request-rate or resource quotas at all, so throttling must be coming from an unrelated service"
       - "Cognito quotas are per account per Region and shared across all tenants in a shared pool, so a busy pooled tier can hit account-wide throttles"
     answer: 3
     explanation: |
@@ -1080,10 +1080,10 @@ questions:
       Which Cognito hosted-UI behavior is a cross-tenant sign-in concern that can
       push regulated tenants toward per-tenant user pools?
     options:
-      - "The hosted-UI supports only OAuth"
+      - "The hosted-UI supports only the OAuth authorization-code flow, so tenants needing SAML federation are forced onto separate pools"
       - "The hosted-UI session cookie is 1 hour and not changeable, and it authenticates across all app clients in the same pool"
-      - "The hosted-UI cannot use custom domains"
-      - "The hosted-UI requires MFA for all users"
+      - "The hosted-UI cannot be mapped to a custom domain, so every regulated tenant is stuck sharing one Cognito-branded login URL"
+      - "The hosted-UI requires MFA for every user by default, which regulated tenants cannot selectively disable per tenant"
     answer: 1
     explanation: |
       The 1-hour, unchangeable session cookie authenticates across all app clients
@@ -1097,10 +1097,10 @@ questions:
     question: |
       Order the Cognito multi-tenancy strategies from most pooled to most siloed.
     options:
-      - "Separate account per tenant, user-pool per tenant, app-client per tenant, shared pool with custom attributes"
-      - "User-pool per tenant, shared pool, separate account, app-client per tenant"
+      - "Separate account per tenant, user-pool per tenant, app-client per tenant, then a shared pool with custom attributes last"
+      - "User-pool per tenant, then a shared pool, then separate account per tenant, then app-client per tenant at the end"
       - "Shared pool with custom attributes/groups/scopes, app-client per tenant, user-pool per tenant, separate account/Region per tenant"
-      - "They are all equally pooled"
+      - "They are all equally pooled because Cognito applies the same isolation boundary to every one of these strategies"
     answer: 2
     explanation: |
       The spectrum runs shared pool (custom attributes/groups/scopes) → app-client
@@ -1117,9 +1117,9 @@ questions:
       How does AWS characterize a cross-tenant data leak for a SaaS business?
     options:
       - "A significant and potentially unrecoverable event — the most important failure to prevent"
-      - "A minor performance issue"
-      - "A billing inconvenience"
-      - "An acceptable trade-off for pooling"
+      - "A minor performance issue that mildly slows the affected tenants until the shared cache is cleared"
+      - "A routine billing inconvenience that is corrected by reconciling the cost allocation tags at month end"
+      - "An acceptable trade-off you knowingly make in exchange for the density and cost savings of pooling"
     answer: 0
     explanation: |
       AWS says crossing the tenant boundary in any form is significant and
@@ -1135,9 +1135,9 @@ questions:
       LeadingKeys, yet still occasionally serves Tenant A's data to Tenant B.
       Which leak vector is MOST likely, given RLS/IAM are correct?
     options:
-      - "A missing WHERE clause (RLS would prevent it)"
-      - "The 400 KB item limit"
-      - "An unscoped Scan (IAM Deny would prevent it)"
+      - "A missing WHERE clause on a pooled query, which the enabled RLS policy would already filter and prevent"
+      - "The 400 KB DynamoDB item-size limit being exceeded, spilling one tenant's overflow bytes into another's item"
+      - "An unscoped Scan across the whole table, which the IAM explicit Deny on Scan would already block"
       - "A cache key that omits the tenant id, so a cached result for A is served to B — the cache sits above the RLS/IAM enforcement plane"
     answer: 3
     explanation: |
@@ -1153,10 +1153,10 @@ questions:
     question: |
       Which practice creates a leak by trusting untrusted input?
     options:
-      - "Deriving tenant id server-side from a validated JWT"
-      - "Using an STS session tag for tenant id"
+      - "Deriving the tenant id server-side from a cryptographically validated JWT before using it to scope any query"
+      - "Passing the tenant id as an STS session tag matched by a PrincipalTag condition in the scoped access policy"
       - "Taking the tenant id directly from a client-supplied request body or an unvalidated claim and using it to scope queries"
-      - "Enabling RLS on all tables"
+      - "Enabling row-level security on every table that holds tenant data so the database backstops the tenant filter"
     answer: 2
     explanation: |
       Trusting a client-supplied/unvalidated tenant id lets an attacker request
@@ -1171,10 +1171,10 @@ questions:
       Which set of layers best describes AWS's defense-in-depth model against
       cross-tenant leaks?
     options:
-      - "A single strong IAM policy is sufficient"
+      - "A single, carefully written IAM policy on the pooled role is sufficient to stop every cross-tenant access path"
       - "Identity (server-derived JWT context) + credential (per-request STS scoped creds/session tags) + infrastructure fail-closed (IAM LeadingKeys/Null/Deny Scan or RLS) + application (tenant filters and tenant-aware cache keys) + detective (CloudTrail/CloudWatch anomalies)"
-      - "Encryption at rest plus TLS in transit only"
-      - "Network isolation via VPC only"
+      - "Encryption of data at rest combined with TLS in transit, which together seal off any cross-tenant read path"
+      - "Network isolation via a dedicated VPC boundary, which by itself keeps each tenant's data unreachable from others"
     answer: 1
     explanation: |
       Defense in depth combines identity, credential, infrastructure-enforcement,
@@ -1190,9 +1190,9 @@ questions:
       alone?
     options:
       - "A Query on a GSI keyed on a non-tenant attribute that spans all tenants"
-      - "A Query scoped to another tenant"
-      - "A GetItem for another tenant's partition key"
-      - "A PutItem writing to another tenant's partition key"
+      - "A base-table Query whose partition key is set to another tenant's leading-key value"
+      - "A GetItem that targets an item under another tenant's partition-key value directly"
+      - "A PutItem that attempts to write an item under another tenant's partition-key value"
     answer: 0
     explanation: |
       LeadingKeys scopes base-table partition-key operations (GetItem/Query/PutItem)
@@ -1208,10 +1208,10 @@ questions:
       At the data tier on RDS/Aurora, what are the two classic noisy-neighbor
       failure modes and their mitigations?
     options:
-      - "Item size and Scan; mitigate with sharding"
-      - "GSI cost and LSI limits; mitigate with on-demand mode"
+      - "Oversized items and unscoped table Scans; mitigate by write-sharding the tenant's rows across suffixes"
+      - "Runaway GSI read cost and the per-table LSI count limit; mitigate by switching the table to on-demand capacity mode"
       - "Shared connection-pool exhaustion (instance-class cap) and one tenant's heavy query starving CPU/IO; mitigate with RDS Proxy, read replicas, per-tenant query throttling, or promoting the whale to a silo instance"
-      - "Cognito throttling and JWT size; mitigate with more app clients"
+      - "Cognito request throttling and oversized JWT claims; mitigate by registering additional per-tenant app clients"
     answer: 2
     explanation: |
       On RDS the noisy-neighbor issues are connection exhaustion and resource
@@ -1226,9 +1226,9 @@ questions:
       SaaS Lens PERF-3 frames performance as a tier differentiator. Which tools
       implement tier-based throttling to protect premium tenants?
     options:
-      - "S3 bucket policies only"
-      - "CloudFront cache invalidation"
-      - "KMS key rotation"
+      - "S3 bucket policies alone, restricting each tier's prefix to throttle how fast lower tiers can read objects"
+      - "CloudFront cache invalidation on a per-tier schedule, slowing lower tiers by forcing more origin fetches"
+      - "KMS key rotation cadence per tier, using slower rotation to rate-limit how often lower tiers can decrypt data"
       - "API Gateway usage plans (rate/burst/quota per tier), Lambda reserved concurrency per tier, and EKS ResourceQuotas/LimitRanges per namespace with dedicated nodes for premium"
     answer: 3
     explanation: |
@@ -1245,9 +1245,9 @@ questions:
       it has spare capacity to serve them?
     options:
       - "Because performance is a deliberate tier differentiator: capping lower tiers aligns cost with revenue and protects premium tenants"
-      - "To reduce AWS bills only"
-      - "Because AWS forbids serving lower tiers faster"
-      - "Because lower tiers cannot use HTTPS"
+      - "Solely to reduce the monthly AWS bill, since idle throughput served to a lower tier still incurs the same charge"
+      - "Because AWS service terms explicitly forbid serving a lower-priced tenant faster than a higher-priced one"
+      - "Because lower-tier tenants are technically unable to negotiate HTTPS, so their throughput must be capped to plaintext"
     answer: 0
     explanation: |
       PERF-3 treats performance as something you sell by tier; deliberately capping
@@ -1263,10 +1263,10 @@ questions:
       What is the main isolation/compliance benefit of a KMS key-per-tenant, and
       its main cost?
     options:
-      - "It makes queries faster; the cost is more storage"
-      - "It removes the need for RLS; the cost is nothing"
+      - "It makes each tenant's queries faster by narrowing the scan; the cost is roughly double the storage per tenant"
+      - "It removes the need for RLS because the key itself gates each row; the cost is essentially zero at any scale"
       - "Strongest crypto isolation and 'crypto-shredding' (delete the tenant's key to make its data unreadable, e.g. for GDPR); the cost is KMS key quotas, per-key cost, and management overhead scaling with tenant count"
-      - "It enables cross-tenant analytics; the cost is latency"
+      - "It enables cross-tenant analytics by sharing one key across tenants; the cost is added decryption latency per read"
     answer: 2
     explanation: |
       Key-per-tenant gives crypto isolation and crypto-shredding for erasure, but
@@ -1281,10 +1281,10 @@ questions:
       When using a single shared KMS key across tenants, how do you retain
       auditable, tenant-scoped cryptographic operations?
     options:
-      - "By storing the tenant id in the plaintext"
+      - "By storing the tenant id inside the plaintext before encryption so it travels with the decrypted payload for auditing"
       - "By carrying the tenant id in the KMS encryption context, enabling tenant-scoped grants and CloudTrail attribution (but you lose crypto-shredding)"
-      - "By rotating the key per request"
-      - "By creating a GSI on the ciphertext"
+      - "By rotating the single shared KMS key on every request so each tenant's operations use a distinct key version"
+      - "By creating a global secondary index on the ciphertext bytes so operations can be attributed back to each tenant"
     answer: 1
     explanation: |
       Encryption context binds tenant id to each operation for auditable,
@@ -1298,9 +1298,9 @@ questions:
     question: |
       What KMS pattern commonly matches a tiered SaaS portfolio?
     options:
-      - "One key for the entire account, no exceptions"
-      - "No encryption for lower tiers"
-      - "A new key per API request"
+      - "A single KMS key for the entire account with no exceptions, so every tier shares exactly one encryption key"
+      - "No encryption at rest for lower tiers, reserving KMS keys only for the premium and regulated customers"
+      - "A brand-new KMS key generated per API request, discarded after the operation completes to isolate each call"
       - "Key-per-tenant for premium/regulated tenants and a shared key for the pooled tail, with the tenant-to-key mapping in the control-plane metadata store"
     answer: 3
     explanation: |
@@ -1316,10 +1316,10 @@ questions:
     question: |
       Why is per-tenant backup/restore trivial in silo but hard in pool?
     options:
-      - "Pool has no backups"
-      - "Silo backups are automatic and pool backups are manual only"
+      - "Pool tables cannot be backed up at all because they co-mingle many tenants in one shared resource"
+      - "Silo backups run automatically on a schedule while pool backups can only ever be triggered manually"
       - "Silo can snapshot the tenant's dedicated instance/table and restore in place; in pool a full snapshot mixes all tenants, so per-tenant restore needs export + filter by tenant id"
-      - "Pool cannot be encrypted so it cannot be backed up"
+      - "Pool data cannot be encrypted at rest, and unencrypted resources are ineligible for snapshot backups"
     answer: 2
     explanation: |
       Silo resources map 1:1 to a tenant, so a snapshot/restore is per tenant. Pool
@@ -1335,9 +1335,9 @@ questions:
       fix a single tenant's corrupted data?
     options:
       - "Restoring the whole table to a past point would roll back ALL tenants, not just the affected one; you instead export + filter that tenant or reimport its rows"
-      - "PITR is not supported on shared tables"
-      - "PITR only works in silo"
-      - "PITR deletes the table permanently"
+      - "PITR is not supported on shared pooled tables, because point-in-time recovery requires each tenant to own a dedicated table before it can be enabled"
+      - "PITR only works in the silo model, since a point-in-time restore can be scoped to a single tenant only when that tenant owns its own dedicated instance"
+      - "PITR permanently deletes and replaces the live table, so recovering one tenant would wipe out every other tenant's current rows in the process"
     answer: 0
     explanation: |
       A whole-table PITR reverts every tenant's data, which is unacceptable
@@ -1352,9 +1352,9 @@ questions:
       How do you honor a GDPR "delete this one tenant" request in a shared pooled
       table?
     options:
-      - "Drop the entire table"
-      - "Rename the tenant_id column"
-      - "Restore the table to before the tenant onboarded"
+      - "Drop the entire shared table and recreate it, then reload every other tenant's rows from the most recent full backup afterward"
+      - "Rename the tenant_id column for that tenant's rows so the deleted tenant's records no longer match any query predicate"
+      - "Restore the whole table to a point in time before the tenant onboarded, discarding every other tenant's data written since then"
       - "A filtered delete of that tenant's rows (or crypto-shred if you used a key-per-tenant), not dropping a resource"
     answer: 3
     explanation: |
@@ -1371,10 +1371,10 @@ questions:
       What tools does AWS recommend for per-tenant cost attribution in a pooled
       model where resources aren't 1:1 with tenants?
     options:
-      - "There is no way to attribute pooled cost per tenant"
+      - "There is no way to attribute pooled cost per tenant, because AWS billing only reports at the resource level and shared resources have no tenant dimension"
       - "Instrument tenant-tagged usage/metrics and use cost allocation tags, the AWS Cost & Usage Report (CUR), and Cost Explorer grouped by tenant tag"
-      - "Only per-account billing works"
-      - "Use CloudFront logs exclusively"
+      - "Only strict per-account billing works, so pooled cost must first be split by moving each tenant into its own linked AWS account before it can be measured"
+      - "Use CloudFront access logs exclusively, parsing each request line to divide the shared infrastructure bill proportionally across every tenant"
     answer: 1
     explanation: |
       Pool requires instrumentation: emit tenant-tagged usage and use cost
@@ -1388,10 +1388,10 @@ questions:
     question: |
       A common heuristic ties noisy-neighbor detection to cost. What is it?
     options:
-      - "Alarm when a tenant uses more than the account average"
-      - "Alarm when total account cost doubles month over month"
+      - "Alarm whenever any tenant uses more than the account-wide average, so every above-average tenant is flagged as a potential noisy neighbor each interval"
+      - "Alarm only when the total account cost doubles month over month, treating the aggregated bill as the single signal for noisy-neighbor detection"
       - "Alarm when a tenant's consumption exceeds roughly 3x its own historical baseline, catching abnormal usage before it forces scaling that raises everyone's bill"
-      - "Alarm only at end of billing cycle"
+      - "Alarm only at the end of each billing cycle, once the finalized cost allocation report reveals which tenant consumed the most that month"
     answer: 2
     explanation: |
       The AWS-referenced heuristic alarms at ~3x a tenant's historical baseline to
@@ -1406,9 +1406,9 @@ questions:
       What is the data-driven trigger for moving a tenant from pool to silo?
     options:
       - "A break-even model: when the tenant's pooled share of cost exceeds what a dedicated (silo) resource would cost, offer them silo (also on a compliance/whale trigger)"
-      - "When the tenant complains once"
-      - "After exactly 12 months in pool"
-      - "When the tenant's data exceeds 400 KB"
+      - "The first time the tenant files a support complaint, regardless of their measured consumption or attributed share of the shared infrastructure cost"
+      - "After exactly 12 months in the pool, on a fixed calendar schedule that migrates every tenant to silo once they reach their first anniversary"
+      - "When any single one of the tenant's items or records exceeds the 400 KB store size limit, forcing that tenant onto a dedicated resource"
     answer: 0
     explanation: |
       The break-even model compares pooled cost share vs dedicated cost; crossing it
@@ -1423,9 +1423,9 @@ questions:
       Which AWS mechanism supports per-tenant usage tags for billing, and what are
       its limits?
     options:
-      - "AWS Budgets, unlimited tags"
-      - "AWS Config rules, 10 tags"
-      - "CloudWatch Logs Insights, no limits"
+      - "AWS Budgets, which attaches unlimited per-tenant usage tags to each budget and forwards them to the billing pipeline for metering"
+      - "AWS Config rules, which emit up to 10 per-tenant usage tags per evaluation and stream them to the billing system for allocation"
+      - "CloudWatch Logs Insights, which carries per-tenant usage tags on every log record with no cardinality or request-size limits at all"
       - "AWS Marketplace Metering UsageAllocations, which supports per-tenant tags with limits like 5 tags, 2,500 allocation cardinality, and 1 MB per request"
     answer: 3
     explanation: |
@@ -1443,10 +1443,10 @@ questions:
       shared infrastructure" and per-customer audit boundaries. Which data-tier
       model fits best and why?
     options:
-      - "Pool with RLS, because it's cheapest"
-      - "Bridge-schemas, because you can cross-query hospitals"
+      - "Pool with RLS, because it is the cheapest option and row-level security satisfies the no-shared-infrastructure clause well enough for regulated hospitals"
+      - "Bridge-schemas, because keeping all hospitals in one database lets you cross-query them, which is exactly what per-customer audit boundaries require"
       - "Silo (dedicated instance/table per tenant), accepting higher cost, slower onboarding, and limited scale, because contractual/compliance isolation outweighs efficiency at this tenant count"
-      - "Account-per-tenant is impossible, so use a single shared table"
+      - "Account-per-tenant is technically impossible at 30 customers, so a single shared table with a tenant_id column is the only workable design here"
     answer: 2
     explanation: |
       Contractual no-shared-infra + compliance at only 30 tenants is the classic
@@ -1461,10 +1461,10 @@ questions:
       A freemium B2C SaaS expects 500,000 tenants, each with a few MB of data, and
       cost/agility are paramount. Which model and enforcement fit best?
     options:
-      - "Silo per tenant with dedicated RDS instances"
+      - "Silo per tenant with a dedicated RDS instance each, since dedicated instances keep per-tenant cost low and onboard new free users instantly at this scale"
       - "Pool (shared schema + tenant_id), enforced with dynamodb:LeadingKeys (DynamoDB) or PostgreSQL RLS, for best density, cost, and onboarding speed"
-      - "Bridge-databases, one database per tenant"
-      - "VPC per tenant"
+      - "Bridge-databases with one PostgreSQL database per tenant, which keeps per-tenant cost minimal while still allowing 500,000 databases on a single instance"
+      - "VPC per tenant, using the network boundary of 500,000 dedicated VPCs to isolate each free-tier user's few megabytes of data"
     answer: 1
     explanation: |
       At 500k small tenants, silo/bridge/VPC-per-tenant all blow past resource
@@ -1480,9 +1480,9 @@ questions:
       why?
     options:
       - "Pool, because the app must add RLS/scoped-credential integration, per-request tenant context, and tenant-aware cache keys everywhere the boundary is only a column value"
-      - "Silo, because you must write per-tenant provisioning"
-      - "Bridge-databases, because of the tenant map"
-      - "All models have identical refactor cost"
+      - "Silo, because the application code itself must be rewritten to route every query, cache lookup, and credential fetch to the current tenant's dedicated instance"
+      - "Bridge-databases, because every read and write path in the application must be refactored to reconcile the tenant map against per-request row-level filters"
+      - "All four models impose an identical tenant-aware refactor cost, since isolation is enforced entirely in the data tier regardless of the model chosen"
     answer: 0
     explanation: |
       Pool pushes isolation into the app/data layer: session variables, scoped
@@ -1497,10 +1497,10 @@ questions:
       A SaaS has three large regulated enterprises and 40,000 small tenants. Which
       architecture best balances the portfolio?
     options:
-      - "Silo all 40,003 tenants for maximum isolation"
-      - "Pool all 40,003 tenants for maximum efficiency"
+      - "Silo all 40,003 tenants for maximum isolation, giving even the 40,000 small tenants a dedicated instance so the regulated enterprises and the long tail share nothing"
+      - "Pool all 40,003 tenants for maximum efficiency, placing the three regulated enterprises in the same shared schema as the 40,000 small tenants to cut cost"
       - "Bridge/tiered: silo the three regulated enterprises, pool the 40,000 small tenants, and route by the tier claim in the JWT"
-      - "Give every tenant its own AWS account"
+      - "Give every one of the 40,003 tenants its own dedicated AWS account, using the account boundary as the isolation mechanism for the entire portfolio"
     answer: 2
     explanation: |
       The realistic ISV answer is tiered/bridge: silo the few that need it, pool the
@@ -1515,9 +1515,9 @@ questions:
       Two SaaS teams both use PostgreSQL. Team A never queries across tenants; Team
       B runs frequent cross-tenant analytics. Which bridge variant suits each?
     options:
-      - "A: schema-per-tenant; B: database-per-tenant"
-      - "Both should use silo instances"
-      - "Both should use pool only"
+      - "A: schema-per-tenant so cross-queries are easy; B: database-per-tenant so its frequent cross-tenant analytics run natively across separate databases"
+      - "Both teams should abandon bridge and move to silo instances, one dedicated PostgreSQL cluster per tenant, regardless of their cross-query needs"
+      - "Both teams should use the pool model only, co-mingling every tenant in one shared schema no matter how often they query across tenants"
       - "A: database-per-tenant (strong isolation, no cross-query needed); B: schema-per-tenant (one DB, easy cross-tenant queries)"
     answer: 3
     explanation: |
@@ -1535,9 +1535,9 @@ questions:
       first as it scales?
     options:
       - "AWS Organizations account limits (default 10, raisable) and Control Tower's 1,000 accounts per OU"
-      - "DynamoDB item size"
-      - "S3 request rate per prefix"
-      - "Lambda reserved concurrency"
+      - "The DynamoDB 400 KB item-size limit, which each tenant's dedicated account hits once its records grow past a single item"
+      - "The S3 per-prefix request rate ceiling, which throttles once every tenant account routes its traffic through one shared bucket prefix"
+      - "The Lambda reserved-concurrency quota, which is exhausted as each per-tenant account reserves its own slice of function concurrency"
     answer: 0
     explanation: |
       Account-per-tenant is bounded by Organizations account quotas and Control
@@ -1552,10 +1552,10 @@ questions:
       A design gives each tenant its own VPC in one Region (Nagarro pattern 3).
       Which limit caps this first, and what's the default?
     options:
-      - "Subnets per VPC, default 200"
-      - "Security groups per VPC, default 2,500"
+      - "Subnets per VPC, default 200 (raisable via Service Quotas), hit first because each tenant VPC needs many subnets"
+      - "Security groups per VPC, default 2,500 (raisable via Service Quotas), exhausted first as per-tenant rules accumulate"
       - "VPCs per Region, default 5 (raisable via Service Quotas)"
-      - "Route tables, default 200"
+      - "Route tables per VPC, default 200 (raisable via Service Quotas), reached first as each tenant VPC adds its own tables"
     answer: 2
     explanation: |
       VPC-per-tenant is capped by the per-Region VPC quota (default 5, raisable).
@@ -1570,10 +1570,10 @@ questions:
       In the AWS Organizations governance model for tenant grouping, what are the
       relevant ceilings?
     options:
-      - "100 OUs and nesting depth of 2"
+      - "100 OUs per organization and a maximum nesting depth of 2 levels below the organization root"
       - "2,000 OUs per organization and OU nesting depth of 5 levels"
-      - "Unlimited OUs and unlimited nesting"
-      - "5 OUs and depth of 10"
+      - "Unlimited OUs and unlimited nesting depth, since Organizations imposes no ceiling on the tenant hierarchy"
+      - "5 OUs per organization and a maximum nesting depth of 10 levels below the root"
     answer: 1
     explanation: |
       Organizations allows up to 2,000 OUs with nesting up to 5 levels — the
@@ -1587,9 +1587,9 @@ questions:
       A team wants a dedicated EventBridge bus per tenant. Which limits constrain
       this bus-per-tenant silo?
     options:
-      - "Unlimited buses; no constraint"
-      - "1 bus per Region"
-      - "5 buses per account"
+      - "Unlimited event buses per account with no constraint, since EventBridge provisions a new bus on demand for every tenant"
+      - "Exactly 1 event bus per Region, forcing every tenant to share the single Regional bus regardless of account"
+      - "5 event buses per account per Region (not adjustable), capping a bus-per-tenant design at five tenants"
       - "100 event buses per account per Region (default, raisable) and 300 rules per event bus (default, raisable)"
     answer: 3
     explanation: |
@@ -1606,10 +1606,10 @@ questions:
       governance. Which non-adjustable limit is most likely to bite, and what's the
       escape hatch?
     options:
-      - "5 accounts per landing zone; no escape"
-      - "10 accounts per OU; raise via Service Quotas"
+      - "5 accounts per landing zone (not adjustable); there is no escape hatch, so account-per-tenant caps at five tenants total"
+      - "10 accounts per OU; raise it via a Service Quotas request once you approach the ceiling for a given OU"
       - "1,000 accounts per OU (not adjustable); mitigate by spreading tenants across multiple OUs (up to 10,000 accounts per landing zone)"
-      - "There is no per-OU account limit"
+      - "There is no per-OU account limit, so a single OU can hold every tenant account without any governance ceiling"
     answer: 2
     explanation: |
       Control Tower's 1,000-accounts-per-OU is not adjustable; you distribute
@@ -1643,9 +1643,9 @@ questions:
       tenant would cost $120/month. Applying the break-even model, what should you
       do?
     options:
-      - "Keep them in pool because pool is always cheaper"
-      - "Nothing; cost is never a migration signal"
-      - "Delete the tenant"
+      - "Keep them in pool because the pool model is always cheaper per tenant, so the $180 attributed share must be a tagging error rather than a real cost"
+      - "Do nothing, because attributed cost is never a valid migration signal and the break-even model applies only to compliance or whale-driven moves"
+      - "Delete the tenant's data to reclaim the $180 of shared infrastructure, since a tenant costing more than a dedicated footprint is no longer profitable"
       - "Offer/migrate them to silo, because their pooled cost share ($180) exceeds the dedicated cost ($120), and silo also improves their isolation"
     answer: 3
     explanation: |
@@ -1662,10 +1662,10 @@ questions:
       the partition key. Given the per-partition ceiling, what is the minimum
       viable design change?
     options:
-      - "Rely on adaptive capacity alone to exceed the ceiling"
+      - "Rely on DynamoDB adaptive capacity alone to push the single partition past 4,000 WCU, since it silently lifts the per-partition ceiling for a sustained hot key"
       - "Write-shard the tenant across at least 4 partition-key suffixes (since 1,000 WCU/partition), storing the shard map in the tenant lookup table and fanning out reads"
-      - "Increase the item size limit"
-      - "Add more LSIs"
+      - "Raise the 400 KB item-size limit via a Service Quotas request so each write carries more data and fewer write units are consumed per operation overall"
+      - "Add several local secondary indexes so writes are spread across the extra index partitions and thereby bypass the per-partition write-capacity cap"
     answer: 1
     explanation: |
       4,000 WCU exceeds the 1,000 WCU/partition ceiling, so you need >=4 shard
@@ -1681,10 +1681,10 @@ questions:
       between an Amazon Verified Permissions per-tenant policy store and a shared
       multi-tenant policy store?
     options:
-      - "Per-tenant store is always wrong"
-      - "Shared store automatically encrypts per tenant"
+      - "A per-tenant policy store is always the wrong choice because Verified Permissions caps you at one policy store per account, so it cannot scale past a single tenant"
+      - "A shared multi-tenant policy store automatically encrypts each tenant's policies under a distinct per-tenant KMS key, so it needs no further isolation controls"
       - "Per-tenant policy store gives silo-like isolation (recommended when tenants need unique policies); a shared store pools policies but RBAC/role-mapping data must NOT live in the shared store, to preserve isolation"
-      - "There is no isolation difference between them"
+      - "There is no isolation difference between them because Verified Permissions evaluates every policy inside a single global engine that ignores which store a policy came from"
     answer: 2
     explanation: |
       Per-tenant policy stores isolate policy logic (good for unique per-tenant
@@ -1700,9 +1700,9 @@ questions:
       pooled multi-tenancy?
     options:
       - "OpenSearch: custom routing + Document-Level Security (DLS); Neptune: named graph per tenant; Redshift: Datashares"
-      - "OpenSearch: dynamodb:LeadingKeys"
-      - "Redshift: Postgres RLS session variable"
-      - "Neptune: S3 prefix policies"
+      - "OpenSearch: dynamodb:LeadingKeys conditions scope each tenant's index shards, the same IAM mechanism DynamoDB uses on the partition key"
+      - "Redshift: a PostgreSQL RLS session variable set per request, since Redshift shares the Postgres engine and evaluates the same USING predicates"
+      - "Neptune: S3 prefix policies that scope each tenant's named graph to a per-tenant key prefix enforced by s3:prefix conditions"
     answer: 0
     explanation: |
       Pooled isolation maps to DLS+custom routing on OpenSearch, named graphs on
@@ -1717,9 +1717,9 @@ questions:
       On a pooled Amazon Neptune (RDF) graph using a named graph per tenant, what
       is the specific cross-tenant leak vector?
     options:
-      - "Storing too many triples"
-      - "Enabling IAM authentication"
-      - "Using SPARQL instead of Gremlin"
+      - "Storing more than the per-graph limit of triples, which spills the overflow into a neighboring tenant's named graph and exposes it on read"
+      - "Enabling IAM database authentication, which grants every connected principal read access across all named graphs regardless of the query"
+      - "Using SPARQL instead of Gremlin, because the SPARQL endpoint ignores named-graph boundaries while the Gremlin traversal engine enforces them"
       - "A query that omits the named graph spans ALL tenants' data, so the app must always scope every query to the tenant's named graph"
     answer: 3
     explanation: |
@@ -1752,10 +1752,10 @@ questions:
     question: |
       Match the store to its canonical pooled-isolation enforcement mechanism.
     options:
-      - "DynamoDB -> RLS; RDS -> LeadingKeys; S3 -> named graphs"
+      - "DynamoDB -> PostgreSQL RLS on each item; RDS/Aurora -> dynamodb:LeadingKeys on the primary key; S3 -> per-tenant named graphs scoped by prefix"
       - "DynamoDB -> dynamodb:LeadingKeys (+ Deny Scan); RDS/Aurora -> PostgreSQL RLS session variable; S3 -> prefix + scoped session policy / Access Grants"
-      - "DynamoDB -> S3 prefix; RDS -> Datashares; S3 -> RLS"
-      - "All three -> IAM row filtering"
+      - "DynamoDB -> S3 key-prefix policies; RDS/Aurora -> Redshift-style Datashares between tenants; S3 -> PostgreSQL row-level security on each object"
+      - "All three stores -> a single IAM policy performing row-level filtering, since IAM can inspect and filter individual rows returned by any AWS data store"
     answer: 1
     explanation: |
       The correct mapping is LeadingKeys (DynamoDB), RLS (RDS/Aurora), and

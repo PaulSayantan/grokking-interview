@@ -186,6 +186,11 @@ inside the cache's operational logic. That's the legitimate home for it. See `dp
 **8. Null contract.** Reject `null` keys and values with `IllegalArgumentException` (or
 `NullPointerException`, matching `ConcurrentHashMap`'s convention). Then a `null` from
 `get` unambiguously means miss; returning `Optional<V>` is a fine stricter alternative.
+One consistency point a sharp interviewer catches: the skeleton's `get`/`put` call
+`requireNonNull(key)` but `remove(null)`/`containsKey(null)` don't — treat those as harmless
+misses (a `null` key was never stored, so removing it is a no-op returning `null`). State
+that this is deliberate, or add `requireNonNull` to `remove` for uniformity; either is
+defensible, but say which so it reads as a decision, not an oversight.
 
 ## API and Method Signatures
 
@@ -376,6 +381,21 @@ Why a linked list at all? `moveToFront` and `removeLast` must be O(1). An `Array
 makes "remove from middle" O(n); a plain `LinkedList<K>` without a node index makes
 "find the node for key k" O(n). The `HashMap<K, Node>` index is what buys O(1) on both.
 
+**Traced example (capacity 3).** Watch the recency list, front (most-recently-used) on the
+left, tail (LRU, the eviction victim) on the right. Sequence: `put A, put B, put C, get A, put D`.
+
+| Step | Action | List (front → tail) | Notes |
+|---|---|---|---|
+| 1 | `put A` | `[A]` | new key → `addFirst(A)` |
+| 2 | `put B` | `[B, A]` | new key → `addFirst(B)` |
+| 3 | `put C` | `[C, B, A]` | new key → `addFirst(C)`; now full (size 3) |
+| 4 | `get A` | `[A, C, B]` | hit → `moveToFront(A)`; **B is now the tail** |
+| 5 | `put D` | `[D, A, C]` | full + new key → `evictKey()` = `removeLast()` = **B**, then `addFirst(D)` |
+
+So **B is evicted** — not the oldest-inserted key (that was A), but the least-recently-*used*,
+because the `get A` in step 4 rescued A from the tail and demoted B into it. That distinction
+— insertion order vs. access order — is the whole point of LRU, and the trace makes it visible.
+
 Shortcut worth naming: Java's `LinkedHashMap(capacity, loadFactor, accessOrder=true)` with
 an overridden `removeEldestEntry` **is** an LRU cache. Mention it to show breadth
 ("in production Java I'd reach for `LinkedHashMap` or Caffeine"), then build the explicit
@@ -393,6 +413,19 @@ LFU evicts the **least frequently used** key; on a frequency tie, evict the leas
   for free: the set's first element is the oldest at that frequency.
 - `int minFrequency` — points at the lowest non-empty bucket so `evictKey()` is O(1),
   no scanning.
+
+**The one invariant that makes `minFrequency` work:** *it always points at the lowest
+non-empty frequency bucket.* Everything in `keyAccessed` exists to preserve that as keys
+move between buckets, and it explains the two cases in the code that trip students up:
+
+- **Brand-new key (`freq == 0`)** enters at frequency 1. One is the smallest count any key
+  can have, so a new key is *always* the new global minimum → `minFrequency = 1`,
+  unconditionally.
+- **Existing key promoted (`freq → freq+1`)** leaves its old bucket. It only *raises* the
+  minimum if it was the **last** key sitting in the current min bucket (that bucket is now
+  empty) — then the lowest non-empty bucket becomes `freq+1` = `next`. If other keys remain
+  at the old min, the minimum hasn't moved, so we leave it alone. Note the min never jumps
+  *down* on an access; only an insert of a new key can lower it back to 1.
 
 ```java
 class LfuEvictionPolicy<K> implements EvictionPolicy<K> {
@@ -426,6 +459,40 @@ class LfuEvictionPolicy<K> implements EvictionPolicy<K> {
     }
 }
 ```
+
+**Traced example (capacity 2).** Sequence: `put A, put B, get A, get A, put C`. Watch
+`frequencies`, the `frequencyBuckets`, and `minFrequency` after each step:
+
+| Step | Action | frequencies | buckets (freq → keys) | min | Notes |
+|---|---|---|---|---|---|
+| 1 | `put A` | `{A:1}` | `{1:[A]}` | 1 | new key → freq 1, min reset to 1 |
+| 2 | `put B` | `{A:1, B:1}` | `{1:[A,B]}` | 1 | new key → freq 1; full now |
+| 3 | `get A` | `{A:2, B:1}` | `{1:[B], 2:[A]}` | 1 | A leaves bucket 1 (still holds B) → min stays 1 |
+| 4 | `get A` | `{A:3, B:1}` | `{1:[B], 2:[], 3:[A]}` | 1 | A promoted again; bucket 2 now empty (lingers) |
+| 5 | `put C` | `{A:3, C:1}` | `{1:[C], 2:[], 3:[A]}` | 1 | full → evict min bucket (freq 1) = **B**; insert C at freq 1 (empty bucket 2 lingers) |
+
+So **B is evicted** — it stayed at frequency 1 while A climbed to 3 on its two hits. On *this*
+sequence LRU agrees (B is also the least-recently-*used*, since A was touched most recently at
+steps 3–4). To see LFU and LRU genuinely **disagree**, use `put A, put B, get A, get A, get B, put C`
+(capacity 2): after the gets, A is freq 3 (last used at step 4) and B is freq 2 (last used at step 5,
+the most recent access). On `put C`, **LFU evicts B** (lowest frequency) but **LRU evicts A** (least
+recently used). That contrast is the line to say aloud: LFU keeps the *popular* item, LRU keeps the
+*recently-used* one.
+
+**Frequency-tie tie-break (why `LinkedHashSet`).** Capacity 2, sequence
+`put X, put Y, get X, get Y, put Z`. After the two gets both keys sit at frequency 2, so
+`buckets = {2:[X, Y]}` — X first because X's second access happened *before* Y's,
+and `LinkedHashSet` preserves that insertion order. When `put Z` forces an eviction,
+`evictKey()` takes `bucket.iterator().next()` = **X**, the least-recently-used of the tied
+pair. That is how the LRU tie-break falls out "for free" with no extra timestamp bookkeeping.
+
+**Empty-bucket cleanup (a hygiene detail worth naming).** Notice bucket `2` sits empty in
+step 4 and is never deleted from the map — neither `keyAccessed`'s `remove` nor `evictKey`
+prunes an emptied `LinkedHashSet`. It doesn't break eviction (we only ever read
+`minFrequency`'s bucket), but over a long-lived cache these empty sets accumulate at low
+frequencies. The fix is one line — after any `bucket.remove(...)`, `if (bucket.isEmpty())
+frequencyBuckets.remove(freq)` — and mentioning it unprompted signals you think about
+memory hygiene, not just correctness.
 
 Two behaviors interviewers probe:
 
@@ -484,6 +551,39 @@ The follow-ups an interviewer will throw, and the seam each one lands on:
   touched. **Active cleanup** (a scheduled sweeper thread, or a min-heap of deadlines)
   reclaims memory promptly at the cost of a background thread and coordination. Interview
   answer: lazy first, optional sweeper as an enhancement — the two compose.
+
+  ```java
+  public class TtlCacheDecorator<K, V> implements Cache<K, V> {  // Decorator
+      private final Cache<K, V> delegate;
+      private final Map<K, Long> deadlines = new HashMap<>();     // key -> expiry nanos
+      private final long ttlNanos;
+
+      public V get(K key) {
+          Long deadline = deadlines.get(key);
+          if (deadline != null && System.nanoTime() >= deadline) {
+              delegate.remove(key);        // route through remove() so keyRemoved fires
+              deadlines.remove(key);
+              return null;                 // lazily expired reads as a miss
+          }
+          return delegate.get(key);
+      }
+
+      public void put(K key, V value) {
+          delegate.put(key, value);
+          deadlines.put(key, System.nanoTime() + ttlNanos);
+      }
+      // remove/size delegate straight through
+  }
+  ```
+
+  **The decorator/policy interaction gotcha:** a lazily-expired entry that nobody has
+  `get`-ed yet is still live in the *underlying* cache — it still sits in the eviction
+  policy's recency/frequency structures and still counts against `maxSize`. So the policy
+  can pick a stale-but-untouched entry as an eviction victim, or (worse) evict a genuinely
+  live entry while a stale one lingers untouched. Two consequences to state: (1) expiry only
+  reclaims a slot when the key is next touched or a sweeper runs, and (2) expiry-driven
+  removal **must** go through `delegate.remove(key)` (as above), never a silent map delete,
+  so `keyRemoved` fires and the policy/storage desync invariant holds.
 - **"Add a new eviction policy (e.g., MRU, random, SLRU)."** → implement `EvictionPolicy`,
   add one line to the factory. Zero changes to `InMemoryCache` — Open-Closed in action.
 - **"Write-through vs write-behind persistence."** → *Write-through*: `put` writes cache

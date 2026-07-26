@@ -20,6 +20,23 @@ The default resolvers registered by `@EnableWebMvc` / `WebMvcConfigurationSuppor
 
 If **no** resolver handles the exception, `DispatcherServlet` re-throws it and it propagates to the servlet container (which typically renders a generic error page or, under Spring Boot, forwards to `/error`).
 
+The whole flow — the `doDispatch` try block, the hand-off to `processHandlerException`, the ordered resolver chain, and the "first non-null wins, else propagate" rule — is summarized here:
+
+```mermaid
+flowchart TD
+    A["DispatcherServlet.doDispatch try block:<br/>preHandle → HandlerAdapter.handle → postHandle"] -->|no exception| Z["render view / write body"]
+    A -->|exception thrown| B["processHandlerException — walk resolver chain"]
+    B --> C["1. ExceptionHandlerExceptionResolver<br/>(@ExceptionHandler / @ControllerAdvice)"]
+    C -->|returns null| D["2. ResponseStatusExceptionResolver<br/>(@ResponseStatus / ResponseStatusException)"]
+    D -->|returns null| E["3. DefaultHandlerExceptionResolver<br/>(standard Spring MVC exceptions)"]
+    E -->|returns null| F["4. Custom appended resolvers"]
+    C -->|non-null ModelAndView| H["Handled — first non-null result wins"]
+    D -->|non-null ModelAndView| H
+    E -->|non-null ModelAndView| H
+    F -->|non-null ModelAndView| H
+    F -->|returns null| G["Propagate to servlet container<br/>(generic error page / Boot forward to /error)"]
+```
+
 Key mental model: `@ExceptionHandler`, `@ControllerAdvice`, `@ResponseStatus`, and `ResponseEntityExceptionHandler` are all **higher-level abstractions built on top of the `HandlerExceptionResolver` SPI.**
 
 ### What exactly is inside the try block

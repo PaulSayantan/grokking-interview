@@ -373,6 +373,16 @@ how singletons are created and how circular references are resolved:
    produce an early reference on demand (this is what allows an AOP proxy to be
    exposed *early* if a proxy will be needed).
 
+**Why three levels and not two?** The obvious design is "finished beans" + "in-progress
+early references." The third level exists because an early reference might need to be an
+**AOP proxy**, and building that proxy must happen *at most once*. Level 3 holds a
+*factory* (a lambda) that, when first invoked, produces the early reference (running
+proxy-creation post-processors). Its result is then cached in level 2. So if two
+different beans in the cycle both ask for the in-progress bean, the first probe runs the
+factory once and every later probe returns the **identical** cached early reference (the
+same proxy object) from level 2 — never a fresh proxy each time. Two levels alone could
+not both *defer* proxy creation and *guarantee one shared instance*.
+
 `getSingleton(beanName, allowEarlyReference)` probes these in order: level 1, then
 level 2, then (if early references are allowed) it invokes the level-3 factory,
 promotes the result into `earlySingletonObjects`, and removes the factory. The key
@@ -418,6 +428,47 @@ A pure constructor cycle throws **`BeanCurrentlyInCreationException`** during
 because there is no point at which an early reference can be published — the bean
 does not exist until its constructor returns.
 
+### Worked trace: how Spring breaks a setter cycle A↔B
+
+Take two singletons that setter-inject each other:
+
+```java
+@Component class A { @Autowired void setB(B b) { this.b = b; } B b; }
+@Component class B { @Autowired void setA(A a) { this.a = a; } A a; }
+```
+
+`refresh()`'s eager step (`preInstantiateSingletons`) calls `getBean("a")`. Watch the
+three maps — L1 = `singletonObjects`, L2 = `earlySingletonObjects`, L3 =
+`singletonFactories`:
+
+| Step | Action | L1 (ready) | L2 (early) | L3 (factory) |
+|---|---|---|---|---|
+| 1 | `getBean("a")` → miss all caches → start creating A | — | — | — |
+| 2 | instantiate A (`new A()`) — raw object exists | — | — | — |
+| 3 | `addSingletonFactory("a", …)` — expose early A | — | — | `a` |
+| 4 | `populateBean(A)`: A needs B → `getBean("b")` | — | — | `a` |
+| 5 | instantiate B (`new B()`) | — | — | `a` |
+| 6 | `addSingletonFactory("b", …)` | — | — | `a`, `b` |
+| 7 | `populateBean(B)`: B needs A → `getSingleton("a", true)` | — | — | `a`, `b` |
+| 8 | **cycle breaks:** L1/L2 miss `a`, so invoke L3 factory for `a`; cache result in L2, drop L3 entry | — | `a` | `b` |
+| 9 | B's `setA` gets the **early A reference**; B has no more deps | — | `a` | `b` |
+| 10 | `initializeBean(B)` runs (BPPs, `@PostConstruct`); B finished → move to L1, drop its L2/L3 | `b` | `a` | — |
+| 11 | back in step 4: A's `setB` gets the now-complete `b` from L1 | `b` | `a` | — |
+| 12 | `initializeBean(A)` runs; A finished → move to L1, drop early A from L2 | `a`, `b` | — | — |
+
+The cycle is broken at **step 8**: because A's early reference was published at step 3
+(after construction, before population), B can obtain a usable `A` handle even though A
+is only half-built. B finishes first (step 10) with a reference to A that A will later
+"grow into." When A finishes at step 12, the `b` field already points at the fully
+initialized B, and B's `a` field points at that same A object — one consistent graph.
+
+Now swap both to **constructor** injection: at step 2 there is no "instantiate then
+populate" — A's constructor itself calls `getBean("b")`, and B's constructor calls
+`getBean("a")`, which is *already in creation* with **no early reference ever published**
+(step 3 never happens for a constructor arg). Spring detects the re-entrant request and
+throws `BeanCurrentlyInCreationException`. That is the whole reason setter cycles resolve
+and constructor cycles cannot.
+
 Ways to break a constructor cycle without switching to setters:
 
 - **`@Lazy` on one injection point** — Spring injects a lazy-initializing proxy for
@@ -453,6 +504,34 @@ If none disambiguates, injection fails. Note the interaction: `@Primary` takes
 precedence over `@Priority`. For collection/array/`Map` injection points, ambiguity
 is *not* an error — all matching beans are injected, ordered by `@Order` / `Ordered`
 / `@Priority`.
+
+### Worked example: two beans of the same type, which one wins?
+
+```java
+@Bean @Primary PaymentGateway stripe()  { return new StripeGateway(); }
+@Bean            PaymentGateway paypal()  { return new PayPalGateway(); }
+
+@Service class Checkout {
+    Checkout(PaymentGateway gateway) { … }   // one candidate needed, two exist
+}
+```
+
+Trace the resolution for `Checkout`'s single `PaymentGateway` parameter:
+
+- **As written:** two candidates match by type (`stripe`, `paypal`). Step 1 of the
+  order applies — exactly one carries `@Primary` (`stripe`), so it wins. Injected bean =
+  `StripeGateway`. No exception.
+- **Add a qualifier at the injection point** — `Checkout(@Qualifier("paypal") PaymentGateway gateway)`:
+  a qualifier match is more specific than `@Primary`, so resolution narrows the candidate
+  set to just `paypal` *before* the `@Primary` tiebreak matters. Injected bean =
+  `PayPalGateway`, overriding the `@Primary` default.
+- **Remove `@Primary`** (two plain beans, no qualifier at the injection point): none of
+  the three tiebreaks applies — no `@Primary`, no `@Priority`, and the parameter name
+  `gateway` matches neither bean name (`stripe`/`paypal`). Two candidates survive →
+  `NoUniqueBeanDefinitionException: expected single matching bean but found 2: stripe,paypal`.
+- **Rename the parameter to `paypal`** (still no `@Primary`): the name-fallback in step 3
+  kicks in — the injection-point name `paypal` matches the bean named `paypal`, so that
+  one is selected and startup succeeds.
 
 **Gotcha:** `@Qualifier` on a `@Bean`/component narrows candidacy but a bean with
 `defaultCandidate=false` (Spring 6.2+) or `autowireCandidate=false` is excluded from
@@ -530,6 +609,29 @@ The naming subtlety interviewers probe:
   returns the **`FactoryBean` instance itself**.
 - `getBean("myFactory", SomeProductType.class)` returns the product typed as the
   product.
+
+Concretely, a factory that produces `Connection`s:
+
+```java
+@Component("conn")
+class ConnectionFactoryBean implements FactoryBean<Connection> {
+    public Connection getObject()   { return DriverManager.getConnection(url); }
+    public Class<?>   getObjectType() { return Connection.class; }
+    public boolean    isSingleton()   { return true; }
+}
+```
+
+Register it under the name `conn`, then:
+
+```java
+Object plain = ctx.getBean("conn");   // runtime type: Connection  (the PRODUCT — getObject())
+Object amp   = ctx.getBean("&conn");  // runtime type: ConnectionFactoryBean (the FACTORY itself)
+```
+
+So `plain instanceof Connection` is `true` while `amp instanceof FactoryBean` is `true` —
+the very same registered name yields two different runtime types depending on the `&`.
+Because `isSingleton()` returns `true`, repeated `getBean("conn")` calls return the *same*
+cached `Connection`; returning `false` would call `getObject()` afresh each time.
 
 `FactoryBean.isSingleton()` controls whether `getObject()` results are cached. Do not
 confuse a `FactoryBean` (an interface your bean implements) with a *factory method*

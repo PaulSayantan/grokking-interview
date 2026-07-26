@@ -64,6 +64,31 @@ the dependency rather than reaching for a global.
    }
    ```
 
+   **Worked trace — why `volatile` is not optional.** The line
+   `instance = new Config()` is *not* one atomic step. It compiles to roughly three:
+   (1) allocate memory for the object, (2) publish that address into the `instance`
+   field, (3) run the constructor to initialize the fields. Steps (2) and (3) have no
+   data dependency, so the JIT/CPU may legally reorder them to **1 → 2 → 3** — publish
+   the reference *before* the constructor runs. Now interleave two threads on a
+   *non-volatile* field:
+
+   - **Thread A** enters the `synchronized` block, does step 1 (allocate) and step 2
+     (`instance` now points to a **non-null but half-built** object), and is paused
+     right before step 3 (constructor).
+   - **Thread B** calls `getInstance()`. Its first, un-synchronized check reads
+     `instance` and sees **non-null** (step 2 already happened), so it skips the lock
+     entirely and returns the object.
+   - Thread B then reads a field, say `config.timeout` — and gets `0`/`null` (the
+     default) instead of the constructed value, because Thread A's step 3 has not run.
+     A half-initialized singleton escapes: silent garbage today, `NullPointerException`
+     tomorrow.
+
+   Declaring `instance` `volatile` inserts a release-store on the write and an
+   acquire-load on the read. That establishes a *happens-before* edge: the constructor's
+   field writes (step 3) may not be reordered after the publish (step 2), so any thread
+   that observes a non-null `instance` is guaranteed to see the fully constructed object.
+   This is exactly what JSR-133 (Java 5) fixed.
+
 4. **Initialization-on-demand holder idiom** — lazy AND lock-free, using the JVM's
    guarantee that a nested class is initialized only when first referenced. Preferred
    lazy approach for its simplicity.
@@ -130,7 +155,24 @@ abstract class Checkout {
     abstract Payment createPayment();          // factory method
     void process(long cents) { createPayment().pay(cents); }
 }
+
+// Abstract Factory: one factory object produces a *family* of matching products
+interface GUIFactory {
+    Button   createButton();
+    Checkbox createCheckbox();
+}
+class DarkThemeFactory implements GUIFactory {
+    public Button   createButton()   { return new DarkButton(); }
+    public Checkbox createCheckbox() { return new DarkCheckbox(); }
+}
+// A LightThemeFactory returns LightButton + LightCheckbox — the factory guarantees the
+// widgets always match (you never mix a DarkButton with a LightCheckbox).
 ```
+
+**Rule of thumb.** *Factory Method* = **one** product, varied by **subclassing** the
+creator (`Checkout` above). *Abstract Factory* = a **family** of related products, varied
+by swapping the **factory object** (`GUIFactory` above). If you find yourself adding a
+second `createX()` to a factory method, you have grown into an abstract factory.
 
 **JDK / Spring examples.** `Calendar.getInstance()`, `NumberFormat.getInstance()`,
 `DriverManager.getConnection()`, `LoggerFactory.getLogger()`. Spring's entire
@@ -184,6 +226,27 @@ library).
 **Advanced: builder + generics for inheritance.** *Effective Java* Item 2 shows a
 recursive generic "simulated self-type" `abstract class Builder<T extends Builder<T>>` so
 subclass builders return the right type from chained calls.
+
+```java
+abstract class Builder<T extends Builder<T>> {
+    abstract T self();                      // subclass returns `this` typed as T
+    abstract Pizza build();
+    T addTopping(String t) { /* ...; */ return self(); }   // returns T, not Builder
+}
+class NyPizza extends Pizza {
+    static class Builder extends Pizza.Builder<Builder> {
+        Builder self() { return this; }     // the one cast that makes it all type-safe
+        Pizza build() { return new NyPizza(this); }
+        Builder size(Size s) { /* ... */ return this; }
+    }
+}
+```
+
+Without `self()`, `addTopping()` in the parent would return `Pizza.Builder`, so a chain
+like `new NyPizza.Builder().addTopping("ham").size(LARGE)` would fail to compile — after
+`addTopping` you'd be back at the parent type and lose access to the subclass's `size()`.
+`self()` casts `this` to the subtype `T`, so every chained call keeps returning the
+concrete builder.
 
 **Records vs builder (since JDK 16).** A `record` gives you an immutable carrier with a
 canonical constructor for free, but records have **no builder and no optional-parameter
@@ -266,6 +329,24 @@ new FileInputStream(file)))` stacks decorators, each adding buffering, char deco
 `Collections.unmodifiableList` / `synchronizedList` are decorators that add access control
 around the same `List` interface.
 
+**Worked trace — what one `readLine()` does through the wrapper chain.** Say the file
+holds the UTF-8 bytes `48 69 0A` (`H`, `i`, newline). Call `br.readLine()`:
+
+1. `BufferedReader.readLine()` needs characters, so it asks `InputStreamReader` to fill
+   its char buffer (it doesn't ask for one char — it grabs a chunk).
+2. `InputStreamReader` needs bytes, so it asks `FileInputStream` for a block. The file
+   stream does the one real syscall and returns the raw bytes `[48, 69, 0A]`.
+3. `InputStreamReader` runs those bytes through the UTF-8 `CharsetDecoder`, producing the
+   chars `['H', 'i', '\n']`, and hands them up.
+4. `BufferedReader` accumulates chars until it hits `'\n'`, strips the line terminator,
+   and returns the `String` `"Hi"`. The `'\n'` is consumed; the buffered leftover (none
+   here) stays for the next `readLine()`.
+
+Each layer added exactly one responsibility to the same `read` contract: `FileInputStream`
+= raw bytes from disk, `InputStreamReader` = bytes→chars decoding, `BufferedReader` =
+chunking + line assembly. Peel any layer off and you keep the rest — that is the win over a
+`BufferedFileCharDecodingReader` mega-class.
+
 **Decorator vs inheritance.** Subclassing is static (compile time) and can cause a
 combinatorial class explosion (`BufferedEncryptedCompressedStream`...). Decorators compose
 at runtime, one responsibility per wrapper.
@@ -299,6 +380,15 @@ Foo proxy = (Foo) Proxy.newProxyInstance(
     });
 ```
 
+**Worked trace — one `proxy.foo()` call.** The proxy never runs `foo`'s body directly;
+every call is funnelled into `invoke(...)` in call order: (1) **before** — `t =
+nanoTime()` (the added behavior); (2) **delegate** — `method.invoke(realTarget, args)`
+actually runs the real `foo()` and captures its return `r`; (3) **after** —
+`log(name, nanoTime() - t)` records the elapsed time; (4) `return r` hands the real
+result back to the caller, which is none the wiser. This before → delegate → after
+sandwich is exactly how Spring layers `@Transactional` (open tx → call method → commit or
+roll back) around a bean.
+
 **Spring AOP uses proxies heavily.** Spring wraps beans in proxies to implement
 `@Transactional`, `@Async`, `@Cacheable`, security, etc. It uses **JDK dynamic proxies**
 when the bean implements an interface, and **CGLIB** (subclass-based bytecode proxy) when
@@ -310,6 +400,75 @@ CGLIB-proxied.
 **Proxy vs Decorator.** Structurally similar (both wrap and delegate on the same
 interface). Intent differs: decorator *adds behavior*; proxy *controls access* (and often
 manages the target's lifecycle, which a decorator does not).
+
+---
+
+## Chain of Responsibility
+
+**Definition (beginner).** Chain of Responsibility passes a request along a chain of
+handlers; each handler decides either to process the request, to pass it to the next
+handler, or both. The sender doesn't know which handler will act — it just drops the
+request into the front of the chain. This decouples "who sends" from "who handles" and
+lets you reorder/insert/remove handlers without touching the sender.
+
+```java
+interface Filter { void doFilter(Request req, Response res, FilterChain chain); }
+
+class AuthFilter implements Filter {
+    public void doFilter(Request req, Response res, FilterChain chain) {
+        if (!authenticated(req)) { res.sendError(401); return; }  // short-circuit
+        chain.doFilter(req, res);                                 // else pass along
+    }
+}
+```
+
+**The canonical JDK example is the Servlet `FilterChain`.** Each `Filter.doFilter()`
+either calls `chain.doFilter()` to advance to the next filter (and eventually the servlet)
+or returns early to short-circuit the whole request. Spring Security's filter chain,
+`javax`/`jakarta` interceptors, and OkHttp/gRPC interceptor chains are all this pattern.
+
+**Chain of Responsibility vs Decorator (a classic confusion).** Both wrap and delegate
+along a chain. The difference is intent and behavior: a **decorator** always calls the
+next layer (every wrapper runs, each adding behavior to the *same* operation), whereas a
+**CoR handler may short-circuit** — an `AuthFilter` returning `401` means downstream
+filters and the servlet never run at all. Decorator = "everyone contributes"; CoR = "the
+first one who can handle it, wins (or stops the line)."
+
+---
+
+## Command pattern
+
+**Definition (beginner).** Command encapsulates a request as an object, so you can
+parameterize code with different requests, queue or log them, and support undo/redo. It
+turns "call this method with these arguments" into a first-class value you can store,
+pass around, and replay later.
+
+```java
+interface Command { void execute(); void undo(); }
+
+class InsertTextCommand implements Command {
+    private final Document doc; private final String text;
+    InsertTextCommand(Document doc, String text) { this.doc = doc; this.text = text; }
+    public void execute() { doc.append(text); }
+    public void undo()    { doc.deleteLast(text.length()); }
+}
+// An editor keeps a Deque<Command> history; Ctrl+Z pops and calls undo().
+```
+
+**Why it exists.** The receiver (`Document`), the action (append), and the arguments
+(`text`) are bundled into one object. That object can be pushed onto an undo stack, put on
+a queue for a worker thread, logged for replay/audit, or bound to a menu item and a
+keyboard shortcut — all without the invoker knowing what the command does.
+
+**JDK example.** `Runnable` *is* a command: `execute()` is `run()`, and
+`executor.submit(runnable)` queues commands for later execution on a thread pool. Swing's
+`Action` is a command bound to buttons and menu items.
+
+**Functional replacement (since Java 8).** When a command needs no `undo()`, it is a
+single-method interface — so a **lambda or method reference is the command**:
+`executor.submit(() -> report.generate())`. You still write a named `Command` class when
+you need state beyond the action itself (an `undo()`, a label, serialization for
+replay/audit) — a lambda can't carry an undo counterpart cleanly.
 
 ---
 
@@ -384,7 +543,7 @@ streams instead.
 
 **Gotchas.** Notifying while iterating can throw `ConcurrentModificationException` if an
 observer unsubscribes during notification — hence `CopyOnWriteArrayList`. Strong references
-to observers cause **lister leaks** (memory leaks); consider weak references or explicit
+to observers cause **listener leaks** (memory leaks); consider weak references or explicit
 unsubscription. Synchronous notification means a slow observer blocks the subject.
 
 ---
@@ -419,6 +578,66 @@ subclasses can't break the invariant sequence.
 fixed structure, override protected steps); Strategy uses **composition** (runtime-
 swappable whole algorithm). Spring's `*Template` classes combine both: a template method
 skeleton that takes a strategy callback (often a lambda since Java 8).
+
+---
+
+## Visitor pattern
+
+**Definition (beginner).** Visitor lets you add new operations over a **fixed** hierarchy
+of types *without* modifying those types. You move the operation out into a separate
+"visitor" object that has one `visit(...)` method per concrete type; each element exposes
+an `accept(visitor)` method that calls back the matching `visit`.
+
+**Why it exists — the "expression problem."** OO code makes adding new *types* easy (add
+a subclass) but adding a new *operation* hard (edit every class). Visitor flips that: with
+a stable set of types (say `Circle`, `Square`), you can add operation after operation
+(area, render, serialize) each as a new visitor class, never touching the shapes.
+
+**Double dispatch — the mechanics.** Java only dispatches on the *receiver's* runtime type
+(single dispatch). Visitor fakes a second dispatch on the *argument's* type using two
+chained calls:
+
+```java
+interface Shape { <R> R accept(Visitor<R> v); }
+class Circle implements Shape { double r;
+    public <R> R accept(Visitor<R> v) { return v.visit(this); } }   // 1st dispatch: picks Circle
+class Square implements Shape { double side;
+    public <R> R accept(Visitor<R> v) { return v.visit(this); } }
+
+interface Visitor<R> { R visit(Circle c); R visit(Square s); }      // 2nd dispatch: overload on type
+class AreaVisitor implements Visitor<Double> {
+    public Double visit(Circle c) { return Math.PI * c.r * c.r; }
+    public Double visit(Square s) { return s.side * s.side; }
+}
+```
+
+`shape.accept(new AreaVisitor())` dispatches (1) on `shape`'s runtime type to the right
+`accept`, which then calls (2) the `visit` overload for that concrete type — so a `Circle`
+lands in `visit(Circle)`. To add a *perimeter* operation you write a new `PerimeterVisitor`
+and touch none of the shapes.
+
+**Modern Java replacement (JDK 17 sealed + JDK 21 pattern-matching switch).** The whole
+`accept`/`visit` ceremony existed only to route on the runtime type safely. If the
+hierarchy is **`sealed`**, the compiler knows all subtypes, so a `switch` with type
+patterns is exhaustive and type-safe — no visitor plumbing:
+
+```java
+sealed interface Shape permits Circle, Square {}
+record Circle(double r) implements Shape {}
+record Square(double side) implements Shape {}
+
+double area(Shape s) {
+    return switch (s) {                              // exhaustive: compiler checks all permits
+        case Circle c -> Math.PI * c.r() * c.r();
+        case Square q -> q.side() * q.side();
+    };
+}
+```
+
+Adding a new operation is just a new method with a new `switch`; adding a new type is a new
+`permits` entry, and every non-exhaustive switch then **fails to compile** — pointing you
+at exactly the operations to update. That compile-time safety is why sealed + pattern
+matching has largely displaced hand-written Visitor in modern Java.
 
 ---
 

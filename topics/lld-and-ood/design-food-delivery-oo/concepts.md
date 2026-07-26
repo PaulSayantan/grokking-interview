@@ -66,6 +66,13 @@ Walk the nouns and give each one job:
 | `OrderObserver` / `NotificationService` | Subscribers notified on every order state change |
 | `Rating` | Score + review, targeting a restaurant or a delivery partner |
 | `Location` | Value object (lat, lng) with `distanceTo()` |
+| `Money` | Immutable value object wrapping `amount` + `currency` |
+
+A quick senior signal on `Money`: prices are `Money`, never `double`. Floating-point
+can't represent `0.10` exactly, so `0.1 + 0.2 == 0.30000000000000004` — cent-level drift
+that's unacceptable on a bill. `Money` wraps a `BigDecimal` (or integer minor units, e.g.
+cents) plus a currency, is immutable, and does arithmetic without rounding surprises;
+mentioning it unprompted reads as production experience.
 
 Three modeling decisions matter more than everything else:
 
@@ -283,6 +290,28 @@ public class NearestPartnerStrategy implements PartnerAssignmentStrategy {
 - `RatingWeightedStrategy` — composite score, e.g.
   `score = w1·distance + w2·load − w3·rating` (what real systems converge to).
 
+**Worked example — how the composite score actually picks a winner.** The sign
+convention is the trick: distance and load are *penalties* (added, so bigger = worse),
+rating is a *reward* (subtracted, so bigger = better). The formula therefore produces a
+number to **minimize** — same direction as `NearestPartnerStrategy`, which minimizes raw
+distance. Take three available partners and weights `w1=1.0`, `w2=2.0`, `w3=3.0` (ops has
+decided load matters more than distance, and a good rating matters most of all):
+
+| Partner | distance (km) | active orders | rating | score = 1.0·d + 2.0·load − 3.0·rating |
+|---|---|---|---|---|
+| A | 2.0 | 3 | 4.8 | 2.0 + 6.0 − 14.4 = **−6.4** |
+| B | 4.0 | 1 | 4.5 | 4.0 + 2.0 − 13.5 = **−7.5** |
+| C | 1.0 | 4 | 4.0 | 1.0 + 8.0 − 12.0 = **−3.0** |
+
+Lowest score wins → **B (−7.5)**. Note what the weights bought: C is *nearest* (1 km) but
+loses because four active orders cost `2.0·4 = 8` and its mediocre 4.0 rating only claws
+back 12 — so `NearestPartnerStrategy` would have picked C, and `LeastLoadedStrategy` would
+also pick B (1 order). The composite lands on B because the heavy load weight plus the
+subtracted rating outweigh B's extra 3 km. Retune the weights and the winner moves — which
+is exactly why this lives behind a swappable Strategy, not an `if`-chain. (Real systems
+normalize each term to a comparable 0–1 range first so km, order-counts, and stars don't
+fight on raw scale; the sign convention above is the part interviewers actually probe.)
+
 Why Strategy and not a conditional? Each rule is independently unit-testable, new rules
 are **added** without touching (or re-testing) the dispatcher — Open/Closed — and the
 service depends only on the interface (DIP). A `CompositeStrategy` that chains fallbacks
@@ -452,15 +481,27 @@ public class FoodDeliveryService {
 
         Order order = new Order(newId(), cart.getCustomer(),
                                 cart.getRestaurant(), snapshot, payment);
-        registerDefaultObservers(order);                      // customer, restaurant, partner, analytics
+        registerDefaultObservers(order);                      // customer, restaurant, analytics; partner is wired later in assignPartner (no partner exists yet)
         cart.clear();
         return order;
     }
 
     public Optional<DeliveryPartner> assignPartner(String orderId) {
         Order order = orders.get(orderId);
-        return assignment.assign(order, partnerPool.availablePartners())
-                         .map(p -> { p.acceptOrder(order); order.setPartner(p); return p; });
+        // Retry loop: the strategy proposes a candidate, but the *claim* must be atomic
+        // (see Concurrency) — the loser of a race just asks for the next candidate.
+        while (true) {
+            Optional<DeliveryPartner> candidate =
+                assignment.assign(order, partnerPool.availablePartners());
+            if (candidate.isEmpty()) return Optional.empty();   // nobody free — wait/queue
+            DeliveryPartner p = candidate.get();
+            if (p.tryAcceptOrder(order)) {                      // atomic CAS on availability
+                order.setPartner(p);
+                order.addObserver(new PartnerNotifier(p));      // partner exists now — safe to wire
+                return Optional.of(p);
+            }
+            // else: lost the race for p, loop and let the strategy pick another
+        }
     }
 }
 ```
@@ -468,7 +509,11 @@ public class FoodDeliveryService {
 Notes to narrate while writing it: the transition map makes illegal moves impossible by
 construction; `transitionTo` is the *only* mutator of `status`, so observers can never
 be skipped; `PaymentFactory` + `Payment` keeps checkout closed against new payment
-types; the strategy is constructor-injected, so tests pass a `FakeStrategy`.
+types; the strategy is constructor-injected, so tests pass a `FakeStrategy`. Note the
+observer wiring is split by *when the participant exists*: the customer, restaurant, and
+analytics observers are registered at order creation, but the partner observer is added
+inside `assignPartner` only once a partner has been claimed — registering it earlier
+would give it no partner to notify.
 
 ## Concurrency and Edge Cases
 
@@ -486,6 +531,51 @@ Single-process, multi-threaded — call these before the interviewer does:
   the *current* state, exactly one wins: if `PICKED_UP` lands first, the cancel throws
   `IllegalStateTransitionException`; if the cancel lands first, the pickup fails. The
   state machine *is* the concurrency guard — this is why booleans lose.
+
+**Traced interleaving — double-assignment race.** Partner P has `available=true`. Order 1
+(Thread A) and Order 2 (Thread B) both call `assignPartner`; the strategy hands both the
+same P. Without the atomic claim, the naive `p.available = false; order.setPartner(p)`
+interleaves like this:
+
+| step | Thread A (Order 1) | Thread B (Order 2) | P.available |
+|---|---|---|---|
+| 1 | reads `available == true` ✓ | | true |
+| 2 | | reads `available == true` ✓ | true |
+| 3 | sets `available = false`, `order1.partner = P` | | false |
+| 4 | | sets `available = false`, `order2.partner = P` | false |
+
+Both orders end up assigned to P — the check at steps 1–2 both passed before either write.
+The fix collapses read+write into one atomic step. `tryAcceptOrder` re-checks *inside* the
+lock (`synchronized`, or `available.compareAndSet(true, false)`):
+
+| step | Thread A | Thread B | P.available |
+|---|---|---|---|
+| 1 | `tryAcceptOrder`: CAS(true→false) **succeeds**, returns true | | false |
+| 2 | `order1.setPartner(P)`, done | | false |
+| 3 | | `tryAcceptOrder`: CAS(true→false) **fails** (already false), returns false | false |
+| 4 | | loops, strategy picks next candidate (P is filtered out — not available) | false |
+
+Exactly one order claims P; the loser (B) retries the next partner. That is the retry loop
+in the `assignPartner` skeleton above.
+
+**Traced interleaving — cancel-vs-pickup race.** Order is in `PREPARING`. Customer cancels
+(Thread A calls `transitionTo(CANCELLED)`) while the partner marks pickup (Thread B calls
+`transitionTo(PICKED_UP)`). Both are valid moves *from `PREPARING`* — but `transitionTo` is
+`synchronized` per order, so they serialize and each validates against the state it *actually*
+observes:
+
+| step | Thread A: `transitionTo(CANCELLED)` | Thread B: `transitionTo(PICKED_UP)` | status |
+|---|---|---|---|
+| 1 | acquires order lock | blocks on lock | PREPARING |
+| 2 | `PREPARING.canTransitionTo(CANCELLED)` → true; sets `CANCELLED`, fires observers, releases lock | (still blocked) | CANCELLED |
+| 3 | | acquires lock; `CANCELLED.canTransitionTo(PICKED_UP)` → **false** | CANCELLED |
+| 4 | | throws `IllegalStateTransitionException`; refund already correct | CANCELLED |
+
+Reverse the lock-acquisition order and pickup wins instead: status becomes `PICKED_UP`, and
+the customer's cancel then throws because `PICKED_UP` has no edge to `CANCELLED`. Either way
+*exactly one commits* and the food-already-left-the-kitchen invariant holds — no extra flag,
+no separate lock, the guarded state machine does it.
+
 - **Menu edit vs. open carts.** Owner raises a price or 86's an item while it sits in
   carts. Cart references live items, so re-validate price and availability at
   `placeOrder` and fail with a clear "cart changed" error — the `OrderItem` snapshot
@@ -501,6 +591,13 @@ Single-process, multi-threaded — call these before the interviewer does:
   per order — the check belongs in the rating service, keyed by order id.
 - **Restaurant closes with orders in flight:** closing stops *new* carts/orders; in-
   flight orders complete. Open/closed is checked at `placeOrder`, not retroactively.
+- **Where carts and orders live.** The `carts.get(customerId)` / `orders.get(orderId)`
+  lookups in the skeleton are `ConcurrentHashMap`s keyed by id — one cart per customer,
+  one lookup per order. The cart itself is concurrent too: the same customer on phone and
+  laptop mutates one cart. Scope it per-customer and keep mutations cheap — last-write-wins
+  on `addItem`/`removeItem` is usually fine, or a lightweight per-cart lock if you need
+  add-remove atomicity. Unlike partner assignment, a lost cart update just re-adds an item;
+  it can't double-book a resource, so it doesn't need the atomic-claim machinery.
 
 ## Extensibility
 

@@ -36,6 +36,19 @@ write latency:
 - **S3, DynamoDB, SQS, Lambda** are regional services that are already multi-AZ
   internally — you get AZ resilience for free.
 
+**Why 6 copies / 3 AZs survives an AZ loss — the quorum arithmetic.** Aurora stores
+`N = 6` copies (2 per AZ across 3 AZs) and uses a **write quorum of 4/6** and a **read
+quorum of 3/6**. Two rules make this work:
+
+- **Writes survive a full AZ loss.** Lose an AZ → lose 2 copies → 4 remain, which exactly
+  meets the 4/6 write quorum, so writes keep flowing with zero availability loss.
+- **Reads survive AZ + 1.** Lose an AZ (2 copies) *and* one more copy → 3 remain, exactly
+  the 3/6 read quorum, so reads still succeed.
+- **Why 4 and 3 (not 3 and 3)?** `W + R = 4 + 3 = 7 > 6 = N`, so any read set of 3 always
+  overlaps a write set of 4 by at least one copy — a read is guaranteed to see the latest
+  acknowledged write. Bumping the write quorum to 4 is what buys "survive an AZ with writes
+  still up."
+
 ```
         Region (us-east-1)
   +-----------------------------------+
@@ -81,6 +94,26 @@ is 4 hours) wastes money; under-engineering fails the audit or the outage.
 Adding a hard dependency on a lower-availability component (e.g. a control-plane API in
 your failover path) *caps* your achievable availability at that component's number. This
 is the core argument for **static stability** (below).
+
+**Worked example — walk the numbers.** Take a request path `ALB → app → RDS`, each
+component 99.9% (three nines):
+
+- **Serial chain (no redundancy).** They multiply: `0.999 × 0.999 × 0.999 = 0.999³ =
+  0.99700`. That is **99.70%**, i.e. `(1 − 0.99700) × 8760 h = 0.00300 × 8760 ≈ 26.3
+  h/year` of downtime — *worse* than any single component, because a failure of any one
+  takes the path down.
+- **Put the app tier in parallel across 2 AZs.** Two 99.9% instances behind the ALB fail
+  the tier only if *both* are down: `1 − (1 − 0.999)² = 1 − (0.001)² = 1 − 0.000001 =
+  0.999999` → **99.9999% (six nines)** for that tier alone. The path becomes `0.999
+  (ALB) × 0.999999 (app) × 0.999 (RDS) = 0.99800` → **99.80%**, ≈ `0.00200 × 8760 ≈ 17.5
+  h/year`. Redundancy on one tier bought back ~9 h/yr; the remaining loss is now dominated
+  by the still-serial ALB and RDS.
+- **Now add a hard dependency on a control-plane API in the failover path.** Suppose
+  reaching "recovered" requires a control-plane call that is itself 99.9%. It multiplies in:
+  even a beautifully redundant path is dragged back to *at most* `… × 0.999`, so the whole
+  thing is **capped at 99.9%** (≈ 8.8 h/year) no matter how many nines you built elsewhere.
+  That is the concrete case for **static stability**: don't put a lower-availability
+  control-plane call on the critical recovery path — it becomes the ceiling.
 
 **Trade-off:** each extra nine costs disproportionately more (redundancy, testing,
 multi-Region). Know the target before choosing a strategy.
@@ -185,6 +218,24 @@ but recovers faster and is continuously validated. Pick when RTO must be minutes
 want lower failover risk than pilot light. If you're going to run a full-capacity fleet
 anyway (**hot standby**), most teams make it active/active to actually use it.
 
+**Worked example — trace the same Region-loss failover, second by second.** Primary Region
+goes dark at **T+0**. Watch where the minutes actually go:
+
+| Step | Pilot light | Warm standby |
+|---|---|---|
+| Detect + decide (health checks flip, alarm) | +30 s → `0:30` | +30 s → `0:30` |
+| **Launch compute** (control-plane `RunInstances`, boot AMIs, register targets) | +8 min → `8:30` | *skipped* — fleet already running |
+| Scale up to full capacity | *(part of launch)* | +2 min → `2:30` |
+| Promote DB / already writable | +1 min → `9:30` | +1 min → `3:30` |
+| DNS/traffic shift (60 s TTL) | +1 min → `~10:30` | +1 min → `~4:30` |
+| **Total RTO** | **≈ 10 min** | **≈ 4 min** |
+
+The whole gap is that one row: pilot light pays a ~8-minute **control-plane launch** step
+(cold compute has to be created and booted from zero) that warm standby skips because its
+scaled-down fleet is *already running and already in the load balancer*. Warm standby only
+has to grow an existing fleet, not create one — and that launch step is also the *riskiest*
+one during a real Regional event, because control-plane APIs are the first thing to degrade.
+
 ---
 
 ## Multi-site active-active and hot standby
@@ -280,6 +331,23 @@ by **last-writer-wins (LWW)** using a reconciliation timestamp.
   strongly consistent cross-Region read** — you can read stale data that hasn't replicated
   yet.
 
+**Worked example — how LWW silently loses an update.** Account balance starts at **100**,
+replicated to Region A and Region B. Two concurrent `+10` / `+5` operations land before
+replication catches up:
+
+- `t1`: Region A reads 100, writes **balance = 110** (its `+10`), timestamp `t1`.
+- `t2 > t1`: Region B (still seeing the un-replicated 100) reads 100, writes **balance =
+  105** (its `+5`), timestamp `t2`.
+- Replication reconciles: LWW keeps the write with the **larger timestamp** → `t2` wins →
+  **balance = 105**. A's `+10` is **silently discarded**. The correct answer (115) is
+  reachable by *neither* Region.
+
+That is why **counters/increments are unsafe** under LWW: read-modify-write races don't
+merge, they overwrite. The fixes: **conditional writes** (`ConditionExpression` so B's
+write fails if the value changed), **write-partition by account** (all writes for one
+account routed to one Region so there's no concurrency), or a **single-writer ledger**
+(Aurora) that serializes the two increments to 115.
+
 **Trade-off:** unmatched for low-latency global writes and Region-loss resilience with
 near-zero RTO, but you **give up cross-Region consistency** and must design for LWW
 semantics (concurrent updates to the same item in two Regions → one silently wins;
@@ -363,6 +431,15 @@ alarms, and can be *calculated* (parent/child). DNS failover is a **data-plane**
 and thus highly reliable. Caveat: **DNS TTL caching** and client/resolver non-compliance
 mean DNS-based failover is not instantaneous — clients may keep hitting the old endpoint
 until TTL expires (set low TTLs, e.g. 60 s, on failover records; accept some tail).
+
+**Concrete tail.** With a 60 s TTL, a well-behaved resolver that cached the record 40 s ago
+keeps sending clients to the *dead* endpoint for up to another ~20 s after the health check
+flips. But the tail is worse than one TTL in practice: resolvers that ignore low TTLs (some
+ISP/corporate caches pin to minutes), plus **long-lived TCP connections** that never re-
+resolve until they drop, mean a residual fraction of traffic keeps hitting the failed Region
+for **minutes**. **Global Accelerator** sidesteps this: clients connect to fixed **anycast
+IPs**, and the flip happens *at the AWS edge* on the next packet — there is no client-side
+DNS cache in the path to wait out, so failover is near-immediate.
 
 **Trade-off vs Global Accelerator:** Route 53 is DNS (subject to TTL/caching) but supports
 rich policies (latency/geo). **Global Accelerator** uses **anycast static IPs** on the AWS

@@ -49,12 +49,14 @@ export const DEFAULT_SAMPLE_SIZE = 25;
 
 /** Session presets shown before a quiz starts. */
 export interface SessionPreset {
-  key: "quick" | "focused" | "missed";
+  key: "quick" | "focused" | "missed" | "due";
   label: string;
   /** null => no cap (use the whole matching pool). */
   size: number | null;
   /** true => review-missed mode (filter pool to missed questions). */
   review: boolean;
+  /** true => spaced-repetition mode (filter pool to questions due for review). */
+  due?: boolean;
   /** short helper line under the label. */
   hint: string;
 }
@@ -62,6 +64,7 @@ export interface SessionPreset {
 export const SESSION_PRESETS: SessionPreset[] = [
   { key: "quick", label: "Quick 10", size: 10, review: false, hint: "A fast 10-question warm-up." },
   { key: "focused", label: "Focused 25", size: DEFAULT_SAMPLE_SIZE, review: false, hint: "A full 25-question block." },
+  { key: "due", label: "Due for review", size: null, review: false, due: true, hint: "Spaced repetition — questions due to revisit today." },
   { key: "missed", label: "All missed", size: null, review: true, hint: "Drill only what you got wrong." },
 ];
 

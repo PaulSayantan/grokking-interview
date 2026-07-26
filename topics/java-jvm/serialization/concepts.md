@@ -43,6 +43,34 @@ entire object graph, including cyclic references and shared references, while
 preserving identity within a single stream (the same object written twice is
 stored once via a *back-reference* / handle table).
 
+**Worked example — shared reference preserved.** Suppose two `Team` objects
+point at the *same* `Coach` instance, and we write a list `[teamA, teamB]`:
+
+```java
+Coach c = new Coach("Sam");
+Team a = new Team("Red",  c);
+Team b = new Team("Blue", c);   // same c
+out.writeObject(List.of(a, b));
+```
+
+As `ObjectOutputStream` walks the graph it assigns each new object a handle and
+records it in a table:
+
+| Step | Object written | Handle assigned | Bytes emitted |
+|---|---|---|---|
+| 1 | `teamA`   | `0x7E0000` | full object data |
+| 2 | `coach c` (via teamA) | `0x7E0001` | full object data |
+| 3 | `teamB`   | `0x7E0002` | full object data |
+| 4 | `coach c` (via teamB) | — already seen — | just a **reference** to `0x7E0001` |
+
+On read, step 4 resolves the handle back to the single already-reconstructed
+`Coach`, so `deserialized.get(0).coach == deserialized.get(1).coach` is
+**`true`** — identity is preserved, and only one `Coach` is allocated. The same
+handle mechanism is what lets a *cyclic* graph (A→B→A) deserialize without
+infinite recursion: A's handle is recorded before B is written, so B's link
+back to A becomes a handle reference, not a re-serialization. (Keep this in mind
+for the JSON section below — JSON has no handle table, so it cannot do this.)
+
 **Key rules and gotchas:**
 
 - `writeObject` throws `NotSerializableException` at runtime (not compile time)
@@ -101,6 +129,47 @@ Spec):
 If you keep the same `serialVersionUID` across a *compatible* change, old bytes
 still deserialize; new fields absent from old streams get default values.
 
+**Worked example — evolve a class, read old bytes.** Serialize a v1 object, add
+a field in v2, then read the *old* bytes back:
+
+```java
+// v1 — write this to users.ser
+class User implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String name;                 // "Ada"
+}
+// ... later, v2 of the SAME class (UID kept at 1L) ...
+class User implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private String name;
+    private String email;                // NEW field
+}
+```
+
+Trace of reading the v1 bytes with the v2 class:
+
+1. `ObjectInputStream` reads the stream UID `1L`, compares it to the loaded
+   class UID `1L` → match, so deserialization proceeds.
+2. The stream supplies `name = "Ada"` → assigned.
+3. The stream has **no** `email` field. Adding a field is a *compatible*
+   change, so `email` is simply left at its default → `null`.
+
+Result: `user.name` is `"Ada"`, `user.email` is `null`. No exception.
+
+Now the failure case — the SAME edit but with `serialVersionUID` **not**
+declared. The runtime computes it from class structure (a SHA hash of fields +
+methods). v1's implicit UID is derived from `{name}`; v2's from `{name, email}`,
+so the two hashes differ. Reading v1 bytes with the v2 class now throws:
+
+```
+java.io.InvalidClassException: User; local class incompatible:
+  stream classdesc serialVersionUID = 7854123... ,
+  local class serialVersionUID = -3092811...
+```
+
+That mismatch — from a change the spec calls *compatible* — is exactly the
+brittleness that declaring an explicit UID prevents.
+
 ---
 
 ## transient and custom writeObject and readObject
@@ -132,8 +201,14 @@ Other hooks:
   `this` (e.g., a compact serialization proxy). Can be `private` and is found
   via inheritance.
 - `readResolve()` — returns the object that replaces the freshly deserialized
-  one. **Essential for singletons and enums** to preserve the single-instance
+  one. **Essential for class-based singletons** to preserve the single-instance
   invariant, because deserialization otherwise creates a brand-new instance.
+  Note that **enums do *not* rely on `readResolve`**: the JVM serializes an enum
+  constant specially — by its `name()` only — and reconstructs it via
+  `Enum.valueOf`, ignoring `writeObject`/`readObject`/`readResolve` entirely.
+  The single-instance guarantee therefore comes for free, which is exactly why
+  *Effective Java* (Items 3 and 89) recommends the enum singleton over a
+  class-plus-`readResolve` idiom.
 - `readObjectNoData()` — called when the stream lacks data for a superclass
   (e.g., receiver added a superclass the sender didn't have).
 - `ObjectInputValidation` + `registerValidation` — post-deserialization
@@ -157,10 +232,62 @@ deserialization (via `readObject`/`readResolve`/finalizers). Attackers craft
 *gadget chains* (e.g., from Apache Commons Collections) that lead to remote
 code execution, DoS (billion-laughs style nested objects), or resource
 exhaustion. This class of bug (CWE-502) has produced many high-severity CVEs.
-The rule: **never deserialize data from an untrusted source with native Java
-serialization.** JDK 9+ added `ObjectInputFilter` (JEP 290) to allow-list
-classes and cap depth/array size; JDK 17 (JEP 415) added context-specific
-filter factories. These mitigate but do not eliminate the risk.
+
+**Walk through the attack (the classic interview question).** The key insight:
+`ObjectInputStream` reconstructs *whatever classes the byte stream names* — the
+stream, not your code, decides which classes get instantiated and which
+`readObject`/`hashCode`/`equals` methods run.
+
+1. **The stream drives class selection.** Each object in the stream carries a
+   class descriptor. `ObjectInputStream` loads that class and, if it defines a
+   private `readObject`, calls it. You have no say over which classes appear —
+   even if your call site is `in.readObject()` expecting a `User`, the attacker
+   can put a `HashMap` (or anything else on the classpath) at the top of the
+   stream, and it gets built first.
+2. **A "gadget" is an already-present class whose deserialization does something
+   useful to the attacker.** Nobody adds malicious code — the attacker reuses
+   methods in libraries you already depend on. Apache Commons Collections'
+   `InvokerTransformer` is the canonical one: given a method name and args, it
+   reflectively invokes that method on any object handed to it.
+3. **Chain the gadgets.** A crafted `HashMap` whose key is a
+   `TiedMapEntry`/`LazyMap` wrapping a `ChainedTransformer` is the payload. When
+   the `HashMap` deserializes it calls `hashCode()` on its key, which forces the
+   lazy map to compute a value, which fires the transformer chain:
+   `Class.forName("java.lang.Runtime")` → `getMethod("getRuntime")` →
+   `invoke(...)` → `exec("calc.exe")`. The victim never called any of this — it
+   all fell out of `readObject`.
+4. **Why a fixed target type does NOT save you.** `mapper.readValue(json,
+   User.class)` (Jackson data-binding) is safe because the parser only ever
+   populates a `User`. But `ObjectInputStream.readObject()` *ignores* your
+   intended type — the cast to `User` happens only *after* the whole malicious
+   graph has already been built and its gadget methods have already run. By the
+   time you'd get a `ClassCastException`, the command has executed.
+
+**Mitigation — `ObjectInputFilter` (JEP 290):**
+
+```java
+var in = new ObjectInputStream(bytes);
+in.setObjectInputFilter(ObjectInputFilter.Config.createFilter(
+    "com.myapp.dto.*;java.base/*;!*"));   // allow my DTOs + JDK base, reject all else
+```
+
+The filter runs *before* each class is resolved, so a rejected class never gets
+instantiated (no gadget fires). You can also cap `maxdepth`, `maxarray`, and
+`maxrefs` to stop billion-laughs DoS payloads.
+
+**Its limits:** an allow-list is only as good as the list — if a gadget class is
+inside an allowed package, it still fires. And any legitimately *polymorphic*
+entry point (a field typed `Object`, or default-typing in Jackson) reopens the
+hole because you cannot enumerate safe classes in advance. Filters mitigate;
+they do not eliminate. The real rule: **never deserialize data from an untrusted
+source with native Java serialization.** JDK 17 (JEP 415) added context-specific
+filter factories for per-stream policies, but the guidance is unchanged.
+
+> [!INTERVIEW]
+> If asked "but I only ever read a `User`, why am I exposed?" — the answer that
+> lands is: `ObjectInputStream` builds the graph the *bytes* describe and runs
+> gadget code *during* construction; your declared type is checked only after,
+> too late. That is the distinction from Jackson's `readValue(json, User.class)`.
 
 **2. Brittleness / maintenance burden.** The serialized form becomes part of
 your public API. Private field names and types leak into the wire format, so
@@ -258,6 +385,38 @@ Plain data-binding to a fixed target class is safe.
 be ignored, missing fields default, and field renames are handled with
 `@JsonProperty` or `@JsonAlias`.
 
+**Gotcha — JSON has no object-identity or cycle model.** Recall that native
+serialization's handle table let a shared/cyclic graph round-trip cleanly. JSON
+is a plain tree: there is no back-reference, so a **bidirectional relationship
+blows up**. Take a `Parent` with a `List<Child>` and each `Child` with a
+`parent` back-pointer:
+
+```java
+class Parent { List<Child> children; }
+class Child  { Parent parent; }   // points back to its Parent
+```
+
+Serializing the parent, Jackson recurses `parent → children[0] → parent →
+children[0] → parent → …` and never terminates → `StackOverflowError` (wrapped
+as `JsonMappingException: Infinite recursion`). This is a classic "we migrated
+JPA entities from native serialization to JSON and everything broke" bug.
+
+Fixes:
+
+- `@JsonManagedReference` on the forward side (`children`) +
+  `@JsonBackReference` on the back side (`parent`) — the back side is simply
+  omitted from output and re-linked on read.
+- `@JsonIdentityInfo(...)` — emits an `@id` for each object and a numeric
+  reference on repeats, re-introducing an identity/handle model on top of JSON
+  (the closest analogue to the native back-reference table).
+
+Related gotcha — **"ghost" properties from getters.** Jackson infers a property
+from any public `getXxx()`, not just fields. A `boolean isAdmin()` or a computed
+`getFullName()` will appear in the JSON even though there is no such field; use
+`@JsonIgnore` to suppress it. For safe polymorphism, prefer explicit
+`@JsonTypeInfo` + `@JsonSubTypes` (a closed set of named subtypes) over the
+class-name-embedding *default typing* that caused the CVEs above.
+
 ---
 
 ## Records and serialization
@@ -325,6 +484,16 @@ class Period implements Serializable {
 }
 ```
 
+The round-trip: `writeReplace` swaps the real object for the proxy on the way
+out, and `readResolve` rebuilds the real object *through its constructor* on the
+way in — so the direct `readObject` path is never taken:
+
+```
+WRITE:  Period ──writeReplace()──▶ SerializationProxy ──▶ bytes
+READ:   bytes ──▶ SerializationProxy ──readResolve()──▶ new Period(start,end)
+                                                          (constructor + validation run)
+```
+
 Benefits: constructors/validation run on read (no invariant bypass), `final`
 fields work, and attackers cannot fabricate an invalid object graph. Records
 achieve the same guarantee automatically.
@@ -348,6 +517,31 @@ controlled versioning.
 - No arbitrary code execution on parse then far safer than native
   serialization.
 - Trade-off: not human-readable, needs the schema and codegen build step.
+
+**Apache Avro:**
+
+- Schema is defined in JSON. The distinctive feature is **schema-on-read with
+  writer/reader schema resolution**: the schema that *wrote* the data and the
+  schema the *reader* expects are both known, and Avro resolves differences
+  (added fields with defaults, dropped fields, reordered fields) at read time.
+- **No per-field tag numbers** — fields are matched by name during resolution,
+  unlike protobuf's stable numeric tags. This makes the *schema itself* the
+  contract, so the writer schema must travel with the data or be fetched.
+- In practice the schema lives in a **schema registry** (e.g., Confluent Schema
+  Registry). Each Kafka message carries a small schema ID; consumers fetch the
+  writer schema by ID and resolve against their reader schema. This is why Avro
+  dominates Kafka/big-data pipelines: millions of records need not each embed a
+  full schema, yet schemas can still evolve independently per producer/consumer.
+
+**Reasoned protobuf-vs-Avro trade-off:** reach for **protobuf** when you have
+RPC/gRPC service contracts with generated stubs and want a compact wire format
+whose compatibility is guaranteed by immutable field numbers — the schema is
+baked into codegen on both sides. Reach for **Avro** when you have data *at
+rest* or streaming (Kafka, Hadoop, data lakes) where schemas evolve often and
+producers/consumers deploy independently — the registry + writer/reader
+resolution lets a new producer schema flow to old consumers without a lockstep
+redeploy. Rough rule: protobuf for *messages between services*, Avro for
+*records in a pipeline*.
 
 **Comparison table:**
 
@@ -374,8 +568,9 @@ serialization for essentially nothing new.
 - Does the constructor run during deserialization? For `Serializable`? For
   `Externalizable`? For a record?
 - How do records change the safety story of serialization?
-- Difference between `writeReplace`/`readResolve` and why enums/singletons rely
-  on `readResolve`.
+- Difference between `writeReplace`/`readResolve` and why *class-based*
+  singletons rely on `readResolve` — while enums do not (they serialize by name
+  and get the single-instance guarantee for free).
 - When would you choose `Externalizable` over `Serializable`? Is it worth it?
 - How does Jackson deserialize without `Serializable`? What does it need
   (constructor, setters, annotations)?

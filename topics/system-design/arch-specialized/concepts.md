@@ -67,6 +67,14 @@ image/signal interpretation, symbolic AI planning, and protein-structure predict
 the solution must be **assembled opportunistically** from many independent specialist
 contributions rather than computed by one procedure.
 
+**Intuition first.** Picture a group of specialists standing around a physical whiteboard.
+Nobody knows the full answer alone. Each one watches the board, and the moment they see
+something they recognize they step up and add their piece — a phonetics expert scribbles
+sounds, a vocabulary expert turns sounds into candidate words, a grammar expert crosses out
+words that can't fit. A moderator (the scheduler) decides who writes next based on what looks
+most promising. That is Blackboard: not a fixed pipeline, but *opportunistic* assembly where
+whoever can contribute most, given the current board, goes next.
+
 **How it works / key components.** Three parts (from POSA vol. 1, origin: the Hearsay-II
 speech system):
 
@@ -90,6 +98,25 @@ flowchart TB
   CTRL -->|"selects next KS to run"| BB
   BB -->|"current state drives choice"| CTRL
 ```
+
+**Worked example — Hearsay-II style speech recognition, board state evolving.** Input: a
+noisy audio clip of someone saying *"the cat"*. Watch the blackboard's hypotheses and their
+confidence scores change as the scheduler picks KSs:
+
+| Step | Scheduler picks | Reads from board | Writes to board (hypothesis @ confidence) |
+|---|---|---|---|
+| 1 | Phoneme KS | raw audio segment | `/k/ @0.55`, `/g/ @0.45` (ambiguous stop consonant) |
+| 2 | Phoneme KS | next segment | `/æ/ @0.8`, `/t/ @0.7` |
+| 3 | Word KS | `/k/ /æ/ /t/` | candidate words `"cat" @0.6`, `"gat" @0.3` |
+| 4 | Grammar/semantics KS | `"cat" @0.6`, prior word `"the" @0.9` | `"the cat" @0.85` (article+noun is grammatical → **boost**); prunes `"gat"` (not a word → confidence → 0) |
+| 5 | Control checks threshold | `"the cat" @0.85` ≥ accept-threshold 0.8 | **stop** — emit `"the cat"` |
+
+The key things to notice: (1) no fixed order — the scheduler chose Phoneme twice, then Word,
+then Grammar, *because* that was where the most promising partial evidence sat; (2) the
+grammar KS *raised* `"cat"` from 0.6 to 0.85 by combining it with a neighbor and *pruned* the
+dead `"gat"` branch — contributions are opportunistic corrections, not a one-way pipe; (3)
+the same run on cleaner audio might never fire the grammar KS at all. That non-determinism is
+exactly why Blackboard is powerful for fuzzy domains and hard to test.
 
 **Trade-offs.**
 
@@ -148,6 +175,30 @@ flowchart LR
   R1 -. "promote on failure" .-> P
 ```
 
+**Worked example 1 — read-scaling math.** Say one node can serve **3,000 reads/s** before
+CPU saturates, and your workload is **10,000 reads/s + 500 writes/s**. A single node can't do
+10,000 reads. With **1 primary + 4 replicas**: all 500 writes/s go to the primary (still well
+under its 3,000 ceiling), and the 10,000 reads/s fan out across the **4 replicas** →
+2,500 reads/s each, under the 3,000 ceiling. It fits. Note what did *not* change: write
+capacity is still capped at one node (~3,000 writes/s here) — the 4 replicas add
+`4 × 3,000 = 12,000 reads/s` of read capacity (**4× a single node**) and **zero** write
+headroom. That is the whole trade in one calculation: replicas scale reads, never writes.
+
+**Worked example 2 — a read-your-writes anomaly, traced on the clock.** Replication is
+**async** with ~200 ms lag. A user updates their profile:
+
+- **t = 0 ms** — client sends `UPDATE name='Alice'` → **primary** commits it. Primary now has `Alice`.
+- **t = 0 ms** — primary begins streaming the change to replicas (async: it does *not* wait).
+- **t = 100 ms** — same client immediately reloads the page → read is routed to **Replica 2**.
+- **t = 100 ms** — Replica 2 has not yet applied the change (it arrives at ~t = 200 ms), so it returns the **old** name `Bob`.
+- **User sees their own just-saved change *missing*** — the classic read-your-writes violation.
+- **t = 200 ms** — the change lands on the replicas; a read now would return `Alice`, but the damage (a confused user) is already done.
+
+**Fix (the senior follow-up):** for N seconds after a write, route *that* client's reads to
+the **primary** (read-your-own-writes / session consistency), or have the client remember the
+write's log position (LSN) and only read from a replica whose applied-LSN ≥ that watermark
+(monotonic reads). See the gotchas below for split-brain and fencing.
+
 **Trade-offs.**
 
 - **Pros:** horizontal **read scaling**; **redundancy / failover** for availability; simple
@@ -172,6 +223,21 @@ not *data replicas*. Versus **sharding**: sharding splits the dataset across pri
 write scale; Primary-Replica copies the *same* data for read scale/HA — the two are
 combined in practice.
 
+**Gotchas / senior follow-ups.**
+
+- **"How do you avoid two primaries after a network partition?"** The failure mode is
+  **split-brain**: the orchestrator thinks the primary died and promotes a replica, but the
+  old primary is only *unreachable*, still alive and still accepting writes → two primaries
+  diverge. Prevent it with **fencing**: issue a monotonically increasing **fencing token** on
+  each promotion and have the storage/downstream reject writes carrying a stale token; or
+  **STONITH** ("shoot the other node in the head") — power-off/network-isolate the old
+  primary before promotion completes. Requiring a **quorum** to elect a primary also stops a
+  minority partition from promoting.
+- **"How do you give a client read-your-writes despite async lag?"** Route that client's
+  reads to the primary for a short window after its write, use **monotonic-read / session
+  consistency**, or gate replica reads on a **replica-LSN watermark** ≥ the write's position
+  (both shown in worked example 2 above).
+
 *Deep dive: see `databases-sql-nosql-sharding-replication` for replication internals
 (sync/async/semi-sync, quorum reads/writes, sharding, split-brain, failover mechanics).*
 
@@ -183,6 +249,14 @@ combined in practice.
 each other's location, transport, or platform**. You want **location transparency** and
 decoupling so services can be added, moved, replaced, or scaled at runtime without clients
 being rewritten.
+
+**Intuition first.** Think of an old **telephone switchboard operator**. You don't dial a
+physical wire; you ask for "the sales desk" and the operator finds whichever line sales is on
+right now and connects you. Sales can move desks, hire a second line, or go on break — you
+never learn or care about the number. The **broker** is that operator. The **stub** is the
+handset you speak into on your side; the **skeleton** is the handset ringing on theirs;
+**marshalling** is turning your spoken words into signals on the wire and back. Location
+transparency = you dial a *name*, not a *number*.
 
 **How it works / key components.** A central **Broker** mediates communication between
 clients and servers. Servers **register** their capabilities and endpoints with the broker.
@@ -259,6 +333,15 @@ consistent hashing for structured lookup, or **gossip** for membership and state
 dissemination. Global agreement (where needed) uses **consensus** protocols. Nodes joining
 or leaving trigger rebalancing of key ranges/partitions.
 
+**How a DHT lookup actually finds a key (two-line intuition).** Both keys *and* nodes are
+hashed onto the **same circular id space** (a consistent-hashing ring). A key is owned by the
+first node **clockwise** from the key's hash. To find it, a peer doesn't scan everyone — each
+node keeps a **routing/finger table** of peers at exponentially increasing distances around
+the ring, so a lookup jumps roughly halfway to the target each hop and lands in **~log(N)
+hops** (e.g. ~20 hops for a million nodes). Concretely: key hashes to position 42; node 40
+isn't responsible, so it forwards toward 42; the next node clockwise is node 45 → node 45
+owns and returns the key.
+
 ```mermaid
 graph TD
   N1["Peer A"] --- N2["Peer B"]
@@ -301,9 +384,9 @@ with fault isolation** — split the work, run identical workers concurrently, a
 their results (MapReduce, render farms, parallel search/simulation, batch ETL).
 
 > [!TIP]
-> This style was historically called *master-worker* in older literature (and the coordinator
-> a "master"); it is a compute-partitioning cousin of Primary-Replica. Use
-> **Master-Worker** / coordinator-worker terminology.
+> The coordinator was historically called the *master*; that word is fine here, but avoid the
+> deprecated *master-slave* framing — say **coordinator/worker** or **Master-Worker**. It is a
+> compute-partitioning cousin of Primary-Replica.
 
 **How it works / key components.** A **coordinator** splits the input into independent
 sub-tasks (shards), dispatches them to a pool of **identical, stateless workers**, monitors
@@ -322,6 +405,23 @@ flowchart TB
   W3 --> AGG
   AGG --> OUT["Final result"]
 ```
+
+**Worked example — why one straggler wrecks a parallel job.** A job is split into **100
+independent shards** run across 100 workers. **99 shards finish in 2 s** each; **1 shard hits
+a slow disk and takes 20 s**. Because the coordinator can only aggregate once *all* shards
+return, **job wall-clock = max(shard times) = 20 s**, not the 2 s the other 99 achieved. So
+even though 99% of the work is done at t = 2 s, the job is **10× slower** than it "should" be
+— the tail dominates. **Fix — speculative (backup) execution:** at, say, t = 5 s the
+coordinator notices shard #100 is far behind its peers and launches a **duplicate copy** on a
+different (healthy) worker; whichever copy finishes first wins, the other is killed. If the
+backup finishes in 2 s, wall-clock drops to ~7 s. This is exactly what MapReduce/Hadoop call
+"speculative execution."
+
+**Amdahl's-law sanity check.** Speed-up is also capped by any *serial* fraction. If 5% of the
+job is inherently serial (e.g. the final aggregation) and 95% parallelizes, then even with
+infinite workers the max speed-up is `1 / 0.05 = 20×` — you can never beat 1/20th of the
+single-threaded time no matter how many workers you add. Parallelism has a ceiling; know it
+before promising "near-linear."
 
 **Trade-offs.**
 

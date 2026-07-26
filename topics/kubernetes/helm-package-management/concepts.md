@@ -148,6 +148,70 @@ Built-in objects you must know:
 > forgetting this produces invalid YAML. `helm template` / `helm install --dry-run` renders
 > locally so you can eyeball the output before touching the cluster.
 
+### Worked example: `nindent` vs a stray-indent bug
+
+Take this values snippet:
+
+```yaml
+# values.yaml
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+```
+
+`toYaml .Values.resources` renders that map back to YAML starting at column 0:
+
+```yaml
+limits:
+  cpu: 500m
+  memory: 512Mi
+```
+
+Now drop it into a container spec where `resources:` sits at 10 spaces and the block must
+sit at 12. The **broken** version uses `indent 12`, which prefixes *every* line (including
+the first) with 12 spaces — but the 12 spaces you already typed before `{{` are still there:
+
+```yaml
+          resources:
+            {{ toYaml .Values.resources | indent 12 }}
+```
+
+renders to (the first line lands at 12 + 12 = 24 spaces; the child lines keep their own 2
+spaces plus 12 = 14):
+
+```yaml
+          resources:
+                        limits:        # 24 spaces — over-indented
+              cpu: 500m                # 14 spaces — now LESS indented than its parent
+              memory: 512Mi            # 14 spaces
+```
+
+`kubectl` rejects that (`error converting YAML to JSON: yaml: line ...: did not find
+expected key`) because `limits:` is indented deeper than its own children. The fix is
+`nindent 12` (newline + indent) together with a `{{-` that trims the whitespace/newline you
+typed before it:
+
+```yaml
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+```
+
+`{{-` eats the newline after `resources:` and the 12 leading spaces; `nindent 12` then
+re-emits one clean newline and prefixes every line with exactly 12 spaces computed from
+scratch:
+
+```yaml
+          resources:
+            limits:            # 12 spaces
+              cpu: 500m        # 14 spaces
+              memory: 512Mi    # 14 spaces
+```
+
+Valid: `limits:` sits one level under `resources:`, its children one level under that. Rule
+of thumb — put the directive on its own line, start it with `{{-`, and use `nindent` (not
+`indent`) so indentation is built fresh rather than stacked on top of what you already typed.
+
 ---
 
 ## Template functions, pipelines, and flow control
@@ -256,6 +320,30 @@ delete history — it creates a *new* revision whose content equals the target. 
 three-way strategic merge (old manifest, new manifest, live state) so it can reconcile
 manual `kubectl edit` drift on upgrade.
 
+### Worked example: three-way merge vs manual drift
+
+The three inputs to the merge are: **(1) old manifest** — what Helm last rendered and stored
+in the release Secret; **(2) new manifest** — what this `helm upgrade` renders now; **(3)
+live state** — what the object actually looks like in the cluster right now (including manual
+edits). Walk a concrete drift case:
+
+1. Chart sets `replicas: 3`; `helm install` → live Deployment has `replicas: 3`.
+2. An operator panics during a spike: `kubectl scale deploy/web --replicas=10`. Live state is
+   now `10`; Helm's stored (old) manifest still says `3`.
+3. Someone runs `helm upgrade` with the **chart unchanged** (new manifest also says `3`).
+
+Helm diffs old (`3`) vs new (`3`): **no change to `replicas`** from Helm's side, so it
+generates no patch for that field — the live `10` is left alone. But now change the chart to
+`replicas: 5` and upgrade: old (`3`) vs new (`5`) *is* a Helm-driven change, so Helm patches
+`replicas` to `5`, **overwriting the manual `10`**. The senior takeaway: Helm 3 only reverts
+your manual drift on fields it is *actively changing* this upgrade; a field Helm didn't touch
+survives.
+
+Contrast Helm 2's **two-way merge** (old manifest vs new manifest only — it never read live
+state): it computed the patch purely from the manifest diff, so it could silently clobber or
+fail to reconcile manual edits it had no knowledge of. Helm 3's three-way merge is what makes
+`helm upgrade` aware of out-of-band `kubectl edit`/`kubectl scale` changes at all.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Rev1: helm install (rev 1)
@@ -264,6 +352,23 @@ stateDiagram-v2
     Rev3 --> Rev4: helm rollback 2 (rev 4 == rev 2 content)
     Rev4 --> [*]: helm uninstall
 ```
+
+### Resource ordering within a chart
+
+Helm applies the objects in a single install/upgrade phase in a **fixed kind-priority order**,
+not by analyzing references between them. The order runs roughly: Namespace → NetworkPolicy →
+ResourceQuota → ... → ServiceAccount → Secret → ConfigMap → ... → Service → ... → Deployment →
+StatefulSet → ... → Job → Ingress → APIService. So the common case ("create the
+ServiceAccount and Secret *before* the Deployment that mounts them") works automatically —
+because those kinds simply sort earlier, **not** because Helm noticed the Deployment
+references them. There is no dependency graph between your objects. The practical
+consequences:
+
+- Ordering you *can* express is only the built-in kind order — you cannot say "this
+  Deployment before that Deployment."
+- Cross-object timing you genuinely need to sequence (run a DB migration, then start the app;
+  install a CRD before a CR that uses it) is what **hooks + `hook-weight`** and the **`crds/`**
+  directory are for.
 
 > [!WARNING]
 > `--atomic` on install/upgrade auto-rolls-back the release if it fails (and `--cleanup-on-fail`
@@ -299,6 +404,42 @@ user-supplied values; add `-a`/`--all` (`helm get values -a`) to see the fully c
 > "If a key is set in both `values-prod.yaml` (via `-f`) and `--set`, which wins?" → *`--set`
 > always wins; command-line `--set*` has the highest precedence, then `-f` files (right-most
 > first), then parent-chart values, then the chart's `values.yaml` defaults.*
+
+### Worked example: resolving one key across four layers
+
+Given these inputs to a single `helm upgrade`:
+
+```yaml
+# values.yaml (chart default, lowest)      # values-prod.yaml (-f, higher)
+replicaCount: 2                            replicaCount: 4
+image:                                     env:
+  repository: myapp                          - name: TIER
+  tag: "1.0"                                   value: prod
+env:
+  - name: TIER
+    value: dev
+```
+
+```bash
+helm upgrade web ./mychart -f values.yaml -f values-prod.yaml --set image.tag=2.8.1
+```
+
+Resolve key by key, lowest layer to highest:
+
+| Key | values.yaml | values-prod.yaml | --set | **Final** |
+|---|---|---|---|---|
+| `replicaCount` | 2 | 4 | — | **4** (prod file wins over default) |
+| `image.repository` | myapp | — | — | **myapp** (only the default set it) |
+| `image.tag` | "1.0" | — | 2.8.1 | **2.8.1** (`--set` beats everything) |
+| `env` (a list) | `[{TIER: dev}]` | `[{TIER: prod}]` | — | **`[{TIER: prod}]`** |
+
+Note the two different merge behaviors. `image` is a **map**, so it deep-merges:
+`image.repository` (only in defaults) *survives* even though `image.tag` was overridden — the
+final `image` is `{repository: myapp, tag: 2.8.1}`, not just `{tag: 2.8.1}`. `env` is a
+**list**, so it is replaced **wholesale**: the prod file's one-element list completely
+supplants the default's — there is no element-by-element merge, and you could not "add" an
+env var by supplying a partial list. That map-merge-vs-list-replace split is the detail
+interviewers probe after you recite the precedence order.
 
 ---
 
@@ -528,7 +669,13 @@ helm test web -n prod               # run resources annotated helm.sh/hook: test
 - **Why did my env-var change not take effect after `helm upgrade`?** If nothing in the Pod
   template changed, the Deployment isn't rolled; a common trick is a checksum annotation of
   the ConfigMap/Secret (`checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}`)
-  so config changes force a rollout.
+  so config changes force a rollout. *Why it works:* editing the ConfigMap changes its
+  rendered content, so the `sha256sum` changes; the annotation must live in
+  `spec.template.metadata.annotations` (the **Pod template**, not the Deployment's own
+  metadata). Changing the Pod template spec makes the Deployment controller compute a new
+  pod-template hash, which it treats as a new ReplicaSet → a rolling update. A ConfigMap edit
+  alone never touches the Pod template, so without this annotation the pods keep their old
+  mounted/env values until they happen to restart for another reason.
 - **Can Helm merge into a list value?** No — `--set`/`-f` replace arrays wholesale; only maps
   deep-merge.
 - **How do hooks differ from normal resources?** They run at lifecycle phases, are ordered by

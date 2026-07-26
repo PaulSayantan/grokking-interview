@@ -10,9 +10,9 @@ questions:
       In a proto3 file, where must the `syntax = "proto3";` declaration appear?
     options:
       - "As the first non-comment, non-blank line of the file"
-      - "Anywhere in the file, order does not matter"
-      - "Immediately after the `package` statement"
-      - "Only inside the top-level `message` block"
+      - "Anywhere in the file, since protoc scans the whole file before order matters"
+      - "Immediately after the `package` statement, which protoc requires to come first"
+      - "Only inside the top-level `message` block, attached as a message-level option"
     answer: 0
     explanation: |
       `syntax = "proto3";` must be the first non-comment, non-blank statement in the
@@ -26,8 +26,8 @@ questions:
     question: |
       What actually travels on the wire to identify a field in binary protobuf?
     options:
-      - "The field's name as a UTF-8 string"
-      - "The field's declared type name"
+      - "The field's name, transmitted as a UTF-8 string"
+      - "The field's declared type name as an ASCII token"
       - "The field's zero-based declaration order"
       - "The field's integer field number (inside the tag)"
     answer: 3
@@ -44,10 +44,10 @@ questions:
       A teammate wants to change a field from number 5 to number 7 "to group it with
       related fields." What is the consequence on the wire?
     options:
-      - "Nothing; field numbers are cosmetic like names"
-      - "The change is safe as long as the field's type is unchanged"
+      - "Nothing at all; field numbers are purely cosmetic labels like field names and never affect the bytes"
+      - "The change is completely safe as long as the field's declared scalar type is left unchanged"
       - "It is treated as deleting field 5 and adding a brand-new field 7, so existing serialized data is misread"
-      - "protoc automatically migrates old data to the new number"
+      - "protoc detects the renumbering and automatically migrates all previously serialized old data to number 7"
     answer: 2
     explanation: |
       Field numbers are the wire identity. Renumbering is indistinguishable from deleting
@@ -62,10 +62,10 @@ questions:
       What is the correct, compiler-enforced way to delete a field so its number is never
       accidentally reused?
     options:
-      - "Comment out the field line"
+      - "Comment out the field line so protoc simply ignores the declaration"
       - "Remove the field and add its number (and name) to a `reserved` statement"
-      - "Set the field to `deprecated = true`"
-      - "Change the field's type to `bytes`"
+      - "Set the field option `deprecated = true`, which blocks any future reuse of its number"
+      - "Change the field's type to `bytes` so protoc treats the slot as permanently retired"
     answer: 1
     explanation: |
       Removing the field and adding its number and name to `reserved` makes `protoc` reject
@@ -182,9 +182,9 @@ questions:
     question: |
       What is the purpose of the 3-bit wire type embedded in every field's tag?
     options:
-      - "It encodes the field's declared name length"
-      - "It indicates whether the field is required"
-      - "It stores the field's default value"
+      - "It encodes the byte length of the field's declared name so the parser can rebuild the schema"
+      - "It indicates whether the field is required and must be aborted on if the field is missing"
+      - "It stores a compact 3-bit index into the message's table of per-field default values"
       - "It tells the parser how to read the payload and how many bytes it occupies, enabling unknown fields to be skipped"
     answer: 3
     explanation: |
@@ -200,10 +200,10 @@ questions:
       For `message T { int32 a = 1; }` with `a = 150`, the bytes on the wire are
       `08 96 01`. What does the `08` byte represent?
     options:
-      - "The value 8"
+      - "The literal integer value 8 held by field `a`"
       - "The tag: field number 1, wire type 0 (VARINT)"
-      - "The length of the message"
-      - "The wrapper for an optional field"
+      - "A length prefix declaring the whole message is 8 bytes long"
+      - "A presence wrapper byte emitted before every proto3 optional field"
     answer: 1
     explanation: |
       `08` = `(1 << 3) | 0` = tag for field number 1 with wire type 0 (VARINT). The
@@ -234,9 +234,9 @@ questions:
       In varint encoding, what does the most-significant bit (MSB) of each byte signify?
     options:
       - "A continuation flag: 1 means more bytes follow, 0 means this is the last byte"
-      - "The sign of the number"
-      - "A parity check bit"
-      - "Whether the field is packed"
+      - "The sign of the encoded number, set to 1 for negatives and 0 for non-negatives"
+      - "A parity check bit used to detect single-bit corruption of the varint on the wire"
+      - "Whether the field belongs to a packed repeated field rather than a scalar field"
     answer: 0
     explanation: |
       Varints store 7 value bits per byte in little-endian order; the MSB is a continuation
@@ -301,9 +301,9 @@ questions:
       How is an embedded (nested) message encoded on the wire?
     options:
       - "As a length-delimited (LEN) field whose payload is itself a complete serialized message"
-      - "As a VARINT holding a pointer to the submessage"
-      - "As a sequence of I32 fields, one per subfield"
-      - "As a JSON string"
+      - "As a VARINT holding a 64-bit memory pointer to the submessage instance on the sender"
+      - "As a flat sequence of I32-typed fields, emitting exactly one I32 entry per nested subfield"
+      - "As a JSON string containing the nested message rendered in canonical proto3 JSON form"
     answer: 0
     explanation: |
       A nested message is written as a length-delimited field: tag, varint length, then
@@ -318,10 +318,10 @@ questions:
       Why should the most frequently set and repeated fields be assigned field numbers
       1-15?
     options:
-      - "protoc processes low numbers faster at compile time"
-      - "Low numbers are validated first during parsing"
+      - "protoc processes low field numbers measurably faster during compilation"
+      - "Low field numbers are range-validated first during parsing for speed"
       - "Their tag encodes in a single byte, whereas numbers 16-2047 need two bytes"
-      - "Numbers above 15 are reserved for Google"
+      - "Numbers above 15 are internally reserved for Google's own extensions"
     answer: 2
     explanation: |
       Because the tag is `(field_number << 3) | wire_type` as a varint, numbers 1-15 keep
@@ -352,9 +352,9 @@ questions:
     question: |
       In proto3, is a plain `int32` field set to `0` serialized on the wire?
     options:
-      - "Yes, always, as a zero-valued varint"
-      - "Only if the message has a `oneof`"
-      - "Only when using the JSON encoding"
+      - "Yes, always — proto3 emits an explicit zero-valued varint for every scalar"
+      - "Only if the enclosing message also declares at least one `oneof` member"
+      - "Only when the message is encoded with the canonical proto3 JSON mapping"
       - "No — a scalar equal to its default (zero) value is not serialized at all"
     answer: 3
     explanation: |
@@ -388,9 +388,9 @@ questions:
       How is a proto3 `optional` scalar implemented under the hood?
     options:
       - "As a synthetic single-member `oneof` that carries presence"
-      - "As a separate boolean sidecar field named `has_<field>`"
-      - "As a `google.protobuf.Any` wrapper"
-      - "As a `repeated` field limited to one element"
+      - "As a separate hidden boolean sidecar field named `has_<field>` in the message"
+      - "As a `google.protobuf.Any` wrapper that boxes the scalar with a type URL"
+      - "As a `repeated` field the compiler silently caps at one element"
     answer: 0
     explanation: |
       `optional` scalars are compiled to a synthetic single-field `oneof`, which is what
@@ -422,9 +422,9 @@ questions:
       What is the primary purpose of the well-known wrapper types like
       `google.protobuf.Int32Value` and `BoolValue`?
     options:
-      - "To compress integers more aggressively"
-      - "To enforce range validation on scalar values"
-      - "To convert scalars to strings automatically"
+      - "To compress integer payloads more aggressively than a plain scalar field"
+      - "To enforce compile-time minimum and maximum range validation on scalar values"
+      - "To convert scalar values to their canonical JSON string form automatically"
       - "To add explicit presence to a scalar by wrapping it in a message"
     answer: 3
     explanation: |
@@ -439,10 +439,10 @@ questions:
     question: |
       In proto3, how is a `repeated int32` field encoded by default?
     options:
-      - "One tag + payload per element (unpacked)"
-      - "As a `map<int32, int32>`"
+      - "Unpacked: a separate tag byte followed by each element's varint payload"
+      - "As an implicit `map<int32, int32>` keyed by each element's zero-based index"
       - "Packed: a single tag and length prefix, then all element payloads concatenated"
-      - "As a length-delimited JSON array"
+      - "As one length-delimited field holding a UTF-8 JSON array of the integers"
     answer: 2
     explanation: |
       Repeated scalar numeric fields are packed by default in proto3: one LEN field
@@ -473,10 +473,10 @@ questions:
       What must a conformant parser do regarding packed vs unpacked encoding of a packable
       repeated field?
     options:
-      - "Reject unpacked data if the field is declared packed"
+      - "Reject unpacked data with a parse error whenever the field is declared `[packed=true]`"
       - "Accept both packed and unpacked forms, so `[packed=...]` can be toggled without breaking the wire"
-      - "Only accept packed data in proto3"
-      - "Convert unpacked data to a map"
+      - "Accept only the packed form in proto3 and treat unpacked bytes as unknown fields"
+      - "Silently rewrite any unpacked repeated field into an equivalent key/value map entry"
     answer: 1
     explanation: |
       Parsers must accept both the packed and unpacked representations for a packable field.
@@ -489,9 +489,9 @@ questions:
     question: |
       On the wire, a `map<string, int32>` field is encoded as:
     options:
-      - "A single length-delimited hash table blob"
-      - "Two parallel repeated fields (one for keys, one for values)"
-      - "A `google.protobuf.Struct`"
+      - "A single length-delimited blob holding a serialized hash-table bucket array"
+      - "Two parallel repeated fields under separate tags, one for keys and one for values"
+      - "A `google.protobuf.Struct` whose fields carry each key/value pair"
       - "A repeated message of key/value entry messages"
     answer: 3
     explanation: |
@@ -522,10 +522,10 @@ questions:
     question: |
       What is required of the first value in a proto3 enum?
     options:
-      - "It must be named `DEFAULT`"
-      - "It must be the highest number in the enum"
+      - "It must be named `DEFAULT` so generated code can locate the fallback value"
+      - "It must carry the highest numeric value among all members of the enum"
       - "It must have the numeric value 0 and serves as the default"
-      - "It must be marked `optional`"
+      - "It must be explicitly marked `optional` to be treated as the default"
     answer: 2
     explanation: |
       The first enum value must be 0 and is the default (implicit presence — a zero enum is
@@ -539,10 +539,10 @@ questions:
       A new server sends an enum value that an old proto3 client's schema does not know.
       What happens on the client?
     options:
-      - "The parse fails with an error"
+      - "The parse fails with a hard error rejecting the entire message as malformed"
       - "The unknown numeric value is preserved (proto3 enums are open) and retrievable as the raw integer"
-      - "The value is silently dropped and the field becomes unset"
-      - "The client crashes with an out-of-range exception"
+      - "The value is silently discarded and the enum field is reset to its zero default"
+      - "The client aborts with an out-of-range enum exception at decode time"
     answer: 1
     explanation: |
       proto3 enums are open: an unrecognized numeric value is preserved and can be read back
@@ -556,10 +556,10 @@ questions:
     question: |
       How are enum values encoded on the wire?
     options:
-      - "As a length-delimited UTF-8 string of the value name"
+      - "As a length-delimited UTF-8 string carrying the value's declared name"
       - "As a varint (wire type 0), like an int32"
-      - "As a fixed 4-byte integer"
-      - "As a boolean flag per possible value"
+      - "As a fixed 4-byte little-endian integer (wire type I32)"
+      - "As a bit-set with one boolean flag per possible enum value"
     answer: 1
     explanation: |
       Enums serialize as varints (wire type 0), the same as int32. Because they are bare
@@ -574,9 +574,9 @@ questions:
       What is the defining behavior of a `oneof`?
     options:
       - "At most one member may be set at a time; setting one clears the others"
-      - "All member fields are serialized together"
-      - "It guarantees every member is non-default"
-      - "It allows repeated members"
+      - "All of its member fields are always serialized together as a group"
+      - "It guarantees every one of its members holds a non-default value"
+      - "It permits its members to be declared `repeated` for list semantics"
     answer: 0
     explanation: |
       A `oneof` is a tagged union: at most one member is set, and assigning a new member
@@ -590,10 +590,10 @@ questions:
     question: |
       Which statement about `oneof` is TRUE?
     options:
-      - "oneof members may be `repeated`"
-      - "A oneof can contain at most three fields"
+      - "oneof members may be declared `repeated` to hold multiple values at once"
+      - "A single oneof is capped at three member fields by the protobuf compiler"
       - "Moving a field into or out of a oneof is a wire- and source-breaking change"
-      - "oneof members must all be scalar types"
+      - "oneof members must all be scalar types and cannot include submessages"
     answer: 2
     explanation: |
       oneof members cannot be repeated, there is no member-count limit, and members may be
@@ -625,9 +625,9 @@ questions:
       What is the idiomatic protobuf mechanism for expressing a PATCH-style partial update
       (which fields to modify)?
     options:
-      - "`google.protobuf.Struct`"
-      - "`google.protobuf.Empty`"
-      - "A repeated string of field names you define ad hoc"
+      - "`google.protobuf.Struct`, whose dynamic key/value tree the server walks to decide which fields changed"
+      - "`google.protobuf.Empty`, sent alongside the payload as a sentinel that signals a partial rather than full update"
+      - "A repeated string of field names you define ad hoc on each request message, parsed by convention on the server"
       - "`google.protobuf.FieldMask`"
     answer: 3
     explanation: |
@@ -643,9 +643,9 @@ questions:
       How does `google.protobuf.Any` allow a receiver to identify the message it wraps?
     options:
       - "It carries a type URL (e.g. type.googleapis.com/<fully-qualified-name>) alongside the serialized bytes"
-      - "It includes the sender's IP address"
-      - "It prefixes the payload with the field number"
-      - "It requires the receiver to already know the type out of band"
+      - "It embeds the sender's IP address and TCP port so the receiver can call back to download the concrete type"
+      - "It prefixes the payload with the field number, which the receiver resolves against a shared global type registry"
+      - "It requires the receiver to already know the concrete type out of band from prior configuration or documentation"
     answer: 0
     explanation: |
       `Any` stores the serialized message plus a type URL of the form
@@ -659,10 +659,10 @@ questions:
     question: |
       Why did proto3 remove the `required` field label that proto2 had?
     options:
-      - "It was too slow to validate at runtime"
-      - "It conflicted with the `optional` keyword"
+      - "Runtime required-presence validation was benchmarked as too slow, adding a full field scan on every parse of large messages"
+      - "It conflicted directly with the `optional` keyword, since a field cannot be flagged both required and optional in the same descriptor"
       - "Because required-ness cannot evolve: you can never safely remove or relax a required field, and a message missing it fails to parse — turning a schema change into an outage"
-      - "It was only ever supported in Java"
+      - "It was only ever implemented by the Java code generator and never wired into the C++ or Python runtimes, leaving it non-portable"
     answer: 2
     explanation: |
       `required` is a schema-evolution trap: once a field is required, removing it or making
@@ -676,10 +676,10 @@ questions:
     question: |
       Which is a genuine difference between proto2 and proto3?
     options:
-      - "proto2 uses a different binary wire format than proto3"
+      - "proto2 uses a different binary wire format than proto3, so a proto2-encoded message cannot be decoded by a proto3 parser at all"
       - "proto2 allows custom field defaults and has closed enums; proto3 has no custom defaults and open enums"
-      - "proto3 does not support nested messages"
-      - "proto2 cannot be used with gRPC"
+      - "proto3 dropped support for nested messages, forcing every submessage to be hoisted to a top-level definition"
+      - "proto2 cannot be used with gRPC because gRPC service stubs are only generated from proto3 syntax files"
     answer: 1
     explanation: |
       proto2 supports `[default = ...]` and closed enums; proto3 always uses type zero-values
@@ -695,9 +695,9 @@ questions:
       stable signature verifiable in another service written in a different language. Why is
       this unsafe?
     options:
-      - "Protobuf serialization is guaranteed canonical, so it would work but is slow"
-      - "Hashing requires the field names, which are stripped"
-      - "gRPC forbids hashing message payloads"
+      - "Protobuf serialization is guaranteed byte-for-byte canonical across all languages, so it would work correctly but is too slow for hot paths"
+      - "Hashing requires the field names to be present in the payload, but the binary wire format strips them out entirely before transmission"
+      - "gRPC's runtime explicitly forbids hashing message payloads and will raise a policy error if you read the raw serialized bytes"
       - "Protobuf serialization is not canonical — map order is unspecified, unknown fields can be re-emitted differently, and libraries/versions/languages may differ"
     answer: 3
     explanation: |
@@ -733,10 +733,10 @@ questions:
       An old parser receives a message containing a field number it does not recognize. What
       does it do?
     options:
-      - "Aborts parsing with a fatal error"
-      - "Guesses the type from the field number"
+      - "Aborts parsing immediately with a fatal error and discards every field decoded before the unknown tag"
+      - "Guesses the field's type from the numeric value of the field number and decodes it with that assumed type"
       - "Uses the wire type in the tag to determine how many bytes to skip, and stores them as unknown fields"
-      - "Requests the schema from the sender"
+      - "Opens a side channel back to the sender to request the current schema before it will continue parsing"
     answer: 2
     explanation: |
       The tag's wire type tells the parser the payload shape and length, so it can skip the
@@ -750,10 +750,10 @@ questions:
     question: |
       What constraint does the `string` scalar type enforce?
     options:
-      - "It must be shorter than 256 characters"
+      - "It must be shorter than 256 characters, a hard length cap the encoder enforces before writing the field"
       - "Its contents must be valid UTF-8 (or 7-bit ASCII); invalid UTF-8 is an error"
-      - "It cannot contain digits"
-      - "It is automatically compressed"
+      - "It cannot contain embedded digits or control characters, which must be moved into a separate `bytes` field"
+      - "It is automatically gzip-compressed on the wire whenever the encoded value exceeds a few kilobytes"
     answer: 1
     explanation: |
       `string` values must be valid UTF-8, validated on both encode and decode. For arbitrary
@@ -767,9 +767,9 @@ questions:
       Your team removes an enum value `LEGACY_MODE = 3`. What is the safe practice to prevent
       future misuse of that number?
     options:
-      - "Nothing special is needed for enums"
-      - "Renumber the remaining values to close the gap"
-      - "Change the enum to a `oneof`"
+      - "Nothing special is needed for enums, since the compiler automatically tombstones any value you delete from the definition"
+      - "Renumber the remaining values to close the gap left by 3, keeping the enum's numeric range contiguous"
+      - "Convert the enum into a `oneof` so that each former value becomes a distinct, individually-presence-tracked member"
       - "Add `reserved 3;` (and reserve the name) to the enum"
     answer: 3
     explanation: |
@@ -786,9 +786,9 @@ questions:
       gRPC's default 4 MiB receive limit)?
     options:
       - "Because length-delimited, recursively-nested encoding lets a small malicious payload demand huge or unbounded allocation, so parsers cap it"
-      - "To match the HTTP/2 default frame size exactly"
-      - "Because field numbers above 4 million are invalid"
-      - "To keep JSON output under a fixed size"
+      - "To match the HTTP/2 default frame size exactly, since each protobuf message must fit within a single unsplit DATA frame"
+      - "Because field numbers above roughly 4 million are invalid, and the byte cap is what the parser uses to enforce that ceiling"
+      - "To keep the equivalent JSON output under a fixed size, as protobuf caps the binary form to bound its JSON transcoding"
     answer: 0
     explanation: |
       Messages are length-prefixed and nest recursively, so an adversarial or accidental

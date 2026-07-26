@@ -8,6 +8,8 @@ Spring MVC (also called Spring Web MVC) is the servlet-based web framework that 
 
 ## DispatcherServlet as Front Controller
 
+**Intuition first.** Think of an airport: instead of every gate having its own passport desk, security scanner, and lost-luggage counter, everyone enters through one arrivals hall that checks documents once and then routes each traveller to the right gate. The `DispatcherServlet` is that arrivals hall. Imagine the alternative — the servlet container mapping `/orders` to an `OrderServlet`, `/users` to a `UserServlet`, and so on. Each of those servlets would have to re-implement locale resolution, exception-to-response translation, multipart parsing, and auth checks — the same plumbing copied and inevitably drifting out of sync. Funnelling *every* request through one front controller means those cross-cutting concerns are written and configured exactly once, and each `@Controller` gets to be plain business logic that never touches the servlet API.
+
 The `DispatcherServlet` is the heart of Spring MVC. It is an ordinary `jakarta.servlet.http.HttpServlet` (via Spring's `HttpServletBean` → `FrameworkServlet` → `DispatcherServlet` hierarchy) that the servlet container maps to some URL pattern (commonly `/`). It acts as the **front controller**: instead of the container routing each URL to a different servlet, *all* matching requests funnel through this one servlet, which then delegates to the appropriate application components.
 
 ### What "front controller" buys you
@@ -103,6 +105,38 @@ Client → [Servlet Container] → DispatcherServlet
 ```
 
 Key distinction: a controller that returns a **view name** goes through the `ViewResolver`/`View` render path; a controller that returns a **response body** (`@ResponseBody`, `@RestController`, or `ResponseEntity`) bypasses view resolution entirely and uses an `HttpMessageConverter` to serialize the return value.
+
+### Worked example: `GET /api/users/42` traced end to end
+
+Take a concrete request against `@RestController @RequestMapping("/api/users")` with one method `@GetMapping("/{id}") public UserDto get(@PathVariable Long id)` and one registered interceptor mapped to `/api/**`. The wire request is:
+
+```
+GET /api/users/42 HTTP/1.1
+Host: example.com
+Accept: application/json
+```
+
+Follow the bytes through `doDispatch`:
+
+1. **Container → DispatcherServlet.** The servlet is mapped to `/`, so `/api/users/42` lands in `doDispatch`.
+2. **HandlerMapping.** `RequestMappingHandlerMapping` (order 0) parses the path `/api/users/42`, finds the class base `/api/users` + method `/{id}`, and matches `get`. It returns a `HandlerExecutionChain` = the `HandlerMethod` for `get` **+ your one interceptor** (its path pattern `/api/**` matches).
+3. **HandlerAdapter.** `DispatcherServlet` loops its adapters; `RequestMappingHandlerAdapter.supports(handler)` returns `true` (the handler is a `HandlerMethod`), so it is selected.
+4. **preHandle.** The interceptor's `preHandle(...)` runs and returns `true`, so dispatch continues. (Had it returned `false`, `doDispatch` would stop here and `afterCompletion` would *not* fire for it.)
+5. **Argument resolution + invoke.** Inside `adapter.handle(...)`, the `PathVariableMethodArgumentResolver` reads the URI-template variable `id` → the raw string `"42"` → `ConversionService` converts it to `Long id = 42L`. The method body runs: `service.find(42L)` returns `UserDto(id=42, name="Ada")`.
+6. **Return-value handling (body path).** The return type is `UserDto` and the class is `@RestController` (i.e. `@ResponseBody` is implied), so `RequestResponseBodyMethodProcessor` handles it. Content negotiation intersects the client's `Accept: application/json` with each converter's writable types; `MappingJackson2HttpMessageConverter.canWrite(UserDto, application/json)` returns `true`, so it wins. It **writes the body right now**, still inside `adapter.handle(...)`:
+
+   ```
+   HTTP/1.1 200 OK
+   Content-Type: application/json
+
+   {"id":42,"name":"Ada"}
+   ```
+
+7. **postHandle.** Control returns to `doDispatch`, which now calls the interceptor's `postHandle(...)`. But the return value was a body, not a view — so the `ModelAndView` handed to `postHandle` is `null`, and the response is already written (see the postHandle-timing gotcha below). Trying to add a header here does nothing useful.
+8. **View resolution — skipped.** `mv == null`, so `DispatcherServlet` does *not* consult any `ViewResolver`; the body path was already complete in step 6.
+9. **afterCompletion.** The interceptor's `afterCompletion(..., ex=null)` runs (reverse order, one interceptor here) for cleanup/timing. The committed `200 OK` with `{"id":42,"name":"Ada"}` is flushed to the client.
+
+Contrast: had this been a `@Controller` method returning the `String` `"userProfile"`, steps 6–8 would flip — no converter, `postHandle` would receive a real non-null `ModelAndView`, and step 8 would resolve `"userProfile"` via a `ViewResolver` and call `view.render(model, ...)`.
 
 ### Gotcha: postHandle timing for body-writing handlers
 
@@ -435,6 +469,37 @@ Key subtleties senior candidates should know:
 - `HandlerExceptionResolver`s only handle exceptions thrown **from the handler or during rendering inside `doDispatch`** — not exceptions thrown in a `Filter` (those are outside `DispatcherServlet`) or after the response is committed.
 - Since Spring 6, `ResponseEntityExceptionHandler` (an `@ControllerAdvice` base class) and the `ProblemDetail` / `ErrorResponse` model (originally per RFC 7807, now RFC 9457, which obsoletes it) provide a standardized body for framework exceptions.
 
+### Worked example: which `@ExceptionHandler` wins
+
+The "local beats advice" rule surprises people because it *overrides* the closest-supertype rule. Set up the surprising case:
+
+```java
+class EntityNotFoundException extends RuntimeException { }
+
+@RestController
+class UserApi {
+    @GetMapping("/users/{id}")
+    UserDto get(@PathVariable Long id) { throw new EntityNotFoundException(); }
+
+    @ExceptionHandler(RuntimeException.class)          // LOCAL, less specific
+    ResponseEntity<String> local(RuntimeException e) { ... }
+}
+
+@ControllerAdvice
+class GlobalHandlers {
+    @ExceptionHandler(EntityNotFoundException.class)   // GLOBAL, exact match
+    ResponseEntity<String> global(EntityNotFoundException e) { ... }
+}
+```
+
+A `GET /users/7` throws `EntityNotFoundException`. Which handler fires? Trace it:
+
+1. `ExceptionHandlerExceptionResolver` runs first. It looks for a matching `@ExceptionHandler` **on the controller that raised the exception, before it ever considers `@ControllerAdvice` beans.**
+2. On `UserApi` it finds `local(RuntimeException)`. `EntityNotFoundException` *is-a* `RuntimeException`, so it matches. The controller-local scope has a hit, so resolution stops here.
+3. `global(EntityNotFoundException)` — an *exact* type match, and by the closest-supertype rule the "better" match — is **never consulted**, because it lives in `@ControllerAdvice` and the local scope already produced a handler.
+
+Result: `local` wins even though `global` is the tighter type match. The closest-supertype rule only breaks ties *within a single scope*; it does not let a global advice outrank any local handler. Move `local` out of `UserApi` (or delete it) and `global` would then win.
+
 ---
 
 ## HandlerMapping Ordering and Path Matching
@@ -447,15 +512,19 @@ When several `@RequestMapping`s match one request, Spring does **not** pick by d
 
 ### PathPattern vs AntPathMatcher
 
-Spring 5.3+ introduced `PathPattern` (parsed path matching) as the default for Spring MVC via `PathPatternParser`, replacing string-based `AntPathMatcher` for most cases. Differences that trip people up:
+`PathPattern` (parsed path matching) was first introduced for WebFlux (Spring 5.0), then made **available as an opt-in** for Spring MVC in 5.3 — where `AntPathMatcher` remained the MVC default. It became the **default** for Spring MVC only in **6.0** (via `PathPatternParser`), with `AntPathMatcher` retained (not deprecated) as a fully supported opt-in for back-compat — only specific *options* like suffix-pattern and trailing-slash matching are deprecated. Getting this version story right matters under interviewer probing. Differences that trip people up:
 
 - `PathPattern` only allows `**` at the **end** of a pattern; `/a/**/b` is illegal with `PathPatternParser` but was allowed by `AntPathMatcher`.
 - `PathPattern` uses a pre-parsed `RequestPath` and is faster and allocation-light on the hot path.
-- The historical **suffix pattern matching** (`/foo` also matching `/foo.*`) and trailing-slash matching (`/foo` matching `/foo/`) are **deprecated and disabled by default** in Spring 6. `setUseTrailingSlashMatch(true)` is removed; you must map both explicitly or add a redirect. This is a common migration break: `/users` no longer matches `/users/`.
+- The historical **suffix pattern matching** (`/foo` also matching `/foo.*`) and trailing-slash matching (`/foo` matching `/foo/`) are **deprecated and disabled by default** in Spring 6. The trailing-slash option itself is deprecated — `setUseTrailingSlashMatch(true)` (via `PathMatchConfigurer`) still restores the old behavior for now, but the guidance is to map both explicitly or add a redirect. This is a common migration break: `/users` no longer matches `/users/` by default.
 
 ---
 
 ## Async Request Processing
+
+**Why this exists.** The servlet thread pool is small and precious (often ~200 threads). If a handler blocks for two seconds waiting on a slow downstream service — or holds the thread open for a 30-second long-poll/SSE stream — that thread is doing nothing but waiting, and under load the pool exhausts and new requests queue or get rejected. Async processing lets you *return the container thread to the pool immediately* and complete the response later on another thread once the data is ready, so a handful of threads can shepherd thousands of in-flight slow requests.
+
+Quick decision guide for the three main return types: **`Callable<T>`** = "offload this compute to Spring's task executor" (Spring runs it, then re-dispatches). **`DeferredResult<T>`** = "I'll complete this from an *external* event on some other thread" — e.g. a Kafka/JMS listener or a webhook calls `deferredResult.setResult(...)` whenever it arrives; nothing runs on a Spring thread in the meantime. **`WebAsyncTask<T>`** = a `Callable` plus per-request control over the timeout and which executor runs it.
 
 A handler may return `DeferredResult<T>`, `Callable<T>`, `WebAsyncTask<T>`, `CompletableFuture<T>`/`CompletionStage`, or a reactive type (with the reactive adapter). This starts **Servlet 3.0 async processing**: the container thread that `DispatcherServlet` ran on is released back to the pool *before* the response is produced, and the result is produced later on another thread.
 
@@ -535,3 +604,4 @@ Filters run outside `DispatcherServlet`, wrapping it. Their **order is determine
 - Handler interceptors: https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/handlermapping-interceptor.html
 - Javadoc: `org.springframework.web.servlet.DispatcherServlet`, `ResponseEntity`, `HandlerInterceptor`
 - Jakarta Servlet migration (Spring Framework 6.x): https://docs.spring.io/spring-framework/reference/
+- Spring Framework 6.0 Release Notes (PathPatternParser default for MVC; trailing-slash matching deprecated/off by default): https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-6.0-Release-Notes

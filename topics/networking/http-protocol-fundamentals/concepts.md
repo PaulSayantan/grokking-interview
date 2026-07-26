@@ -311,10 +311,13 @@ is a great site.\r\n               <-- 0x10 = 16 octets
 
 Rules and gotchas:
 
-- A message **must not** use both `Content-Length` and `Transfer-Encoding: chunked`. If
-  both appear, `Transfer-Encoding` wins and `Content-Length` must be ignored/removed —
-  disagreement between a front-end and back-end over which to honor is the root of
-  **HTTP request smuggling** (CL.TE / TE.CL attacks).
+- A message **must not** use both `Content-Length` and `Transfer-Encoding: chunked`.
+  RFC 9112 §6.1 historically instructed a recipient that sees both to **remove
+  `Content-Length` and prefer `Transfer-Encoding`**; but because front-end/back-end
+  disagreement over exactly that reconciliation is the root of **HTTP request smuggling**
+  (CL.TE / TE.CL attacks), modern hardened stacks instead **reject** the message (respond
+  `400` and close the connection) rather than silently preferring TE. (This matches the
+  Headers and Request-Smuggling sections.)
 - `chunked` must be the **final** transfer coding, and it is a **hop-by-hop** property
   (a proxy may de-chunk before forwarding).
 - Some responses are **implicitly** framed: 1xx/204/304 and any response to HEAD have no
@@ -526,7 +529,12 @@ Proxies must forward the expectation and relay the interim `100` back. This is w
 ## Redirects and Method Preservation
 
 The 3xx redirects differ precisely in **whether they preserve the method and body**
-(RFC 9110 §15.4) — a distinction that matters enormously for non-idempotent requests:
+(RFC 9110 §15.4) — a distinction that matters enormously for non-idempotent requests. A
+method is **safe** if it only reads and has no side effects, and **idempotent** if sending
+it more than once has the same net effect as sending it once (`GET`, `PUT`, and `DELETE`
+qualify; a `POST` generally does **not**, so silently replaying it can double-charge a
+payment). Full treatment lives in `rest-api-design`; the one-line gloss here is enough to
+follow the retry and method-preservation reasoning below.
 
 | Code | Name | Effect on method/body |
 |---|---|---|

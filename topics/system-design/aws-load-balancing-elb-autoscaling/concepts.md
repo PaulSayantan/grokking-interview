@@ -88,6 +88,26 @@ fixed IP is mandatory), its per-request LCU model can be pricier than NLB at ver
 high connection churn, and it adds L7 processing latency. Choose ALB when routing
 intelligence, HTTP features, and WAF matter more than raw latency or static IP.
 
+**Worked example — reading an LCU bill.** An LCU is billed as the **max** of four
+dimensions each hour — you pay for the single dimension you stress most, *not* their
+sum. Published per-LCU allowances: **25 new connections/sec**, **3,000 active
+connections/min**, **1 GB processed/hour**, and **1,000 rule-evaluations/sec** (only
+rules past the first 10 count). Take one hour of a chatty, short-connection API:
+
+- New connections: 2,000/sec → 2,000 / 25 = **80 LCUs**
+- Active connections: ~10,000 concurrent → 10,000 / 3,000 = **3.3 LCUs**
+- Processed bytes: 5 GB → 5 / 1 = **5 LCUs**
+- Rule evals: default routing (≤10 rules) → **~0 LCUs**
+
+Max = **80 LCUs**, driven entirely by connection churn. At ≈$0.008/LCU-hour that's
+≈$0.64/hour plus the ≈$0.0225 ALB-hour. Run the *same* traffic through an NLB, whose
+NLCU allowances for connections are far higher (**800 new flows/sec**, **100,000
+active flows/min**, 1 GB/hour): new flows 2,000/800 = 2.5, bytes 5/1 = 5 → max = **5
+NLCUs** ≈ $0.03/hour at ≈$0.006/NLCU-hour. That ~20x gap is *why* NLB is cheaper for
+high connection churn: ALB meters new connections at 25/sec, NLB at 800/sec, so the
+same connection storm that pins ALB to its new-connection dimension barely registers
+on NLB (which ends up bytes-bound instead).
+
 ---
 
 ## Network Load Balancer (L4) deep dive
@@ -102,13 +122,34 @@ How it routes:
   target.
 - Supports **TCP, UDP, TCP_UDP, TLS** listeners (and newer QUIC/TCP_QUIC).
 
+**Worked example — why one client hits two targets.** The hash is over the *tuple*,
+not the client. Say client `203.0.113.7` opens two TCP connections to the NLB on
+port 443. The OS picks a different **ephemeral source port** per connection — say
+`51000` and `51001`. Two tuples with 4 fields identical and one field (src port)
+different hash to two different buckets, so connection A lands on target-1 and
+connection B on target-2. The flip side is the load-skew trap: a single client
+holding **one** huge long-lived connection (e.g. a 1 Gbps video ingest) is *one*
+tuple → *one* target for its entire life. NLB never rebalances a live flow, so a few
+heavy long-lived clients can pin most of your load onto a couple of targets while the
+connection *count* looks perfectly even. That is exactly when you reach for
+`least_outstanding_requests` (ALB) or more granular fan-out — flow hashing balances
+flows, not bytes.
+
 Distinctive properties:
 - **Static IP per AZ**: one private IP per enabled subnet, and you can attach one
   **Elastic IP per AZ** for internet-facing NLBs — clients/partners can allowlist
   fixed IPs. ALB cannot do this.
 - **Source IP preservation**: with `instance` and `ip` target types the client's
   real source IP reaches the target (no `X-Forwarded-For` needed). Preserved by
-  default for instance targets. Great for firewalls, geo-IP, rate limiting at the app.
+  default for **instance** targets; for **ip** targets it is a target-group attribute
+  (`preserve_client_ip`) whose default differs (off for ip targets registered by IP
+  in most cases) — a classic gotcha when a container fleet suddenly sees the LB's IP
+  instead of the client's. Great for firewalls, geo-IP, rate limiting at the app.
+  Watch the **hairpin/loopback** limitation: when client-IP preservation is on, a
+  target cannot reach *itself* through the NLB (a request that flow-hashes back to the
+  originating instance breaks, because the packet's src and dst resolve to the same
+  host). And because the client IP is preserved, target **security groups must allow
+  the client CIDRs, not the NLB** — see the failure-modes section.
 - **Ultra-low latency** (single-digit added latency, often sub-millisecond vs
   ALB's higher processing) and **millions of connections/requests per second**.
 - **TLS offload** on NLB (terminate TLS at L4 with ACM) if you want cert management
@@ -238,9 +279,15 @@ thundering herd.
 **Trade-offs.** Aggressive health checks (short interval, low unhealthy threshold)
 detect failures fast but risk flapping and false negatives under transient GC
 pauses; conservative checks are stable but slow to eject bad hosts. A deep health
-check that pings downstream deps can cascade a dependency outage into "all targets
-unhealthy" (fail-closed) — a shallow `/healthz` avoids that but can keep routing to
-a target whose dependency is down. Balance depth vs blast radius.
+check that pings downstream deps can flip *every* target to unhealthy at once when
+that shared dependency blips. Critically, ELB does **not** then drop all traffic:
+when *all* targets in a target group are unhealthy the LB **fails open** and routes
+to every target anyway (regardless of health status). So the real danger of a deep
+check isn't dropped traffic — it's that the LB sends requests to targets that will
+all error on the dead dependency, and you've lost the health signal that could have
+routed around a genuinely bad host. A shallow `/healthz` avoids the mass-unhealthy
+flip but can keep routing to a target whose dependency is down. Balance depth vs
+blast radius.
 
 ---
 
@@ -262,6 +309,19 @@ each AZ receives ~50% of traffic, so the 2 targets in AZ-A get 25% each while th
 8 in AZ-B get 6.25% each — a 4x imbalance. Cross-zone smooths this by letting every
 node reach every target. Keeping AZs symmetric (equal target counts) mitigates the
 imbalance without paying cross-zone data charges on NLB.
+
+```
+WITHOUT cross-zone (DNS = 50% per node)      WITH cross-zone (nodes fan to all)
+  Node-A (50%)      Node-B (50%)               Node-A          Node-B
+   /     \          / / / / \ \ \ \              \\  \\        //  //
+  T1     T2        T3 T4 ... T10                every node -> all 10 targets
+ 25%    25%       6.25% each                    each target = 100%/10 = 10%
+ (2 targets split 50%)  (8 split 50%)           (even, regardless of AZ counts)
+```
+
+The skew comes purely from splitting each node's 50% among *unequal* target counts:
+50%/2 = 25% vs 50%/8 = 6.25% (25 / 6.25 = 4x). Cross-zone erases it (10% each) at the
+cost of inter-AZ bytes on NLB.
 
 **Multi-AZ = availability.** Enable ≥2 (ideally 3) AZs and keep healthy targets in
 each. If an AZ's targets all go unhealthy, ELB removes that AZ's node IPs from DNS
@@ -334,6 +394,18 @@ ASG supports several policy types; picking the right one is a common design ques
   ASGAverageCPUUtilization = 50%, or `ALBRequestCountPerTarget` = 1000). AWS
   manages the CloudWatch alarms and computes how many instances to add/remove. Best
   for most workloads; behaves like a thermostat.
+
+  **Worked example — how it picks the count.** Target = `ALBRequestCountPerTarget`
+  = 1,000. You have **10** instances and traffic climbs to **18,000 req** over the
+  period. Current metric = 18,000 / 10 = **1,800 per target** — 1.8x the target, too
+  hot. Target tracking uses the ratio: desired ≈ current × (metric / target) =
+  10 × (1,800 / 1,000) = 18 (equivalently ceil(18,000 / 1,000) = 18). So it scales
+  **+8 → 18 instances**. Next period the same 18,000 spread over 18 targets = exactly
+  1,000/target → at target, no action. If traffic then falls to 9,000: 9,000 / 18 =
+  500/target (half), desired = 18 × (500 / 1,000) = 9 → scale **in to 9**. That
+  settle-toward-target loop is the "thermostat." (Compare step scaling firing on the
+  same 1,800 breach: you'd hand-author a table like `+3 if ≥150% of target, +6 if
+  ≥180%` — more control, more to tune, whereas target tracking derived the +8 for you.)
 - **Step scaling**: add/remove capacity in steps based on alarm breach magnitude
   (e.g. +1 at 60% CPU, +3 at 80%). More control than simple; good when you want
   bigger responses to bigger breaches.
@@ -341,8 +413,10 @@ ASG supports several policy types; picking the right one is a common design ques
   further action. Oldest, least responsive; largely superseded by target/step.
 - **Scheduled scaling**: change min/max/desired at set times (e.g. scale up before
   a 9 a.m. business spike, down at night). Deterministic, predictable loads.
-- **Predictive scaling**: ML forecasts load from ≥24 h of history (needs history;
-  forecasts up to 48 h) and **provisions capacity ahead of the predicted spike**,
+- **Predictive scaling**: ML forecasts load from history — a **24 h minimum** to
+  produce a first forecast, but AWS analyzes up to the past **14 days** and forecasts
+  are more accurate with ~2 full weeks of data (hourly forecast for the next 48 h,
+  refreshed every 6 h) — and **provisions capacity ahead of the predicted spike**,
   ideal for cyclical/daily patterns. Often combined with target tracking (predictive
   handles the known cycle, target tracking handles the unexpected).
 
@@ -356,8 +430,8 @@ or memory-bound apps.
 *after* the metric moves, so there's a boot-time lag). Step scaling reacts more
 aggressively to severe breaches but you must design the steps. Scheduled is perfect
 for known cycles but blind to surprises. Predictive removes the boot-lag for
-*recurring* patterns but is useless for novel spikes and needs weeks of history to
-be accurate. Real systems layer them: predictive/scheduled for the baseline curve +
+*recurring* patterns but is useless for novel spikes and, while 24 h of history is
+enough to start, needs about two weeks of history to be accurate. Real systems layer them: predictive/scheduled for the baseline curve +
 target tracking as the safety net.
 
 ---
@@ -398,13 +472,26 @@ hangs (instance sits in Wait until timeout), so keep hook actions fast and idemp
 - CPU-bound compute: average CPU (target tracking at ~50–70%).
 - Queue workers: **backlog per instance** = messages / running instances; target a
   value that meets your latency budget.
+
+  **Worked example — turning a drain SLO into a target.** Backlog = **10,000
+  messages**, each takes **200 ms** to process, and you want to drain within **60 s**.
+  One instance does 1 / 0.2 = **5 msgs/sec**, so in 60 s it clears 5 × 60 = **300
+  messages**. Instances needed = 10,000 / 300 ≈ 33.3 → **34 instances**. So set the
+  target `backlog-per-instance` = messages ÷ (throughput_per_instance × budget) =
+  10,000 / 34 ≈ **294 messages/instance**: whenever `ApproximateNumberOfMessages /
+  running-instances` exceeds ~294, target tracking scales out to hold the 60 s drain
+  SLO. Tighten the budget to 30 s and the target halves (~147), doubling the fleet.
 - Connection-heavy (NLB): active flow count / bandwidth per target.
 
 **Back-of-envelope.** If each instance safely serves 1,000 RPS and peak is 250,000
 RPS, you need ≥250 instances just for peak, plus headroom for a target CPU below
 100% (at 50% target, double to ~500) and **N+1 (or N+ one AZ)** redundancy so a
-full AZ failure still leaves enough. With 3 AZs, size each AZ to carry ~1.5x its
-share so losing one AZ (33%) is absorbed. Include **scale-out lag**: if boot+warm
+full AZ failure still leaves enough. Work the AZ math explicitly: 500 instances / 3
+AZs ≈ **167/AZ** at steady state. If one AZ dies, the surviving **two** must still
+carry all 500 → 500 / 2 = **250/AZ**. So provision **250/AZ = 750 total** — i.e. each
+AZ runs at 250 / 167 ≈ **1.5x** its normal share (the remaining two go from 33% each
+to 50% each, and 50/33 = 1.5). That is where the "size each AZ to ~1.5x its share"
+rule comes from. Include **scale-out lag**: if boot+warm
 is 4 minutes and traffic can double in 2 minutes, you must pre-scale (predictive/
 scheduled) or keep warm-pool/standby headroom.
 
@@ -495,8 +582,10 @@ exposed to the full request volume and to L7 attacks at the region.
 - **Deploy fails health checks**: ASG/instance refresh loops launching and killing;
   min-healthy-percentage and rollback protect you.
 - **Deep health check + dependency outage**: if `/healthz` pings a down dependency,
-  *all* targets report unhealthy and ELB fail-opens or drops traffic — a shallow
-  check avoids turning a dependency blip into a total outage.
+  *all* targets report unhealthy at once; ELB then **fails open** (routes to every
+  target regardless of health) rather than dropping traffic — so requests still flow
+  but hit targets that all error on the dead dependency. A shallow check avoids
+  turning a dependency blip into a fleet-wide "all unhealthy" event.
 - **Sticky sessions + scale-in**: draining a pinned target disrupts its users;
   stateless design avoids this.
 - **NLB source-IP + security groups**: forgetting that targets see client IPs (not
@@ -569,12 +658,17 @@ speed and the traffic shape.
 
 - AWS docs — Elastic Load Balancing: User Guide, and the Application, Network,
   Gateway, and Classic Load Balancer developer guides (target groups, health checks,
-  cross-zone load balancing, sticky sessions, target group attributes).
+  cross-zone load balancing, sticky sessions, target group attributes). The ALB
+  target-group health-checks guide documents the **fail-open** rule: if a target
+  group contains only unhealthy targets the LB routes to all of them regardless of
+  status.
 - AWS docs — Product comparison for Elastic Load Balancing (ALB vs NLB vs GWLB vs CLB
   feature matrix).
 - AWS docs — Amazon EC2 Auto Scaling User Guide: scaling policies (target tracking,
   step, simple, scheduled, predictive), cooldowns and warm-up, warm pools, lifecycle
-  hooks, health checks and grace period.
+  hooks, health checks and grace period. "How predictive scaling works" states the
+  **24 h minimum** history to start forecasting, analysis of up to the **past 14
+  days**, and an hourly forecast for the next 48 h refreshed every 6 h.
 - AWS docs — Gateway Load Balancer and GENEVE (UDP 6081), Gateway Load Balancer
   endpoints.
 - AWS docs — AWS Global Accelerator, Amazon CloudFront developer guide (CloudFront +

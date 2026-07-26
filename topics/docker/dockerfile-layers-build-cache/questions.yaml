@@ -9,10 +9,10 @@ questions:
     question: |
       What is a Docker image, structurally?
     options:
-      - "A single editable tarball that the daemon mutates in place"
+      - "A single editable tarball on disk that the daemon mutates in place"
       - "An ordered stack of read-only layers (filesystem changesets) plus an image config"
-      - "A running process isolated by namespaces and cgroups"
-      - "A YAML file describing services and networks"
+      - "A running process isolated by Linux namespaces and control groups"
+      - "A YAML manifest describing services, networks, and shared volumes"
     answer: 1
     explanation: |
       An image is an ordered set of immutable, content-addressed layers (each a filesystem
@@ -26,9 +26,9 @@ questions:
     question: |
       When you run a container from an image, where do writes go?
     options:
-      - "Directly into the topmost image layer, mutating it"
-      - "Into the build cache"
-      - "They are discarded immediately unless a volume is used"
+      - "Directly into the topmost read-only image layer, mutating it in place"
+      - "Into the shared build cache, so they persist across every container start"
+      - "They are discarded immediately at process exit unless a named volume is mounted"
       - "Into a thin writable copy-on-write layer added on top of the read-only image layers"
     answer: 3
     explanation: |
@@ -62,9 +62,9 @@ questions:
       layers?
     options:
       - "No — ENV is metadata written to the image config, not a filesystem layer"
-      - "Yes, each ENV adds a large layer"
-      - "Only if the variable value is longer than 256 bytes"
-      - "Yes, but only on Alpine base images"
+      - "Yes, each ENV line commits a new filesystem layer roughly the size of the variable"
+      - "Only if the variable's value string is longer than the 256-byte config limit"
+      - "Yes, but the extra layers only materialize on Alpine and other musl base images"
     answer: 0
     explanation: |
       ENV only sets values in the image config; it does not create a meaningful filesystem
@@ -78,10 +78,10 @@ questions:
       A learner writes `CMD apt-get install -y curl` expecting curl to be installed in the
       image. What actually happens?
     options:
-      - "curl is installed during the build"
-      - "The build fails because CMD cannot take arguments"
+      - "curl is installed during the build and committed into a new image layer"
+      - "The build fails because CMD rejects arguments passed in shell form"
       - "Nothing at build time — CMD only sets the default command run at container start"
-      - "curl is installed but only in the writable layer"
+      - "curl is installed at build time but only into the container's writable layer"
     answer: 2
     explanation: |
       CMD does not execute at build time; it declares the default command run when a
@@ -95,9 +95,9 @@ questions:
     question: |
       In `docker build .`, what is the `.`?
     options:
-      - "The output directory for the built image"
-      - "The name of the Dockerfile to use"
-      - "A flag enabling BuildKit"
+      - "The output directory where the finished image tarball is written"
+      - "The path to the Dockerfile the builder should parse and use"
+      - "A positional flag that enables the BuildKit backend for this build"
       - "The build context — the set of files sent to the builder that COPY/ADD can reference"
     answer: 3
     explanation: |
@@ -113,9 +113,9 @@ questions:
       What is the main purpose of a `.dockerignore` file?
     options:
       - "To exclude paths from the build context so they aren't sent to the builder or copied in"
-      - "To list packages that should not be installed"
-      - "To mark layers that should be squashed"
-      - "To configure which registry to push to"
+      - "To list apt/apk packages that the builder should refuse to install during RUN steps"
+      - "To mark redundant intermediate layers that the builder should squash together"
+      - "To configure the default registry and namespace that finished images are pushed to"
     answer: 0
     explanation: |
       .dockerignore excludes files/dirs from the build context (gitignore-style globs),
@@ -130,10 +130,10 @@ questions:
       A build's first line shows `transferring context: 1.83GB` and builds are slow. What is
       the most likely cause and fix?
     options:
-      - "The base image is too large; switch to scratch"
-      - "Too many ENV instructions; combine them"
+      - "The base image is far too large; switch the FROM line to scratch to shrink transfer"
+      - "Too many ENV and LABEL instructions inflate the context; combine them into one line"
       - "node_modules/.git/artifacts are in the context; add a .dockerignore to exclude them"
-      - "The Dockerfile is missing a HEALTHCHECK"
+      - "The Dockerfile is missing a HEALTHCHECK, so the builder re-scans the whole context"
     answer: 2
     explanation: |
       A huge context means large/unnecessary directories (node_modules, .git, dist, big
@@ -148,10 +148,10 @@ questions:
       During a build, the instruction at line 5 gets a cache miss. What happens to lines 6
       through 10?
     options:
-      - "They still use cache if their own inputs are unchanged"
+      - "They still use cache as long as each line's own inputs are individually unchanged"
       - "They are all rebuilt, because each layer depends on the result of the previous one"
-      - "Only COPY/ADD lines among them rebuild"
-      - "The build aborts with an error"
+      - "Only the COPY/ADD lines among them rebuild; RUN lines keep their cached layers"
+      - "The build aborts with a cache-invalidation error and must be restarted with --no-cache"
     answer: 1
     explanation: |
       A cache miss cascades: because every instruction builds on the layer produced by the
@@ -166,9 +166,9 @@ questions:
       Why can a lone `RUN apt-get update` on its own line serve a stale package index on
       later builds?
     options:
-      - "apt caches indexes in a volume that never expires"
-      - "Docker signs the index and refuses to refresh it"
-      - "The layer is marked immutable by the registry"
+      - "apt stores its package indexes in a persistent build volume that never expires"
+      - "Docker cryptographically signs the fetched index and then refuses to refresh it"
+      - "The resulting layer is marked immutable by the registry once it has been pushed"
       - "RUN cache is keyed on the command string only; the same string is a cache hit regardless of upstream package changes"
     answer: 3
     explanation: |
@@ -183,10 +183,10 @@ questions:
     question: |
       How does the builder decide whether a `COPY` instruction can use the cache?
     options:
-      - "By comparing the command string only"
-      - "By checking the file's last-access time only"
+      - "By comparing the literal COPY command string, the same way it keys RUN steps"
+      - "By checking each source file's last-access (atime) timestamp and nothing else"
       - "By computing a checksum of the copied files' contents/metadata and comparing it"
-      - "It never caches COPY"
+      - "It never caches COPY, so the instruction re-runs on every single build"
     answer: 2
     explanation: |
       For COPY/ADD the builder computes a checksum from the source files' contents/metadata.
@@ -201,10 +201,10 @@ questions:
       You `touch` a source file (updating only its modification time, not its contents) and
       rebuild. Is the corresponding `COPY` layer's cache invalidated?
     options:
-      - "Yes, any change to the file busts the cache"
+      - "Yes, any timestamp change touches the file's metadata and busts the COPY cache"
       - "No — if only the mtime changed and contents are identical, the cache is not invalidated"
-      - "Only if BuildKit is disabled"
-      - "Only for files larger than 1 MB"
+      - "Only if BuildKit is disabled and the legacy builder computes the checksum instead"
+      - "Only for files larger than the 1 MB threshold above which mtime is included"
     answer: 1
     explanation: |
       The COPY/ADD cache checksum is based on file contents; a pure mtime change with
@@ -242,9 +242,9 @@ questions:
       ```
     options:
       - "COPY . . comes first, so any source change busts that layer and every layer after it, including npm ci"
-      - "npm ci is never cacheable"
-      - "The base image tag is mutable"
-      - "WORKDIR resets the cache"
+      - "npm ci is inherently never cacheable and always re-downloads the dependency tree"
+      - "The node:20-alpine base tag is mutable, so its layers change and invalidate the build"
+      - "WORKDIR /app resets the layer cache each build, forcing the install step to re-run"
     answer: 0
     explanation: |
       Because the full source is copied before dependencies are installed, any code change
@@ -259,10 +259,10 @@ questions:
       What is the guiding principle for ordering Dockerfile instructions to maximize cache
       reuse?
     options:
-      - "Alphabetical order of instruction keywords"
-      - "Put all COPY instructions at the very top"
+      - "Sort instructions alphabetically by keyword so the builder can index them faster"
+      - "Put every COPY instruction at the very top so the source is available to all steps"
       - "Place instructions that change rarely (install deps) before ones that change often (copy source)"
-      - "Put the largest layers last regardless of change frequency"
+      - "Put the largest layers last, regardless of how frequently their inputs actually change"
     answer: 2
     explanation: |
       Since a cache miss cascades downward, ordering from least- to most-frequently-changed
@@ -294,10 +294,10 @@ questions:
       Between COPY and ADD, which does Docker recommend as the default for copying local
       files?
     options:
-      - "ADD, because it is more powerful"
+      - "ADD, because its extra tar and URL features make it the more powerful default"
       - "COPY, because it is predictable and has no hidden behavior"
-      - "Neither; use RUN cp instead"
-      - "They are identical, so it doesn't matter"
+      - "Neither; use RUN cp so the copy is captured explicitly in its own layer"
+      - "They are byte-for-byte identical instructions, so the choice makes no difference"
     answer: 1
     explanation: |
       COPY is preferred because it does exactly one thing — copy files literally. ADD adds
@@ -311,9 +311,9 @@ questions:
     question: |
       What does `ADD app.tar.gz /opt/` do that `COPY app.tar.gz /opt/` does not?
     options:
-      - "ADD verifies a GPG signature before copying"
-      - "ADD copies the file with root ownership; COPY does not"
-      - "Nothing; they behave identically for tarballs"
+      - "ADD verifies the archive's detached GPG signature before copying it into /opt"
+      - "ADD copies the file with root ownership, whereas COPY preserves the source's owner"
+      - "Nothing; both instructions treat the tarball as an opaque file and behave identically"
       - "ADD automatically decompresses and extracts the local tar archive into /opt"
     answer: 3
     explanation: |
@@ -330,9 +330,9 @@ questions:
       auto-extract the remote archive into /opt.
     options:
       - "False — ADD downloads the remote file but does NOT auto-extract remote archives"
-      - "True — remote tars are extracted just like local ones"
-      - "True, but only with the --extract flag"
-      - "False — ADD cannot use URLs at all"
+      - "True — ADD unpacks remote tar archives into the target just like local ones"
+      - "True, but only when you pass the explicit --extract flag to the ADD line"
+      - "False — ADD rejects HTTPS URLs and only accepts local build-context paths"
     answer: 0
     explanation: |
       ADD can fetch remote URLs, but unlike local tar archives, remote archives are NOT
@@ -347,10 +347,10 @@ questions:
       Why is `RUN curl -fsSL <url> -o /tmp/x.tgz && tar -xzf /tmp/x.tgz -C /opt && rm
       /tmp/x.tgz` often preferred over `ADD <url> /opt/`?
     options:
-      - "curl is faster than ADD"
-      - "ADD cannot download over HTTPS"
+      - "curl streams the download in parallel chunks, making it strictly faster than ADD"
+      - "ADD only understands local build-context paths and cannot fetch anything over HTTPS"
       - "It lets you verify the download and delete the archive in the same layer so it doesn't bloat the image"
-      - "RUN commands are never cached, guaranteeing freshness"
+      - "RUN steps are never cached, so the download always re-runs and is guaranteed fresh"
     answer: 2
     explanation: |
       Using RUN, you can checksum-verify the download and clean up the archive within the
@@ -366,8 +366,8 @@ questions:
       separate RUN lines?
     options:
       - "It makes the Dockerfile shorter, which Docker rewards with faster networking"
-      - "Separate RUN lines are not allowed in BuildKit"
-      - "A single RUN disables the cache, guaranteeing correctness"
+      - "The BuildKit frontend rejects a Dockerfile that contains more than one RUN per stage"
+      - "A single RUN instruction disables the layer cache entirely, which is what guarantees a correct build"
       - "Each RUN is its own layer; temp files created and deleted within one RUN never persist, whereas across layers deletions don't reclaim earlier bytes"
     answer: 3
     explanation: |
@@ -385,8 +385,8 @@ questions:
     options:
       - "RUN apt-get install -y gcc on one line, RUN make on the next, RUN apt-get purge gcc on the next"
       - "RUN apt-get update && apt-get install -y --no-install-recommends gcc && make && apt-get purge -y --auto-remove gcc && rm -rf /var/lib/apt/lists/*"
-      - "RUN apt-get install gcc; CMD make; RUN rm gcc"
-      - "ADD gcc /usr/bin && RUN make"
+      - "RUN apt-get install -y gcc, then CMD make on its own line, then a trailing RUN rm -rf /usr/bin/gcc"
+      - "ADD gcc /usr/bin/ on one line followed by RUN make, relying on ADD to fetch the compiler"
     answer: 1
     explanation: |
       Chaining install, use, purge, and apt-list cleanup in one RUN means the build tools and
@@ -400,10 +400,10 @@ questions:
     question: |
       What is the downside of collapsing an entire Dockerfile into one giant RUN?
     options:
-      - "Docker rejects RUN commands longer than 100 characters"
-      - "It prevents the image from ever being pushed to a registry"
+      - "Docker refuses to build any RUN command whose script exceeds 100 characters in length"
+      - "A single giant RUN strips the image manifest, so the result can never be pushed to a registry"
       - "Any change to that line re-runs the whole thing, losing fine-grained cache reuse"
-      - "It makes ENV variables stop working"
+      - "One combined RUN causes every ENV variable declared earlier to silently stop expanding"
     answer: 2
     explanation: |
       Fewer layers is cleaner, but a single huge RUN re-executes entirely on any change to
@@ -419,9 +419,9 @@ questions:
       approximate size contribution of these steps to the final image?
     options:
       - "About 500 MB — the delete only adds a whiteout marker; the bytes remain in the earlier layer"
-      - "0 MB — the file was deleted"
-      - "250 MB — Docker averages the two layers"
-      - "It depends on the storage driver's compression ratio"
+      - "About 0 MB — the later rm frees the bytes and the earlier layer shrinks to match"
+      - "About 250 MB — Docker averages the add and delete layers into a single midpoint size"
+      - "It depends entirely on the storage driver's compression ratio for the deleted region"
     answer: 0
     explanation: |
       Layers are additive. Deleting the file in a later layer writes a whiteout that hides it
@@ -436,8 +436,8 @@ questions:
       Which technique reliably keeps build-time junk out of the FINAL image?
     options:
       - "Adding a `RUN rm -rf` step at the very end of the Dockerfile"
-      - "Setting ENV CLEANUP=true"
-      - "Adding more LABEL instructions"
+      - "Setting ENV CLEANUP=true so the daemon garbage-collects build junk at commit time"
+      - "Adding more LABEL instructions to mark the build-only layers as removable metadata"
       - "Using a multi-stage build and COPY --from to bring only the artifacts into a slim final stage"
     answer: 3
     explanation: |
@@ -453,10 +453,10 @@ questions:
       A Dockerfile does `COPY id_rsa /root/.ssh/id_rsa`, uses it in a RUN, then `RUN rm
       /root/.ssh/id_rsa`. Why is the key still compromised?
     options:
-      - "Because rm doesn't work as root"
+      - "Because rm silently fails for files under /root/.ssh unless run with sudo -E first"
       - "Because the key still exists in the earlier COPY layer and can be extracted from the image"
-      - "Because SSH keys are cached in the registry"
-      - "It isn't compromised — rm removes it from the image"
+      - "Because the registry caches SSH private keys separately and replays them on every pull"
+      - "It isn't compromised — the trailing rm scrubs the key from every layer of the image"
     answer: 1
     explanation: |
       Deleting in a later layer only hides the file; the key bytes remain in the earlier
@@ -471,10 +471,10 @@ questions:
       What does `RUN --mount=type=cache,target=/root/.cache/pip pip install -r
       requirements.txt` achieve?
     options:
-      - "It bakes the pip cache into the image as a layer"
-      - "It disables caching for pip"
+      - "It bakes the entire pip download cache into the image as a dedicated extra layer"
+      - "It disables pip's own caching so every install re-downloads all wheels from PyPI"
       - "It provides a persistent build-time cache directory that survives across builds but is NOT part of the image"
-      - "It uploads packages to a private registry"
+      - "It uploads the resolved packages to a private registry for other builds to reuse"
     answer: 2
     explanation: |
       A BuildKit cache mount is a persistent scratch directory reused across builds and never
@@ -489,9 +489,9 @@ questions:
       Is the content of a `--mount=type=cache` directory included in the resulting image
       layers?
     options:
-      - "Yes, it becomes a dedicated cache layer"
-      - "Only the first 100 MB is included"
-      - "Only if you tag the image with :cache"
+      - "Yes, its contents are committed as a dedicated cache layer at the end of the build"
+      - "Only the first 100 MB of the cache directory is copied into the final image layers"
+      - "Only when you explicitly tag the resulting image with the reserved :cache suffix"
       - "No — cache mounts are build-time only and never shipped in the image"
     answer: 3
     explanation: |
@@ -507,9 +507,9 @@ questions:
       The "layer cache" and a BuildKit "cache mount" are:
     options:
       - "Two distinct mechanisms — the layer cache reuses whole layers; a cache mount is a persistent scratch dir for a package manager"
-      - "The same thing under different names"
-      - "Both stored inside the final image"
-      - "Both disabled by --no-cache in identical ways"
+      - "The same underlying mechanism exposed under two different marketing names"
+      - "Both physically stored inside the final image as ordinary read-only layers"
+      - "Both switched off by the --no-cache flag in exactly the same way each build"
     answer: 0
     explanation: |
       The layer cache reuses an entire layer when instruction+inputs are unchanged. A cache
@@ -523,10 +523,10 @@ questions:
     question: |
       Which statement about ARG vs ENV is correct?
     options:
-      - "ARG persists in the image; ENV is build-time only"
+      - "ARG values are baked into the image config, while ENV is only visible during the build"
       - "ARG is build-time only and not persisted; ENV persists into the image and is available at runtime"
-      - "Both persist into the running container's environment"
-      - "Neither is available during the build"
+      - "Both ARG and ENV persist into the running container's environment and survive docker inspect"
+      - "Neither ARG nor ENV is available during the build; both apply only at container start"
     answer: 1
     explanation: |
       ARG variables are available only during the build and are not baked into the image.
@@ -559,10 +559,10 @@ questions:
       An `ARG TAG=1.0` is declared before `FROM`. In a `RUN echo $TAG` after FROM, what does
       $TAG expand to (without redeclaration)?
     options:
-      - "1.0, inherited automatically"
+      - "1.0, because a pre-FROM ARG is automatically inherited into every build stage"
       - "An empty string, because an ARG before FROM is out of scope after FROM unless redeclared"
-      - "The literal string $TAG"
-      - "The build fails with an undefined variable error"
+      - "The literal string $TAG, since RUN does not expand ARG references in shell form"
+      - "The build fails with an undefined-variable error the moment RUN references $TAG"
     answer: 1
     explanation: |
       An ARG declared before FROM lives outside the build stage. After FROM it is out of
@@ -576,10 +576,10 @@ questions:
     question: |
       Why should you NOT pass secrets via `--build-arg`?
     options:
-      - "Build args are encrypted and slow"
-      - "Build args cannot hold strings longer than 64 bytes"
+      - "Build args are transparently encrypted, which makes every build noticeably slower"
+      - "Build args are capped at 64 bytes, too small to hold a typical token or password"
       - "ARG values are visible in `docker history` and thus leak; use BuildKit secret mounts instead"
-      - "Build args are ignored by RUN instructions"
+      - "Build args are silently ignored by RUN instructions, so the secret never reaches the command"
     answer: 2
     explanation: |
       ARG values (except predefined proxy ARGs) show up in docker history, so a secret passed
@@ -595,9 +595,9 @@ questions:
       subsequent RUN see in its environment?
     options:
       - "The ENV value overrides the ARG of the same name"
-      - "The ARG value always wins"
-      - "It is undefined behavior"
-      - "Both are concatenated"
+      - "The ARG value always wins because build-time args are resolved last of all"
+      - "It is undefined behavior that varies between the classic builder and BuildKit"
+      - "Both are concatenated into a single value separated by a colon delimiter"
     answer: 0
     explanation: |
       Per the Dockerfile reference, an ENV instruction always overrides an ARG of the same
@@ -610,9 +610,9 @@ questions:
     question: |
       What is `FROM scratch`?
     options:
-      - "A minimal Alpine image"
-      - "A placeholder that Docker replaces with ubuntu:latest"
-      - "A command to clear the build cache"
+      - "A minimal Alpine-based image stripped down to just busybox and musl"
+      - "A placeholder keyword that Docker silently rewrites to ubuntu:latest at build time"
+      - "A special instruction that clears the entire build cache before the next stage"
       - "The empty image with zero base layers, used for fully static binaries"
     answer: 3
     explanation: |
@@ -628,10 +628,10 @@ questions:
       Why pin a base image to a digest (`FROM node:20-alpine@sha256:...`) instead of just a
       tag?
     options:
-      - "Digests download faster than tags"
-      - "Only digests support multi-arch"
+      - "Digests are pre-hashed, so the registry serves them faster than resolving a tag"
+      - "Only digest references support multi-arch manifests; plain tags are single-platform"
       - "Tags are mutable and can point to different contents over time; a digest is immutable, giving reproducible builds and stable base-layer caching"
-      - "Tags cannot be used with Alpine"
+      - "Tags simply cannot be used with Alpine-based images and must be replaced by a digest"
     answer: 2
     explanation: |
       A tag like 20-alpine can be re-pushed to point at new contents, silently changing your
@@ -645,10 +645,10 @@ questions:
     question: |
       What does the `latest` tag mean?
     options:
-      - "The newest stable release, guaranteed by Docker"
+      - "The newest stable release, guaranteed by Docker's registry to always be production-ready"
       - "Just the default tag with no special meaning; it can be stale or move unexpectedly"
-      - "An image that auto-updates inside running containers"
-      - "The smallest available variant of an image"
+      - "An image that auto-updates itself inside every running container when the upstream tag moves"
+      - "The smallest, most size-optimized variant of an image that Docker publishes for a repository"
     answer: 1
     explanation: |
       latest is merely the tag used when none is specified. It carries no guarantee of being
@@ -662,9 +662,9 @@ questions:
     question: |
       What characterizes a "distroless" base image?
     options:
-      - "It includes a full package manager for flexibility"
-      - "It is a distribution built entirely from Alpine packages"
-      - "It cannot run compiled binaries"
+      - "It includes a full package manager and shell so operators can debug and install extra tools at runtime"
+      - "It is a standalone Linux distribution assembled entirely from Alpine musl packages and apk repositories"
+      - "It cannot run statically compiled binaries and requires an interpreter to be layered in first"
       - "It contains only the app and its runtime libraries — no shell or package manager — reducing size and attack surface"
     answer: 3
     explanation: |
@@ -681,9 +681,9 @@ questions:
       bloating an image?
     options:
       - "docker history --no-trunc myimage:tag"
-      - "docker ps -a"
-      - "docker logs myimage:tag"
-      - "docker stats myimage:tag"
+      - "docker ps -a --size --no-trunc --filter status=exited"
+      - "docker logs --details --timestamps myimage:tag"
+      - "docker stats --no-stream --all myimage:tag"
     answer: 0
     explanation: |
       docker history lists each layer with its originating instruction and size, so you can
@@ -698,10 +698,10 @@ questions:
       In build output, what does `CACHED` next to a step indicate, and how do you find where
       your cache broke?
     options:
-      - "It means the step failed; the first CACHED step is the failure"
-      - "It means the step was skipped entirely"
+      - "It means the step failed to build; the first CACHED step marks where the failure began"
+      - "It means the step was skipped entirely because its instruction produced no filesystem layer"
       - "It means a cache hit; the first non-CACHED step is where the cache broke"
-      - "It means the layer was pushed to the registry"
+      - "It means the resulting layer was already pushed to the configured registry during the build"
     answer: 2
     explanation: |
       CACHED marks a cache hit. The first step lacking CACHED is where reuse stopped — inspect
@@ -716,10 +716,10 @@ questions:
       An interviewer says: "Your image is 1.4 GB and you don't know why. Walk me through
       debugging." Which is the strongest first step?
     options:
-      - "Restart the Docker daemon and rebuild"
+      - "Restart the Docker daemon and rebuild so the storage driver recompacts the oversized layers"
       - "Run `docker history --no-trunc` to find the largest layer(s), then attack that layer with same-layer cleanup, multi-stage, or a slimmer base"
-      - "Switch to Podman"
-      - "Add more HEALTHCHECK instructions"
+      - "Switch the build to Podman, whose overlay driver stores images far more compactly than dockerd"
+      - "Add more HEALTHCHECK instructions so the daemon can prune unused bytes from each layer at commit"
     answer: 1
     explanation: |
       The systematic approach is to locate the fat layer(s) with docker history, identify the
@@ -734,9 +734,9 @@ questions:
       Two images are both built `FROM ubuntu:22.04`. What is true about the base layers on
       disk and over the network?
     options:
-      - "Each image stores its own private copy of the base layers"
-      - "Base layers are never cached and always re-downloaded"
-      - "The images must be merged before they can share layers"
+      - "Each image stores its own private, independently-hashed copy of the base ubuntu layers on disk"
+      - "Base layers are never cached locally and are re-downloaded in full on every single pull"
+      - "The two images must first be flattened and merged into one manifest before any layers can be shared"
       - "The identical, content-addressed base layers are shared/deduplicated on disk, and a pull only fetches layers not already present"
     answer: 3
     explanation: |
@@ -752,9 +752,9 @@ questions:
       How does the `ARG CACHEBUST=$(date +%s)` trick force a rebuild from a certain point?
     options:
       - "A changed build-arg value invalidates the cache from the instruction that uses it onward"
-      - "It clears the entire Docker daemon cache"
-      - "It renames the image so cache can't match"
-      - "It disables BuildKit"
+      - "It clears the entire Docker daemon layer cache the same way `docker builder prune -a` would"
+      - "It renames the resulting image with a timestamp suffix so the cache key can never match a prior build"
+      - "It silently disables the BuildKit frontend and falls back to the uncached legacy builder"
     answer: 0
     explanation: |
       Changing a build-arg value that an instruction consumes causes a cache miss at that
@@ -768,10 +768,10 @@ questions:
     question: |
       What does `EXPOSE 8080` do?
     options:
-      - "Publishes port 8080 on the host automatically"
-      - "Opens a firewall rule on the host"
+      - "Automatically publishes and binds port 8080 on the host to the container at run time"
+      - "Opens an iptables firewall rule on the host so external traffic can reach port 8080"
       - "Documents that the container listens on 8080; it does not publish the port"
-      - "Creates a new network layer"
+      - "Creates a new bridge-network layer dedicated to routing traffic on port 8080"
     answer: 2
     explanation: |
       EXPOSE is metadata documenting the intended port; it does not publish anything. You
@@ -786,9 +786,9 @@ questions:
       In `RUN --mount=type=cache,target=/var/cache/apt,sharing=locked ...`, what is the role
       of `sharing=locked`?
     options:
-      - "It encrypts the cache directory"
-      - "It locks the cache into the final image"
-      - "It prevents the cache from ever being reused"
+      - "It encrypts the cache directory's contents with a per-build key before writing them to disk"
+      - "It locks the cache mount's contents into the final image as a persistent read-only layer"
+      - "It prevents the cache mount from ever being reused, forcing a fresh apt download each build"
       - "It serializes concurrent builds' access to the shared cache to avoid corruption"
     answer: 3
     explanation: |
@@ -804,10 +804,10 @@ questions:
       Which command exports an image's layers as a tar so you can inspect exactly what files
       it contains?
     options:
-      - "docker export <container>"
+      - "docker export <container> -o img.tar"
       - "docker save myimage:tag -o img.tar"
-      - "docker commit myimage:tag"
-      - "docker cp myimage:tag ."
+      - "docker commit myimage:tag backup:tag"
+      - "docker cp myimage:tag/ ./layers"
     answer: 1
     explanation: |
       docker save writes an image (all its layers + manifest) to a tar archive you can unpack
@@ -822,9 +822,9 @@ questions:
       What does `docker build --no-cache-filter=deps .` do?
     options:
       - "Skips the cache only for the stage named `deps`, while other stages may still use cache"
-      - "Disables cache for the entire build"
-      - "Deletes the deps stage from the Dockerfile"
-      - "Filters out dependency layers from the final image"
+      - "Disables the build cache for the entire multi-stage build, exactly like passing --no-cache"
+      - "Deletes the stage named `deps` from the parsed Dockerfile before the build graph is assembled"
+      - "Filters the layers produced by the deps stage out of the final squashed image"
     answer: 0
     explanation: |
       --no-cache-filter targets specific stages (here, deps) to bypass their cache while
@@ -838,9 +838,9 @@ questions:
     question: |
       Which capability is available to BOTH COPY and ADD?
     options:
-      - "Auto-extracting a local tar archive"
-      - "Fetching a remote git repository"
-      - "Downloading from an HTTPS URL"
+      - "Auto-extracting a recognized local compressed tar archive into the destination directory"
+      - "Fetching and cloning a remote git repository directly into the destination path"
+      - "Downloading a file from an HTTPS URL straight into the image at build time"
       - "Copying files from another build stage with --from"
     answer: 3
     explanation: |
@@ -854,10 +854,10 @@ questions:
     question: |
       When does a `RUN` instruction execute?
     options:
-      - "Every time the container starts"
-      - "Only when docker exec is called"
+      - "Every time the container starts, re-running its command as the container's entrypoint"
+      - "Only when docker exec attaches to the running container and invokes the command manually"
       - "During the image build, capturing its filesystem changes into a new layer"
-      - "Never; RUN is only documentation"
+      - "Never; RUN is purely documentation that records an intended command in the image config"
     answer: 2
     explanation: |
       RUN executes at build time in an intermediate container and commits the resulting
@@ -872,10 +872,10 @@ questions:
       Using `RUN --mount=type=secret,id=npmrc ...`, how does the secret interact with the
       build cache and image layers?
     options:
-      - "The secret's contents are stored in the layer and cache"
+      - "The secret's contents are committed into that RUN's layer and folded into the build cache key"
       - "The secret's contents are not written to any layer and are not part of the build cache"
-      - "The secret forces --no-cache for the whole build"
-      - "The secret is embedded in docker history"
+      - "The secret forces --no-cache for the whole build, re-running every step from FROM onward"
+      - "The secret's plaintext value is embedded in docker history as a build-arg-style annotation"
     answer: 1
     explanation: |
       BuildKit secret mounts expose the secret only to that RUN's process; the contents are

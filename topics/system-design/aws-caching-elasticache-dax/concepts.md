@@ -178,6 +178,22 @@ write freshness is required.
   use **hash tags** `{user123}:profile` / `{user123}:orders` to co-locate keys.
   Cross-slot commands fail. The client must be cluster-aware.
 
+**Worked example — how a key lands on a shard.** The router computes `CRC16(key) mod
+16384` to pick a slot, then looks up which shard owns that slot. With **3 shards**,
+slots are divided roughly evenly: shard A owns `0–5460`, shard B `5461–10922`, shard C
+`10923–16383`. Trace real keys (CRC16 is deterministic):
+- `user123:profile` → `CRC16 mod 16384 = 8517` → in `5461–10922` → **shard B**.
+- `user456:profile` → `893` → in `0–5460` → **shard A**. Two similar keys, different
+  shards — so `MGET user123:profile user456:profile` is a **cross-slot** command and
+  **errors** (`CROSSSLOT Keys ... don't hash to the same slot`).
+- Now add a hash tag: only the substring inside the first `{...}` is hashed.
+  `{user123}:profile` and `{user123}:orders` both hash just `user123` → **both = slot
+  13438** → both on **shard C**. Now `MGET {user123}:profile {user123}:orders` and a
+  `MULTI/EXEC` across them work, because they are guaranteed co-located.
+
+That is the whole point of hash tags: force related keys you need to read/transact
+together onto one shard, without giving up sharding for everything else.
+
 **Replication and consistency:** replication is **asynchronous**, so a replica read
 can be **stale** and a failover can lose the last few unreplicated writes. Redis is an
 **AP-leaning** store; do not treat it as a strongly-consistent system of record.
@@ -262,6 +278,19 @@ RCUs.
 **Limits/facts:** default item/query TTL 5 min; cluster up to 11 nodes; DAX is for
 **DynamoDB only** (not RDS, not arbitrary data); works with tables using standard
 throughput; not for strongly-consistent-critical reads.
+
+**Security/access (interviewers probe this):** a DAX cluster is **VPC-only** — no public
+endpoint — so clients reach it from inside the VPC (or via peering/VPN). Callers need
+IAM permissions for **both** DAX **and** the underlying DynamoDB table (DAX doesn't
+bypass table authorization). It supports **encryption in transit (TLS)** and **at rest**.
+
+> [!WARNING]
+> DAX caches **successful** `GetItem` results, not **misses** — a lookup for a key that
+> does not exist is **not** negatively cached. So repeated reads of a nonexistent key
+> hit DynamoDB **every time** (a cache-penetration pattern). If bad keys are hammered,
+> add your own negative caching in front (e.g. a short-TTL "not found" marker in
+> ElastiCache). Also: `TransactWriteItems`/conditional writes and query-cache staleness
+> don't refresh the item cache the way a plain write-through `PutItem` does.
 
 **When to use DAX:** read-heavy DynamoDB workloads, microsecond latency targets,
 repeated reads of the same items, "hot item" traffic, or reducing RCU cost/throttling
@@ -422,9 +451,38 @@ sliding-window limiters atomically and fast; sorted sets implement sliding-windo
 Centralizing counters in ElastiCache gives a **global** limit across many app servers
 that local in-memory counters cannot.
 
+**Worked example — fixed-window limiter, "100 requests / 60 s per user".** Key is
+`rl:user123`. First request in the window:
+```
+INCR rl:user123        -> 1      (key was absent, INCR creates it at 1)
+EXPIRE rl:user123 60             (only set TTL on the first hit, so the window is fixed)
+```
+Each later request just does `INCR rl:user123` → `2`, `3`, … Compare the returned value
+to the limit: while `value <= 100`, allow; the request that returns `101` is **rejected**
+(HTTP 429). After 60 s the key expires, the next `INCR` re-creates it at `1`, and the
+window resets. `INCR` is atomic, so 50 app servers hitting the same key never
+double-count — that is why the counter lives in ElastiCache, not in each server's memory.
+
 **Leaderboards.** Redis **sorted sets** (`ZADD`, `ZRANGE`, `ZREVRANK`) are the textbook
 answer — O(log n) ranked inserts and range queries give real-time top-N and a player's
 rank cheaply. Neither Memcached (no structures), DAX, nor CloudFront can do this.
+
+**Worked example — top-N and a player's rank.** Add three scores to sorted set
+`game:lb` (a sorted set keeps members ordered by score automatically):
+```
+ZADD game:lb 1500 alice
+ZADD game:lb 1800 bob
+ZADD game:lb 1650 carol
+```
+Sorted ascending by score, the set is `alice(1500) < carol(1650) < bob(1800)`.
+- `ZREVRANK game:lb bob` → **0** (bob is highest; ranks are **0-based**, descending).
+  `ZREVRANK game:lb alice` → **2** (lowest of the three).
+- `ZREVRANGE game:lb 0 2 WITHSCORES` → the top 3, highest first:
+  `bob 1800, carol 1650, alice 1500`.
+- Now `ZADD game:lb 1700 alice` **updates** alice's score in place (same member) to
+  1700; the set re-sorts to `carol(1650) < alice(1700) < bob(1800)`, so `ZREVRANK
+  game:lb alice` is now **1**. Every one of these is O(log n) — no full re-sort — which
+  is why a sorted set beats querying and ordering a table on every scoreboard refresh.
 - **Trade-off:** a sorted set on one shard is a potential hot key at extreme scale;
   shard leaderboards (per-region, per-time-bucket) and merge, or use read replicas.
 
@@ -470,6 +528,25 @@ low-latency, in-memory, best-effort fan-out.
 - **DAX:** per-node-hour × cluster nodes; you trade DAX cost against **saved DynamoDB
   RCUs** — for read-heavy hot data, DAX is often cheaper than scaling table read
   capacity, and it eliminates throttling on hot partitions.
+
+  **Worked example — DAX vs serving reads from the table.** A hot item is read **50,000
+  times/sec**, item size **4 KB**, eventually consistent (an eventually-consistent read
+  of a 4 KB item = **0.5 RCU**). Reads/sec in RCU = `50,000 × 0.5 = 25,000 RCU/sec`.
+  - **On-demand** table reads (~$0.25 per million read units): `25,000 × 2,592,000 s/mo
+    = 64.8 billion RRU/mo`, `64,800 × $0.25 ≈ $16,200/month`.
+  - **Provisioned** 25,000 RCUs (~$0.00013 per RCU-hour): `25,000 × $0.00013 × 730 h ≈
+    $2,370/month` — but every one of those 25k RCU/sec hammers a **single hot partition**,
+    which caps at ~3,000 RCU/sec, so you'd throttle badly without spreading the key.
+  - **DAX**: a small **3-node** cluster (~$0.28/node-hour class) ≈ `3 × $0.28 × 730 ≈
+    $610/month`, and with a high hit rate almost all 50k reads/sec are served from cache
+    memory — so the table sees only misses/refreshes, and you avoid the hot-partition
+    throttle entirely.
+
+  DAX (~$610) beats even provisioned (~$2,370) and crushes on-demand (~$16,200) here,
+  **and** removes the throttling. The crossover: DAX wins whenever the same items are
+  read often enough that a small fixed cluster cost is less than the per-read table cost
+  of that volume — i.e. read-heavy, high-reuse, hot-key traffic. For low-volume or
+  low-reuse reads, the flat DAX node cost isn't worth it.
 - **CloudFront:** per-GB data transfer out (by region tier) + per-10k requests +
   invalidation requests beyond the free tier. Caching reduces **origin** egress and
   compute — often the biggest saving.
@@ -478,6 +555,22 @@ low-latency, in-memory, best-effort fan-out.
 × overhead; add headroom for eviction to not thrash. If working set > one node's RAM →
 cluster mode (sharding). Estimate ops/sec against per-node limits (single-threaded
 Redis shard tops out on CPU; shard out to scale writes).
+
+**Worked example — from workload to topology.** Session cache: **20M** active sessions,
+avg value **2 KB**.
+- Raw working set: `20,000,000 × 2 KB = 40 GB`.
+- Redis overhead (key strings, dict/pointer structures, fragmentation) ≈ **1.5×** →
+  `40 × 1.5 = 60 GB`.
+- Eviction headroom so LRU isn't thrashing at the edge, ≈ **+25%** → `60 × 1.25 = 75 GB`.
+
+So you need ~75 GB of usable memory. A single large node (e.g. an `r7g.4xlarge`, ~100+
+GB) **fits the memory** — memory alone says CMD (single shard) is enough. Now check
+**throughput**: suppose the workload is **2M ops/sec**. A single-threaded Redis shard
+realistically handles ~100k–200k ops/sec before CPU saturates, so one primary **cannot**
+serve 2M ops/sec no matter how much RAM it has. That CPU ceiling — not memory — forces
+**cluster mode**: shard across, say, ~12–16 primaries so each handles ~125k–165k ops/sec.
+The lesson: size against **both** memory and per-shard CPU, and let the tighter
+constraint (here, ops/sec) pick the topology.
 
 **The core cost/latency trade-off:** caching spends memory + cache-node cost + a small
 staleness/complexity budget to buy large latency and origin-cost reductions. The win

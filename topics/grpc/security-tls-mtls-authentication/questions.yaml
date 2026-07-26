@@ -11,7 +11,7 @@ questions:
       CALL credentials secure?
     options:
       - "Channel creds secure the transport (encryption + server identity); call creds authenticate the caller per-RPC"
-      - "Both secure the transport; they are interchangeable"
+      - "Both secure the transport at the TLS layer and are fully interchangeable, so you may configure either one alone"
       - "Channel creds authenticate the caller per-RPC; call creds encrypt the whole connection"
       - "Channel creds validate the protobuf schema; call creds validate the message body"
     answer: 0
@@ -47,7 +47,7 @@ questions:
       How does a per-RPC bearer token conventionally travel with a gRPC call?
     options:
       - "As an `authorization: Bearer <token>` entry in the request metadata"
-      - "In a URL query-string parameter"
+      - "As an extra query-string parameter appended to the HTTP/2 request path URL"
       - "As a field inside the protobuf request message"
       - "In the TLS certificate's Subject Alternative Name"
     answer: 0
@@ -64,9 +64,9 @@ questions:
     question: |
       What distinguishes mTLS from ordinary (server-auth) TLS in gRPC?
     options:
-      - "mTLS uses a faster cipher suite but authenticates only the server"
-      - "mTLS skips encryption to reduce latency"
-      - "mTLS authenticates only the client, not the server"
+      - "mTLS negotiates a faster elliptic-curve cipher suite but still authenticates only the server"
+      - "mTLS skips the encryption step entirely to shave handshake latency on trusted internal links"
+      - "mTLS authenticates only the client to the server and leaves the server's own identity unverified"
       - "In mTLS both peers present and verify certificates, so the server authenticates the client too"
     answer: 3
     explanation: |
@@ -84,8 +84,8 @@ questions:
       INSECURE (plaintext) gRPC channel?
     options:
       - "The credentials refuse to attach because they require transport security"
-      - "The channel is automatically upgraded to TLS"
-      - "The token is sent in cleartext with a warning logged"
+      - "The channel is silently and automatically upgraded to full TLS before the token is sent"
+      - "The token is sent in cleartext over the plaintext connection with only a warning logged"
       - "The token is base64-encoded, which is treated as sufficient protection"
     answer: 0
     explanation: |
@@ -138,9 +138,9 @@ questions:
       What are COMPOSITE credentials in gRPC?
     options:
       - "A single object combining channel credentials (transport security) with call credentials (per-RPC token)"
-      - "A certificate that embeds both a public and private key for sharing"
-      - "Two separate channels merged into one connection pool"
-      - "A fallback chain that tries TLS, then plaintext, then ALTS"
+      - "A single certificate that embeds both a public and private key together for easy sharing between peers"
+      - "Two separate gRPC channels merged into one shared connection pool for higher throughput"
+      - "A negotiation fallback chain that first tries TLS, then plaintext, then ALTS until one succeeds"
     answer: 0
     explanation: |
       Composite credentials combine channel creds (e.g., TLS/mTLS) with call creds
@@ -154,10 +154,10 @@ questions:
     question: |
       Where is per-RPC caller authorization typically ENFORCED in a gRPC server?
     options:
-      - "In the TLS handshake, which validates the token"
+      - "In the TLS handshake itself, which parses and validates the bearer token as part of certificate exchange"
       - "In a server interceptor that validates the metadata token before the handler runs"
-      - "Inside each protobuf message via a required field"
-      - "In the client stub, which self-certifies its permissions"
+      - "Inside each protobuf message body via a required field the handler checks"
+      - "In the client stub, which self-certifies its own permissions before dialing"
     answer: 1
     explanation: |
       Transport creds give a secure pipe but do not authorize anyone. A server
@@ -191,9 +191,9 @@ questions:
       What does an "insecure" gRPC channel provide?
     options:
       - "No transport security at all — plaintext HTTP/2 (h2c), no encryption or server auth"
-      - "Encryption but no integrity checking"
-      - "TLS encryption without server authentication"
-      - "mTLS with self-signed certificates"
+      - "Encryption of the payload but with all integrity checking disabled to save CPU"
+      - "TLS encryption of the connection but with server authentication turned off"
+      - "mTLS using self-signed certificates that skip certificate-authority validation"
     answer: 0
     explanation: |
       An insecure channel uses HTTP/2 in cleartext (h2c): no TLS handshake, no
@@ -209,10 +209,10 @@ questions:
       verification error, even though the cert is validly signed. What is the most likely
       cause?
     options:
-      - "The client did not send its own certificate"
-      - "The server is using HTTP/2 instead of HTTP/1.1"
+      - "The client failed to present its own client certificate during the handshake"
+      - "The server negotiated HTTP/2 when the client was expecting legacy HTTP/1.1"
       - "The dialed hostname/authority is not present in the server certificate's Subject Alternative Names"
-      - "The token in the authorization header expired"
+      - "The bearer token carried in the authorization metadata header has expired"
     answer: 2
     explanation: |
       The client checks that the requested authority (hostname/:authority) matches a SAN
@@ -228,9 +228,9 @@ questions:
       A server sets `ClientAuth: VerifyClientCertIfGiven` and gates access on the client
       certificate identity. Why is this risky?
     options:
-      - "It forces every client to present a certificate, breaking browsers"
-      - "It disables encryption on the connection"
-      - "It requires the server cert to be self-signed"
+      - "It forces every single client to present a certificate, which breaks browser callers"
+      - "It disables payload encryption on the connection while keeping the handshake"
+      - "It requires the server's own certificate to be self-signed rather than CA-issued"
       - "Client certificates are optional, so a client presenting none can bypass the cert-based check"
     answer: 3
     explanation: |
@@ -246,9 +246,9 @@ questions:
       What is a SPIFFE ID in the context of gRPC mTLS?
     options:
       - "A URI-form workload identity (e.g., spiffe://org/ns/prod/sa/svc) embedded in the certificate's SAN"
-      - "A shared symmetric key distributed to all services"
-      - "A signed JWT placed in the authorization metadata header"
-      - "The TCP source port used to identify a connection"
+      - "A shared symmetric key pre-distributed to every service in the mesh for signing"
+      - "A signed JWT placed in the authorization metadata header of each request"
+      - "The TCP source port number used by the mesh to identify an inbound connection"
     answer: 0
     explanation: |
       A SPIFFE ID is a URI workload identity embedded in the cert SAN (an SVID). SPIRE
@@ -263,10 +263,10 @@ questions:
     question: |
       What is ALTS in gRPC?
     options:
-      - "A load-balancing policy for headless services"
-      - "A compression codec for protobuf payloads"
+      - "A client-side load-balancing policy used specifically for headless Kubernetes services"
+      - "A streaming compression codec applied to protobuf payloads before framing"
       - "Google's mutual-authentication transport based on service-account identity, used inside Google's infrastructure"
-      - "An alternative serialization format replacing Protocol Buffers"
+      - "An alternative wire serialization format intended to replace Protocol Buffers"
     answer: 2
     explanation: |
       ALTS (Application Layer Transport Security) is Google's mTLS-like transport that
@@ -282,9 +282,9 @@ questions:
       Why should you avoid putting a bearer token or password inside a protobuf message
       field?
     options:
-      - "Protobuf cannot encode strings longer than 256 bytes"
-      - "Message fields are always sent in cleartext even over TLS"
-      - "Protobuf strips string fields during serialization"
+      - "Protobuf cannot encode string fields longer than 256 bytes, so tokens are truncated"
+      - "Message fields are always transmitted in cleartext even when the channel uses TLS"
+      - "Protobuf silently strips string-typed fields during wire serialization"
       - "It is cross-cutting context that belongs in metadata; putting it in the message pollutes the contract and risks being logged as business data"
     answer: 3
     explanation: |
@@ -320,8 +320,8 @@ questions:
     options:
       - "So a short-lived token can be transparently refreshed before it expires"
       - "Because HTTP/2 forbids reusing headers across streams"
-      - "To renegotiate the TLS session on every call"
-      - "To rotate the server certificate on each request"
+      - "To force a full TLS session renegotiation on every individual call"
+      - "To rotate and reissue the server's certificate on each incoming request"
     answer: 0
     explanation: |
       Because GetRequestMetadata runs per RPC, the credential can re-mint or refresh a
@@ -336,8 +336,8 @@ questions:
       In a service mesh (e.g., Istio/Linkerd) using zero-trust, how is mTLS typically
       managed for gRPC workloads?
     options:
-      - "Each team manually generates and rotates long-lived certificates"
-      - "mTLS is disabled and replaced by IP allowlists"
+      - "Each team manually generates long-lived certificates and rotates them by hand every few months"
+      - "mTLS is disabled entirely and replaced by static per-namespace IP allowlists at the sidecar"
       - "Certificates are embedded in the container image at build time and never rotated"
       - "The mesh sidecar/control plane issues and auto-rotates short-lived workload certificates"
     answer: 3
@@ -356,9 +356,9 @@ questions:
       a connection?
     options:
       - "The negotiated SecurityLevel (NONE / INTEGRITY / PRIVACY)"
-      - "The number of pending RPCs on the channel"
-      - "The client's CPU architecture"
-      - "The protobuf schema version in use"
+      - "The number of pending RPCs currently in flight on the channel"
+      - "The client's CPU architecture and operating-system version string"
+      - "The protobuf schema (FileDescriptor) version negotiated for the connection"
     answer: 0
     explanation: |
       The AuthContext surfaces the connection's SecurityLevel — NONE (insecure),
@@ -372,10 +372,10 @@ questions:
     question: |
       In a mesh that uses BOTH mTLS and a propagated JWT, what does each authenticate?
     options:
-      - "mTLS authenticates the end user; the JWT authenticates the network"
-      - "Both authenticate the same thing and one is redundant"
+      - "mTLS authenticates the acting end user, while the JWT authenticates the underlying network segment"
+      - "Both authenticate the exact same principal, so one of them is redundant and can be safely dropped"
       - "mTLS authenticates the workload/connection; the JWT authenticates the end user/caller principal"
-      - "mTLS encrypts the JWT so the JWT need not be validated"
+      - "mTLS transparently encrypts the JWT in transit, so the receiving service need not validate its claims"
     answer: 2
     explanation: |
       mTLS gives cryptographic identity to the workload/connection (service-to-service),
@@ -390,9 +390,9 @@ questions:
       Why can't you compose call credentials onto an insecure channel and expect the
       token to be transmitted?
     options:
-      - "Insecure channels do not support HTTP/2 headers"
-      - "Metadata is disabled on plaintext connections"
-      - "The token would exceed the HTTP/2 header size limit"
+      - "Insecure channels use HTTP/1.1 framing and therefore cannot carry HTTP/2 header blocks at all"
+      - "Metadata transmission is disabled by the runtime on any plaintext (h2c) connection by design"
+      - "A bearer token is large enough that it always exceeds the HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE limit"
       - "Composite credentials require the channel creds to provide transport security for the token to attach"
     answer: 3
     explanation: |
@@ -407,10 +407,10 @@ questions:
     question: |
       In Go, which is the correct way to start a gRPC server with TLS transport security?
     options:
-      - "grpc.NewServer() with no options, since TLS is automatic"
+      - "grpc.NewServer() with no options at all, since the runtime negotiates TLS automatically on first connect"
       - "grpc.NewServer(grpc.Creds(serverCreds)) where serverCreds is built from the cert and key"
-      - "grpc.NewServer(grpc.WithInsecure())"
-      - "Set an environment variable GRPC_TLS=1 and start the server normally"
+      - "grpc.NewServer(grpc.WithInsecure()) combined with a server-side plaintext listener option"
+      - "Set the environment variable GRPC_TLS=1 before process start and then launch the server normally"
     answer: 1
     explanation: |
       You pass transport credentials to the server via grpc.Creds(...), built from the
@@ -460,9 +460,9 @@ questions:
       A microservice speaks PLAINTEXT gRPC to 127.0.0.1 where a mesh sidecar listens.
       Is this acceptable, and why?
     options:
-      - "No — any plaintext gRPC is forbidden under all circumstances"
-      - "Yes — plaintext is fine anywhere as long as a firewall exists"
-      - "No — sidecars require the application to terminate TLS itself"
+      - "No — any plaintext gRPC is forbidden under all circumstances, even over the loopback interface"
+      - "Yes — plaintext gRPC is fine on any interface as long as a host firewall blocks external ports"
+      - "No — a mesh sidecar always requires the application itself to terminate the inbound TLS session"
       - "Yes — the app-to-sidecar hop is loopback-only and the sidecar upgrades to mTLS for the network hop"
     answer: 3
     explanation: |
@@ -478,10 +478,10 @@ questions:
       When a server interceptor validates a JWT bearer token, checking only that the
       token is PRESENT is insufficient. What else must it verify?
     options:
-      - "Only that the token is longer than 128 characters"
+      - "Only that the encoded token string is longer than the 128-character minimum length"
       - "Signature, expiry (exp), audience (aud), and scopes"
-      - "That the token matches the server's own TLS certificate"
-      - "Only the token's issuer hostname resolves in DNS"
+      - "That the token's signature matches the server's own TLS certificate fingerprint"
+      - "Only that the token's issuer (iss) hostname currently resolves to an A record in DNS"
     answer: 1
     explanation: |
       Full validation checks the signature (integrity/authenticity), expiry, audience,
@@ -497,9 +497,9 @@ questions:
       Why does gRPC rely on HTTP/2 (and thus, on the public internet, TLS with ALPN)?
     options:
       - "HTTP/2 is required for the multiplexed streams, binary framing, and trailers gRPC depends on"
-      - "HTTP/2 encrypts payloads without needing TLS"
-      - "HTTP/2 is only needed for unary calls"
-      - "gRPC uses HTTP/2 solely for its larger header size limits"
+      - "HTTP/2 encrypts all payloads on its own via built-in AES, removing any need to configure TLS"
+      - "HTTP/2 is only needed for unary calls, while streaming RPCs quietly fall back to HTTP/1.1"
+      - "gRPC uses HTTP/2 solely because it raises the maximum allowed request header size to 64 KB"
     answer: 0
     explanation: |
       gRPC requires HTTP/2 for multiplexed streams (streaming RPCs), binary framing, and
@@ -533,10 +533,10 @@ questions:
       When a gRPC client validates a server certificate, what does it check the chain
       against?
     options:
-      - "The server's own private key"
-      - "The client's own certificate"
+      - "The server's own private key, which the client downloads once during the initial handshake"
+      - "The client's own certificate and its locally cached private key material"
       - "A set of trusted root CAs configured on the client (system roots or a supplied CA)"
-      - "A hash stored in the protobuf descriptor"
+      - "A SHA-256 hash of the expected chain embedded as an option in the compiled protobuf descriptor"
     answer: 2
     explanation: |
       The client validates the server's certificate chain against its configured trusted
@@ -553,10 +553,10 @@ questions:
       connection and (b) an end-user JWT propagated per request. Which credential
       construction fits?
     options:
-      - "Insecure channel plus the JWT in a message field"
-      - "TLS channel credentials only, embedding the JWT in the certificate"
+      - "An insecure plaintext channel plus the end-user JWT carried inside a dedicated protobuf message field"
+      - "TLS channel credentials only, embedding the per-request JWT as a custom extension in the client certificate"
       - "Composite credentials: mTLS channel credentials + call credentials carrying the JWT"
-      - "Call credentials only, since they imply encryption"
+      - "Call credentials only, since attaching a bearer token to a channel implicitly enables encryption"
     answer: 2
     explanation: |
       mTLS channel creds give the mutually-authenticated encrypted connection (workload
@@ -589,10 +589,10 @@ questions:
     question: |
       Why do gRPC security best practices favor SHORT-LIVED certificates and tokens?
     options:
-      - "They compress better on the HTTP/2 wire"
-      - "They are required by the proto3 specification"
+      - "They compress better in the HPACK dynamic table and shrink each HTTP/2 header block"
+      - "They are explicitly mandated for all transport credentials by the proto3 language specification"
       - "They limit the blast radius if a credential is compromised, since it soon expires"
-      - "They eliminate the need for a certificate authority"
+      - "They eliminate the need for any certificate authority by letting workloads self-sign each cert"
     answer: 2
     explanation: |
       Short-lived credentials that auto-rotate limit blast radius: a stolen cert/token is
@@ -607,9 +607,9 @@ questions:
       A handler decides authorization based on an `x-user-role: admin` value the client
       set in metadata, on an mTLS connection. What is the flaw?
     options:
-      - "Metadata cannot be read inside handlers"
-      - "mTLS connections strip all custom metadata"
-      - "The header should have used a `-bin` suffix"
+      - "Custom metadata such as `x-user-role` cannot be read from inside a server-side RPC handler"
+      - "An mTLS-secured connection automatically strips all application-set custom metadata headers before dispatch"
+      - "The `x-user-role` header carries structured data and therefore should have used the binary `-bin` key suffix"
       - "The role is self-asserted by the client and must not be trusted for authz; derive identity from the verified peer cert (AuthContext) instead"
     answer: 3
     explanation: |
@@ -627,9 +627,9 @@ questions:
       returning `true` mean?
     options:
       - "The credential will only attach its metadata over a secure (TLS/mTLS/ALTS) channel"
-      - "The credential forces the server to enable mTLS"
-      - "The credential encrypts the token itself with AES"
-      - "The channel will retry on transport failures"
+      - "The credential forces the remote server to enable and require mutual TLS on the connection"
+      - "The credential independently encrypts the token value with AES-256 before placing it in metadata"
+      - "The channel will transparently retry the RPC whenever a transport-level failure occurs"
     answer: 0
     explanation: |
       Returning true tells gRPC the credential must not send its token over an insecure
@@ -644,10 +644,10 @@ questions:
       True or false: enabling TLS (or mTLS) on a gRPC server automatically authorizes
       callers.
     options:
-      - "True — a valid TLS connection means the caller is authorized"
-      - "True — but only for unary RPCs"
+      - "True — a successfully established TLS connection is treated as proof the caller is authorized"
+      - "True — but the automatic authorization applies only to unary RPCs, not to streaming methods"
       - "False — secure transport does not authorize anyone; an interceptor must validate the token or peer identity"
-      - "False — TLS blocks all RPCs until a password is entered"
+      - "False — TLS blocks every RPC until the caller enters a shared password during the handshake"
     answer: 2
     explanation: |
       Transport security establishes encryption and (for mTLS) connection identity, but
@@ -663,10 +663,10 @@ questions:
       For a server-streaming RPC, when is the caller's bearer token most naturally
       validated?
     options:
-      - "Before every individual response message is streamed"
+      - "Repeatedly, re-validating the token before every individual response message is pushed to the client"
       - "Once, in the server interceptor, from the initial request metadata before the stream handler runs"
-      - "After the stream completes, in the trailers"
-      - "It cannot be validated for streaming RPCs"
+      - "After the stream completes, by reading the grpc-status value carried in the closing HTTP/2 trailers"
+      - "It cannot be validated at all for streaming RPCs, since request metadata only exists on unary calls"
     answer: 1
     explanation: |
       Request metadata (including the authorization token) arrives in the opening HEADERS
@@ -701,10 +701,10 @@ questions:
       In a large service-mesh deployment, how are mTLS certificates commonly delivered to
       gRPC clients/servers so identities rotate automatically?
     options:
-      - "Baked into each binary and shipped via a new release"
+      - "Baked into each container image at build time and redeployed with a new release when they expire"
       - "Downloaded on demand from a public certificate transparency log"
       - "Via xDS/mesh-provided credentials that fetch and rotate certs from the control plane"
-      - "Hard-coded in the .proto file"
+      - "Hard-coded as a literal string option inside the service's .proto file and shipped after recompiling"
     answer: 2
     explanation: |
       xDS/mesh-integrated credentials let gRPC obtain and auto-rotate workload certs from
@@ -718,9 +718,9 @@ questions:
     question: |
       Can a single gRPC channel carry different call credentials over its lifetime?
     options:
-      - "No — call credentials are fixed for the life of the channel"
-      - "No — changing call credentials requires a new TLS handshake"
-      - "Yes — but only if the channel is insecure"
+      - "No — call credentials are bound at dial time and stay fixed for the entire lifetime of the channel"
+      - "No — swapping call credentials forces a brand-new TLS handshake and a fresh underlying connection"
+      - "Yes — but only when the channel is insecure, since secure channels lock credentials at creation time"
       - "Yes — channel creds secure the connection while call creds are applied per-RPC and can vary/refresh"
     answer: 3
     explanation: |
@@ -735,10 +735,10 @@ questions:
     question: |
       Beyond authenticating the server, what else does TLS provide for gRPC traffic?
     options:
-      - "Automatic retries on failed RPCs"
-      - "Load balancing across backends"
+      - "Automatic transparent retries of failed RPCs using an exponential-backoff policy"
+      - "Client-side load balancing that spreads RPCs evenly across all backend replicas"
       - "Encryption and integrity protection of all bytes on the connection"
-      - "Compression of protobuf messages"
+      - "Transparent gzip compression of every protobuf message before it is framed for the wire"
     answer: 2
     explanation: |
       TLS encrypts and integrity-protects all frames (HEADERS, DATA, etc.) on the
@@ -753,10 +753,10 @@ questions:
       A client's token is valid but the auth service the interceptor calls to validate it
       is down, so validation cannot complete. Which status is most defensible to return?
     options:
-      - "OK, and let the request through since the token looked valid"
-      - "PERMISSION_DENIED (7), since validation did not succeed"
+      - "OK, and let the request through since the token itself looked structurally valid and unexpired"
+      - "PERMISSION_DENIED (7), since the interceptor's validation step did not complete successfully"
       - "UNAVAILABLE (14), signaling a transient dependency failure the client may retry"
-      - "INVALID_ARGUMENT (3), since the token could not be checked"
+      - "INVALID_ARGUMENT (3), since the token's contents could not be verified by the auth service"
     answer: 2
     explanation: |
       When the failure is that a downstream auth dependency is unavailable (not that the
@@ -772,10 +772,10 @@ questions:
       Which statement best contrasts mTLS-based identity with token-based (JWT/OAuth)
       identity in gRPC?
     options:
-      - "mTLS identity is self-asserted in metadata; token identity is cert-derived"
+      - "mTLS identity is merely self-asserted by the client in metadata, while token identity is instead derived from the verified peer certificate"
       - "mTLS provides connection/workload identity from a verified cert; a token provides caller/user identity carried per-RPC in metadata"
-      - "They are the same mechanism with different names"
-      - "Tokens authenticate the transport; mTLS authenticates the message payload"
+      - "They are the same underlying mechanism under different names, so choosing between them is purely a matter of style"
+      - "Tokens authenticate the underlying transport connection, while mTLS certificates authenticate the individual protobuf message payload"
     answer: 1
     explanation: |
       mTLS authenticates the workload/connection via a cryptographically verified
@@ -791,9 +791,9 @@ questions:
       An interceptor wants to ensure an RPC arrived over an encrypted connection before
       handling sensitive data. What should it inspect?
     options:
-      - "The presence of any authorization header"
-      - "The size of the request message"
-      - "Whether the RPC is unary or streaming"
+      - "The mere presence of any authorization bearer-token header in the request metadata"
+      - "The byte size of the request message, assuming encrypted payloads are consistently larger"
+      - "Whether the RPC method is unary or one of the streaming variants declared in the .proto"
       - "The connection's SecurityLevel (must be PRIVACY) from the AuthContext/peer info"
     answer: 3
     explanation: |
@@ -809,10 +809,10 @@ questions:
       In Java gRPC, which construct combines TLS channel credentials with bearer-token
       call credentials?
     options:
-      - "InsecureChannelCredentials.create()"
+      - "InsecureChannelCredentials.create().withCallCredentials(bearerCallCreds)"
       - "CompositeChannelCredentials.create(tlsCreds, callCreds)"
-      - "ManagedChannelBuilder.usePlaintext()"
-      - "SslContextBuilder.forClient()"
+      - "ManagedChannelBuilder.forTarget(addr).usePlaintext().build()"
+      - "SslContextBuilder.forClient().trustManager(caFile).build()"
     answer: 1
     explanation: |
       CompositeChannelCredentials.create(channelCreds, callCreds) composes transport
@@ -827,10 +827,10 @@ questions:
     question: |
       What is SPIRE's role relative to SPIFFE in a zero-trust gRPC deployment?
     options:
-      - "SPIRE is a protobuf compiler plugin"
-      - "SPIRE is a gRPC load balancer"
+      - "SPIRE is a protoc compiler plugin that generates certificate-handling client stubs from your .proto files"
+      - "SPIRE is a client-side gRPC load balancer that distributes RPCs across the mesh's backend replicas"
       - "SPIRE is a reference implementation that attests workloads and issues short-lived X.509 SVIDs carrying SPIFFE IDs"
-      - "SPIRE is the metadata key used to carry SPIFFE IDs"
+      - "SPIRE is the reserved ASCII metadata key that applications use to carry the SPIFFE ID on each request"
     answer: 2
     explanation: |
       SPIFFE is the identity spec (SPIFFE IDs as URIs); SPIRE is the reference
@@ -864,9 +864,9 @@ questions:
       Which statement captures the recommended production posture for a networked gRPC
       service?
     options:
-      - "Pick either TLS or a token — using both is redundant"
-      - "Use an insecure channel and validate everything in the message body"
-      - "Rely on mTLS alone and skip any per-user authentication"
+      - "Pick either TLS or a per-RPC token — running both of them together is wasteful and fully redundant"
+      - "Use an insecure channel and validate every credential inside a dedicated field of the protobuf message"
+      - "Rely on mTLS workload identity alone and skip any separate per-user token authentication entirely"
       - "Compose channel credentials (TLS/mTLS) with call credentials (a token); enforce authz in an interceptor"
     answer: 3
     explanation: |

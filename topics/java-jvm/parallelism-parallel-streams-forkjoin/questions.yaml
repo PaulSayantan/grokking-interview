@@ -10,10 +10,10 @@ questions:
       Which statement best captures the distinction between concurrency and
       parallelism that interviewers typically look for?
     options:
-      - Concurrency requires multiple CPU cores; parallelism can run on a single core.
+      - Concurrency requires multiple CPU cores to make any progress; parallelism is merely a scheduling illusion that time-slices a single core so tasks appear to overlap.
       - Concurrency is about dealing with many tasks that overlap in time (structure); parallelism is about literally executing multiple computations simultaneously (requires multiple execution units).
-      - They are exact synonyms; the words are interchangeable in the JVM.
-      - Parallelism only applies to I/O-bound work, while concurrency only applies to CPU-bound work.
+      - They are exact synonyms in the JVM memory model; the language spec defines both terms identically, so any concurrent program is automatically parallel and vice versa.
+      - Parallelism only applies to I/O-bound work such as network fan-out, while concurrency is strictly a CPU-bound scheduling technique used to speed up arithmetic loops.
     answer: 1
     explanation: |
       Concurrency is a structuring concept (tasks in progress over overlapping
@@ -45,10 +45,10 @@ questions:
       What is the defining characteristic of DATA parallelism (as opposed to task
       parallelism)?
     options:
-      - Different operations run at the same time on the same or different data.
-      - It can only be expressed with CompletableFuture.
+      - Different, heterogeneous operations run at the same time on the same or different data, coordinated through explicit task dependencies.
+      - It can only be expressed with CompletableFuture chains, since data partitioning is impossible without composing async callback stages.
       - The same operation is applied to many pieces of data simultaneously (split data, run identical work, combine).
-      - It is only useful for blocking I/O workloads.
+      - It is only useful for blocking I/O workloads where each thread spends most of its time parked waiting on network or disk responses.
     answer: 2
     explanation: |
       Data parallelism applies the same operation across partitions of the data
@@ -64,9 +64,9 @@ questions:
       You must fetch a user's profile, order history, and recommendations from three
       independent services and merge them. Which paradigm and tool fit best?
     options:
-      - Data parallelism via list.parallelStream() over the three service names.
-      - Data parallelism via Arrays.parallelSort on the results.
-      - Amdahl's-law-bounded Fork/Join RecursiveTask splitting the three calls by index.
+      - Data parallelism via list.parallelStream() over the three service names, letting the common pool split the three blocking calls into balanced halves.
+      - Data parallelism via Arrays.parallelSort on the three results, since sorting the responses by service name merges them into one combined view.
+      - Amdahl's-law-bounded Fork/Join RecursiveTask splitting the three calls by index down to a granularity threshold before joining the results.
       - Task parallelism via CompletableFuture composing three independent async calls, then combining.
     answer: 3
     explanation: |
@@ -150,10 +150,10 @@ questions:
       Why does choosing the split THRESHOLD in a Fork/Join task matter, and what happens
       at the extremes?
     options:
-      - Threshold has no measurable effect; the work-stealing scheduler makes it irrelevant.
-      - A smaller threshold always improves performance because more parallelism is always better.
+      - Threshold has no measurable effect on runtime; the work-stealing scheduler rebalances subtasks so uniformly that any split size converges to the same throughput.
+      - A smaller threshold always improves performance because more subtasks mean more parallelism, and the fork/join bookkeeping overhead per task is provably negligible on modern CPUs.
       - Too small a threshold creates huge numbers of tiny tasks whose management overhead dominates; too large a threshold yields too few tasks, leaving cores idle and hurting load balancing.
-      - The threshold must exactly equal the number of CPU cores or compute() throws IllegalArgumentException.
+      - The threshold must exactly equal the number of CPU cores returned by availableProcessors(), or compute() throws IllegalArgumentException at fork time.
     answer: 2
     explanation: |
       The sweet spot balances overhead against load balancing: enough subtasks to keep
@@ -168,10 +168,10 @@ questions:
       How does the work-stealing scheduler in ForkJoinPool typically manage each worker's
       deque?
     options:
-      - A single shared global queue that all workers lock to pop the next task.
+      - A single shared global queue that every worker must lock and contend on to pop the next task, serializing all task hand-off through one mutex.
       - Each worker pushes/pops its own tasks LIFO at the head; idle workers steal from the tail (FIFO) of another worker's deque.
-      - Each worker steals from the head of its own deque and never touches other deques.
-      - Tasks are assigned round-robin by a central dispatcher thread with no stealing.
+      - Each worker steals only from the head of its own private deque and is strictly forbidden from ever touching another worker's deque.
+      - Tasks are assigned round-robin by a central dispatcher thread that pre-partitions all work up front, so no stealing ever occurs at runtime.
     answer: 1
     explanation: |
       Each worker owns a deque, treating its own tasks as a LIFO stack (cache locality,
@@ -187,9 +187,9 @@ questions:
       deque rather than the same end the owner uses?
     options:
       - Stealing the tail grabs the oldest, largest task (near the root of the split tree), giving the thief substantial work, while the owner keeps working its newest tasks LIFO for cache locality with minimal contention.
-      - It is an arbitrary implementation detail with no performance rationale.
-      - Tail stealing guarantees FIFO ordering of all results for the caller.
-      - It prevents the owner thread from ever needing to synchronize its own pops.
+      - It is an arbitrary implementation detail chosen by the JSR 166 authors with no measurable performance rationale behind either end.
+      - Tail stealing guarantees strict FIFO ordering of all task results delivered back to the original caller of the join.
+      - It prevents the owner thread from ever needing to synchronize its own pops, because only tail access requires a memory fence.
     answer: 0
     explanation: |
       The owner pops its newest tasks (LIFO) for cache locality; a thief taking from the
@@ -204,10 +204,10 @@ questions:
       By default, what is the target parallelism (number of worker threads) of the common
       ForkJoinPool?
     options:
-      - Always exactly 4, regardless of hardware.
-      - Twice the number of available processors.
+      - Always exactly 4 worker threads, a fixed constant baked into the JDK regardless of the underlying hardware core count.
+      - Twice the number of available processors, matching the classic thread-pool sizing rule of 2 x cores for hyper-threaded machines.
       - Runtime.getRuntime().availableProcessors() - 1 worker threads (with the submitting thread also helping).
-      - "Unbounded \u2014 it grows a new thread per submitted task."
+      - "Unbounded \u2014 it eagerly grows a brand-new worker thread for every task submitted, with no fixed ceiling on pool size."
     answer: 2
     explanation: |
       The common pool targets availableProcessors() - 1 worker threads; the submitting
@@ -240,10 +240,10 @@ questions:
       Why is performing blocking I/O inside a parallel stream running on the common pool
       considered dangerous?
     options:
-      - It causes a compile error because streams forbid checked exceptions.
+      - It causes a compile error because parallel stream lambdas forbid any method that declares a checked exception such as IOException.
       - The common pool is shared JVM-wide with only a few worker threads (~cores-1); blocking them on I/O starves every other parallel stream/parallelSort/CompletableFuture task in the process and yields no throughput benefit.
-      - Blocking I/O in a parallel stream automatically doubles the pool size, exhausting memory.
-      - It silently switches the stream back to sequential mode.
+      - Blocking I/O in a parallel stream automatically doubles the common pool's size on each blocked call, quickly exhausting heap memory and triggering OOM.
+      - It silently switches the entire stream back to sequential mode, so the blocking calls run one after another on the caller thread with no error.
     answer: 1
     explanation: |
       The common pool has roughly cores-1 workers shared across the whole JVM. Blocking
@@ -259,9 +259,9 @@ questions:
       of the common pool. Which approach achieves that, and what caveat applies?
     options:
       - 'Submit the pipeline as a task to a custom ForkJoinPool (customPool.submit(() -> list.parallelStream()...).get()); the pipeline runs on that pool because a parallel stream uses the pool current at the terminal operation. Caveat: this is a widely used idiom, not a documented API guarantee.'
-      - "Call stream.parallel(16) \u2014 a built-in overload that sets pool size per pipeline."
-      - Set Thread.currentThread().setPriority(16) before running the stream.
-      - There is no way to change the pool; parallel streams are hardwired to the common pool with no workaround.
+      - "Call stream.parallel(16) \u2014 a built-in Stream overload added in Java 9 that lets you set the worker-thread count for that single pipeline."
+      - Set Thread.currentThread().setPriority(16) before running the stream, which reserves 16 dedicated OS threads for the pipeline's duration.
+      - There is no way to change the pool; parallel streams are permanently hardwired to the shared common pool with no supported or unsupported workaround.
     answer: 0
     explanation: |
       Running the terminal operation from within a task submitted to your own
@@ -275,9 +275,9 @@ questions:
     question: |
       Within a ForkJoinPool, what is the purpose of ForkJoinPool.managedBlock(...)?
     options:
-      - It permanently disables work-stealing for the calling thread.
-      - It converts a RecursiveTask into a RecursiveAction at runtime.
-      - It forces the common pool to shut down after the current task completes.
+      - It permanently disables work-stealing for the calling thread so its deque is never raided by idle thieves during the blocking region.
+      - It converts a RecursiveTask into a RecursiveAction at runtime, discarding the return value so the blocked worker can be recycled.
+      - It forces the common pool to shut down gracefully after the current task completes, draining all queued subtasks first.
       - It lets a worker block (e.g., waiting on a resource) while signaling the pool to spawn a compensation thread so parallelism is maintained.
     answer: 3
     explanation: |
@@ -312,8 +312,8 @@ questions:
     options:
       - The map runs in parallel and the filter runs sequentially in the same pipeline.
       - The last call (sequential) wins and applies to the WHOLE pipeline, so it runs sequentially.
-      - It throws IllegalStateException because parallel and sequential cannot be mixed.
-      - The first call (parallel) wins and applies to the whole pipeline.
+      - It throws IllegalStateException at terminal-operation time because parallel and sequential mode markers cannot legally coexist on one pipeline.
+      - The first call (parallel) wins and locks the execution mode, so every later sequential() marker on the same pipeline is silently ignored.
     answer: 1
     explanation: |
       parallel() and sequential() merely set a single flag on the pipeline; the LAST one
@@ -328,9 +328,9 @@ questions:
       IntStream.rangeClosed(1, 5).parallel().forEach(System.out::println);
     options:
       - It prints the numbers 1..5 but in a nondeterministic, possibly interleaved order across threads.
-      - It always prints 1 2 3 4 5 in order.
-      - It fails to compile because forEach is not allowed on parallel streams.
-      - It prints each number exactly twice, once per split half.
+      - It always prints 1 2 3 4 5 in order because parallel streams flush output in encounter order.
+      - It fails to compile because forEach is a terminal operation that is rejected on any parallel stream at compile time.
+      - It prints each number exactly twice, once for each half the range is split into.
     answer: 0
     explanation: |
       In a parallel stream, forEach imposes no encounter order — output order is
@@ -344,10 +344,10 @@ questions:
     question: |
       Why is findAny() often preferred over findFirst() in a parallel stream?
     options:
-      - findAny() is guaranteed to return the first element in encounter order faster.
-      - findFirst() is not defined for parallel streams and throws at runtime.
+      - findAny() is guaranteed to return the first element in encounter order, just doing so faster than findFirst() by scanning partitions in reverse.
+      - findFirst() is not defined for parallel streams and throws UnsupportedOperationException the moment the terminal stage runs.
       - findAny() does not have to respect encounter order, so any thread that finds a match can return immediately, typically faster in parallel.
-      - findAny() automatically removes duplicates before returning.
+      - findAny() automatically removes duplicate matches across partitions before returning a single deduplicated result.
     answer: 2
     explanation: |
       findFirst() must honor encounter order (return the first matching element),
@@ -364,9 +364,9 @@ questions:
       List<Integer> out = new ArrayList<>();
       IntStream.range(0, 1_000_000).parallel().forEach(out::add);
     options:
-      - "Nothing \u2014 ArrayList handles concurrent adds internally."
-      - It always throws ConcurrentModificationException deterministically.
-      - It compiles but silently converts the stream to sequential.
+      - "Nothing \u2014 ArrayList synchronizes its add() path internally, so concurrent forEach appends are perfectly safe and lossless."
+      - It always throws ConcurrentModificationException deterministically on the first cross-thread add, aborting the pipeline cleanly with no partial writes.
+      - It compiles but the runtime silently downgrades the pipeline to sequential mode the instant it detects a non-thread-safe sink.
       - 'It is a data race: ArrayList is not thread-safe, so concurrent add() calls can lose elements, produce nulls/corruption, or throw ArrayIndexOutOfBoundsException.'
     answer: 3
     explanation: |
@@ -382,10 +382,10 @@ questions:
       For a parallel reduce(identity, accumulator, combiner) to produce the same result
       as sequential execution, what must hold?
     options:
-      - The accumulator must be synchronized to avoid races.
+      - The accumulator function must be wrapped in a synchronized block or backed by an AtomicReference so concurrent partial reductions never race.
       - The combiner must be associative, the identity must be a true identity for the combiner, and the functions must be non-interfering and stateless.
-      - The stream must be ordered and the identity must be null.
-      - The reduction must run on the common pool with exactly one thread.
+      - The stream must be marked ordered and the identity must be null so the framework can detect an uninitialized accumulator seed.
+      - The reduction must run on the common pool pinned to exactly one worker thread to keep the combiner's ordering deterministic.
     answer: 1
     explanation: |
       Correct parallel reduction requires associativity of the combiner, a valid identity
@@ -401,9 +401,9 @@ questions:
       "non-interfering" and "stateless." What does non-interfering mean?
     options:
       - The lambda must not modify the stream's underlying data source while the pipeline executes.
-      - The lambda must not throw any checked exceptions.
-      - The lambda must not capture any variables from the enclosing scope.
-      - The lambda must complete within a fixed time budget.
+      - The lambda must not throw any checked exceptions, since interfering exceptions would corrupt the encounter-order buffer.
+      - The lambda must not capture any variables from the enclosing scope, because captured references count as interference with the source.
+      - The lambda must complete within a fixed per-element time budget enforced by the spliterator to avoid interfering with other partitions.
     answer: 0
     explanation: |
       Non-interference means the behavior does not modify the source during execution
@@ -417,9 +417,9 @@ questions:
     question: |
       What is a Spliterator in Java 8?
     options:
-      - A thread pool specialized for splitting I/O work.
-      - A collector that splits results into two lists.
-      - A lock that splits read and write access.
+      - A thread pool specialized for splitting blocking I/O work across dedicated reader and writer worker threads.
+      - A collector that splits a stream's results into two balanced lists, one per half of the encounter order.
+      - A reentrant lock variant that splits read and write access into separately acquirable partition handles.
       - A splittable iterator abstraction whose trySplit() partitions a source for parallel traversal.
     answer: 3
     explanation: |
@@ -437,7 +437,7 @@ questions:
       - LinkedList > Stream.iterate > ArrayList > IntStream.range
       - Stream.iterate > BufferedReader.lines > arrays > ArrayList
       - ArrayList / IntStream.range (excellent) > HashSet (good) > LinkedList / Stream.iterate (poor)
-      - All sources split identically because the framework normalizes them.
+      - All sources split identically because the framework normalizes every spliterator into an array-backed SIZED form first.
     answer: 2
     explanation: |
       Index-addressable, SIZED/SUBSIZED sources (arrays, ArrayList, IntStream.range)
@@ -472,9 +472,9 @@ questions:
       Stream.iterate(1L, i -> i + 1).limit(N).parallel().reduce(0L, Long::sum);
     options:
       - Because Stream.iterate produces an inherently sequential, unsized stream that splits poorly, and boxing to Long destroys locality; a primitive LongStream.rangeClosed(1, N) is far better.
-      - Because reduce cannot be parallelized at all.
-      - Because limit() converts the stream to sequential automatically.
-      - Because Long::sum is not associative.
+      - Because reduce cannot be parallelized at all; it always folds elements strictly left-to-right on the caller thread.
+      - Because limit() forces the entire pipeline back into sequential mode automatically whenever a size cap is present.
+      - Because Long::sum is not associative, so the tree-combined partial sums disagree with the left-to-right total.
     answer: 0
     explanation: |
       The two-arg Stream.iterate is sequential and unsized, so trySplit gives little; plus
@@ -506,9 +506,9 @@ questions:
     question: |
       The "NQ heuristic" for deciding whether to parallelize a stream refers to what?
     options:
-      - N = number of cores, Q = queue depth; parallelize when N > Q.
-      - N = nanoseconds, Q = quintile; a statistical latency measure.
-      - N = null checks, Q = quality gates in the pipeline.
+      - N = number of cores, Q = task-queue depth; parallelize only when N exceeds Q so no worker's deque overflows.
+      - N = nanoseconds per stage, Q = latency quintile; together they form a statistical tail-latency threshold for splitting.
+      - N = null checks, Q = quality gates in the pipeline; the product estimates validation overhead before parallelizing.
       - N = number of elements, Q = cost per element; parallelization tends to pay off when N x Q (total parallelizable work) is large.
     answer: 3
     explanation: |
@@ -525,7 +525,7 @@ questions:
       - Stream.iterate(1L, i -> i+1).limit(N).parallel().reduce(0L, Long::sum), because iterate parallelizes well.
       - LongStream.rangeClosed(1, N).parallel().sum(), because it avoids boxing and splits perfectly by index.
       - list.parallelStream().map(Long::valueOf).reduce(0L, Long::sum), because boxing improves cache locality.
-      - Both are identical in performance; boxing is free on the JVM.
+      - Both are identical in performance, because the JVM caches boxed Long values so autoboxing costs nothing during the reduction.
     answer: 1
     explanation: |
       Primitive LongStream.rangeClosed avoids autoboxing (no Long object churn) and splits
@@ -540,9 +540,9 @@ questions:
       buffering or respecting encounter order?
     options:
       - Order-sensitive operations like limit, skip, findFirst, and ordered distinct/sorted.
-      - Stateless map and filter.
-      - Primitive sum and count.
-      - unordered() followed by findAny.
+      - Stateless map and filter, which must buffer each partition to preserve encounter order.
+      - Primitive sum and count, which force a full merge pass because their totals are order-dependent.
+      - unordered() followed by findAny, which reconstructs encounter order before returning the match.
     answer: 0
     explanation: |
       limit, skip, findFirst, and ordered distinct/sorted must respect or reconstruct
@@ -558,9 +558,9 @@ questions:
       encounter order within groups. Which collector is designed for maximum parallel
       throughput here?
     options:
-      - Collectors.groupingBy(...) with a manually synchronized downstream map.
-      - Collectors.toMap(...) with a null merge function.
-      - Collectors.toList() and then group afterward on the main thread.
+      - Collectors.groupingBy(...) wrapping a manually synchronized downstream map so every thread locks before appending to its group.
+      - Collectors.toMap(...) with a null merge function, letting the framework skip merge logic entirely for maximum throughput.
+      - Collectors.toList() collected in parallel and then grouped afterward on the main thread in a second single-threaded pass.
       - Collectors.groupingByConcurrent(...), which uses a ConcurrentMap and permits an unordered concurrent accumulation.
     answer: 3
     explanation: |
@@ -593,10 +593,10 @@ questions:
       What does Arrays.parallelSort do when the array is below its granularity threshold
       (default 8192 elements)?
     options:
-      - It throws IllegalArgumentException for arrays that small.
+      - It throws IllegalArgumentException for arrays that small, refusing any input under the 8192-element granularity floor.
       - It falls back to the ordinary sequential Arrays.sort, so it behaves identically to sequential sorting.
-      - It still spawns 8192 tasks, one per potential element slot.
-      - It refuses to sort and returns the array unchanged.
+      - It still spawns 8192 Fork/Join subtasks, one per potential element slot, regardless of the actual array length.
+      - It refuses to sort and returns the array unchanged, leaving small inputs untouched until they exceed the threshold.
     answer: 1
     explanation: |
       Below MIN_ARRAY_SORT_GRAN (8192), parallelSort simply delegates to sequential
@@ -630,10 +630,10 @@ questions:
       Which statement about the algorithms used by sequential Arrays.sort versus
       Arrays.parallelSort is correct?
     options:
-      - Both use bubble sort; parallelSort just runs it on more threads.
-      - parallelSort uses Dual-Pivot Quicksort while sequential sort uses heap sort.
+      - Both use bubble sort internally; parallelSort simply distributes the same adjacent-swap passes across more worker threads.
+      - parallelSort uses Dual-Pivot Quicksort for every input while sequential Arrays.sort always falls back to a binary heap sort.
       - Sequential Arrays.sort uses Dual-Pivot Quicksort for primitives and TimSort for objects; parallelSort splits into sorted partitions and merges them (a parallel merge-sort style) above the threshold.
-      - parallelSort is only defined for object arrays, never primitives.
+      - parallelSort is only defined for object arrays implementing Comparable, and throws for any primitive array such as int[] or long[].
     answer: 2
     explanation: |
       Sequential Arrays.sort uses Dual-Pivot Quicksort (primitives) and TimSort (objects).
@@ -647,9 +647,9 @@ questions:
     question: |
       Why must the operator passed to Arrays.parallelPrefix be associative?
     options:
-      - To satisfy a compile-time generic bound.
-      - Associativity makes the operator run on fewer threads.
-      - It is not actually required; any BinaryOperator works correctly.
+      - To satisfy a compile-time generic bound that the BinaryOperator interface enforces on its type parameter at declaration.
+      - Associativity lets the runtime schedule the operator on fewer worker threads, cutting fork/join bookkeeping overhead per chunk.
+      - It is not actually a requirement at all; any BinaryOperator you pass will produce the correct cumulative prefix in parallel.
       - Because the parallel algorithm computes partial prefixes on separate chunks and combines them; a non-associative operator would give results that depend on grouping/order, differing from the sequential answer.
     answer: 3
     explanation: |
@@ -664,10 +664,10 @@ questions:
     question: |
       Amdahl's law says the maximum speedup from parallelization is limited by what?
     options:
-      - The clock speed of a single core.
+      - The peak clock speed of a single core, which no amount of added threads can ever exceed.
       - The fraction of the program that is inherently serial (cannot be parallelized).
-      - The amount of RAM available.
-      - The number of lambda expressions used.
+      - The total amount of physical RAM installed on the machine running the workload.
+      - The number of lambda expressions the program uses to express its pipeline.
     answer: 1
     explanation: |
       Amdahl's law: with parallel fraction P, speedup = 1 / ((1-P) + P/s), capped at
@@ -697,9 +697,9 @@ questions:
     question: |
       How does Gustafson's law differ from Amdahl's law?
     options:
-      - Gustafson's law says parallelism is impossible beyond 4 cores.
-      - Gustafson's law only applies to I/O-bound programs.
-      - They are identical; Gustafson just restated Amdahl.
+      - Gustafson's law says parallelism is physically impossible beyond 4 cores, so any speedup measured above a quad-core machine must be a measurement artifact.
+      - Gustafson's law only applies to I/O-bound programs, since it models the time threads spend parked on network or disk rather than doing CPU work.
+      - They are mathematically identical; Gustafson merely restated Amdahl's equation with the variables renamed and added no genuinely new modeling insight.
       - Gustafson's law assumes the problem size scales with the machine, so the parallel fraction grows and large problems scale better than Amdahl's fixed-size pessimism suggests.
     answer: 3
     explanation: |
@@ -716,10 +716,10 @@ questions:
       speedup WORSE than Amdahl's optimistic prediction for simple operations over large
       arrays?
     options:
-      - The JIT refuses to compile parallel code.
-      - Lambdas are interpreted, never compiled.
+      - The JIT compiler refuses to compile any lambda used inside a parallel stream, leaving that code interpreted forever.
+      - Lambda bodies are always interpreted and never JIT-compiled, so parallel code runs at slow bytecode-interpreter speed.
       - Memory bandwidth saturation and cache contention become the bottleneck before all cores are fully utilized.
-      - The GC always runs single-threaded during parallel streams.
+      - The garbage collector always falls back to a single-threaded stop-the-world pass during parallel streams.
     answer: 2
     explanation: |
       For memory-bound work (e.g., trivial ops over huge arrays), memory bandwidth and
@@ -752,9 +752,9 @@ questions:
       with thousands of virtual threads to "go faster." Why is this misguided?
     options:
       - "Virtual threads excel at high-volume BLOCKING work by unmounting on I/O, but they do not add CPU parallelism \u2014 you still have only as many carrier threads as cores, so CPU-bound crunching is not sped up."
-      - Virtual threads cannot run any computation at all.
-      - Virtual threads are slower than platform threads for every workload.
-      - Virtual threads require JDK 25 and will not compile on JDK 21.
+      - Virtual threads are restricted to blocking I/O calls only and throw an exception if you try to run any arithmetic or CPU computation inside one.
+      - Virtual threads carry so much per-task scheduling overhead that they are strictly slower than platform threads for every workload, blocking or not.
+      - Virtual threads were only finalized in a hypothetical JDK 25 build and simply will not compile or run on a JDK 21 runtime.
     answer: 0
     explanation: |
       Virtual threads help when many tasks BLOCK (they unmount from carriers on I/O). For
@@ -769,10 +769,10 @@ questions:
       CompletableFuture was introduced in Java 8. For I/O-bound task-parallel work, what
       is the key recommendation regarding its executor?
     options:
-      - Always rely on the default common ForkJoinPool for supplyAsync of blocking calls.
-      - CompletableFuture cannot accept a custom executor.
+      - Always rely on the default common ForkJoinPool for supplyAsync of blocking calls, since it auto-grows extra worker threads whenever a stage blocks on I/O.
+      - CompletableFuture is hardwired to the common pool and offers no overload that accepts a caller-supplied custom executor.
       - Pass an explicit Executor sized for I/O concurrency, rather than defaulting to the common pool, to avoid starving CPU-bound parallel work.
-      - Use a single-threaded executor so results arrive in order.
+      - Use a single-threaded executor so results always arrive strictly in submission order, which is required for correct thenCombine composition.
     answer: 2
     explanation: |
       supplyAsync/thenApplyAsync default to the common ForkJoinPool; for blocking I/O you
@@ -787,9 +787,9 @@ questions:
       As of JDK 21, what is the accurate status of Structured Concurrency
       (StructuredTaskScope)?
     options:
-      - It was finalized in JDK 21 alongside virtual threads.
-      - It was removed from the JDK entirely.
-      - It has never existed; it is a hypothetical proposal.
+      - It was promoted straight to a final, permanent API in JDK 21 alongside virtual threads, sharing the same JEP 444 finalization.
+      - It was proposed but then removed from the JDK entirely before JDK 21 shipped, so StructuredTaskScope is absent from the release.
+      - It has never actually existed in any build; StructuredTaskScope remains only a hypothetical proposal that was never implemented.
       - "It is still a preview API in JDK 21 (JEP 453), NOT finalized \u2014 it began as an incubator in JDK 19 (JEP 428) and continued in preview beyond 21."
     answer: 3
     explanation: |
@@ -805,10 +805,10 @@ questions:
       A service must issue 10,000 outbound HTTP calls (each blocking ~100ms) and collect
       the responses. On JDK 21, which approach is the best fit?
     options:
-      - list.parallelStream().map(url -> blockingHttpGet(url)), relying on the common pool.
+      - list.parallelStream().map(url -> blockingHttpGet(url)), relying on the common pool to elastically add workers for each of the 10,000 blocked calls.
       - Run each call on its own virtual thread (e.g., Executors.newVirtualThreadPerTaskExecutor()), since virtual threads cheaply handle massive blocking concurrency.
-      - A Fork/Join RecursiveTask splitting the URL list by index.
-      - A single platform thread looping sequentially to keep it simple.
+      - A Fork/Join RecursiveTask that splits the URL list by index down to a granularity threshold, letting work-stealing balance the blocking calls.
+      - A single platform thread looping sequentially over the URLs to keep the code simple and avoid any concurrency bugs.
     answer: 1
     explanation: |
       10,000 blocking I/O calls is high-volume blocking concurrency — the ideal case for
@@ -825,9 +825,9 @@ questions:
       Java operation actually helps?
     options:
       - JMH (Java Microbenchmark Harness), which handles JIT warmup, dead-code elimination, and other microbenchmark pitfalls.
-      - A simple System.currentTimeMillis() difference around one run.
-      - The garbage collector log timestamps.
-      - Counting the number of threads in a thread dump.
+      - A simple System.currentTimeMillis() difference wrapped around a single unwarmed run of the operation.
+      - The garbage collector log timestamps, subtracting GC pauses to infer how long the operation itself took.
+      - Counting the number of live worker threads captured in a thread dump taken while the operation runs.
     answer: 0
     explanation: |
       JMH is the OpenJDK microbenchmarking tool built to avoid warmup, dead-code
@@ -841,9 +841,9 @@ questions:
     question: |
       In a JMH benchmark, what is the purpose of consuming results with a Blackhole?
     options:
-      - To speed up the benchmark by discarding results.
-      - To force the code to run single-threaded.
-      - To reset the heap between iterations.
+      - To speed up the benchmark by cheaply discarding each result before the next iteration begins.
+      - To force the benchmarked method to run single-threaded so timings are reproducible across machines.
+      - To reset the heap and clear allocated objects between measurement iterations for a clean baseline.
       - To prevent the JIT from eliminating the computation as dead code, ensuring the work you intend to measure actually runs.
     answer: 3
     explanation: |
@@ -858,10 +858,10 @@ questions:
     question: |
       Which is the soundest methodology before adding .parallel() to production code?
     options:
-      - Add it everywhere by default; parallel is always at least as fast.
-      - Add it wherever the collection has more than 5 elements.
+      - Add it everywhere by default, since a parallel stream is guaranteed to be at least as fast as the sequential version on any input.
+      - Add it automatically wherever the source collection holds more than 5 elements, since that is the JDK's documented break-even size.
       - Profile to confirm the code is a real hotspot, verify the source splits well and ops are stateless/associative, then benchmark (e.g., with JMH) on representative data to confirm a win.
-      - Only parallelize code that runs on the main thread at startup.
+      - Only parallelize code that runs on the main thread during application startup, where spare cores are always idle.
     answer: 2
     explanation: |
       The disciplined approach: profile to find the actual hotspot (Amdahl's law says only
@@ -897,9 +897,9 @@ questions:
       Why is passing 10 as the identity a bug for this reduction?
     options:
       - Because 10 is NOT the additive identity (0); a two-arg parallel reduce seeds each partial reduction with the identity, so 10 gets combined once per partition and the result differs from the single-threaded contract.
-      - Because 10 is a valid identity for addition, so the result is exactly 25.
-      - Because reduce ignores the identity entirely in parallel mode, always yielding 15.
-      - Because it throws IllegalArgumentException since the identity must be 0.
+      - Because 10 is a perfectly valid identity element for addition, so the parallel reduction deterministically yields exactly 25 on every run.
+      - Because reduce discards the supplied identity entirely when a stream is parallel, so it always folds to the bare element sum of 15.
+      - Because a two-arg reduce validates its identity and throws IllegalArgumentException at terminal time whenever the seed is not 0 for a sum.
     answer: 0
     explanation: |
       For addition the identity must be 0 (x + 0 = x). With identity 10, each parallel
@@ -916,10 +916,10 @@ questions:
       parallel stream but must preserve the source encounter order of those writes. Which
       operation do you use?
     options:
-      - forEach, which preserves order in parallel streams.
-      - peek, which guarantees ordered side effects.
+      - forEach, which the spec guarantees will preserve encounter order for side effects even on a parallel stream.
+      - peek, which is defined to run its consumer in strict encounter order across all worker threads.
       - forEachOrdered, which honors encounter order at a performance cost.
-      - map, because it is inherently ordered.
+      - map, because as an intermediate stage it is inherently ordered and pins the terminal writes to that order.
     answer: 2
     explanation: |
       forEachOrdered processes elements in encounter order even in a parallel stream (at
@@ -934,9 +934,9 @@ questions:
       Why can nesting a parallel stream inside another parallel stream's operation on the
       common pool lead to starvation or poor performance?
     options:
-      - It cannot; nested parallel streams are fully isolated.
-      - The JVM automatically creates a second common pool for the inner stream.
-      - Nested parallel streams always run sequentially, so there is never any issue.
+      - It cannot happen; the runtime fully isolates each nested parallel stream onto its own private set of worker threads.
+      - The JVM automatically spins up a second dedicated common pool for the inner stream so the two pipelines never share workers.
+      - Nested parallel streams are silently downgraded to sequential execution by the runtime, so there is never any resource contention.
       - Both the outer and inner pipelines draw workers from the SAME bounded common pool; the inner streams can exhaust or contend for the few shared threads, and worker threads may block waiting on nested tasks, degrading throughput or stalling.
     answer: 3
     explanation: |
@@ -970,9 +970,9 @@ questions:
       What does calling .unordered() on a parallel stream accomplish?
     options:
       - It explicitly removes the encounter-order constraint, allowing operations like distinct, limit, and findFirst/findAny to run faster by not preserving order.
-      - It sorts the stream in ascending order first.
-      - It shuffles the elements randomly.
-      - It converts the stream to sequential to guarantee determinism.
+      - It sorts the stream into ascending natural order first, then applies the pipeline over that reordered sequence deterministically.
+      - It randomly shuffles the elements using a per-worker seed so successive parallel runs visit them in a different pseudo-random order.
+      - It converts the stream back to sequential execution so every terminal operation produces a fully deterministic, reproducible ordering.
     answer: 0
     explanation: |
       unordered() drops the encounter-order constraint, letting order-sensitive operations
@@ -985,9 +985,9 @@ questions:
     question: |
       Which is true of RecursiveAction?
     options:
-      - Its compute() returns a value that you retrieve via join().
-      - It cannot be submitted to a ForkJoinPool.
-      - It is only available since Java 11.
+      - Its compute() returns a typed value that you retrieve by calling join(), just like the generic result you get back from a RecursiveTask.
+      - It cannot be submitted to a ForkJoinPool directly and must instead be wrapped in a Callable and handed to a separate ExecutorService.
+      - It is only available since Java 11, having been added as part of the same release that introduced the local-variable var syntax.
       - Its compute() returns void; it is used for side-effecting divide-and-conquer work that produces no direct result.
     answer: 3
     explanation: |
@@ -1002,10 +1002,10 @@ questions:
     question: |
       Which of these parallel accumulations is CORRECT (thread-safe and well-defined)?
     options:
-      - A shared StringBuilder appended to via parallelStream().forEach(sb::append).
-      - A shared HashMap put into via parallelStream().forEach(m -> m.put(k, v)).
+      - A shared StringBuilder appended to via parallelStream().forEach(sb::append), since StringBuilder synchronizes its internal char[] on every append call.
+      - A shared HashMap populated via parallelStream().forEach(m -> m.put(k, v)), because HashMap resizes its bucket array atomically under concurrent puts.
       - "list.parallelStream().collect(Collectors.toList()) \u2014 the collector supplies per-thread containers and an associative combiner, so no shared mutable state is exposed."
-      - An int[] counter incremented via parallelStream().forEach(x -> counter[0]++).
+      - An int[] counter bumped via parallelStream().forEach(x -> counter[0]++), because array element writes are guaranteed atomic across worker threads.
     answer: 2
     explanation: |
       collect(toList()) is the correct mutable-reduction pattern: the framework uses
@@ -1019,10 +1019,10 @@ questions:
     question: |
       Match the workload to the idiomatic Java tool.
     options:
-      - CPU-bound bulk data reduction -> virtual threads; blocking I/O fan-out -> parallel stream.
+      - CPU-bound bulk data reduction -> virtual threads (they add carrier parallelism); blocking I/O fan-out -> parallel stream on the common pool.
       - CPU-bound bulk data reduction -> parallel stream / Fork-Join; heterogeneous async composition -> CompletableFuture; high-volume blocking I/O -> virtual threads (JDK 21).
-      - Everything -> parallel streams, since they subsume all other tools.
-      - CPU-bound reduction -> CompletableFuture; blocking I/O -> Arrays.parallelSort.
+      - Everything -> parallel streams, since they subsume Fork/Join, CompletableFuture, and virtual threads under one unified data-parallel API.
+      - CPU-bound reduction -> CompletableFuture chained stages; blocking I/O fan-out -> Arrays.parallelSort over the response array.
     answer: 1
     explanation: |
       The correct mapping: parallel streams / Fork-Join for CPU-bound data parallelism;
@@ -1036,10 +1036,10 @@ questions:
     question: |
       Which JVM facilities share the common ForkJoinPool by default?
     options:
-      - Only explicit new ForkJoinPool() instances.
+      - Only explicit new ForkJoinPool() instances, which register themselves with the shared common pool on construction.
       - Parallel streams, Arrays.parallelSort/parallelPrefix, and CompletableFuture async methods invoked without an explicit executor.
-      - Only CompletableFuture; parallel streams always create their own pool.
-      - Only Arrays.parallelSort; parallel streams use platform threads directly.
+      - Only CompletableFuture async stages; every parallel stream instead allocates its own private single-use ForkJoinPool.
+      - Only Arrays.parallelSort; parallel streams bypass the pool and run their pipelines directly on freshly spawned platform threads.
     answer: 1
     explanation: |
       By default the common pool backs parallel streams, the parallel Arrays utilities,
@@ -1054,9 +1054,9 @@ questions:
       Which thread pool do parallel streams use by default?
     options:
       - The shared common ForkJoinPool (ForkJoinPool.commonPool()).
-      - A newly created cached thread pool per stream.
-      - The JVM's finalizer thread.
-      - A single-threaded scheduled executor.
+      - A freshly created cached thread pool spun up per stream and torn down when the terminal operation finishes.
+      - The JVM's finalizer thread, reused between GC cycles to run the pipeline's map and filter stages.
+      - A single-threaded scheduled executor that time-slices the pipeline stages in round-robin fashion.
     answer: 0
     explanation: |
       Parallel streams execute on the shared common ForkJoinPool by default. They do not
@@ -1070,10 +1070,10 @@ questions:
       If a subtask inside a Fork/Join computation throws an unchecked exception, what
       happens when the parent calls join() on it?
     options:
-      - join() silently returns null and swallows the exception.
-      - The whole JVM terminates immediately.
+      - join() silently returns null and swallows the exception, logging it only to the pool's uncaught-exception handler.
+      - The whole JVM terminates immediately, since an unhandled Fork/Join task exception is treated as a fatal VM error.
       - join() rethrows the exception (a RuntimeException/Error is propagated to the caller of join()).
-      - The exception is only visible via a separate getException() call and never thrown.
+      - The exception is only visible via a separate getException() call and is never thrown out of join() itself.
     answer: 2
     explanation: |
       ForkJoinTask.join() propagates a failure by rethrowing the task's exception
@@ -1087,9 +1087,9 @@ questions:
     question: |
       How do data parallelism and the Fork/Join framework relate?
     options:
-      - They are unrelated; Fork/Join only does task parallelism.
-      - Data parallelism is a replacement that made Fork/Join obsolete.
-      - Fork/Join can only parallelize exactly two subtasks and cannot express data parallelism.
+      - They are unrelated; Fork/Join handles only heterogeneous task parallelism and has no mechanism for partitioning uniform bulk data.
+      - Data parallelism is a newer replacement introduced in Java 8 that deprecated and made the older Fork/Join framework obsolete.
+      - Fork/Join can only ever parallelize exactly two subtasks per split and therefore cannot express general data parallelism over large collections.
       - Fork/Join implements data parallelism by recursively splitting the data into a tree of subtasks, so a data-parallel job becomes a tree of tasks executed with work-stealing.
     answer: 3
     explanation: |
@@ -1107,10 +1107,10 @@ questions:
       (B) linkedList.parallelStream().mapToInt(heavy).sum()
       Assuming equal sizes, which typically parallelizes better and why?
     options:
-      - B, because LinkedList nodes are cache-friendly.
+      - B, because LinkedList stores its nodes contiguously in memory, giving better cache locality than ArrayList's boxed elements.
       - A, because ArrayList's spliterator splits by index into balanced SIZED/SUBSIZED halves cheaply, whereas LinkedList must traverse to split, yielding unbalanced, costly partitions.
-      - They perform identically; the source type is irrelevant once parallel.
-      - B, because linked structures avoid array bounds checks.
+      - They perform identically; once a stream is parallel the source type no longer affects how trySplit balances the partitions.
+      - B, because linked structures avoid the array bounds checks that dominate ArrayList's per-element cost during heavy work.
     answer: 1
     explanation: |
       ArrayList is random-access and reports exact sizes (SIZED/SUBSIZED), so trySplit
@@ -1126,9 +1126,9 @@ questions:
       what happens under the hood?
     options:
       - The virtual thread unmounts from its carrier (platform) thread, freeing the carrier to run other virtual threads; when the I/O is ready the virtual thread is remounted and resumed.
-      - The underlying OS thread blocks and is lost until the read completes.
-      - The JVM spawns a brand-new OS thread for every blocking call.
-      - The blocking call is silently converted to a busy-wait spin loop.
+      - The underlying OS carrier thread blocks along with the virtual thread and is lost to the scheduler until the socket read completes.
+      - The JVM spawns a brand-new dedicated OS thread for every blocking call and retires it once the operation returns.
+      - The blocking call is silently converted into a busy-wait spin loop that polls the socket until data becomes available.
     answer: 0
     explanation: |
       On a blocking I/O call the JDK unmounts the virtual thread from its carrier so the
@@ -1142,9 +1142,9 @@ questions:
     question: |
       What does Arrays.parallelSetAll(arr, i -> f(i)) do?
     options:
-      - Sorts the array in parallel using generator f as a comparator.
-      - Sums the array in parallel and stores the total at index 0.
-      - Copies the array into a new parallel-safe structure.
+      - Sorts the array in parallel, using the generator function f as the comparator that decides element ordering.
+      - Sums the array in parallel via the generator and stores the accumulated running total back into index 0.
+      - Copies the array into a new parallel-safe concurrent structure, leaving the original array untouched.
       - Populates each index of the array in parallel by applying the generator function to the index i.
     answer: 3
     explanation: |

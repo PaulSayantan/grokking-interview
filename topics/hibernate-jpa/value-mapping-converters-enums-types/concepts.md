@@ -153,10 +153,22 @@ with the raw column value.
   every persist, update, and query-result materialization.
 - Both methods must handle `null` — Hibernate may pass `null` for a nullable column.
 - **JPQL/Criteria awareness:** you query and compare using the *entity attribute* type;
-  Hibernate applies the converter to literals and parameters. But a converted column is
-  opaque to functions Hibernate can't translate — e.g. you cannot reliably do a `LIKE`
-  or range scan on the raw stored form through JPQL, and a converter that scrambles order
-  (encryption, hashing) makes DB-side sorting/filtering meaningless.
+  Hibernate applies the converter to literals and parameters. With the `Boolean`→`'Y'`/`'N'`
+  converter above:
+
+  ```
+  JPQL:  where e.active = true      -- correct: Boolean literal
+    → Hibernate runs the converter on the literal → SQL: where active = 'Y'   ✓
+
+  JPQL:  where e.active = 'Y'       -- WRONG: you passed the stored form
+    → Hibernate expects a Boolean for e.active → type-mismatch / no conversion  ✗
+  ```
+
+  So you write JPQL in terms of `Boolean`, and Hibernate binds `'Y'` for you. The flip side:
+  a converted column is opaque to functions Hibernate can't translate — a `LIKE 'Y%'` on the
+  raw column or a range scan on the stored form isn't expressible through JPQL, and a
+  converter that scrambles order (encryption, hashing) makes `ORDER BY`/range filtering on
+  that column meaningless because the DB only sees ciphertext.
 - **Not allowed on:** `@Id` (before recent versions), version fields, associations, or
   attributes already annotated `@Enumerated`/`@Temporal` — those have their own mapping.
 - Index/query performance is a real trade-off: `'Y'`/`'N'` and JSON strings are simple,
@@ -252,6 +264,13 @@ The underlying `TIMESTAMPTZ` semantics belong to `messaging-databases`.
 
 ## Hibernate 6 Revamped Type System (JavaType JdbcType JdbcTypeCode)
 
+The old `org.hibernate.type.Type` bundled two unrelated jobs into one class: *how Java
+holds the value* and *how JDBC binds it to SQL*. So if you only wanted to change the SQL
+side (store a `UUID` as `char(36)` instead of the driver default) you had to reimplement
+the whole type, Java side and all. Hibernate 6 splits those jobs into two independent
+"dictionaries" — a **Java-side** descriptor and a **JDBC-side** translator — so you can
+swap one without touching the other.
+
 Hibernate 6 replaced the old `org.hibernate.type.Type` hierarchy and the string-based
 `@Type("...")` / `UserType` mechanism with a compositional model:
 
@@ -282,6 +301,27 @@ you're migrating a Hibernate-5 app, string `@Type`s must be rewritten as convert
 @JdbcTypeCode(SqlTypes.CHAR)
 UUID externalId;
 ```
+
+**Trace it through one value.** Take `BigDecimal amount = 19.99` on a `NUMERIC` column:
+
+```
+WRITE  amount = new BigDecimal("19.99")
+  JavaType<BigDecimal>.unwrap(...) -> hands the raw BigDecimal to the JdbcType
+  JdbcType (NUMERIC) -> ps.setBigDecimal(idx, 19.99), java.sql.Types.NUMERIC
+                                            ↓ column now holds 19.99
+
+READ   column value 19.99
+  JdbcType (NUMERIC) -> rs.getBigDecimal(idx) -> BigDecimal 19.99
+  JavaType<BigDecimal>.wrap(...) -> the BigDecimal handed back to the entity
+                                            ↓ amount = 19.99
+```
+
+The `JavaType` half owns the Java representation (compare/copy/wrap); the `JdbcType` half
+owns the `setXxx`/`getXxx` + `java.sql.Types` code. Now the payoff of the split:
+`@JdbcTypeCode(SqlTypes.CHAR)` on the `UUID` above swaps **only the JdbcType** — the read
+path becomes `rs.getString()` -> `char(36)` text, while `JavaType<UUID>` is untouched and
+still parses that string back into a `UUID`. You changed the SQL binding without rewriting
+the Java side. That is what "composable" buys you.
 
 > [!KEY-TAKEAWAY]
 > Hibernate 6 = `JavaType` + `JdbcType` (composable descriptors) + `@JdbcTypeCode`.
@@ -445,6 +485,21 @@ classic senior trap. It is governed by `hibernate.timezone.default_storage` (a
 @TimeZoneColumn(name = "created_at_offset")   // companion column holds the offset
 private OffsetDateTime createdAt;
 ```
+
+**Worked example — one value, three storage modes.** Persist
+`OffsetDateTime.parse("2024-03-01T09:00+05:30")` (that instant is `09:00 − 05:30 = 03:30`
+UTC, i.e. `2024-03-01T03:30Z`) and read it straight back:
+
+| Mode | What's stored | Read-back value | Instant kept? | Offset kept? |
+|---|---|---|---|---|
+| `NORMALIZE_UTC` | `2024-03-01T03:30` (a plain timestamp, UTC-normalized) | `2024-03-01T03:30Z` | ✅ | ❌ `+05:30` → `Z` |
+| `NATIVE` on Postgres `timestamptz` | `2024-03-01T03:30Z` (timestamptz is UTC internally) | `2024-03-01T03:30Z` | ✅ | ❌ normalized to `+00:00` |
+| `COLUMN` (+ `@TimeZoneColumn`) | main col `2024-03-01T09:00`, companion col `+05:30` | `2024-03-01T09:00+05:30` | ✅ | ✅ exact original |
+
+Notice the first two read back `03:30Z`, **not** `09:00+05:30`: the moment on the timeline
+is identical, but the fact that the client was at `+05:30` is gone — `.getOffset()` now
+returns `Z`. Only `COLUMN` reconstructs the literal you wrote, because it parked the offset
+in its own column and re-applies it on read.
 
 Key facts:
 
@@ -651,6 +706,17 @@ serialized/copied form against the loaded snapshot). Consequences:
   return type Hibernate assumes immutable), mutating the object **in place** is **not**
   detected — "my JSON update didn't persist." The fix is to **reassign** a new instance
   (`entity.setAttrs(newMap)`), which flips the reference and is always caught.
+
+  ```java
+  // BROKEN — mutate in place; if the plan treats the Map as immutable, no dirty flag,
+  // no UPDATE at flush:
+  entity.getAttributes().put("theme", "dark");        // may silently NOT persist
+
+  // FIXED — copy, mutate the copy, reassign; the reference change is always detected:
+  Map<String, Object> next = new HashMap<>(entity.getAttributes());
+  next.put("theme", "dark");
+  entity.setAttributes(next);                          // reassignment → always flushed
+  ```
 - Built-in JSON/array support *does* deep-compare, so in-place mutation usually works — but
   at the cost of serializing + comparing large blobs on every flush.
 - `@Immutable` on a converter or type **opts out** of dirty checking for that attribute,

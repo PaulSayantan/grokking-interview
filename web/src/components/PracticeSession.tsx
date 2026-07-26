@@ -13,6 +13,8 @@ import {
   registerPractice,
   missedIds,
   missedCount,
+  dueIds,
+  dueCount,
   claimStreakMilestone,
 } from "@lib/progress";
 
@@ -199,8 +201,8 @@ const ANIM_CSS = `
       transform var(--dur-fast, 140ms) var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
       background-color 150ms ease, border-color 150ms ease, color 150ms ease;
   }
-  .ps-press-opt:hover:not(:disabled) { transform: scale(1.01); }
-  .ps-press-opt:active:not(:disabled) { transform: scale(0.985); }
+  .ps-press-opt:hover:not(:disabled):not([aria-disabled="true"]) { transform: scale(1.01); }
+  .ps-press-opt:active:not(:disabled):not([aria-disabled="true"]) { transform: scale(0.985); }
   .ps-answer-pulse { animation: ps-answer-pulse 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)); }
   .ps-answer-dip { animation: ps-answer-dip 300ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)); }
   .ps-progress-fill {
@@ -282,12 +284,13 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         ? new URLSearchParams(window.location.search)
         : null;
     const review = params?.get("review") === "1";
+    const due = params?.get("due") === "1";
     if (groups && groups.length && params) {
       const key = params.get("group");
       const match = key ? groups.find((g) => g.key === key) : undefined;
-      if (match) return { url: match.url, scope: match.label, review };
+      if (match) return { url: match.url, scope: match.label, review, due };
     }
-    return { url: poolUrl, scope: title, review };
+    return { url: poolUrl, scope: title, review, due };
   }, [poolUrl, title, groups]);
 
   // Scope the missed-question count to what this pool actually reviews: a
@@ -308,7 +311,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   // Per-tier counts for the chooser pills (null until the pool is sampled once).
   const [tierCounts, setTierCounts] = useState<Record<string, number> | null>(null);
   // Why the pool ended up empty, so the empty state can explain it.
-  const [emptyReason, setEmptyReason] = useState<"pool" | "review" | "tiers">("pool");
+  const [emptyReason, setEmptyReason] = useState<"pool" | "review" | "tiers" | "due">("pool");
   const [status, setStatus] = useState<
     "choosing" | "loading" | "error" | "empty" | "ready"
   >("choosing");
@@ -389,6 +392,16 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
           return;
         }
       }
+      // Spaced-repetition mode: keep only questions due for review today.
+      if (preset.due) {
+        const due = new Set(dueIds(missedFilter));
+        pool = pool.filter((q) => due.has(q.id));
+        if (pool.length === 0) {
+          setEmptyReason("due");
+          setStatus("empty");
+          return;
+        }
+      }
       const q = prepare(pool, preset.size ?? pool.length);
       setPrepared(q);
       setSelections(new Array(q.length).fill(undefined));
@@ -414,13 +427,15 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
     });
   }, []);
 
-  // Deep-link ?review=1 auto-selects the "missed" preset so it skips the chooser.
+  // Deep-link ?review=1 / ?due=1 auto-select their preset so they skip the chooser.
   useEffect(() => {
     if (preset) return;
-    if (resolved.review) {
+    if (resolved.due) {
+      setPreset(SESSION_PRESETS.find((p) => p.key === "due") ?? null);
+    } else if (resolved.review) {
       setPreset(SESSION_PRESETS.find((p) => p.key === "missed") ?? null);
     }
-  }, [resolved.review, preset]);
+  }, [resolved.review, resolved.due, preset]);
 
   // Tally per-tier counts once for the chooser pills (best-effort; ignores errors).
   useEffect(() => {
@@ -582,6 +597,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
   // Pre-quiz preset chooser (microlearning: match session length to time on hand).
   if (status === "choosing") {
     const missed = missedCount(missedFilter);
+    const due = dueCount(missedFilter);
     return (
       <div class="card p-6">
         <style>{ANIM_CSS}</style>
@@ -625,7 +641,13 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         <div class="mt-4 flex flex-col gap-3">
           {SESSION_PRESETS.map((p) => {
             const isMissed = p.key === "missed";
-            const disabled = isMissed && missed === 0;
+            const isDue = p.key === "due";
+            const count = isMissed ? missed : isDue ? due : null;
+            // Count-driven presets (missed / due) disable when their pool is empty.
+            const disabled = (isMissed || isDue) && count === 0;
+            const emptyHint = isMissed
+              ? "Nothing missed yet — practice a round first."
+              : "Nothing due yet — answer some questions and they'll return on a schedule.";
             return (
               <button
                 type="button"
@@ -639,10 +661,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
               >
                 <span class="font-semibold">
                   {p.label}
-                  {isMissed && missed > 0 ? ` (${missed})` : ""}
+                  {count != null && count > 0 ? ` (${count})` : ""}
                 </span>
                 <span class="mt-1 block text-sm" style="color: var(--color-text-muted);">
-                  {disabled ? "Nothing missed yet — practice a round first." : p.hint}
+                  {disabled ? emptyHint : p.hint}
                 </span>
               </button>
             );
@@ -702,9 +724,11 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
         <p style="color: var(--color-text-muted);">
           {emptyReason === "tiers"
             ? "No questions match the difficulty levels you picked. Clear or widen the difficulty filter and try again."
-            : resolved.review
-              ? "Nothing to review here — you haven't missed any questions in this scope. Practice a round first, then come back to drill what you got wrong."
-              : "There are no practice questions available for this selection yet."}
+            : emptyReason === "due"
+              ? "Nothing due for review right now — you're all caught up in this scope. Spaced-repetition brings questions back as their intervals elapse; check back tomorrow, or practice a fresh round."
+              : resolved.review
+                ? "Nothing to review here — you haven't missed any questions in this scope. Practice a round first, then come back to drill what you got wrong."
+                : "There are no practice questions available for this selection yet."}
         </p>
         <div class="mt-4 flex flex-wrap gap-3">
           {emptyReason === "tiers" && (
@@ -980,7 +1004,13 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
             Q {current + 1} / {total}
           </p>
         </div>
-        <p class="text-sm font-medium" style="color: var(--color-text-muted);">
+        <p
+          class="text-sm font-medium"
+          style="color: var(--color-text-muted);"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           Score: {score} / {answeredCount}
         </p>
       </div>
@@ -1008,11 +1038,22 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
       {activeQ && (
         /* Keyed by question index so the CSS enter animation replays on change. */
         <div key={current} class="card ps-card-in p-5 sm:p-6">
-          <h2 class="text-lg font-semibold" style="white-space: pre-wrap;">
+          <h2
+            id={`ps-q-${current}`}
+            class="text-lg font-semibold"
+            style="white-space: pre-wrap;"
+            tabIndex={-1}
+          >
             {activeQ.q.question.trim()}
           </h2>
 
-          <div class="mt-4 flex flex-col gap-2" role="group" aria-label="Answer choices">
+          {/* The answer group is labelled by the question stem, so a screen
+              reader announces the new question when focus moves here on Next. */}
+          <div
+            class="mt-4 flex flex-col gap-2"
+            role="group"
+            aria-labelledby={`ps-q-${current}`}
+          >
             {activeQ.options.map((opt, oi) => {
               const chosen = activeSelection === oi;
               const isCorrect = oi === activeQ.correctIndex;
@@ -1052,7 +1093,10 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                     color: fg,
                     cursor: isLocked ? "default" : "pointer",
                   }}
-                  disabled={isLocked}
+                  /* aria-disabled (not `disabled`) keeps locked options focusable
+                     so a screen-reader user can review every choice + its marked
+                     correctness after answering; select() still ignores re-answers. */
+                  aria-disabled={isLocked}
                   aria-pressed={chosen}
                   tabIndex={oi === focusIndex ? 0 : -1}
                   onClick={() => select(oi)}
@@ -1071,6 +1115,11 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                     {oi + 1}
                   </span>
                   <span class="flex-1">{opt}</span>
+                  {/* Correctness conveyed by name, not color alone (WCAG 1.4.1). */}
+                  {isLocked && isCorrect && <span class="sr-only"> (correct answer)</span>}
+                  {isLocked && chosen && !isCorrect && (
+                    <span class="sr-only"> (your answer — incorrect)</span>
+                  )}
                   {isLocked && isCorrect && (
                     <span
                       class="ps-mark-in ml-auto text-base font-bold"
@@ -1108,7 +1157,7 @@ export default function PracticeSession({ poolUrl, backHref, title, groups }: Pr
                 >
                   {activeSelection === activeQ.correctIndex
                     ? "Correct"
-                    : `Incorrect — the correct answer is ${activeQ.correctIndex + 1}.`}
+                    : `Incorrect — the correct answer is ${activeQ.correctIndex + 1}. ${activeQ.options[activeQ.correctIndex]}`}
                 </p>
                 {(() => {
                   // Slim pools carry no explanation; look it up in the lazily

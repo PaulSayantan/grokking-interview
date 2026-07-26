@@ -5,8 +5,9 @@ Spring's persistence story has several layers that interviewers love to conflate
 (templates, transaction management, exception translation), and Spring Data JPA as a
 *repository-abstraction* library on top of all of them. This note untangles those layers and
 then drills into the everyday building blocks: repository interfaces, derived queries, `@Query`,
-paging/sorting, `JdbcTemplate`, the `DataAccessException` hierarchy, the N+1 problem, and the
-`EntityManager` vs `Session` distinction.
+paging/sorting, `JdbcTemplate`, the `DataAccessException` hierarchy, the N+1 problem, the
+`EntityManager` vs `Session` distinction, and — later — optimistic/pessimistic locking, transaction
+semantics in the data layer, and persistence-context flush timing.
 
 A note on versions: **Spring Framework 6.x (and Spring Data 3.x / Hibernate 6.x)** moved from the
 `javax.persistence.*` namespace to **`jakarta.persistence.*`** (Jakarta EE 9+). Spring Framework
@@ -44,7 +45,8 @@ Key clarifications interviewers probe:
 
 - **Spring Data JPA is not an ORM.** It delegates all persistence work to the JPA provider
   (Hibernate by default in most stacks). It is a code-generation and abstraction layer.
-- You can use **JPA/Hibernate without Spring Data** (hand-written DAOs using `EntityManager`), and
+- You can use **JPA/Hibernate without Spring Data** (hand-written DAOs — Data Access Objects, plain
+  classes that encapsulate persistence operations — using `EntityManager`), and
   you can use **Spring without JPA at all** (e.g., `JdbcTemplate` or Spring Data JDBC).
 - **Spring ORM** (`spring-orm` module) is the part of the *core Spring Framework* that integrates
   JPA/Hibernate: `LocalContainerEntityManagerFactoryBean`, `JpaTransactionManager`,
@@ -321,6 +323,22 @@ Notes and pitfalls:
   the page contents: if the current page is the first page *and* its content size is smaller than
   the requested page size, or if a non-first page comes back short, the total is computed
   arithmetically. So "`Page` = always +1 count query" is an over-simplification.
+
+  *Worked example — when the COUNT fires and when it doesn't.* Table `users` has **45 matching
+  rows**. `offset = page * size`.
+
+  - `PageRequest.of(2, 20)` → `offset = 2 * 20 = 40`. The DB returns rows 40, 41, 42, 43, 44 →
+    **content size = 5**. It's *not* page 0, and `5 < 20` (short page), so `PageableExecutionUtils`
+    infers `total = offset + contentSize = 40 + 5 = 45`. **No `COUNT` query runs.**
+  - `PageRequest.of(0, 20)` → `offset = 0`. The DB returns a **full page of 20** rows
+    (`contentSize == pageSize`). A full page could mean 20 total or 20,000 total — Spring cannot
+    tell — so it **issues `SELECT COUNT(*)`** to learn `getTotalElements() = 45`.
+  - `PageRequest.of(0, 50)` → `offset = 0`. The DB returns all **45** rows (`45 < 50`, and it's the
+    first page), so `total = contentSize = 45`. **No `COUNT` query.**
+
+  Rule of thumb: the COUNT is skipped exactly when the returned content lets Spring *deduce* the
+  total — a short page (last page) or an all-in-one first page. A full non-final page is the case
+  that forces the extra query.
 - **`Sort` by an unmapped/derived property.** Sorting works on persistent entity properties; sorting
   by an alias or a function requires `JpaSort.unsafe("FUNCTION('...')")`, and unsafe sort strings are
   spliced into the query (injection risk if user-controlled).
@@ -521,7 +539,12 @@ Detection and fixes:
 - **`@EntityGraph`** on the repository method — declarative fetch plan without writing the join:
   `@EntityGraph(attributePaths = "books")`.
 - **Batch fetching** — `@BatchSize(size = n)` or `hibernate.default_batch_fetch_size` turns N
-  queries into `ceil(N/n)` `IN (...)` queries.
+  queries into `ceil(N/n)` `IN (...)` queries. *Concrete payoff:* with **N = 100 authors** and
+  `@BatchSize(size = 10)`, the 100 per-author book lookups collapse to `ceil(100 / 10) = 10`
+  batched queries, each `... WHERE author_id IN (?,?,?,?,?,?,?,?,?,?)` (10 binds). Total =
+  1 (load authors) + 10 = **11 queries**, versus 1 + 100 = **101** with naive lazy loading — a ~9×
+  reduction. (The final batch may be partial: N = 95 gives `ceil(95/10) = 10` batches, the last
+  with 5 binds, so 11 queries still.)
 - **DTO projections** — select exactly the columns you need in a single query.
 - Note: naïvely switching a collection to `EAGER` is *not* a real fix — it makes every load fetch
   the collection (often via a cartesian join) and can cause its own N+1 or over-fetching problems.
@@ -564,6 +587,13 @@ interview topic because it shows you understand the cost of the object-relationa
 ---
 
 ## EntityManager vs Session
+
+Before the mechanics: *why does a persistence context exist at all?* Think of it as a per-unit-of-work
+**scratchpad / staging area**. Instead of firing a SQL statement the instant you call a setter, the
+context collects your changes, guarantees that a given DB row is represented by exactly **one**
+in-memory object (so two lookups of `id=7` hand you the same instance), and touches the database as
+**little and as late as possible** — batching writes and coalescing repeated edits into one `UPDATE`
+at flush time. The flush/dirty-checking/L1-cache details below are all consequences of that one goal.
 
 At the JPA layer you interact with an **`EntityManager`**; the Hibernate-native equivalent is a
 **`Session`**. Both represent a **persistence context** — a first-level cache of managed entities
@@ -609,6 +639,23 @@ Key facts:
   `Persistable.isNew`) and `merge` otherwise. For an entity with an assigned (non-generated) id,
   `isNew` returns false, so `save` does a `merge` → an extra `SELECT` before every insert. Implement
   `Persistable` or use `@Version`/a `@CreatedDate` audit field to fix this.
+
+  *Worked example — the wasted SELECT.* Persist a brand-new object twice, two id strategies:
+
+  - **`@GeneratedValue Long id` (id is `null` on a new object):** `isNew()` checks the id → `null`
+    → **`true`** → `save()` calls `persist()`. Emitted SQL for one insert: **`INSERT INTO ...`** —
+    1 statement.
+  - **Assigned business key (e.g. `@Id String isbn = "978-..."`, non-null before save):** `isNew()`
+    checks the id → non-null → **`false`** → `save()` calls `merge()`. `merge` must first load the
+    "current" row to copy onto: **`SELECT ... WHERE isbn=?`** → returns *nothing* (it's actually
+    new) → Hibernate then does **`INSERT INTO ...`**. That's **2 statements**, and the `SELECT` is
+    pure waste. Do this in a loop inserting 10,000 rows and you've issued 10,000 pointless
+    `SELECT`s.
+
+    The fixes flip `isNew()` back to `true` for genuinely-new rows without relying on the id:
+    implement `Persistable#isNew()` (e.g. return `true` while a `@Transient` flag is set), or add a
+    `@Version` / `@CreatedDate` field — Spring Data's `isNew` then treats a `null` version/created
+    timestamp as "new" and skips the `SELECT`.
 - **Flush ordering (`ActionQueue`).** Hibernate does *not* execute SQL in the order you call methods.
   On flush it orders operations by type: inserts, then updates, then collection removals/updates,
   then deletes — respecting insertion order within each type. This is why a `persist` followed by a
@@ -637,6 +684,22 @@ Concurrency control is where persistence integration meets real production scars
   rare, resolved at flush/commit. The version check fires **only when the entity is dirty and
   flushed**; a bulk `@Modifying` update or a native SQL update does *not* bump `@Version`, which can
   silently corrupt the optimistic-locking contract for concurrent readers.
+
+  *Worked example — two transactions race on row `id=7`.* Both start with the row at
+  **`version = 3`**:
+
+  | Step | Tx A | Tx B |
+  |---|---|---|
+  | 1 | `SELECT ... FROM product WHERE id=7` → reads `version=3` | `SELECT ... WHERE id=7` → reads `version=3` |
+  | 2 | mutates `price`, commits | (still editing) |
+  | 3 | `UPDATE product SET price=?, version=4 WHERE id=7 AND version=3` → **1 row affected** → commit OK; row is now `version=4` | |
+  | 4 | | mutates `stock`, commits |
+  | 5 | | `UPDATE product SET stock=?, version=4 WHERE id=7 AND version=3` → **0 rows affected** (the row is already at `version=4`, so `version=3` matches nothing) |
+  | 6 | | Hibernate sees `0` updated → throws `OptimisticLockException` → Spring translates to `OptimisticLockingFailureException`; Tx B rolls back |
+
+  The whole mechanism lives in that **row count**: `1` means "I updated the version I read, no one
+  beat me"; `0` means "someone changed the row since I read it" — no locks were ever held. Tx B's
+  recovery is to re-read (now `version=4`), re-apply its change, and retry.
 - **`@Version` gotchas:** the field must not be manually modified; a `merge` of a detached entity
   compares the detached version against the DB and can throw on merge; and `LockModeType.OPTIMISTIC`
   vs `OPTIMISTIC_FORCE_INCREMENT` differ in whether the version is bumped even without a change

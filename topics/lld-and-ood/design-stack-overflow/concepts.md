@@ -184,7 +184,7 @@ classDiagram
         -List~Vote~ votes
         -List~Comment~ comments
         +castVote(User voter, VoteType type) VoteResult
-        +retractVote(User voter) void
+        +retractVote(User voter) Vote
         +addComment(User author, String text) Comment
         +getScore() int
     }
@@ -328,8 +328,8 @@ Key public surface (types shown; `Result` objects report accept/reject reasons):
 Question postQuestion(User author, String title, String body, List<Tag> tags);
 Answer   postAnswer(User author, Question question, String body);
 Comment  addComment(User author, Post target, String text);
-VoteResult castVote(User voter, Post target, VoteType type);   // idempotent per user
-void       retractVote(User voter, Post target);
+VoteResult castVote(User voter, Post target, VoteType type);   // idempotent; a flip reverses old rep then applies new
+void       retractVote(User voter, Post target);               // reverses the reputation the removed vote granted
 void       acceptAnswer(User asker, Question question, Answer answer);
 List<Question> searchByTag(Tag tag);
 List<Question> searchByTag(Tag tag, SortStrategy sort);
@@ -368,10 +368,13 @@ abstract class Post {
         if (existing != null && existing.type() == type)
             return VoteResult.rejected("Already voted");     // idempotent
         votesByUser.put(voter.getId(), new Vote(voter, type, this, Instant.now()));
-        return VoteResult.accepted(type);   // service publishes the ReputationEvent
+        // hand back the prior vote type (null if none) so the service can reverse its rep
+        // delta before applying the new one — a flip is a reversal PLUS a new event
+        return VoteResult.accepted(type, existing == null ? null : existing.type());
     }
 
-    void retractVote(User voter) { votesByUser.remove(voter.getId()); }
+    // returns the removed Vote (or null) so the service can reverse the reputation it granted
+    Vote retractVote(User voter) { return votesByUser.remove(voter.getId()); }
 
     int getScore() {
         return (int) votesByUser.values().stream().filter(v -> v.type() == VoteType.UP).count()
@@ -410,12 +413,16 @@ class ReputationManager {
     private final Map<EventType, ReputationRule> rules = Map.of(
         EventType.ANSWER_UPVOTED,   e -> +10,
         EventType.QUESTION_UPVOTED, e -> +5,
-        EventType.DOWNVOTED,        e -> -2,
+        EventType.DOWNVOTED,        e -> -2,   // to the post author
+        EventType.DOWNVOTE_CAST,    e -> -1,   // to the voter, for downvoting an answer
         EventType.ANSWER_ACCEPTED,  e -> +15
     );
     void apply(ReputationEvent e) {
         ReputationRule rule = rules.get(e.type());
-        if (rule != null) e.targetUser().addReputation(rule.pointsFor(e));
+        if (rule == null) return;
+        // reversal events (vote flip / retract) negate the delta the original event granted
+        int delta = e.isReversal() ? -rule.pointsFor(e) : rule.pointsFor(e);
+        e.targetUser().addReputation(delta);
     }
 }
 
@@ -437,8 +444,30 @@ class QnAService {
 
     VoteResult castVote(User voter, Post target, VoteType type) {
         VoteResult r = target.castVote(voter, type);
-        if (r.accepted()) publish(new ReputationEvent(eventTypeFor(target, type), target.getAuthor()));
+        if (!r.accepted()) return r;
+        // A flip (priorType != null) first reverses what the old vote granted, then applies the new vote.
+        if (r.priorType() != null)
+            reverse(target, voter, r.priorType());
+        applyVote(target, voter, type);
         return r;
+    }
+
+    void retractVote(User voter, Post target) {
+        Vote removed = target.retractVote(voter);
+        if (removed != null) reverse(target, voter, removed.type());
+    }
+
+    // one physical vote can move TWO users' reputation: the post author (up/down) and,
+    // for a downvote on an answer, the voter (-1). Emit an event per affected user.
+    private void applyVote(Post target, User voter, VoteType type) {
+        publish(new ReputationEvent(eventTypeFor(target, type), target.getAuthor(), false));
+        if (type == VoteType.DOWN && target instanceof Answer)
+            publish(new ReputationEvent(EventType.DOWNVOTE_CAST, voter, false));
+    }
+    private void reverse(Post target, User voter, VoteType type) {
+        publish(new ReputationEvent(eventTypeFor(target, type), target.getAuthor(), true));
+        if (type == VoteType.DOWN && target instanceof Answer)
+            publish(new ReputationEvent(EventType.DOWNVOTE_CAST, voter, true));
     }
     private void publish(ReputationEvent e) {
         reputation.apply(e);
@@ -450,6 +479,39 @@ class QnAService {
 Note how `ReputationManager` (Strategy map) and `BadgeService` (Observer) both hang off the
 single `publish(...)` seam — every reputation-affecting action funnels through one place,
 so a new consumer or a new rule is an *addition*, never an edit.
+
+## Worked Example: a vote-to-badge trace
+
+The machinery above stays abstract until you push real numbers through it. User **A** starts
+at **reputation 0**. A's answer `a7` collects **5 upvotes**, then **2 downvotes**, then the
+asker **accepts** it. The badge catalog holds one Silver badge whose `qualifies(u)` returns
+true at **reputation ≥ 50**. Watch each action funnel through `publish(...)`:
+
+| # | Action | Event(s) published (target) | `ReputationManager.apply` | A's rep | `BadgeService.onEvent` |
+|---|---|---|---|---|---|
+| 1 | upvote #1 | `ANSWER_UPVOTED` (A) | +10 | 10 | <50, no award |
+| 2 | upvote #2 | `ANSWER_UPVOTED` (A) | +10 | 20 | no |
+| 3 | upvote #3 | `ANSWER_UPVOTED` (A) | +10 | 30 | no |
+| 4 | upvote #4 | `ANSWER_UPVOTED` (A) | +10 | 40 | no |
+| 5 | upvote #5 | `ANSWER_UPVOTED` (A) | +10 | **50** | `qualifies`→true, **award Silver** |
+| 6 | downvote #1 | `DOWNVOTED` (A) **+** `DOWNVOTE_CAST` (voter) | −2 to A; −1 to voter | 48 | has Silver → skip |
+| 7 | downvote #2 | `DOWNVOTED` (A) **+** `DOWNVOTE_CAST` (voter) | −2 to A; −1 to voter | 46 | skip |
+| 8 | asker accepts | `ANSWER_ACCEPTED` (A) | +15 | **61** | skip |
+
+**Arithmetic check:** `5×(+10) + 2×(−2) + (+15) = 50 − 4 + 15 = 61`. The badge fires **exactly
+once**, at step 5 — the moment `A.reputation` crosses 50 on the same event that moved it.
+Steps 6–8 re-run `onEvent`, but `hasBadge(b)` short-circuits the re-award (Observer
+idempotency). Nothing polls; the threshold check rides the reputation event itself. Note also
+that each downvote emits **two** events: the −2 hits author A, and a `DOWNVOTE_CAST` −1 hits
+the *caster* — one physical click, two `ReputationEvent`s to two different users.
+
+**Now flip a vote.** Say upvote #5 was voter V, who at step 5 leaves A at 50 and then switches
+to a downvote. `Post.castVote` overwrites V's map entry and returns `priorType = UP`; the
+service first **reverses** the old `ANSWER_UPVOTED` (−10), then applies the new `DOWNVOTED`
+(−2): A moves `50 → 40 → 38`, a net **−12** from that one voter — not the `+8` you'd get by
+only counting the new downvote against the stale +10. `getScore()` needs no special case: the
+map now holds one `DOWN` where a `UP` used to be, so the derived score drops by 2 (from +5,
+five upvotes, to +3, four upvotes minus one downvote) automatically.
 
 ## Extensibility
 
@@ -481,13 +543,23 @@ Single-process, thread-safe. The interesting races are around **votes** and **re
 - **Concurrent votes on the same post:** back the votes by `voter.getId()` in a
   `ConcurrentHashMap` (shown) so "one vote per user" is enforced atomically — a duplicate
   from the same user is idempotent, and two *different* users don't contend. `getScore()`
-  derives from the map, so it's always consistent with the stored votes.
+  derives from the map, so it's always consistent with the stored votes. **Trade-off:**
+  derive-on-read is dead simple and never drifts, but it streams the whole vote map (O(n) per
+  read) — fine for LLD, painful for a hot question read millions of times. The alternative is
+  a denormalized pair of `AtomicInteger` up/down counters bumped on each vote: O(1) reads at
+  the cost of keeping them in sync with the map under concurrent votes/flips/retracts. Pick
+  the counter only once read pressure justifies the extra invariant to maintain.
 - **Reputation updates:** `addReputation(delta)` must be atomic (`AtomicInteger` or a
   synchronized accumulator) — many votes across many posts credit the same author
   concurrently; a naive `rep += delta` loses updates.
 - **Self-vote / double-vote / vote flip:** rejected or handled idempotently in
-  `Post.castVote` (author check + per-user map). Flipping up→down is a remove-then-add;
-  do it atomically so the score never transiently double-counts.
+  `Post.castVote` (author check + per-user map). Flipping up→down is a single atomic
+  `put` that overwrites the map entry, so the stored vote — and the derived score — never
+  transiently double-counts. **Reputation must be reversed too:** `castVote` returns the
+  *prior* vote type, and the service publishes a **reversal event** (negating the old
+  delta) before applying the new vote's delta, so a +10 upvote flipped to a −2 downvote
+  nets the author −12, not +8. `retractVote` returns the removed vote and publishes a
+  single reversal, undoing exactly what that vote had granted.
 - **Accept answer races:** only the asker accepts, and re-accepting moves the flag
   atomically (unset old, set new) under the question's guard so at most one answer is
   accepted at any instant.
@@ -513,6 +585,14 @@ Single-process, thread-safe. The interesting races are around **votes** and **re
 - **"How do you stop a user voting twice or voting on their own post?"** Reify `Vote` and
   key votes by user id (map); author check in `castVote`. A plain `int` counter can't
   enforce either.
+- **"What happens to reputation when a vote is flipped or retracted?"** The granted rep
+  must be reversed, not just overwritten. `castVote` returns the prior vote type; the
+  service publishes a **reversal event** (negating the old delta) and then the new vote's
+  event, so up→down nets the author −12 (undo +10, then −2). `retractVote` returns the
+  removed vote and publishes one reversal. This is also why one physical downvote on an
+  answer emits **two** events — −2 to the author and −1 to the voter (`DOWNVOTE_CAST`) —
+  each reversible independently. Recomputing rep from the full vote set on every change is
+  the simpler-but-slower alternative.
 - **"Make the reputation numbers configurable."** They already are — `ReputationManager`
   is a map of `EventType → ReputationRule`; load the map from config. That's the Strategy
   payoff.
@@ -525,6 +605,27 @@ Single-process, thread-safe. The interesting races are around **votes** and **re
   or a generic service method.
 - **"Model close/duplicate/protected."** `QuestionStatus` state machine (State pattern /
   enum guard); legal operations depend on status.
+- **"You said privileges are reputation-gated — show it."** Make `Privilege` a small enum
+  carrying its own min-rep threshold, and derive the check from `user.reputation` rather than
+  a role table — so the same mechanism that awards badges also unlocks abilities:
+
+  ```java
+  enum Privilege {
+      VOTE_UP(15), VOTE_DOWN(125), COMMENT(50), EDIT_OTHERS(2000), CLOSE(3000);
+      private final int minRep;
+      Privilege(int minRep) { this.minRep = minRep; }
+      int minRep() { return minRep; }
+  }
+  // Information Expert: User owns its reputation, so it answers can()
+  class User { boolean can(Privilege p) { return reputation >= p.minRep(); } }
+  ```
+
+  Worked trace: user A from the example above sits at **rep 61**. `A.can(VOTE_UP)` → `61 ≥ 15`
+  → **true**; `A.can(COMMENT)` → `61 ≥ 50` → **true**; `A.can(VOTE_DOWN)` → `61 ≥ 125` →
+  **false**; `A.can(CLOSE)` → `61 ≥ 3000` → **false**. `QnAService.castVote` gates on
+  `voter.can(type == UP ? VOTE_UP : VOTE_DOWN)` before touching the post. New privilege =
+  new enum constant, no edits (OCP) — and a *moderator* is just a `User` whose rep clears the
+  bar (or an explicit override flag), not a subclass.
 - **"Scale to real Stack Overflow traffic."** Out of LLD scope — read replicas, a search
   index (Elasticsearch), caching, and denormalized reputation counters live in the
   `system-design` domain; the OO model is the single-node core.

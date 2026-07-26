@@ -35,6 +35,13 @@ endpoint** identified by a target string, not a single TCP socket. One channel:
 - carries channel-wide config: credentials, interceptors, compression, keepalive,
   max message sizes, and the service config (retry/LB policy).
 
+**Keepalive** here means periodic HTTP/2 `PING` frames the client sends on an otherwise
+idle connection to detect a dead peer (a half-open TCP connection) and to keep NAT/load-balancer
+idle timers from silently dropping the connection. It is a *per-channel* setting because it
+belongs to the connection, not the call. Watch the tension with server-side enforcement:
+pinging too aggressively makes the server reject you with a `GOAWAY` carrying
+`ENHANCE_YOUR_CALM`, so client and server keepalive intervals must be compatible (gRFC A8).
+
 ```mermaid
 flowchart TD
   Stub["Stub / generated client"] --> Ch["Channel (logical endpoint)"]
@@ -115,6 +122,12 @@ flowchart LR
   TF -->|"Close()"| SHUTDOWN
 ```
 
+**Idle timeout.** A `READY` channel that sees no RPCs for a configurable window (the idle
+timeout, ~30 min in several implementations) drops its subchannels and returns to `IDLE`
+to free resources. Nothing is broken — but the *next* RPC after that quiet period re-pays
+name resolution + TCP/TLS/HTTP/2 handshake, so it's slow again like the very first call.
+This is the answer to "why did my first request after lunch spike in latency?"
+
 **Reconnect backoff.** When a subchannel enters `TRANSIENT_FAILURE`, gRPC does *not*
 hot-loop reconnecting. It uses exponential backoff (per the gRPC connection-backoff
 spec): a base delay, a multiplier (~1.6), jitter, capped at a max (~120s). This protects
@@ -139,6 +152,21 @@ the channel is *not* `READY` at RPC start:
 ```go
 resp, err := client.GetBalance(ctx, req, grpc.WaitForReady(true))
 ```
+
+**Worked example — the two flags diverging in time.** Backend is down, the channel is in
+`TRANSIENT_FAILURE`, and at `t=0` the client issues one RPC with a **500ms deadline**:
+
+- **wait-for-ready = false (default):** the channel isn't `READY`, so the RPC **fails
+  fast** — it returns `UNAVAILABLE` at ~`t=0` without ever touching the wire. The caller
+  can retry or shed immediately.
+- **wait-for-ready = true, backend recovers:** the RPC **parks** (no error yet). Say the
+  backend comes back at `t=300ms`: the subchannel transitions `TRANSIENT_FAILURE ->
+  CONNECTING -> READY`, the queued RPC is sent at ~`t=300ms`, and it succeeds well inside
+  the 500ms budget.
+- **wait-for-ready = true, backend never recovers:** the RPC stays parked until the
+  **deadline** fires at `t=500ms`, then returns `DEADLINE_EXCEEDED`. Note the *different
+  status code* — `DEADLINE_EXCEEDED`, not `UNAVAILABLE` — and note that with **no**
+  deadline this same RPC would block forever (the hang in the warning above).
 
 ## Name resolution: dns:/// and the resolver plugin
 
@@ -296,6 +324,23 @@ Mitigations, in order of preference:
    stacks provide explicit pool options).
 3. **Raise `MAX_CONCURRENT_STREAMS`** on the server — helps, but a single TCP connection
    can still become a head-of-line / congestion bottleneck.
+
+**Worked example — how many channels/connections do I need?** Say you expect **5,000
+concurrent in-flight RPCs** to one logical backend, and the server advertises
+`MAX_CONCURRENT_STREAMS = 100`. One HTTP/2 connection tops out at 100 concurrent RPCs, so:
+
+- **One channel to one backend** = one connection = **100 slots**. The other 4,900 RPCs
+  **queue** waiting for a stream to free up — latency climbs while CPU sits idle.
+- **`round_robin` over the backend pods:** if the backend runs on 50 pods and DNS returns
+  all 50 IPs, round_robin opens 50 connections → 50 × 100 = **5,000 slots**, exactly your
+  need. Zero extra plumbing beyond the LB policy + a headless Service.
+- **Pool of channels to a single backend** (when you can't scale pods): each channel is
+  its own connection, so you need 5,000 ÷ 100 = **50 channels**. Add ~20% headroom for
+  bursts → 50 × 1.2 = **60 channels**, i.e. 60 connections carrying 60 × 100 = 6,000 slots.
+
+The arithmetic is just `channels_needed = ceil(peak_concurrent_RPCs / MAX_CONCURRENT_STREAMS)`,
+then add headroom. If you got 5,000 concurrency and provisioned a single channel, ~98% of
+your requests would be queuing — that's the "one channel per ~100 streams" rule made concrete.
 
 ```mermaid
 flowchart TD

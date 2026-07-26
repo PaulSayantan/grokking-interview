@@ -112,6 +112,14 @@ Classic example — Spring MVC:
 - Web-layer beans can inject service-layer beans from the root; the reverse is not
   possible.
 
+```mermaid
+graph TD
+    Root["Root ApplicationContext<br/>services, repositories, data sources"]
+    Child["DispatcherServlet child context<br/>controllers, view resolvers, handler mappings"]
+    Child -->|"child CAN see parent beans"| Root
+    Root -. "parent CANNOT see child beans" .-> Child
+```
+
 Rules and gotchas:
 - Beans are resolved child-first, then parent. A bean defined in both is effectively
   overridden for the child's consumers.
@@ -162,9 +170,13 @@ public class OrderService {
 | `final` / immutability | ✅ yes | ❌ no | ❌ no |
 | Fully initialized object | ✅ guaranteed | ❌ can be partially built | ❌ |
 | Testability without container | ✅ `new` with mocks | ✅ via setters | ❌ needs reflection/injection |
-| Optional / changeable deps | awkward | ✅ good fit | — |
+| Optional / changeable deps | awkward* | ✅ good fit | — |
 | Circular dependency | ❌ fails fast (BeanCurrentlyInCreation) | ✅ can be resolved | ✅ can be resolved |
 | Hides too many deps (code smell) | ✅ constructor gets bloated → visible signal | hidden | hidden |
+
+\* *Optional* collaborators with constructor injection are handled cleanly with
+`Optional<T>`, `@Nullable`, or `ObjectProvider<T>` (see the optional-injection section
+below) — so the "awkward" cell rarely bites in practice.
 
 **Why field injection is discouraged (say this in interviews):**
 1. **No immutability** — the field can't be `final`, so the object is mutable.
@@ -288,6 +300,12 @@ Both resolve the ambiguity of multiple candidates of the same type, but differen
 @Autowired DataSource ds;                         // gets primaryDs (Primary)
 @Autowired @Qualifier("audit") DataSource audit;  // gets auditDs (Qualifier overrides)
 ```
+
+Walking the mechanism for the second line: candidates start as `{primaryDs, auditDs}`;
+`@Qualifier("audit")` **filters** the set down to `{auditDs}`; only one survivor remains,
+so the `@Primary` tie-breaker is never consulted. That "narrow-then-tiebreak" order (from
+the resolution algorithm above) is exactly why an injection-point `@Qualifier` beats a
+`@Primary` declared elsewhere.
 
 Rule of thumb: use **`@Primary`** when there's a sensible default and most consumers want
 it; use **`@Qualifier`** when consumers must choose explicitly. If both apply,
@@ -444,6 +462,12 @@ transitively).
 - **Field or setter injection → resolvable** (for singletons) via early references,
   because Spring can create the raw instance first and inject the collaborator afterward.
 
+Intuition first: an **early reference** is a half-built A — its constructor has run so the
+object exists, but its fields aren't filled in yet — handed out as a placeholder so B can
+grab a pointer to it and finish. A completes afterward, and because B held the *same*
+object, B now sees the fully wired A. The three maps below simply track which stage of
+"doneness" each singleton is in (factory → early reference → finished).
+
 **The three-level cache** (in `DefaultSingletonBeanRegistry`) is how Spring exposes an
 early reference to a half-built singleton so the cycle can be closed:
 
@@ -465,6 +489,23 @@ Creation flow for a singleton A that needs B which needs A:
 5. B receives the early A reference, finishes initialization, moves to **L1**.
 6. Control returns to A; A finishes populating (now has the finished B), completes
    initialization, and moves to **L1**.
+
+```mermaid
+sequenceDiagram
+    participant A as create A
+    participant Reg as Singleton registry (L3→L2→L1)
+    participant B as create B
+    A->>Reg: instantiate A, put A's ObjectFactory in L3
+    A->>B: A needs B → start creating B
+    B->>Reg: instantiate B, put B's ObjectFactory in L3
+    B->>Reg: B needs A → getSingleton(A)
+    Reg->>Reg: L1 miss, L2 miss, L3 hit: fire A's factory (early ref, may be proxy)
+    Reg->>Reg: move A's early ref L3 → L2
+    Reg-->>B: hand B the early A reference
+    B->>Reg: B finishes init → move B to L1
+    B-->>A: return finished B to A
+    A->>Reg: A populates B, finishes init → move A to L1
+```
 
 **Why three levels and not two?** The third level stores *factories*, not objects. The
 factory allows Spring to create the *correct* early reference lazily — critically, if A

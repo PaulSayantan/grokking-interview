@@ -117,6 +117,33 @@ Key details interviewers probe:
 - **Other advice types use `JoinPoint`** (not `ProceedingJoinPoint`) as an optional first parameter to introspect args, signature, and target.
 - **Advice ordering.** Around the same join point, on entry the order is `@Around` (before `proceed`) → `@Before`; on exit it is `@AfterReturning`/`@AfterThrowing` → `@After` → `@Around` (after `proceed`). Note: in Spring Framework 5.2.7+ the ordering for multiple advice methods *within the same aspect* was made deterministic based on advice type (`@Around`, then `@Before`, then `@After`, then `@AfterReturning`, then `@AfterThrowing` on the "after" side). Ordering between *different* aspects is controlled by `@Order` / `Ordered`.
 
+**Worked example — trace the five advice types firing.** Take the `LoggingAspect` above (all five advice methods, all matching the same pointcut) applied to one call: `orderService.placeOrder(o)`, where `placeOrder` prints `"...running placeOrder..."` and returns the string `"OK"`. Follow the proxy step by step.
+
+*Normal return.* `proceed()` runs the target, which returns `"OK"`; `@AfterReturning` sees that value. Console output, top to bottom:
+
+```
+Calling placeOrder            ← @Around before proceed()  →  @Before
+...running placeOrder...      ← target body runs inside proceed()
+Returned: OK                  ← @AfterReturning (normal return only)
+Finished (finally)            ← @After (runs on any outcome)
+placeOrder took 3ms           ← @Around resumes after proceed() (its finally block)
+```
+
+The onion closes in reverse of how it opened: `@Around` is the outermost layer, so it is first in and last out; `@AfterReturning` fires before `@After` because "returning" is more specific than the finally-style `@After`.
+
+*Exception path.* Now `placeOrder` throws `IllegalStateException("bad order")`. `proceed()` throws, so `@AfterThrowing` fires instead of `@AfterReturning`, and the code *after* `proceed()` that is **not** in a `finally` is skipped — but `timeIt`'s `finally` still runs:
+
+```
+Calling placeOrder            ← @Around before proceed()  →  @Before
+...running placeOrder...      ← target body, then throws
+Threw: bad order              ← @AfterThrowing (throw path only)
+Finished (finally)            ← @After
+placeOrder took 3ms           ← @Around's finally block still runs
+(exception then propagates to the caller)
+```
+
+Note what did **not** print: `Returned: OK` (no normal return) and any `@Around` line placed *after* `proceed()` but outside the `finally`. The exception rethrows out of `proceed()` and, since `timeIt` doesn't catch it, propagates to the original caller after the `finally` completes.
+
 Deeper details a senior interviewer probes about `@Around`:
 
 - **Declare the return type as `Object`, not `void`.** If an `@Around` method is declared `void`, Spring always returns `null` to the caller and the value produced by `proceed()` is discarded — even if the target returned something. This silently corrupts non-void target methods. Always declare `Object` (or the exact matching type) and `return` the value from `proceed()`.
@@ -168,6 +195,40 @@ public class Pointcuts {
 ```
 
 Common pointcut designators: `execution(...)` (most used — matches method execution), `within(...)` (types), `@annotation(...)` (methods carrying an annotation), `bean(name)` (by bean name), `args(...)`, `this(...)`, `target(...)`.
+
+**Worked example — decompose `execution(* com.example.service.*.*(..))` token by token.** An `execution` pointcut has the shape `execution([modifiers] return-type declaring-type.method-name(param-pattern) [throws])` — the modifiers and throws clause are optional. Splitting the expression used ~8 times above:
+
+| Token | Part | Matches |
+|-------|------|---------|
+| `*` (first) | return type | **any** return type (void, `String`, `int`, …) |
+| `com.example.service` | package of declaring type | that exact package (not sub-packages) |
+| `.*` | declaring type | **any** class in that package |
+| `.*` | method name | **any** method name |
+| `(..)` | parameter pattern | **any** number and type of args (including zero) |
+
+So it reads: "any method, any name, on any class directly in `com.example.service`, any return type, any arguments." Contrast that with narrower variants to see each token do work:
+
+```
+execution(public String com.example.service.OrderService.find(..))
+  └ only public methods named "find" on OrderService that return String
+
+execution(* com.example..*.*(..))
+  └ ".." in the package position = com.example AND all sub-packages (recursive)
+
+execution(* com.example.service.*.get*(..))
+  └ only methods whose name starts with "get"
+
+execution(* *..*Service.*(..))
+  └ any class whose name ends in "Service", in any package
+
+execution(* com.example.service.*.*(String, ..))
+  └ only methods whose FIRST arg is a String (any further args)
+
+execution(* com.example.service.*.*())
+  └ "()" (not "(..)") = methods that take EXACTLY zero arguments
+```
+
+The two traps students miss: `.*` matches one package level while `..` matches that level *and* all nested packages; and `(..)` means "any args" whereas `()` means "no args."
 
 > Note on packages: In **Spring Framework 6.x** the aspect annotations still come from `org.aspectj.lang.annotation` (AspectJ), unchanged. The jakarta/javax split affects things like `@Transactional`'s underlying APIs and servlet/JPA, not the AOP annotations themselves.
 
@@ -290,6 +351,21 @@ Key timing and ordering facts:
 
 Under the hood every piece of advice becomes an `Advisor` = `Pointcut` + `Advice`, and each advice type is adapted into an `org.aopalliance.intercept.MethodInterceptor`. At invocation time a `ReflectiveMethodInvocation` (JDK) or CGLIB equivalent walks the interceptor chain, each interceptor calling `invocation.proceed()` to reach the next link, ending at the target method. `@Around` maps most directly to a `MethodInterceptor`; `@Before`, `@AfterReturning`, etc. are wrapped by adapter interceptors that call the target at the right point.
 
+**Worked example — the nested `proceed()` onion for two advisors.** Say `OrderService.placeOrder()` is advised by both the transaction advisor (`@Transactional`, framework precedence `LOWEST_PRECEDENCE`) and a custom `@Around` audit aspect annotated `@Order(0)` (higher precedence = runs first on the way in). Spring builds one chain on the single proxy. `proceed()` is a *cursor*: each call advances one link deeper, and each interceptor's code before its `proceed()` runs on the way in, after it on the way out.
+
+```
+caller.placeOrder()
+  → proxy: start chain at index 0
+    → AuditInterceptor   (@Order(0))   : "audit: begin"      // before proceed
+        → TxInterceptor  (LOWEST_PREC) : open transaction    // before proceed
+            → target.placeOrder()      : ...business logic, returns "OK"
+        ← TxInterceptor                : commit transaction   // after proceed
+    ← AuditInterceptor                 : "audit: end (OK)"    // after proceed
+  ← proxy returns "OK" to caller
+```
+
+Trace the cursor: the proxy calls `proceed()` → audit interceptor logs "begin" then calls `proceed()` → tx interceptor opens the transaction then calls `proceed()` → the target runs and returns `"OK"`. Now the stack unwinds in reverse: tx commits, then audit logs "end", then `"OK"` reaches the caller. The chain is a stack of nested `proceed()` calls, so the **last** advisor in (transaction) is the **first** to finish — which is exactly why `@Order` controls interleaving: to make audit *wrap* the transaction (see rollbacks in the audit log), give audit the lower `@Order` value so it sits outside the tx interceptor, as shown. Swap the order and the transaction would already be committed by the time audit's "after" code runs.
+
 - **`execution` matching is static (per method); `args`/`this`/`target`/`@annotation` with runtime binding can be dynamic (per invocation).** Purely static pointcuts are matched once and cached, so they are cheap. Pointcuts requiring runtime argument type checks are evaluated on every call and are more expensive — relevant for hot paths.
 - **Pointcut evaluation cost.** Broad `execution(* com..*(..))` pointcuts force the auto-proxy creator to test many beans at startup and can proxy far more beans than intended, adding startup cost and per-call indirection. Narrow with `within(...)` or bean-name scoping.
 - **`this()` vs `target()`.** `this(Foo)` matches when the *proxy* is an instance of `Foo`; `target(Foo)` matches when the *target* is. Under JDK proxying the proxy is not an instance of the concrete class, so `this(ConcreteClass)` may fail to match where `target(ConcreteClass)` succeeds — a genuine trap.
@@ -323,4 +399,5 @@ Under the hood every piece of advice becomes an `Advisor` = `Pointcut` + `Advice
 - Spring Framework Reference — Proxying mechanisms (JDK dynamic proxies vs CGLIB): https://docs.spring.io/spring-framework/reference/core/aop/proxying.html
 - Spring Framework Reference — Advice types and ordering: https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/advice.html
 - Spring Framework Reference — Choosing between Spring AOP and full AspectJ: https://docs.spring.io/spring-framework/reference/core/aop/choosing.html
+- Spring Boot Reference — AOP (Boot defaults to CGLIB proxies; `spring.aop.proxy-target-class`): https://docs.spring.io/spring-boot/reference/features/aop.html
 - AspectJ Programming Guide (terminology and full weaving model): https://eclipse.dev/aspectj/doc/latest/progguide/

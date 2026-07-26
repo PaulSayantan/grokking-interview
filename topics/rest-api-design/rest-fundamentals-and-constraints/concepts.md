@@ -240,6 +240,12 @@ ETag: "order-1001-v7"
 }
 ```
 
+> [!NOTE]
+> The `_links` shape above is an **illustrative (non-standard) sketch**: plain HAL links
+> do *not* carry a `method` field — HAL models reads (link relations) only. To express a
+> *write* action like cancel/pay properly you need **HAL-FORMS** or **Siren**, which add
+> templated actions (method + fields). See "Hypermedia formats and link standards" below.
+
 **Gotchas.**
 - Most "REST" APIs implement sub-constraints 1–3 but skip HATEOAS (sub-constraint 4).
   Fielding explicitly argued that an API without hypermedia is not RESTful.

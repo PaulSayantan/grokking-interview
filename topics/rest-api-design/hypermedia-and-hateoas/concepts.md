@@ -63,6 +63,28 @@ Note the affordances are **state-dependent**: once the order is `PAID`, the serv
 is what "hypermedia as the engine of application state" literally means: the *available
 transitions* are carried in the representation.
 
+Seen as a state machine, the order's lifecycle *is* the set of links the server emits at each
+state — the client walks the machine by following whichever affordance it wants:
+
+```mermaid
+stateDiagram-v2
+    [*] --> AWAITING_PAYMENT
+    AWAITING_PAYMENT --> PAID: follow "pay"
+    AWAITING_PAYMENT --> CANCELLED: follow "cancel"
+    PAID --> REFUNDED: follow "refund"
+    PAID --> SHIPPED: server ships
+    SHIPPED --> SHIPPED: follow "track-shipment"
+    note right of AWAITING_PAYMENT
+        _links: self, pay, cancel
+    end note
+    note right of PAID
+        _links: self, refund, track-shipment
+    end note
+    note right of SHIPPED
+        _links: self, track-shipment
+    end note
+```
+
 ## Hypermedia controls: links and actions
 
 A **hypermedia control** is any element in a representation that tells the client about a
@@ -192,7 +214,8 @@ HAL adds exactly two reserved properties to an otherwise ordinary JSON object:
   `"/orders{?page,size}"` — the client fills in variables.
 - **CURIEs** (Compact URIs) let HAL abbreviate long extension-relation URIs. A `curies` link
   defines a prefix; `ea:items` above expands via the `ea` curie to a full documentation URI.
-  This keeps custom rels self-documenting without bloating every link name.
+  This keeps custom rels self-documenting without bloating every link name. (Full CURIE
+  expansion mechanics are covered later in *JSON:API v1.1, CURIEs, and client-driven includes*.)
 
 **HAL's deliberate limitation:** it models **links only, no actions** — no method, no input
 fields. A client following the `next` link knows to `GET` it, but for a state change the
@@ -236,7 +259,9 @@ to HAL's `_embedded`; **`links`** appears at document, resource, and relationshi
 tooling (Ember Data, many libraries) can consume any JSON:API service. The flip side is that
 the format is heavy and the strict media-type/structure rules make ad-hoc responses harder.
 JSON:API is primarily **link-based**; it does not define generic form/action affordances the
-way Siren does.
+way Siren does. (The v1.1 refinements — link objects, `describedby`, profiles/extensions, and
+client-driven `include`/sparse-fieldsets — are treated later in *JSON:API v1.1, CURIEs, and
+client-driven includes*.)
 
 ## Siren
 

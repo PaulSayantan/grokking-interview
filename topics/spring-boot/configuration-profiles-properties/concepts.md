@@ -46,10 +46,12 @@ group of properties onto a POJO). You can also read directly from the
 
 ## application.properties vs application.yml
 
-Both formats express the same thing; Spring Boot loads whichever it finds (and
-if both exist in the same location, `.properties` wins on conflicting keys
-because it is processed *after* YAML within a location... in practice, avoid
-having both).
+Both formats express the same thing; Spring Boot loads whichever it finds. If
+both exist in the same location, the reference documentation is explicit that
+`.properties` takes precedence on conflicting keys (it is processed after the
+YAML variant within that location, so its values override). The docs still
+recommend sticking to one format per application, so in practice avoid having
+both.
 
 **`.properties` — flat key/value:**
 

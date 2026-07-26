@@ -99,6 +99,11 @@ Consistency, Eventual Consistency, Storage Offering, Elastic Load Balancer.
 
 ## Multi-Component Image
 
+*How you **package** components into server images is the other side of the elasticity
+coin: the Stateful/Stateless split decides where state lives, while image packaging
+decides how quickly and cheaply you can spin up (and repurpose) the stateless compute that
+runs it.*
+
 **Intent.** *How can a virtual server provide the functionality of multiple application
 components so it can be used flexibly?*
 
@@ -268,6 +273,27 @@ on the isolation/cost dial), Restricted Data Access Component.
 > Dedicated (one instance *per tenant* — priciest, strongest, physical isolation).
 > Real systems mix all three across layers.
 
+### Worked example — why the cost curve bends (1,000 tenants × 5 GB)
+
+Take **1,000 tenants averaging 5 GB of data each → 5 TB total**, and price each option's
+database tier. Watch what happens to **cost per tenant**:
+
+| Model | Infrastructure | Monthly infra cost | Cost / tenant | Storage utilization |
+|---|---|---|---|---|
+| **Shared** | 1 right-sized instance holding the pooled 5 TB | ~$2,000 | $2,000 / 1,000 = **$2** | pooled — near 100% of what you pay for |
+| **Tenant-isolated** | *same* 1 instance + per-tenant RLS + quotas | ~$2,000 (infra unchanged) | ~**$2** | still pooled |
+| **Dedicated** | 1,000 separate instances | 1,000 × $150 = **$150,000** | $150,000 / 1,000 = **$150** | 5 GB used on a ~100 GB min instance = **~5%** |
+
+The bend is the **minimum-instance floor**. A tenant needs 5 GB, but the smallest managed
+DB instance you can rent still costs ~$150/mo — you pay for a floor of vCPU/RAM/storage,
+not for 5 GB. So Dedicated cost is `tenants × floor`: it **scales linearly with tenant
+count** (1,000 instances → $150k) and each instance runs at **~5% utilization**. Shared
+pools all 1,000 tenants onto one bill, so per-tenant cost collapses to **$2 — a 75×
+difference**. Tenant-isolated keeps that same ~$2 infra cost; what you *add* is
+**engineering cost** (building access/performance/data isolation into the code), not
+hardware. That is exactly why you reserve Dedicated for the few components that genuinely
+can't be pooled.
+
 ---
 
 ## Restricted Data Access Component
@@ -286,6 +312,23 @@ data elements**, and route all access through dedicated **Restricted Data Access
 Components** that **interpret** those rules and **modify the data at request time** —
 **deleting or obfuscating** the disallowed portions on every access. The enforcement is
 data-element-aware and environment-aware, not just a coarse allow/deny at the endpoint.
+
+**Worked example — one row, transformed at request time.** The stored row is
+`{name:"Ada", email:"ada@x.com", ssn:"123-45-6789"}`, tagged: `name` = public,
+`email` = obfuscate-outside-EU, `ssn` = never-leave-secure-env. Two identical `GET` calls
+hit the *same* Restricted Data Access Component but from different environments:
+
+- **Request from the trusted secure env** → rules say all three are permissible here →
+  returns the row **verbatim**: `{name:"Ada", email:"ada@x.com", ssn:"123-45-6789"}`.
+- **Request from a public/EU env** → the component reads the full row, then **modifies it
+  on the way out**: masks `ssn → null` (never allowed here) and hashes `email →
+  "sha256:9c1f…"` → returns `{name:"Ada", email:"sha256:9c1f…", ssn:null}`.
+
+Same query, same underlying record, **two different payloads** — decided by the caller's
+environment and the per-element tags. Nothing was copied or pre-computed; the transform
+happened **per request**. That is the defining trait versus plain authz (which would just
+return 403) and versus Compliant Data Replication below (which transforms *once* at
+replication time and stores the reduced view).
 
 **Modern equivalent.** Column/field-level masking and dynamic data masking (Snowflake
 Dynamic Data Masking, BigQuery column-level security, PostgreSQL RLS + masking views);
@@ -341,6 +384,16 @@ single point of failure, and must handle delivery semantics (at-least-once → p
 duplicates) and ordering carefully. Use to bridge queues across clouds/regions/accounts
 without touching the components.
 
+**How you actually handle those hard parts (senior turn).** A relay across a broker
+boundary is inherently at-least-once — on a crash mid-transfer it re-reads and re-forwards
+the in-flight message — so make **consumers idempotent**: dedup on a stable message key
+(or an idempotency key) so a re-delivered copy is a no-op. Accept that **only per-key /
+per-partition ordering** survives the bridge; global ordering across the two brokers is
+lost, so don't design consumers that assume it. Pin the mover's **failure/replay window**:
+on restart it re-delivers anything not yet acked, which is where the duplicates come from.
+And define the **DLQ story** — when the destination broker is unreachable, messages should
+land in a dead-letter queue for replay rather than block or silently drop.
+
 **Related patterns.** Message-oriented Middleware, Application Component Proxy, Hybrid
 Cloud, At-least-once Delivery.
 **Deep dive:** delivery semantics & broker internals →
@@ -375,6 +428,31 @@ flowchart LR
 Systems Manager Session Manager, Azure Relay / Hybrid Connections, `ngrok`, Cloudflare
 Tunnel, `frp`, self-hosted-runner "phone-home" agents, and service-mesh east-west
 gateways that expose a private service via an outbound-established mTLS link.
+
+**Traced walkthrough — how a request travels "backward."** The counterintuitive part is
+that the client→server arrow points the *opposite* way from the connection that carries
+it. Follow one call:
+
+1. **Startup (restricted side dials out).** The on-prem agent opens a **persistent TLS
+   connection outbound** to the proxy in the public env — e.g. `agent → proxy:443`. The
+   firewall allows this because it is an *outbound* connection from the trusted side; **no
+   inbound rule is ever added** to the private network.
+2. **Client calls the proxy.** A public-env client does an ordinary call —
+   `POST proxy.example.com/orders` — believing the proxy *is* the real component.
+3. **Proxy enqueues onto the open tunnel.** The proxy doesn't dial into the private
+   network (it can't). It writes the request as a frame **down the already-open connection
+   from step 1**, which the agent is holding.
+4. **Agent reads and invokes locally.** The agent, sitting inside the restricted env,
+   reads that frame off the tunnel and calls the **real component over localhost** —
+   `localhost:8080/orders`.
+5. **Response goes back up the same link.** The agent writes the real component's response
+   **up the same outbound connection**.
+6. **Proxy returns it.** The proxy hands the response back to the client as its own HTTP
+   response.
+
+The request logically flowed public → private, but **every packet rode a connection the
+private side originated**. The firewall only ever saw one outbound session; it never had
+to accept an inbound one.
 
 **Trade-offs / when to use.** Exposes a private component safely without weakening the
 firewall posture, but the proxy adds a hop and must faithfully mirror the interface;
@@ -418,6 +496,29 @@ flowchart LR
   Rec["Transformation records (Storage Offering)"] -.-> F
   Rec -.-> E
 ```
+
+**Worked example — one record's round trip through filter → enricher.** Replicate
+`{id:42, name:"Ada", email:"ada@x.com", ssn:"123-45-6789"}` from the secure region to a
+less-trusted region that may **not hold raw SSNs**.
+
+1. **Egress (filter).** As the update message leaves the secure env, the message filter
+   **tokenizes** the SSN: it mints `tok_abc`, writes `tok_abc → "123-45-6789"` into the
+   **transformation-records store**, and rewrites the message to
+   `{id:42, name:"Ada", email:"ada@x.com", ssn:"tok_abc"}`.
+2. **Less-secure region stores the permitted view.** That region now holds
+   `{id:42, …, ssn:"tok_abc"}` — a token, never the real SSN. Compliant.
+3. **A change originates there and returns.** Someone in that region updates the email:
+   the return message is `{id:42, name:"Ada", email:"ada@new.com", ssn:"tok_abc"}`.
+4. **Ingress (enricher).** As it enters the secure env, the message enricher sees
+   `ssn:"tok_abc"`, **looks it up** in the transformation-records store → `"123-45-6789"`,
+   and **re-inserts the real value** → `{id:42, name:"Ada", email:"ada@new.com",
+   ssn:"123-45-6789"}` lands in the secure store. The email change is preserved and the
+   SSN is restored intact — a full round trip with no data loss and no illegal copy abroad.
+
+This is exactly **why the mapping store must exist**: without `tok_abc → SSN`, the
+returning update would either wipe the real SSN (data loss) or the region would have had
+to hold it (compliance breach). And it is why **a bug there is a compliance incident** —
+a mis-keyed lookup either leaks the SSN to the wrong place or corrupts the secure record.
 
 **Modern equivalent.** Compliant CDC/replication pipelines: filtered logical replication,
 Debezium + stream transforms (SMTs) that mask/drop PII columns, Kafka Connect

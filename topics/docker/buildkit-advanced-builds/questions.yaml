@@ -28,7 +28,7 @@ questions:
     A Dockerfile has two independent builder stages (one compiling Go, one bundling JS
     assets) that both feed a final stage. How does BuildKit execute them?
   options:
-  - Sequentially, always top-to-bottom
+  - Strictly one after another in top-to-bottom file order
   - In parallel, because they have no dependency edge between them
   - Only the last-defined stage runs, others are ignored
   - Both run but the earlier one is discarded from cache
@@ -64,9 +64,9 @@ questions:
     Your Dockerfile defines a `test` stage that no other stage COPYs from and that isn't the
     build target. What does BuildKit do with it?
   options:
-  - Builds it anyway as an intermediate image
-  - Fails the build for having an unreferenced stage
-  - Builds it but marks it uncacheable
+  - Builds it anyway as an intermediate image before pruning the target
+  - Fails the build with an error for having an unreferenced dead stage
+  - Builds it but flags the resulting layers as uncacheable scratch space
   - Skips it entirely because it doesn't affect the requested output
   answer: 3
   explanation: |
@@ -83,8 +83,8 @@ questions:
   options:
   - It sends the entire context tarball to the daemon before starting, like the legacy builder
   - It incrementally streams only the files actually needed, skipping unchanged/unused files
-  - It ignores the context entirely and reads from the registry
-  - It requires the context to be a git URL
+  - It ignores the local context entirely and pulls every file from the registry instead
+  - It requires the build context to be supplied as a remote git URL, never a local path
   answer: 1
   explanation: |
     The legacy builder tars up and uploads the whole context up front. BuildKit transfers
@@ -98,9 +98,9 @@ questions:
   question: |
     What is LLB in BuildKit?
   options:
-  - A logging layer for build output
-  - The load balancer that distributes builds across nodes
-  - A lockfile format for pinning base images
+  - A structured logging layer that streams build step output to the client
+  - The load balancer component that distributes build jobs across worker nodes
+  - A lockfile format for pinning base image digests across repeatable builds
   - An intermediate binary format describing a content-addressable dependency graph of build operations
   answer: 3
   explanation: |
@@ -134,9 +134,9 @@ questions:
     On an older Docker Engine where BuildKit is not yet the default, how do you force a
     single `docker build` invocation to use BuildKit?
   options:
-  - Add `# buildkit` as the first line of the Dockerfile
-  - Pass `--legacy=false`
-  - Rename the file to `BuildKitfile`
+  - Add `# buildkit` as the very first comment line of the Dockerfile
+  - Pass the `--legacy=false` flag to the `docker build` command
+  - Rename the file from `Dockerfile` to `BuildKitfile` before building
   - Set the environment variable `DOCKER_BUILDKIT=1`
   answer: 3
   explanation: |
@@ -151,10 +151,10 @@ questions:
   question: |
     What is `docker buildx`?
   options:
-  - A registry client for pushing images
+  - A standalone registry client for pushing and pulling built image tags
   - The CLI plugin that exposes BuildKit's full feature set (multi-platform, cache export, multiple builders)
-  - A tool that only lints Dockerfiles
-  - A replacement for `docker run`
+  - A static analysis tool that only lints Dockerfile syntax and best practices
+  - A drop-in replacement for `docker run` that also launches built containers
   answer: 1
   explanation: |
     buildx is the CLI plugin front-end to BuildKit. It exposes advanced capabilities like
@@ -169,10 +169,10 @@ questions:
     You run `docker buildx build --platform linux/amd64,linux/arm64 -t app --load .` on the
     default `docker` driver and it fails to produce a multi-platform image. What's the fix?
   options:
-  - Add more `--platform` values
-  - Downgrade Docker to the legacy builder
+  - Add several more `--platform` values so the manifest list has quorum
+  - Downgrade Docker and force the legacy builder with DOCKER_BUILDKIT=0
   - Use the `docker-container` driver (or enable the containerd image store)
-  - Remove the `-t` flag
+  - Remove the `-t` tag flag so buildx defaults to a multi-arch output
   answer: 2
   explanation: |
     The default `docker` driver can't build a multi-platform manifest list without the
@@ -189,9 +189,9 @@ questions:
     container and supports all advanced features?
   options:
   - "docker buildx create --name mybuilder --driver docker-container --use"
-  - "docker build --new-builder mybuilder"
-  - "docker buildx enable --full"
-  - "docker run buildkit --daemon"
+  - "docker build --new-builder mybuilder --driver docker-container"
+  - "docker buildx enable --full --name mybuilder --use"
+  - "docker run buildkit --daemon --name mybuilder --detach"
   answer: 0
   explanation: |
     `docker buildx create --driver docker-container --use` provisions a builder backed by a
@@ -205,9 +205,9 @@ questions:
   question: |
     What does `RUN --mount=type=cache,target=/root/.npm npm ci` give you?
   options:
-  - A directory baked into the final image as a layer
-  - A way to expose npm credentials to the container at runtime
-  - Faster container startup at runtime
+  - A directory baked into the final image as a committed read-only layer
+  - A way to expose npm registry credentials to the container at runtime
+  - Faster container startup at runtime by preloading node_modules into memory
   - A persistent cache directory reused across builds but NOT committed to the image
   answer: 3
   explanation: |
@@ -222,10 +222,10 @@ questions:
   question: |
     True or false: a `--mount=type=cache` directory becomes part of the image's layers.
   options:
-  - "True — it is committed as a normal layer"
+  - "True — it is committed as a normal read-only layer in the final image"
   - "False — it is never committed to the image; only the RUN output is"
-  - "True, but only in mode=max builds"
-  - "True, but only on the docker-container driver"
+  - "True, but only in mode=max builds where intermediate layers are kept"
+  - "True, but only when running on the docker-container builder driver"
   answer: 1
   explanation: |
     A cache mount is not a layer. It's a persistent build-time scratchpad on the builder.
@@ -239,10 +239,10 @@ questions:
   question: |
     When caching apt data with a cache mount, why use `sharing=locked`?
   options:
-  - To encrypt the cache contents
-  - To make the cache read-only
+  - To encrypt the cached package archives at rest on the builder
+  - To make the mounted cache directory strictly read-only during the RUN
   - Because apt needs exclusive access to its data, so parallel builds must serialize on the cache
-  - To share the cache with the final image
+  - To share the populated cache directory into the final committed image
   answer: 2
   explanation: |
     `sharing=locked` makes concurrent builds acquire a lock and wait for each other. Tools
@@ -258,9 +258,9 @@ questions:
     changes. Which change fixes the wasted network time without bloating the image?
   options:
   - Add `RUN --mount=type=cache,target=/go/pkg/mod` (and the go-build cache) to the build step
-  - Switch the base image to `scratch`
-  - Copy the whole repo before running `go mod download`
-  - Add `ENV GOFLAGS=-mod=vendor` and vendor into a layer
+  - Switch the build stage base image to `scratch` to shrink the download surface
+  - Copy the whole repo into the image before running `go mod download` early
+  - Add `ENV GOFLAGS=-mod=vendor` and vendor all modules into a committed layer
   answer: 0
   explanation: |
     Mounting the module cache (/go/pkg/mod) and build cache (/root/.cache/go-build) as cache
@@ -275,9 +275,9 @@ questions:
     What is the main advantage of `RUN --mount=type=bind,target=.` over `COPY . .` when you
     only need the source to produce a build artifact?
   options:
-  - It encrypts the source files
-  - It makes the source writable in the final image
-  - It automatically runs the build in parallel across stages
+  - It encrypts the mounted source files while the RUN executes
+  - It makes the source tree writable and persistent in the final image
+  - It automatically parallelizes the build across independent stages
   - It mounts the context for that RUN without creating a COPY layer, so a large context doesn't bloat the image/cache
   answer: 3
   explanation: |
@@ -293,10 +293,10 @@ questions:
     You use `RUN --mount=type=bind,rw,target=/src ...` and the command writes files under
     /src. What happens to those writes?
   options:
-  - They are committed to the final image
+  - They are committed to the final image as a new writable layer
   - They are discarded after the instruction and never reach the image or build cache
-  - They are written back to the host build context
-  - They are stored in a cache mount automatically
+  - They are synced back to the host build context directory on disk
+  - They are persisted into an implicit cache mount automatically by BuildKit
   answer: 1
   explanation: |
     Even with the `rw` option, changes to a bind mount are not persisted in the final image
@@ -311,10 +311,10 @@ questions:
     Why prefer `RUN --mount=type=secret` over passing a token via `ARG` for `npm install`
     against a private registry?
   options:
-  - ARG is slower
-  - Secret mounts are cached longer
+  - ARG resolution is measurably slower during the build than a secret mount
+  - Secret mounts stay warm in the build cache far longer than ARG values do
   - The secret mount is never written to a layer, image, or build cache, whereas ARG values leak into image history
-  - ARG can only hold numbers
+  - ARG values can only hold numeric or boolean data, never a token string
   answer: 2
   explanation: |
     A secret mount exposes the file only for the single RUN and never persists it to a
@@ -332,7 +332,7 @@ questions:
   - "docker buildx build --build-arg npmrc=$HOME/.npmrc ."
   - "docker buildx build --secret id=npmrc,src=$HOME/.npmrc ."
   - "docker buildx build --env npmrc=$HOME/.npmrc ."
-  - "docker buildx build --mount npmrc ."
+  - "docker buildx build --mount=secret,src=$HOME/.npmrc ."
   answer: 1
   explanation: |
     Secrets are supplied with `--secret id=<id>,src=<file>` (or `env=<VAR>`). The `id` must
@@ -365,10 +365,10 @@ questions:
     A teammate uses `ARG GITHUB_TOKEN` then `RUN git clone https://$GITHUB_TOKEN@github.com/...`
     and argues a later multi-stage copy "hides" the token. Why is this still a leak?
   options:
-  - Multi-stage always deletes ARGs, so it is safe
-  - git clone never uses the token
+  - Starting a fresh stage with a new FROM automatically deletes every ARG declared earlier, so the token cannot survive into any later layer
+  - The git clone over HTTPS transmits the token only to GitHub's servers and never records it in any local build layer or history
   - The token is recorded in the build ARG history/layer of that stage and remains recoverable; squashing/multi-stage doesn't reliably scrub it
-  - ARG values are automatically encrypted
+  - BuildKit automatically encrypts every ARG value at rest in the layer, so `docker history` only ever shows an unreadable ciphertext blob
   answer: 2
   explanation: |
     An ARG-provided secret is embedded in that stage's history and layer. A downstream stage
@@ -418,9 +418,9 @@ questions:
   question: |
     With `--mount=type=ssh`, what is actually exposed to the build step?
   options:
-  - The raw private key file, copied into the image
-  - The user's password
-  - A long-lived token stored in a layer
+  - The raw private key file itself, decrypted and copied into a committed layer of the image
+  - The user's account password, injected as an environment variable for the whole build
+  - A long-lived personal access token, written into a dedicated layer for later reuse
   - The SSH agent socket only, for the duration of that RUN
   answer: 3
   explanation: |
@@ -435,10 +435,10 @@ questions:
   question: |
     What does BuildKit's heredoc support in a Dockerfile let you do?
   options:
-  - Encrypt RUN commands
-  - Run commands on the host instead of the build container
+  - Transparently encrypt each RUN command's text so it cannot be read back from `docker history`
+  - Break out of the build sandbox and run commands directly on the host instead of the build container
   - Write multi-line RUN scripts (or inline file contents) without long `&&` chains
-  - Skip the FROM instruction
+  - Omit the FROM instruction entirely and let BuildKit infer a base image from the shell commands used
   answer: 2
   explanation: |
     Heredocs (`RUN <<EOF ... EOF`) let you write readable multi-line shell scripts as a single
@@ -452,10 +452,10 @@ questions:
   question: |
     Why is it important to add `set -e` at the top of a multi-line heredoc `RUN`?
   options:
-  - It makes the layer smaller
+  - It strips shell built-ins from the resulting layer, measurably shrinking the final image size
   - Without it, a failing line mid-script may not fail the build, unlike a `&&`-chained RUN
-  - It enables parallel execution
-  - It is required syntax or the heredoc won't parse
+  - It signals BuildKit to run the independent lines of the script concurrently for a faster build
+  - It is mandatory heredoc syntax, and the frontend refuses to parse a `<<EOF` block that omits it
   answer: 1
   explanation: |
     A `&&`-chained RUN stops on the first failure. A heredoc runs a shell script, so without
@@ -469,9 +469,9 @@ questions:
   question: |
     What is the purpose of `# syntax=docker/dockerfile:1` as the first line of a Dockerfile?
   options:
-  - It's a comment with no effect
-  - It sets the base image to Debian 1
-  - It disables the build cache
+  - It is an ordinary comment that BuildKit ignores completely and has no effect on the build
+  - It sets the default base image for the build to release 1 of the Debian distribution
+  - It turns off the build cache so every step is rebuilt from scratch on each invocation
   - It pins the BuildKit frontend image used to parse the Dockerfile
   answer: 3
   explanation: |
@@ -488,9 +488,9 @@ questions:
     without upgrading Docker Engine?
   options:
   - Because the engine downloads and runs that frontend image at build time, so features travel with the frontend, not the daemon
-  - Because it recompiles the Docker daemon
-  - Because it disables version checks
-  - Because it forces the legacy builder which supports everything
+  - Because the directive triggers an in-place recompile of the Docker daemon from source before the build begins
+  - Because it disables the engine's internal version compatibility checks and lets any syntax through unvalidated
+  - Because it forces a fallback to the legacy builder, which is documented to support every Dockerfile feature
   answer: 0
   explanation: |
     BuildKit pulls the specified frontend image and uses it to parse the Dockerfile. New
@@ -504,10 +504,10 @@ questions:
   question: |
     Where must the `# syntax=` directive appear to take effect?
   options:
-  - Anywhere in the file
+  - On any line of the file, since BuildKit scans the whole Dockerfile for the directive
   - As a comment before any instruction, including before `FROM`
-  - Only after the first `FROM`
-  - Inside a RUN instruction
+  - Only on the line immediately after the first `FROM`, so the base image is resolved first
+  - Inside a RUN instruction, so it is evaluated when that build step executes
   answer: 1
   explanation: |
     The syntax directive must be a comment at the very top of the Dockerfile, before any
@@ -522,10 +522,10 @@ questions:
     What backs a single multi-platform image tag like `acme/app:1.0` that serves both amd64
     and arm64?
   options:
-  - A single squashed layer
-  - Two separate tags with the same name
+  - A single squashed layer containing fat binaries compiled for both architectures at once
+  - Two separate tags that happen to share the same name but resolve by client CPU type
   - A manifest list (OCI image index) pointing to per-architecture manifests
-  - A symlink in the registry
+  - A server-side symlink in the registry that redirects pulls to the matching arch tag
   answer: 2
   explanation: |
     A multi-platform image is a manifest list / OCI image index referencing one manifest per
@@ -539,9 +539,9 @@ questions:
   question: |
     Which command builds and publishes an image for both amd64 and arm64 in one shot?
   options:
-  - "docker build --arch all -t acme/app:1.0 ."
-  - "docker run --platform multi acme/app:1.0"
-  - "docker manifest build acme/app:1.0"
+  - "docker build --arch all -t acme/app:1.0 --push ."
+  - "docker run --platform multi --build acme/app:1.0 ."
+  - "docker manifest build --all-arch acme/app:1.0 ."
   - "docker buildx build --platform linux/amd64,linux/arm64 -t acme/app:1.0 --push ."
   answer: 3
   explanation: |
@@ -575,10 +575,10 @@ questions:
     In a cross-compiling Go Dockerfile you write `FROM --platform=$BUILDPLATFORM golang AS
     build`. Why pin the build stage to `$BUILDPLATFORM`?
   options:
-  - To force the image to be amd64 only
-  - Because $BUILDPLATFORM is required in every FROM
+  - To force the resulting image to be published as linux/amd64 only, regardless of the requested targets
+  - Because the Dockerfile syntax requires $BUILDPLATFORM in every FROM line that names a build stage
   - So the compiler toolchain runs natively and only the output is cross-compiled, avoiding slow QEMU emulation of the compiler
-  - To disable the build cache for that stage
+  - To opt this stage out of the build cache so its compiled output is always rebuilt from scratch
   answer: 2
   explanation: |
     $BUILDPLATFORM is the builder's native platform. Pinning the toolchain to it runs the
@@ -611,9 +611,9 @@ questions:
     Why can't you `--load` a multi-architecture build result into your local classic image
     store?
   options:
-  - Because --load only works with the legacy builder
-  - Because multi-arch images are always larger than 2GB
-  - Because QEMU is required for --load
+  - Because --load is implemented only in the legacy builder, which cannot produce multi-arch output at all
+  - Because a multi-arch image always exceeds the 2GB per-image size ceiling the local store enforces
+  - Because --load must run each foreign architecture under QEMU emulation, which the local engine forbids
   - Because the classic local image store can't hold a manifest list, so you push to a registry (or use the containerd store); --load handles a single platform
   answer: 3
   explanation: |
@@ -629,10 +629,10 @@ questions:
     In CI, builders are ephemeral so the local build cache is lost each run. Which BuildKit
     feature lets the next run reuse cache?
   options:
-  - Squashing layers
-  - Setting HEALTHCHECK
+  - Squashing all layers into one so the single result layer is trivially re-fetched next run
+  - Setting a HEALTHCHECK so the builder detects a warm cache and restores it automatically
   - Exporting/importing remote cache with `--cache-to` and `--cache-from`
-  - Using `docker commit`
+  - Using `docker commit` on the builder container to snapshot its cache for the following job
   answer: 2
   explanation: |
     `--cache-to` exports the build cache to a shared backend (e.g. a registry) and
@@ -648,8 +648,8 @@ questions:
     image layers. Which setting do you use?
   options:
   - "--cache-to type=registry,...,mode=max"
-  - "--cache-to type=inline"
-  - "--squash"
+  - "--cache-to type=inline (embeds every intermediate stage layer into the image itself)"
+  - "--squash (collapses intermediate stages into one exported cache layer)"
   - "--cache-to type=registry,...,mode=min"
   answer: 0
   explanation: |
@@ -664,10 +664,10 @@ questions:
   question: |
     What is a key limitation of the `inline` cache backend compared to the `registry` backend?
   options:
-  - It cannot be pushed to a registry
+  - It cannot be pushed to a registry and only ever persists on the local builder's disk
   - It doesn't support `mode=max`, so it can't cache intermediate build stages
-  - It only works with the legacy builder
-  - It requires QEMU
+  - It only works with the legacy builder and is rejected outright by the BuildKit solver
+  - It requires QEMU emulation to be installed before any cache metadata can be exported
   answer: 1
   explanation: |
     Inline cache embeds cache metadata into the image itself and only works with the image
@@ -682,9 +682,9 @@ questions:
     Your CI job fails when exporting `--cache-to type=registry,...` on the default `docker`
     driver. What's the typical fix?
   options:
-  - Use a smaller base image
-  - Add more `--platform` values
-  - Remove `--cache-from`
+  - Use a smaller base image so the exported cache blob fits under the registry's layer size limit
+  - Add more `--platform` values so the exporter has a manifest list to attach the cache to
+  - Remove `--cache-from` because importing and exporting registry cache in the same job deadlocks
   - Use a `docker-container` builder (the default `docker` driver can't export registry cache without the containerd store)
   answer: 3
   explanation: |
@@ -699,10 +699,10 @@ questions:
   question: |
     Which of these is a valid BuildKit cache backend?
   options:
-  - "type=volume"
-  - "type=commit"
+  - "type=volume (persists cache in a named Docker volume)"
+  - "type=commit (snapshots the builder container as cache)"
   - "type=gha (GitHub Actions cache)"
-  - "type=layerfs"
+  - "type=layerfs (dedupes cache at the overlay layer level)"
   answer: 2
   explanation: |
     Valid backends include inline, registry, local, gha (GitHub Actions cache), s3, and
@@ -716,10 +716,10 @@ questions:
   question: |
     What are provenance and SBOM attestations produced by BuildKit?
   options:
-  - Runtime health probes
+  - Runtime health probes that the orchestrator polls to decide when the container is ready
   - Signed structured metadata about how the image was built and what it contains, stored as extra manifests in the image index
-  - Network policies for the container
-  - Layer compression settings
+  - Network policies embedded in the image that restrict which endpoints the container may reach
+  - Layer compression settings that tune how aggressively each image layer is gzip-packed
   answer: 1
   explanation: |
     Attestations are in-toto metadata attached to the image index. Provenance records how
@@ -733,9 +733,9 @@ questions:
   question: |
     Which flags request provenance and SBOM attestations on a buildx build?
   options:
-  - "--attest none"
-  - "--metadata-only"
-  - "--sign cosign"
+  - "--attest none (BuildKit emits both attestations unless you opt out)"
+  - "--metadata-only (writes provenance and SBOM to a sidecar metadata file)"
+  - "--sign cosign (generates the attestations as part of cosign signing)"
   - "--provenance=true --sbom=true"
   answer: 3
   explanation: |
@@ -752,9 +752,9 @@ questions:
     rather than the default `docker` driver's classic store?
   options:
   - The classic image store can't hold the extra OCI-index attestation manifests locally
-  - Attestations are only supported on Windows
-  - Attestations must be decrypted by the registry
-  - The default driver doesn't support multi-stage builds
+  - Attestations are only supported when building Windows containers, never Linux ones
+  - Attestations arrive encrypted and must be decrypted by the registry before they load
+  - The default driver silently strips attestations from any multi-stage build it produces
   answer: 0
   explanation: |
     Attestations are stored as additional manifests in the OCI image index. The default
@@ -770,10 +770,10 @@ questions:
     supply-chain framework (SLSA levels, cosign signing policy, verifying provenance in a
     pipeline) belong in this library?
   options:
-  - It is fully covered here under BuildKit
-  - It belongs to docker-networking
+  - It is fully covered here under BuildKit, since the SBOM attestation already encodes SLSA levels and signing policy
+  - It belongs to docker-networking, because provenance verification happens over the registry pull connection at runtime
   - It belongs to devops-cicd/software-supply-chain-security (pipeline framework); scanning image layers for CVEs is in image-scanning-supply-chain
-  - It is not covered anywhere
+  - It is not covered anywhere in this library, as supply-chain signing is considered out of scope for the whole collection
   answer: 2
   explanation: |
     BuildKit owns the image-level primitive (producing SBOM/provenance attestations). The
@@ -788,9 +788,9 @@ questions:
   question: |
     What problem does `docker buildx bake` solve?
   options:
-  - It runs containers with health checks
-  - It scans images for CVEs
-  - It replaces the container runtime
+  - It runs the built containers with health checks and restart policies once the build finishes
+  - It scans each built image for CVEs and fails the build when a critical vulnerability is found
+  - It replaces the container runtime with a BuildKit-native daemon for both building and running
   - It declaratively builds multiple images/targets together from an HCL/JSON/Compose file, with shared config
   answer: 3
   explanation: |
@@ -806,10 +806,10 @@ questions:
     In a `docker-bake.hcl`, how can you override the platforms for all targets at the command
     line without editing the file?
   options:
-  - "docker buildx bake --platform-all arm64"
+  - "docker buildx bake --platform-all arm64 (applies one platform to every declared target)"
   - "docker buildx bake --set *.platform=linux/arm64"
-  - "docker buildx bake --arch arm64"
-  - "You cannot override bake values from the CLI"
+  - "docker buildx bake --arch arm64 (shorthand that rewrites each target's platform field)"
+  - "You cannot override bake values from the CLI; you must edit the HCL file and re-run bake"
   answer: 1
   explanation: |
     `--set <target>.<field>=<value>` overrides bake attributes at the CLI, and `*` matches
@@ -824,9 +824,9 @@ questions:
     In which case does modern Docker still use the legacy builder rather than BuildKit?
   options:
   - Building Windows containers (or when DOCKER_BUILDKIT=0 is set)
-  - Any build on Linux
-  - Whenever multi-stage builds are used
-  - Whenever a cache mount is used
+  - Any build on Linux, since BuildKit only ships in the Docker Desktop edition for macOS
+  - Whenever multi-stage builds are used, because the legacy builder handles stage graphs faster
+  - Whenever a cache mount is used, as those mounts are a feature carried over from the legacy engine
   answer: 0
   explanation: |
     BuildKit is default for Linux containers on Docker Desktop/Engine. Windows containers
@@ -840,10 +840,10 @@ questions:
     Which `sharing` value for a cache mount gives each concurrent build its own independent
     cache instance?
   options:
-  - "sharing=shared"
-  - "sharing=locked"
+  - "sharing=shared (all concurrent builds read and write the one cache at once)"
+  - "sharing=locked (builds queue on a lock and reuse the same cache in turn)"
   - "sharing=private"
-  - "sharing=isolated"
+  - "sharing=isolated (spins up a throwaway cache namespace per build stage)"
   answer: 2
   explanation: |
     `sharing=private` creates a separate cache per concurrent build. `shared` (default) lets

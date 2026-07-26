@@ -180,6 +180,21 @@ re-builder) *detect* a SolarWinds-style build compromise, because the malicious 
 would no longer match an independent rebuild. Hermeticity shrinks the build's attack
 surface and is a prerequisite for trustworthy provenance about inputs.
 
+Concrete example of nondeterminism breaking reproducibility. Suppose the compiler embeds
+a build timestamp (`__DATE__ __TIME__`) into the binary:
+
+```
+Build A (10:00:00): ...embeds "2024-01-01 10:00:00" -> sha256 = 3f9a...c21e
+Build B (10:05:00): ...embeds "2024-01-01 10:05:00" -> sha256 = b7d4...08af
+```
+
+Identical source, identical dependencies — yet the two artifacts differ. Because a hash
+avalanches on a single changed byte, that one differing timestamp flips the *entire*
+SHA-256 digest, so an independent rebuild can never confirm a match. The standard fix is
+to pin the clock: set `SOURCE_DATE_EPOCH` (and sort file order, strip absolute paths, fix
+the locale) so every rebuild embeds the same value and lands on the same digest. Now a
+rebuild that *doesn't* match is real evidence of tampering — not just a different clock.
+
 > [!TIP]
 > Interview line: "Reproducible builds turn trust into *verification* — instead of
 > trusting the build server, N independent rebuilders can confirm the artifact matches the
@@ -208,6 +223,15 @@ Two dominant formats:
 | **SPDX** | Linux Foundation | ISO/IEC 5962 standard; broad, license-focused heritage, also carries security data |
 | **CycloneDX** | OWASP | Security-first; lightweight; supports VEX, and extends to SaaSBOM/ML-BOM |
 
+**VEX** (Vulnerability Exploitability eXchange) is the piece that turns an SBOM's raw
+component list into an actionable answer. It's a machine-readable statement asserting
+whether a product is *actually affected* by a given CVE — with a status like `affected`,
+`fixed`, `under_investigation`, or `not_affected` plus a justification (e.g.
+`vulnerable_code_not_in_execute_path`). Concretely: your SBOM says you ship `log4j 2.14`,
+so SCA flags CVE-2021-44228 — but if you never enable the vulnerable JNDI lookup, you
+publish a VEX saying `not_affected` and the scanner stops paging you. VEX is how you
+suppress false-positive SCA noise without hiding real exposure.
+
 **Generation** happens best **during the build**, when the resolver knows the exact
 resolved versions (source-based, most accurate). You can also generate from a built
 artifact/image by scanning (e.g., **Syft**, Trivy) — convenient but can miss or misidentify
@@ -232,14 +256,16 @@ cosign attest --predicate sbom.json --type cyclonedx registry.example.com/app@sh
 
 **Signing** binds an artifact to an identity so a consumer can verify (a) it hasn't been
 tampered with and (b) it came from an expected signer. The modern, dominant toolchain is
-**Sigstore**, whose CLI **cosign** signs container images and other OCI artifacts.
+**Sigstore**, whose CLI **cosign** signs container images and other **OCI** (Open Container
+Initiative — the standard image/artifact format) artifacts.
 
 The traditional problem with signing was **key management**: long-lived private keys get
 lost, leaked, or become a burden to rotate and distribute. Sigstore's answer is **keyless
 signing**:
 
 1. The client generates an **ephemeral** keypair in memory.
-2. It authenticates the signer's **OIDC identity** (GitHub/Google/Microsoft, or a CI
+2. It authenticates the signer's **OIDC** (OpenID Connect — the identity-token standard
+   that GitHub/Google/Microsoft and CI systems issue) identity (a human SSO login, or a CI
    workload identity).
 3. **Fulcio** (the CA) verifies the OIDC token and issues a **short-lived certificate**
    binding the identity to the ephemeral public key.
@@ -250,7 +276,10 @@ signing**:
 Because keys are ephemeral, there's nothing long-lived to steal or rotate. Verification
 checks the signature against the certificate's identity and confirms a matching Rekor entry
 exists. Identity owners can *monitor Rekor* to detect unexpected signing under their name.
-Fulcio's root and Rekor's key are distributed via **TUF (The Update Framework)**.
+Fulcio's root and Rekor's key are distributed via **TUF (The Update Framework)**, which
+solves the "how do you securely bootstrap and rotate the trust roots themselves" problem:
+it signs and versions the root metadata so a compromised mirror or CDN can't feed you a
+fake Fulcio/Rekor key, and roots can be rotated without every client re-pinning by hand.
 
 ```bash
 # Keyless sign (uses ambient OIDC, e.g. GitHub Actions workload identity)
@@ -323,6 +352,33 @@ Key operational points:
 configured sources**. If your internal package `acme-utils` is only in your private
 registry, but an attacker publishes a *public* `acme-utils` with a **higher version**, a
 naive resolver that checks both may prefer the public, higher-versioned (malicious) one.
+
+Worked trace — the resolver's decision:
+
+```
+Package requested:  acme-utils   (unpinned, e.g. "acme-utils": "*")
+Configured sources: [ private registry (nexus.acme.internal), public npm ]
+
+1. Resolver queries private:  acme-utils -> 1.4.0   (your real internal build)
+2. Resolver queries public:   acme-utils -> 99.0.0  (attacker just published this)
+3. Resolver picks the HIGHEST version across all sources: max(1.4.0, 99.0.0) = 99.0.0
+4. Installs public 99.0.0 -> runs attacker's postinstall script in CI. Compromised.
+```
+
+Now apply the fix and re-run the trace. Scope the package to a namespace you own,
+`@acme/acme-utils`, so the *name itself* only exists in your registry:
+
+```
+Package requested:  @acme/acme-utils
+1. @acme scope is bound to nexus.acme.internal only -> resolver never queries public npm
+2. Resolves @acme/acme-utils -> 1.4.0. There is no public "@acme/acme-utils" to shadow it.
+```
+
+Version `99.0.0 > 1.4.0` is still true, but it no longer matters: the malicious public
+`acme-utils` and your scoped `@acme/acme-utils` are now *different names*, so there is
+nothing to confuse. (Pinning the resolver so bare internal names never fall through to
+public gives the same outcome.)
+
 Defenses:
 
 - **Namespacing/scoping** — npm scopes (`@acme/utils`), Maven groupIds you control, so the
@@ -414,6 +470,28 @@ Representative checks (with risk weights):
 | **Signed-Releases** | High | Releases are cryptographically signed |
 | **Dependency-Update-Tool** | High | Uses Dependabot/Renovate |
 | **Pinned-Dependencies** | Medium | Dependencies (incl. actions) pinned by hash |
+
+Worked rollup (illustrative weights: Critical = 10, High = 7.5, Medium = 5). Take the 9
+checks above and say a repo scores **9/10 on all of them except one that scores 0**. The
+aggregate is a weighted average, `Σ(weight × score) / Σ(weight)`:
+
+```
+Σ(weights) = 10 + 7×7.5 + 5 = 67.5      (1 Critical, 7 High, 1 Medium)
+All checks 9:  9 × 67.5 / 67.5                              = 9.0
+
+Case A — the 0 is Dangerous-Workflow (Critical, weight 10):
+  numerator = (9×67.5) − (9×10) = 607.5 − 90 = 517.5
+  aggregate = 517.5 / 67.5                                  ≈ 7.7
+
+Case B — the 0 is Pinned-Dependencies (Medium, weight 5):
+  numerator = (9×67.5) − (9×5) = 607.5 − 45 = 562.5
+  aggregate = 562.5 / 67.5                                  ≈ 8.3
+```
+
+Same failing check, same 0 — but a **Critical** miss drags the score to 7.7 while a
+**Medium** miss only reaches 8.3. That's what "weighted aggregate" buys you: a dangerous
+CI workflow costs you twice as much as an unpinned dependency. So a "6" is not "60% good"
+— it usually means something heavily-weighted is failing.
 
 Use it to set a **minimum bar** for dependencies ("we don't adopt libraries scoring < 6")
 and to harden your own repos. It measures *practices/posture*, not "is this code exploit-

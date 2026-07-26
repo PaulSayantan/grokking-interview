@@ -92,6 +92,21 @@ Prepare **2-3 projects** so you can pick based on what the interviewer probes (o
 story, one ambiguity/greenfield story, one incident/reliability story). Have a crisp
 **60-second overview** ready for each: problem, your role, the key decision, the outcome.
 
+Then *read the opening probe* and map it to the right project in the first 30 seconds:
+
+- "Hardest technical decision / biggest trade-off you've made" → lead with the **scaling** story
+  (it has the clearest alternatives-and-trade-off spiral).
+- "Most ambiguous problem / something with no clear spec" → lead with the **greenfield/ambiguity**
+  story (shows you can create structure, not just execute it).
+- "A time something went wrong / a failure" → lead with the **incident/reliability** story
+  (ownership under pressure).
+
+And have a pivot ready: if the first project isn't landing — the interviewer keeps steering away, or
+the drill keeps hitting parts you didn't own — bridge explicitly rather than forcing it. "That one was
+more of a team effort on the layer you're asking about; a cleaner example of me owning that decision is
+the ledger migration — can I switch to that?" Choosing to pivot is itself a senior signal; grinding a
+mismatched story into the ground is not.
+
 > [!WARNING]
 > Do not pick the most *impressive-sounding* project if you were peripheral to it. Interviewers
 > drill precisely to find the seam between "I built this" and "I was on the team that built
@@ -151,6 +166,40 @@ The counter-strategy is honesty plus depth: know your project cold, and where yo
 something, say so and pivot to what you *did* own. "The ML model wasn't mine — I owned the
 serving layer, and there the hard part was..." Honest scoping *raises* trust.
 
+### A drill-down, traced turn by turn
+
+Here is the funnel in motion on the checkout-cache project, so you can *hear* an owner getting
+sharper each layer instead of vaguer. Notice the interviewer never repeats a question — each
+probe descends one level, and each answer adds a number or a mechanism the layer above didn't have.
+
+> **Q1 (broad):** "You mentioned a read-through cache for pricing. Why 30 s TTL and not, say, 5 s?"
+> **A1:** "Prices changed a few times a day at most, so 30 s bounded staleness cheaply — a 5 s TTL
+> would have ~6× the miss rate and pushed load right back onto the pricing service I was trying to
+> protect. 30 s kept hit rate around 98%."
+>
+> **Q2 (why-not-X):** "What happens to a shopper who loads the page during those 30 s right after a
+> price *changes*?"
+> **A2:** "They can see a stale price for up to the TTL. Product accepted that for non-promotional
+> items. For promos we couldn't — a promo ending late is a real revenue/GMV risk — so those keys
+> were tagged and evicted on the price-change event instead of waiting for TTL."
+>
+> **Q3 (what broke):** "You said you hit a thundering herd. How did you actually detect it?"
+> **A3:** "On a launch the cache was cold; the pricing service's p99 spiked from ~40 ms to ~1.2 s and
+> its error rate crossed ~5%, which paged us. The tell was thousands of *identical* misses in a
+> ~200 ms window — every request recomputing the same key because none had populated it yet."
+>
+> **Q4 (the fix):** "And the fix under fire?"
+> **A4:** "Hotfix was a per-key mutex so only one request recomputes and the rest wait on the result.
+> Afterward I added request coalescing plus a short 'stale-while-revalidate' window so a cold key
+> serves the last value while one background fill runs. That's the cache-stampede protection I said
+> I'd build from day one now."
+
+Contrast a peripheral candidate on the *same* funnel: Q1 → "30 seconds felt like a reasonable
+default." Q2 → "I think it would just... show the new price?" Q3 → "I remember it was slow at launch
+but the infra team handled that part." The answers get *shorter and softer* as the drill deepens —
+the exact inverse of the owner above. That divergence, not any single wrong answer, is what the
+funnel is built to expose.
+
 ## Owning your scope honestly: "I" vs "we"
 
 Pronoun discipline is a top seniority and integrity signal. **"We" describes the team's
@@ -202,6 +251,37 @@ and no reasoning that could have gone another way.
 Why it's strong: numbers, alternatives, an explicit trade-off with a stakeholder, a measured
 outcome, and an owned mistake with the lesson. That's the full spiral in one answer.
 
+## Recovering in the moment: blanks and the friendly HM
+
+Two real-time situations trip up prepared candidates, and neither is about the *content* of your
+answer — they're about composure.
+
+**When you blank on a number mid-drill.** You will not remember every figure, and faking precision
+is worse than not having it — a made-up number that doesn't survive the next follow-up reads as the
+exaggeration the drill is hunting for. The honest recovery is to give the *order of magnitude* and
+pivot to *why it mattered*, which is the part you actually own:
+
+> Interviewer: "What was your exact p99 before the cache?"
+> You: "I don't recall the exact figure — it was somewhere around 800–900 ms against a 300 ms budget,
+> so roughly 3× over. What I remember clearly is *why*: about 70% of it was fan-out to the pricing
+> service, and that's what drove the caching decision."
+
+That answer loses nothing — it signals honesty (you flag the imprecision), keeps the magnitude
+credible, and steers back to reasoning, which is what's actually being scored. Compare the trap:
+inventing "847 ms," then getting asked "measured how, at what percentile, over what window?" and
+unravelling.
+
+**When the HM is clearly selling the role.** A warm, enthusiastic manager who spends half the time
+pitching the team is *still scoring you* — the friendliness is not a pass. The trap is downshifting:
+giving looser, less-structured answers because the vibe feels like a chat. Stay in the same gear you
+would with a skeptical interviewer: same numbers, same "I" vs "we" discipline, same depth. Enjoy the
+rapport, but treat every answer as graded, because it is.
+
+> [!WARNING]
+> A friendly HM going easy is the most common round to under-perform in, precisely because it doesn't
+> *feel* like an evaluation. Don't coast. The write-up they submit is scored on the same rubric as the
+> toughest interviewer's — warmth in the room does not soften the bar on the page.
+
 ## "Walk me through your resume" and career narrative
 
 This is a *storytelling* test, not a recall test. The failure mode is a chronological recital
@@ -218,6 +298,24 @@ A reusable structure (~2-3 minutes):
 3. **The through-line:** what connects them ("increasingly, reliability of money-movement
    systems").
 4. **The hook to *this* role:** "which is exactly why this platform team interests me."
+
+Stitched together, the four parts read as one continuous ~90-second answer — notice the seams
+between positioning, arc beats, through-line, and hook disappear:
+
+> "I'm a backend engineer, and for the last six years I've basically lived in high-throughput payment
+> systems. I started at company A owning a single service — the payment-authorization API — where I
+> learned what 'reliability of money movement' really costs when you're the one paged at 3 a.m. That
+> pulled me deeper: at company B I led the redesign of our double-entry ledger, moved it off a
+> single-primary Postgres onto a sharded model before we hit the write ceiling, and started mentoring
+> two engineers through it. The thread through all of it is that I keep gravitating to the systems where
+> being wrong means losing someone's money — the correctness and reliability bar is what I find
+> genuinely interesting, not just the scale. Which is exactly why this platform role caught my eye:
+> you're building the payments substrate other teams build on, and that's the leverage point I want to
+> be at next."
+
+That is roughly 150 words — about 60-75 seconds spoken. It never lists a job title with a date; every
+beat earns its place by showing a scope jump, and the through-line ("systems where being wrong loses
+money") is stated explicitly so the interviewer doesn't have to infer it.
 
 > [!TIP]
 > Rehearse the arc out loud and *time it*. Over ~3 minutes and you're rambling; under ~60 s and
@@ -272,6 +370,47 @@ ceiling was ~single-primary write throughput, which we were 18 months from hitti
 > When drilled on a choice you'd now make differently, say so plainly and explain the new
 > reasoning. "Given today's traffic I'd shard on customer_id from the start" shows growth. Rigidly
 > defending a past decision you privately doubt reads as lack of self-awareness.
+
+## Handling conflict and disagreement
+
+"Tell me about a time you disagreed with a technical decision" is one of the most reliably-asked
+and most-botched HM questions. The slogan is "disagree and commit," but a slogan is not an answer.
+What the HM is actually watching for: can you hold a strong view, argue it on *data* rather than
+volume, and then get behind the team's call — including one that went *against* you — without
+sulking. The trap is picking a story where you "won" by being the most senior person in the room;
+that shows you can overrule, not that you can collaborate.
+
+A worked answer (same payments engineer), structured so the seams are visible:
+
+> **The disagreement:** "Our tech lead wanted to add a second datastore — a document DB — for a new
+> product-catalog feature, arguing the schema was too fluid for Postgres. I disagreed: we already ran
+> Postgres, and I thought a JSONB column plus a GIN index would cover the flexibility without a whole
+> new operational surface — a second datastore meant a second backup story, on-call runbook, and
+> consistency boundary."
+>
+> **How I voiced it:** "I didn't just assert it in the meeting. I built a throwaway prototype over two
+> days: JSONB storage for the catalog, with the three query patterns product actually needed. It held
+> ~50k catalog items and returned the worst query in ~15 ms — well under our 100 ms bar."
+>
+> **How it resolved:** "The data mostly backed me *and* surfaced a real limit: one planned query — a
+> deep faceted search — was awkward in JSONB and genuinely cleaner in a document DB. So we split the
+> difference: JSONB now, and a documented trigger — 'if faceted search ships, revisit.' My lead was
+> right that the schema was fluid; I was right that we didn't need the second system *yet*."
+>
+> **The disagree-and-commit:** "On a *different* call I lost outright — I wanted gRPC between two
+> services, the team chose REST for tooling familiarity. I said my piece once, the decision went the
+> other way, and I wrote the REST client myself and didn't relitigate it in standups. Six months on it
+> was clearly the right call for that team's velocity."
+
+Why it lands: a real technical disagreement with a named trade-off, resolved by *evidence* not
+seniority, plus a second beat where the candidate *lost* and committed cleanly. The interviewer
+learns you can push hard and let go — the exact low-drama, high-ownership blend the round screens for.
+
+> [!WARNING]
+> Do not pick a conflict you won by authority ("as the senior engineer, I made the final call"), and
+> never make the other person the villain. The strongest conflict story is one where you show empathy
+> for *why* the other side held their view, and — bonus — one where you were the one who was wrong and
+> changed your mind. "I can lose gracefully and still commit" is the signal; "I always win" is a red flag.
 
 ## Showing curiosity, self-awareness, and "what you'd do differently"
 
@@ -333,8 +472,10 @@ Tactics:
 - **Deflect early number-anchoring** without stonewalling: "I'd like to understand the scope and
   level first — I'm confident we can align on comp if the role's a fit. What band is this
   budgeted at?" Turning the question around is legitimate and often works.
-- **Never lie about current comp**, but you're not obligated to disclose it (illegal for them to
-  ask in many US states). Anchor on market/target, not history.
+- **Never lie about current comp**, but you're not obligated to disclose it — salary-history bans in
+  a number of US states and cities make asking about *prior pay* unlawful in those jurisdictions
+  (it varies by location, and the rules keep changing, so don't assume). Anchor on market/target,
+  not history.
 - **Understand the level maps to the money.** Fighting for a title with the same band is
   hollow; the leverage is level. Deep detail on negotiation and reverse questions lives in
   `leveling-negotiation-and-reverse-questions` — here, just recognize the *signals*.

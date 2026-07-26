@@ -288,6 +288,11 @@ Key design decisions:
   version or the *latest*? Serving "latest by default" is dangerous — a new major can silently
   break clients that never opted in. Safer: pin to a specific default (often the newest at the
   time the account/key was created, as Stripe does) or require the version explicitly.
+  The trade-off is about *who controls the clients*: latest-by-default is acceptable for
+  internal/simple APIs where you own every consumer and can coordinate deploys (you upgrade the
+  callers in lockstep with the server). Pinned-or-explicit is mandatory for public/partner APIs,
+  where clients upgrade on their own schedule and a silent latest-substitution becomes a breaking
+  change you shipped *for* them — see the internal-vs-public follow-up below.
 - **Unsupported version requested.** Respond clearly — commonly `400 Bad Request` for a
   malformed/unknown version param, or `406 Not Acceptable` when using media-type negotiation and
   no representation matches the `Accept`. Do **not** silently fall back to a different version.
@@ -329,6 +334,13 @@ Sunset: Wed, 30 Jun 2027 23:59:59 GMT
 Link: <https://developer.example.com/deprecation>; rel="deprecation"; type="text/html"
 Link: <https://api.example.com/v2/users/42>; rel="successor-version"
 ```
+
+Reading the two dates concretely: `@1688169599` decodes to **2023-06-30 23:59:59 UTC** (the
+Unix timestamp of the moment the resource became deprecated), while `Sunset` is
+**2027-06-30 23:59:59 GMT** — the moment it stops working. So this single response says
+"deprecated four years ago, removed at the future sunset": the `Deprecation` date sits in the
+*past* (already discouraged) and the `Sunset` date sits in the *future* (still serving, for now).
+That is the whole "deprecated now, removed later" lifecycle expressed in two headers.
 
 > [!WARNING]
 > The `Deprecation` header value is a Structured-Fields **Date**, written as `@` followed by a
@@ -388,6 +400,23 @@ designing for change from day one. Techniques:
 > lets you avoid most version bumps entirely. Reserve explicit versions for the genuinely
 > unavoidable breaking change, and even then, run old and new in parallel with a clear
 > deprecation runway.
+
+**Worked example — renaming `name` → `fullName` with expand/contract.** The wire state at each
+phase makes the "parallel change" concrete. Say the resource is a user and we are renaming a
+single field. Trace the actual response body over the three phases:
+
+| Phase | Duration | Response body | Request accepts | Server behavior |
+|---|---|---|---|---|
+| 1. Expand | rename ships | `{"id":42,"name":"Ada Lovelace","fullName":"Ada Lovelace"}` | either `name` **or** `fullName` | **Dual-write**: on read, populate both from one source; on write, if client sends `name`, copy it into `fullName` (and vice versa) |
+| 2. Migrate | weeks–months | *same as Phase 1* (both fields still present) | either field | Telemetry watches per-field reads/writes; wait until `name` usage → 0 |
+| 3. Contract | after zero usage | `{"id":42,"fullName":"Ada Lovelace"}` | only `fullName` | `name` removed; requests still sending `name` now get a `400`/ignored per policy |
+
+The key is Phase 1's **overlap window**: both fields carry the *same* value, so an old client
+reading `name` and a new client reading `fullName` both see `"Ada Lovelace"` — no one breaks.
+On writes the server **dual-reads**: `fullName = request.fullName ?? request.name`, so a legacy
+`PUT {"name":"Grace Hopper"}` and a new `PUT {"fullName":"Grace Hopper"}` are stored identically.
+Only after Phase 2 telemetry proves `name` is dead do you contract to the clean single-field
+shape — the rename completed with *zero* version bump.
 
 ## Three axes of compatibility (source, wire, semantic)
 
@@ -539,6 +568,50 @@ how?" There are three patterns, in increasing sophistication:
    single-versioned; each historical version is just a stack of small reversible diffs. A large
    bonus: because each change module is declarative, it can **auto-generate the changelog** and
    documentation for that version.
+
+**Worked example — walking a v2-pinned request back through two change modules.** Suppose the
+latest internal version is **v4**, and two breaking changes happened after v2:
+
+- **v2 → v3:** split the single `name` field into `first_name` + `last_name`.
+- **v3 → v4:** renamed `email` to `email_address`.
+
+The core service only ever computes the **latest (v4)** representation:
+
+```json
+// v4 — what the business logic produces internally
+{ "id": 42, "first_name": "Ada", "last_name": "Lovelace", "email_address": "ada@example.com" }
+```
+
+Each breaking change is one declarative module that knows how to **downgrade** the response one
+step (and upgrade the request the other way). Sketching the two downgrade transforms:
+
+```text
+DowngradeV4toV3:  rename email_address -> email          (drop the v4 name)
+DowngradeV3toV2:  combine first_name + last_name -> name (drop the two v3 fields)
+```
+
+A client pinned to **v2** hits the endpoint. The server sees the pin is *older* than v4, so it
+walks back through every module newer than v2, newest first, applying each transform to the JSON:
+
+```json
+// Start: v4 internal representation
+{ "id": 42, "first_name": "Ada", "last_name": "Lovelace", "email_address": "ada@example.com" }
+
+// After DowngradeV4toV3  (email_address -> email)
+{ "id": 42, "first_name": "Ada", "last_name": "Lovelace", "email": "ada@example.com" }
+
+// After DowngradeV3toV2  (first_name + last_name -> name)
+{ "id": 42, "name": "Ada Lovelace", "email": "ada@example.com" }   // <- served to the v2 client
+```
+
+A client pinned to **v3** would run *only* `DowngradeV4toV3` and stop — it gets
+`{"id":42,"first_name":"Ada","last_name":"Lovelace","email":"ada@example.com"}`. A **v4** client
+runs no transforms at all and gets the raw internal shape. Requests flow the opposite way: a v2
+`POST {"name":"Ada Lovelace"}` is *upgraded* forward — `UpgradeV2toV3` splits `name` on the last
+space into `first_name`/`last_name`, `UpgradeV3toV4` renames `email` → `email_address` — before
+the single-versioned business logic ever sees it. That is why complexity grows with the *number
+of changes* (here, 2 modules), not versions × endpoints: adding v5 is one more module, not a
+rewrite of every handler.
 
 > [!KEY-TAKEAWAY]
 > The transformation-pipeline model is the answer to "how does one codebase serve a hundred

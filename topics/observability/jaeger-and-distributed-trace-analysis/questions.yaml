@@ -11,7 +11,7 @@ questions:
     options:
       - "It is a tracing backend that ingests, stores, queries, and visualizes spans"
       - "It instruments application code to generate spans automatically"
-      - "It is a metrics time-series database queried with PromQL"
+      - "It is a metrics time-series database queried with PromQL and backed by a TSDB"
       - "It is a log-shipping agent that forwards logs to Elasticsearch"
     answer: 0
     explanation: |
@@ -62,9 +62,9 @@ questions:
       A span has a duration of 500 ms, and the sum of its child spans is about
       480 ms. What does this most strongly suggest?
     options:
-      - "This span is CPU-bound and owns the latency itself"
-      - "The span is missing instrumentation"
-      - "The trace was tail-sampled"
+      - "This span is CPU-bound and its own code owns nearly all of the 500 ms"
+      - "The span is missing instrumentation, so the 480 ms is an artifact of unrecorded work"
+      - "The trace was tail-sampled, and buffering delay inflated the reported duration"
       - "The latency lives downstream in the children, not in this span's own code"
     answer: 3
     explanation: |
@@ -80,8 +80,8 @@ questions:
       What is the recommended way for applications to send trace data to Jaeger
       today?
     options:
-      - "Jaeger Thrift over UDP to the agent"
-      - "Writing spans directly into Cassandra"
+      - "Jaeger Thrift over UDP to the host-local agent on port 6831"
+      - "Writing spans directly into the Cassandra keyspace from the app"
       - "OTLP (OpenTelemetry Protocol) from the OpenTelemetry SDK"
       - "Scraping a /traces endpoint like Prometheus does for metrics"
     answer: 2
@@ -100,9 +100,9 @@ questions:
       likely explanation?
     options:
       - "The trace was never sampled, so its spans were never recorded"
-      - "Jaeger's storage backend is corrupted"
-      - "The query role is misconfigured"
-      - "The trace ID was too long to index"
+      - "Jaeger's storage backend is corrupted and silently dropped that trace's spans"
+      - "The query role is misconfigured and cannot read traces flagged as errors"
+      - "The trace ID exceeded the 128-bit limit and was rejected at index time"
     answer: 0
     explanation: |
       Head-based sampling decides at trace start, before the outcome is known. At
@@ -119,7 +119,7 @@ questions:
     options:
       - "Matching log timestamps to span timestamps by hand"
       - "Storing logs and traces in the same Cassandra table"
-      - "Using the same log level for all services"
+      - "Using the same log level for all services so the volumes line up"
       - "Recording the trace ID (and span ID) in the structured logs"
     answer: 3
     explanation: |
@@ -154,9 +154,9 @@ questions:
       Architecturally, what is Jaeger v2?
     options:
       - "A customized distribution of the OpenTelemetry Collector configured into roles"
-      - "A rewrite of Jaeger in Rust with a proprietary protocol"
-      - "A plugin for Prometheus that stores traces as metrics"
-      - "A managed cloud-only service with no self-hosted option"
+      - "A ground-up rewrite of Jaeger in Rust that speaks a new proprietary wire protocol"
+      - "A plugin for Prometheus that stores traces as high-cardinality metric time series"
+      - "A managed cloud-only service with no self-hosted or open-source deployment option"
     answer: 0
     explanation: |
       Jaeger v2 is built as a customized distribution of the OpenTelemetry
@@ -191,10 +191,10 @@ questions:
     question: |
       Why is Jaeger's "all-in-one" binary not recommended for production?
     options:
-      - "It cannot accept OTLP"
-      - "It only supports Zipkin format"
+      - "It cannot accept OTLP and only ingests legacy Jaeger Thrift over UDP"
+      - "It only supports the Zipkin format and rejects native Jaeger spans"
       - "It uses in-memory storage that loses all data on restart"
-      - "It has no UI"
+      - "It has no UI and exposes only a raw gRPC query API for traces"
     answer: 2
     explanation: |
       all-in-one combines the collector and query roles with in-memory storage.
@@ -208,10 +208,10 @@ questions:
     question: |
       What is the "critical path" of a trace?
     options:
-      - "The span with the largest number of tags"
+      - "The span carrying the largest number of tags and span events overall"
       - "The chain of spans the root was actually blocked waiting on, which determines total duration"
-      - "The path with the most error spans"
-      - "The set of spans emitted by the highest-priority service"
+      - "The path through the trace that accumulates the most error-flagged spans"
+      - "The set of spans emitted by the service configured with the highest priority"
     answer: 1
     explanation: |
       The critical path is the sequence of operations the request was blocked on;
@@ -227,9 +227,9 @@ questions:
       A trace's longest span is 800 ms, but its bar overlaps in time with the
       parent's other work and the parent did not block on it. What is true?
     options:
-      - "It is definitely the bottleneck because it is the longest span"
-      - "It must be an N+1 pattern"
-      - "It proves the trace was head-sampled"
+      - "It is definitely the bottleneck, since the longest span always owns the latency"
+      - "It must be an N+1 pattern, because one long span implies repeated per-row lookups"
+      - "It proves the trace was head-sampled at the default 0.1% probability rate"
       - "It contributes little or nothing to end-user latency and may not be on the critical path"
     answer: 3
     explanation: |
@@ -247,9 +247,9 @@ questions:
       covering it. What is the most likely cause?
     options:
       - "Unaccounted time: local processing, queueing, GC, network, or missing instrumentation"
-      - "The trace ID collided with another trace"
-      - "The span was tail-sampled out"
-      - "The storage backend deduplicated the span"
+      - "The trace ID collided with another trace, so the child span was attributed elsewhere"
+      - "The span was tail-sampled out while its sibling spans were retained in storage"
+      - "The storage backend deduplicated the span and merged it into the parent's bar"
     answer: 0
     explanation: |
       A gap with no child span is time not attributed to any span — local work,
@@ -263,10 +263,10 @@ questions:
     question: |
       How does Jaeger construct its service dependency graph?
     options:
-      - "By reading the architecture diagram from a config file"
+      - "By reading a hand-maintained architecture diagram from a static config file"
       - "By aggregating CLIENT->SERVER span edges across many (sampled) traces"
-      - "By scraping each service's /dependencies endpoint"
-      - "By parsing application logs for service names"
+      - "By scraping each service's /dependencies endpoint on a fixed polling interval"
+      - "By parsing application logs for service names and inferring edges from them"
     answer: 1
     explanation: |
       The dependency graph aggregates client-to-server edges across traces
@@ -282,10 +282,10 @@ questions:
       Which sampling approach lets you reliably keep all error traces and slow
       outliers while downsampling boring fast/OK traces?
     options:
-      - "Head-based probabilistic sampling"
-      - "Rate-limiting sampling"
+      - "Head-based probabilistic sampling that decides at trace start before the outcome"
+      - "Rate-limiting sampling that caps traces to a fixed number of samples per second"
       - "Tail-based sampling (e.g., the Collector's tailsamplingprocessor)"
-      - "No sampling is possible for that"
+      - "No sampling approach can selectively keep errors and slow outlier traces"
     answer: 2
     explanation: |
       Tail-based sampling decides after the trace completes, so it can keep
@@ -302,7 +302,7 @@ questions:
       attributes?
     options:
       - "Tag every span with the raw user ID and full URL with embedded IDs"
-      - "Store raw SQL literals so queries are exact"
+      - "Store raw SQL literals in db.statement so trace queries stay byte-for-byte exact"
       - "Use normalized values like /orders/{id} and parameterized db.statement"
       - "Add as many unique attributes as possible for searchability"
     answer: 2
@@ -319,9 +319,9 @@ questions:
     question: |
       What does Jaeger's Service Performance Monitoring (SPM) provide?
     options:
-      - "Full flame graphs from continuous profiling"
-      - "Raw log search across all services"
-      - "A distributed lock manager for services"
+      - "Full CPU flame graphs assembled from continuous per-service profiling data"
+      - "Raw full-text log search aggregated across every instrumented service"
+      - "A distributed lock manager that coordinates leader election between services"
       - "RED-style metrics (rate, errors, duration) derived from spans"
     answer: 3
     explanation: |
@@ -337,9 +337,9 @@ questions:
       In a Kafka-buffered Jaeger deployment, what is the ingester role's job?
     options:
       - "Read spans off Kafka and write them to the storage backend"
-      - "Serve the UI and query API"
-      - "Generate sampling strategies for SDKs"
-      - "Instrument the application code"
+      - "Serve the trace-search UI and the read-only query API to end users"
+      - "Generate and push per-service sampling strategies down to instrumented SDKs"
+      - "Instrument the application code to emit spans at each request boundary"
     answer: 0
     explanation: |
       In the buffered path (collector -> Kafka -> ingester -> storage), the
@@ -372,9 +372,9 @@ questions:
       A service makes five independent 200 ms downstream calls laid out end-to-end
       (serially) in the waterfall. What is the best optimization?
     options:
-      - "Increase the sampling rate"
-      - "Move the spans to a different storage backend"
-      - "Add more tags to each span"
+      - "Increase the sampling rate so more of these traces are captured for analysis"
+      - "Move the spans to a faster storage backend so the query UI renders them sooner"
+      - "Add more descriptive tags to each span so the slow calls are easier to search"
       - "Run the independent calls in parallel to reduce wall-clock to ~200 ms"
     answer: 3
     explanation: |
@@ -389,10 +389,10 @@ questions:
     question: |
       What distinguishes a span "event" (span log) from a span "attribute/tag"?
     options:
-      - "Events are key/value labels; attributes are timestamped points in time"
-      - "They are identical concepts"
+      - "Events are the searchable key/value labels, while attributes are the timestamped points marking moments in time"
+      - "They are identical concepts that Jaeger stores in the same field and renders the same way"
       - "An event is a timestamped occurrence within the span's lifetime; an attribute is a key/value describing the operation"
-      - "Attributes are only for errors; events are only for success"
+      - "Attributes are recorded only on error spans, while events are recorded only on spans that completed successfully"
     answer: 2
     explanation: |
       Attributes/tags are key/value pairs describing the operation (used for
@@ -406,10 +406,10 @@ questions:
     question: |
       What problem does Jaeger's adaptive sampling solve?
     options:
-      - "It compresses spans to reduce storage size"
+      - "It compresses buffered spans with a columnar codec before they are written to reduce storage footprint"
       - "It recalculates per-service/per-operation probabilities to hit a target samples-per-second, so low-traffic endpoints aren't starved and high-traffic ones don't overwhelm storage"
-      - "It encrypts trace data in transit"
-      - "It merges duplicate traces automatically"
+      - "It encrypts trace payloads in transit with mutual TLS between the SDK, collector, and storage tier"
+      - "It merges duplicate traces that share a trace ID automatically at query time to save index space"
     answer: 1
     explanation: |
       Adaptive sampling watches per-service/per-operation traffic and adjusts
@@ -425,9 +425,9 @@ questions:
       What is a metric "exemplar" and why is it useful with traces?
     options:
       - "A sample trace ID attached to a metric bucket, letting you jump from a latency spike to a representative slow trace"
-      - "A default dashboard template"
-      - "A recording rule that pre-aggregates spans"
-      - "A synthetic trace generated for load testing"
+      - "A prebuilt Grafana dashboard template shipped with Jaeger for visualizing per-service latency"
+      - "A Prometheus recording rule that pre-aggregates spans into rolled-up latency series ahead of query time"
+      - "A synthetic trace generated during load testing to benchmark the collector's ingest throughput"
     answer: 0
     explanation: |
       An exemplar attaches a representative trace ID to a metric observation
@@ -443,10 +443,10 @@ questions:
       In a waterfall, what does it mean when a child span's bar sits fully inside
       its parent's time range?
     options:
-      - "The child errored"
+      - "The child errored, and Jaeger nests failed spans inside their parent to flag the fault"
       - "The child represents work that occurred during (and causally under) the parent operation"
-      - "The child was sampled separately"
-      - "The parent is a duplicate of the child"
+      - "The child was sampled separately from the parent and later stitched back into the trace"
+      - "The parent is a duplicate of the child that the collector failed to deduplicate on write"
     answer: 1
     explanation: |
       Nesting shows causality and containment: the child span occurred within the
@@ -461,9 +461,9 @@ questions:
       A p99 for order-svc regressed after a deploy. Which Jaeger feature most
       directly answers "what changed in the trace shape?"
     options:
-      - "The service dependency graph"
-      - "Raising the sampling rate"
-      - "Switching storage to Cassandra"
+      - "The service dependency graph, which maps which services call one another and how often"
+      - "Raising the sampling rate so more post-deploy traces are captured for later inspection"
+      - "Switching the storage backend to Cassandra to speed up trace writes after the deploy"
       - "Trace comparison (diffing a slow trace against a pre-deploy baseline)"
     answer: 3
     explanation: |
@@ -499,9 +499,9 @@ questions:
       Jaeger's analysis views?
     options:
       - "It tells the UI whether a span is an inbound or outbound edge, which is how the dependency graph and client-vs-server latency are computed"
-      - "It sets the retention period for the span"
-      - "It determines the sampling probability"
-      - "It controls the span's color only"
+      - "It sets the retention period for the span, so SERVER spans are kept longer than CLIENT ones"
+      - "It determines the sampling probability, with SERVER spans sampled more aggressively than INTERNAL"
+      - "It controls only the color the UI paints the span bar, and has no bearing on analysis"
     answer: 0
     explanation: |
       SpanKind identifies inbound (SERVER/CONSUMER) vs outbound (CLIENT/PRODUCER)
@@ -532,10 +532,10 @@ questions:
     question: |
       Why can inconsistent per-service sampling decisions fracture a trace?
     options:
-      - "Because each service uses a different storage backend"
+      - "Because each service writes to a different storage backend, so their spans never land in one index"
       - "Because if the sampling decision isn't propagated, some services keep spans while others drop them, leaving an incomplete trace"
-      - "Because trace IDs are regenerated per service"
-      - "Because the UI cannot render more than 100 spans"
+      - "Because trace IDs are regenerated at each service hop, breaking the shared identifier across the call chain"
+      - "Because the Jaeger UI silently refuses to render any trace that contains more than 100 spans"
     answer: 1
     explanation: |
       The sampling decision must travel with the request (the sampled flag in W3C
@@ -549,9 +549,9 @@ questions:
     question: |
       What is the recommended first step when root-causing latency with traces?
     options:
-      - "Compute the average duration across all traces"
-      - "Delete old traces to free storage"
-      - "Switch from OTLP to Zipkin ingestion"
+      - "Compute the average duration across all traces and chase whatever moves that mean the most"
+      - "Delete old traces to free storage so the newer slow traces index and load faster in the UI"
+      - "Switch the ingestion path from OTLP to Zipkin so span timings are recorded more precisely"
       - "Find a representative slow exemplar trace (e.g., sort by duration or use a p99 exemplar)"
     answer: 3
     explanation: |
@@ -568,9 +568,9 @@ questions:
       succession with escalating gaps. What does this most likely indicate?
     options:
       - "Downstream flakiness combined with a retry policy inflating latency"
-      - "Tail sampling duplicated the span"
-      - "The dependency graph is stale"
-      - "The span kind is misconfigured"
+      - "Tail sampling duplicated the span, so one attempt is shown two or three times over"
+      - "The dependency graph is stale and is replaying edges from an older aggregation run"
+      - "The span kind is misconfigured, causing the UI to redraw one bar as several attempts"
     answer: 0
     explanation: |
       Repeated child spans (attempts) are the signature of retries against a
@@ -586,9 +586,9 @@ questions:
       observability?
     options:
       - "Metrics (exemplar) -> trace -> (trace_id) -> logs"
-      - "Logs -> metrics -> dashboards"
-      - "Traces -> alerts -> pager"
-      - "Dashboards -> runbooks -> postmortems"
+      - "Logs -> (log volume) -> metrics -> auto-generated service dashboards"
+      - "Traces -> (duration threshold) -> alerts -> on-call pager escalation"
+      - "Dashboards -> (annotations) -> runbooks -> written incident postmortems"
     answer: 0
     explanation: |
       The chain metrics -> (exemplar) -> trace -> (trace_id) -> logs lets you go
@@ -602,10 +602,10 @@ questions:
     question: |
       What is the current guidance regarding the legacy Jaeger "agent"?
     options:
-      - "It is mandatory for all deployments"
-      - "It is the only component that can write to storage"
+      - "It is mandatory for all deployments and every SDK must ship spans through it first"
+      - "It is the only component permitted to write spans to the storage backend directly"
       - "It is superseded; run the OpenTelemetry Collector instead"
-      - "It replaces the query role"
+      - "It replaces the query role and now serves the trace-search UI to end users"
     answer: 2
     explanation: |
       The host-local Jaeger agent that batched spans to the collector is
@@ -620,9 +620,9 @@ questions:
       Which question does the service dependency graph answer, as opposed to the
       waterfall?
     options:
-      - "Where did this single request's time go?"
-      - "What is the exact self-time of one span?"
-      - "Which log line threw the exception?"
+      - "Where did this one specific request's time go, span by span down the critical path?"
+      - "What is the exact self-time of one span once its children's durations are subtracted?"
+      - "Which precise log line in the emitting service threw the exception for this request?"
       - "Who calls whom (runtime topology and call volumes)?"
     answer: 3
     explanation: |
@@ -674,9 +674,9 @@ questions:
       How is a span's "self-time" (exclusive time) defined?
     options:
       - "Its total duration minus the time attributable to its child spans"
-      - "Its start offset from the trace start"
-      - "The number of child spans times their average duration"
-      - "The time between two events inside the span"
+      - "Its start offset measured from the very beginning of the enclosing trace"
+      - "The number of child spans multiplied by their average recorded duration"
+      - "The elapsed time between the first and last recorded events inside the span"
     answer: 0
     explanation: |
       Self-time (exclusive time) is duration minus child-span time — the time the
@@ -708,9 +708,9 @@ questions:
       A client span records "send" at T=0 and the matching server span records
       "receive" at T=40 ms. What does that 40 ms most directly represent?
     options:
-      - "The server's CPU time processing the request"
-      - "The database query time"
-      - "Clock drift only, with no real latency"
+      - "The server's on-CPU time spent executing the request handler logic"
+      - "The database query time consumed while fetching rows for this request"
+      - "Pure clock drift between the two hosts, representing no real elapsed latency"
       - "Network latency (plus TLS/handshake or the callee's inbound queue)"
     answer: 3
     explanation: |
@@ -727,9 +727,9 @@ questions:
       Which statement best captures the Cassandra vs Elasticsearch trade-off for
       Jaeger storage?
     options:
-      - "Cassandra is best for ad-hoc tag search; Elasticsearch is best for write throughput"
-      - "Both are in-memory only"
-      - "Elasticsearch cannot store traces at all"
+      - "Cassandra is best for ad-hoc tag search, while Elasticsearch is the stronger choice for raw write throughput"
+      - "Both are purely in-memory engines that lose all stored trace data whenever the node restarts"
+      - "Elasticsearch cannot persist trace spans at all and is only usable as a query-side cache"
       - "Cassandra favors high write throughput and predictable scaling; Elasticsearch favors flexible tag search and aggregation at higher operational cost"
     answer: 3
     explanation: |
@@ -745,10 +745,10 @@ questions:
       You open a trace and one span is marked with error=true. What is the fast
       next move?
     options:
-      - "Increase the sampling rate and wait for another occurrence"
+      - "Increase the head-sampling probability and wait for the same error to recur on a future request"
       - "Inspect that span's tags/events (exception, stack trace, status) and pivot to that service's logs via the trace ID"
-      - "Delete the trace and retry the request"
-      - "Switch the storage backend"
+      - "Delete the offending trace from storage and replay the original request to regenerate it cleanly"
+      - "Switch the storage backend from Cassandra to Elasticsearch to re-index the failed span"
     answer: 1
     explanation: |
       An errored span's events typically carry the exception and stack trace, and
@@ -764,9 +764,9 @@ questions:
       metrics from spans?
     options:
       - "The Span Metrics connector"
-      - "The batch processor"
-      - "The memory limiter"
-      - "The Zipkin receiver"
+      - "The batch processor that groups spans before export"
+      - "The memory limiter that caps collector heap usage"
+      - "The Zipkin receiver that ingests legacy Zipkin spans"
     answer: 0
     explanation: |
       The Span Metrics connector generates metrics (RED-style rate/errors/
@@ -780,10 +780,10 @@ questions:
     question: |
       In the collector -> Kafka -> ingester path, what is Kafka's role?
     options:
-      - "The permanent storage backend for traces"
-      - "The query engine for the UI"
+      - "The permanent storage backend where completed traces are indexed and retained"
+      - "The query engine that reads spans back to render the trace-search UI"
       - "A durable buffer that absorbs ingest bursts and protects the storage backend"
-      - "The sampling decision maker"
+      - "The component that makes the per-trace head-sampling decision on ingest"
     answer: 2
     explanation: |
       Kafka is a durable buffer, not final storage. It smooths ingest spikes so
@@ -798,10 +798,10 @@ questions:
       Two child spans under the same parent overlap in time on the waterfall.
       What does the overlap indicate?
     options:
-      - "One span is a duplicate of the other"
+      - "One span is a duplicate copy of the other that the collector failed to dedupe"
       - "The spans ran concurrently (in parallel)"
-      - "The trace is corrupted"
-      - "The parent errored"
+      - "The trace is corrupted and its span timings can no longer be trusted"
+      - "The parent operation errored and propagated the fault down to both children"
     answer: 1
     explanation: |
       Overlapping bars mean the operations executed concurrently. Sequential
@@ -815,9 +815,9 @@ questions:
     question: |
       Why can Jaeger accept Zipkin-format spans?
     options:
-      - "Because Zipkin is the only supported format"
-      - "Because Zipkin spans are stored more efficiently"
-      - "Because OTLP is not supported"
+      - "Because Zipkin is the only wire format Jaeger's collector can parse on ingest"
+      - "Because Zipkin-format spans are compressed and stored far more efficiently on disk"
+      - "Because OTLP export is not supported by the modern Jaeger collector at all"
       - "To support migration from Zipkin-instrumented systems"
     answer: 3
     explanation: |
@@ -833,10 +833,10 @@ questions:
       What is the main cost/trade-off of tail-based sampling compared with
       head-based sampling?
     options:
-      - "It cannot keep error traces"
-      - "It breaks trace ID propagation"
+      - "It is structurally unable to retain error traces once they complete"
+      - "It breaks W3C trace-context propagation between upstream and downstream services"
       - "It requires buffering complete traces, adding memory and processing cost (and the app must record/export everything first)"
-      - "It only works with Cassandra storage"
+      - "It only functions when traces are persisted to a Cassandra storage backend"
     answer: 2
     explanation: |
       Tail-based sampling must wait for and buffer all spans of a trace before
@@ -853,9 +853,9 @@ questions:
       children. Where should you look for the latency?
     options:
       - "In this service's own code (CPU, serialization, local work, or an un-instrumented call)"
-      - "In the downstream services this span calls"
-      - "In the sampling configuration"
-      - "In the dependency graph aggregation job"
+      - "In the downstream services this span calls out to over the network"
+      - "In the remote sampling configuration that decided to record this trace"
+      - "In the Spark/Flink dependency-graph aggregation job that post-processes traces"
     answer: 0
     explanation: |
       High self-time means the time is spent in this span's own work, not waiting

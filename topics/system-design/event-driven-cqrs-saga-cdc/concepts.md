@@ -156,6 +156,16 @@ contention with writes.
 social feeds, dashboards, analytics. Often paired with event sourcing but does
 NOT require it. Read replicas are a degenerate, "CQRS-lite" version of the idea.
 
+**Concrete asymmetry example.** Say a product catalog serves **50,000 reads/s**
+against **500 writes/s** — a 100:1 ratio. Forcing both through one Postgres means
+search-heavy reads contend with write locks. Split it: writes stay on Postgres;
+a projector consumes the `OrderPlaced`/`PriceChanged` stream and maintains an
+Elasticsearch read model sized only for the 50k reads/s. If that projector runs
+**~200 ms behind** the write log, a seller who changes a price and reloads within
+that 200 ms window still sees the old price. That is the projection-lag cost made
+concrete — and it's exactly what the read-your-writes fix below (read from the
+write model, or echo the new value in the command response) exists to hide.
+
 **What you gain**
 - **Independent scaling & optimization.** Scale reads (often 10–1000x the write
   volume) separately; pick the perfect storage per query (Elasticsearch for
@@ -380,6 +390,37 @@ sequenceDiagram
 - Some steps are **pivot/retryable** — after the pivot point the saga must go
   forward (retry) and cannot compensate.
 
+**Worked trace — an order saga that fails at inventory.** Orchestrated saga over
+Order → Payment → Inventory → Shipping. Watch the money and each entity's status;
+compensation runs the *forward* steps in reverse, and each compensation is a new
+fact, not a physical rollback.
+
+| Step | Forward local tx | Result | State after |
+|---|---|---|---|
+| 1 | Order: create order #42 | OK | order #42 = `PENDING`, total $100 |
+| 2 | Payment: charge card $100 | OK | payment = `CAPTURED $100` |
+| 3 | Inventory: reserve 1× item | **FAILS** (out of stock) | inventory unchanged |
+
+Step 3 fails, so the orchestrator fires compensating commands for the committed
+steps **k−1 … 1** = step 2 then step 1:
+
+| Compensation | Command | Result | State after |
+|---|---|---|---|
+| for step 2 | Payment: `Refund $100` | OK | payment = `REFUNDED $100` (net $0; the charge row still exists — refund is a *new* ledger entry, not a delete) |
+| for step 1 | Order: `Cancel order #42` | OK | order #42 = `PENDING → CANCELLED` |
+
+Net money movement: `+100` (charge) `−100` (refund) `= $0`. Nothing was ever
+"undone" — the customer's statement shows both a charge and a refund. That is the
+whole point of *semantic* compensation.
+
+Now shift the failure later. Suppose steps 1–3 succeed and **Shipping is the pivot
+step**: once the parcel is handed to the carrier you cannot un-ship it. If step 4
+fails *before* dispatch you still compensate backward (refund + release stock +
+cancel). But once Shipping commits, the saga is **roll-forward only** — a later
+problem (e.g., customer address invalid) is handled by *new* forward actions
+(reroute, return-to-sender, refund-on-return), never by compensating a step that
+already produced a physical, irreversible effect.
+
 **Saga vs 2PC.** 2PC gives ACID atomicity + isolation but is blocking,
 coordinator-dependent, and doesn't scale or tolerate partitions well — rarely used
 across microservices. Sagas trade isolation and immediate consistency for
@@ -431,6 +472,23 @@ event may be published more than once (relay crashes after publish, before marki
 sent). Therefore **consumers must be idempotent** (next section). Exactly-once
 end-to-end across systems is effectively unachievable; "effectively-once" =
 at-least-once delivery + idempotent processing.
+
+**Worked trace — how the duplicate is born.** Outbox row `evt-77` for
+`OrderPlaced{orderId: 42}`:
+
+1. **Business tx commits.** Single local transaction writes the `orders` row *and*
+   inserts outbox row `evt-77` with `sent = false`. Both durable, or neither.
+2. **Relay publishes.** Relay reads the unsent row, publishes `evt-77` to Kafka;
+   Kafka acks. The consumer receives it and charges the card.
+3. **Relay crashes** *after* Kafka's ack but *before* running
+   `UPDATE outbox SET sent = true WHERE id = 'evt-77'`. So the row is still
+   `sent = false` even though the event is already on the topic.
+4. **Relay restarts**, re-reads still-unsent `evt-77`, and publishes it **again** →
+   the consumer sees `OrderPlaced{orderId: 42}` a second time.
+
+Without idempotency the card is charged twice. This is exactly why the next
+section's dedup / monotonic-version guard is mandatory — the outbox guarantees the
+event is *never lost*, at the price of it *sometimes arriving twice*.
 
 **Listen-to-yourself / event-sourcing alternatives.** With event sourcing, the
 event store *is* the DB, so there is no dual write — appending the event is the
@@ -569,6 +627,25 @@ same effect as processing it once.
 per entity; ignore events with a version ≤ the last applied. This handles both
 duplicates and out-of-order delivery.
 
+**Worked trace — the monotonic-version guard.** Entity `order-42` starts with
+`lastApplied = 5`. The guard is a single rule: *apply iff `event.version >
+lastApplied`, then set `lastApplied = event.version`.* Watch four arrivals — a
+duplicate, a jump, a late straggler, and a fresh one:
+
+| Arrives | version | vs lastApplied (5) | Action | lastApplied after |
+|---|---|---|---|---|
+| v5 (redelivered) | 5 | 5 ≤ 5 | **skip** (duplicate) | 5 |
+| v7 | 7 | 7 > 5 | **apply** | 7 |
+| v6 (arrived late) | 6 | 6 ≤ 7 | **skip** (stale / out of order) | 7 |
+| v8 | 8 | 8 > 7 | **apply** | 8 |
+
+Final state reflects v8. The duplicate v5 and the late-arriving v6 were both
+dropped by the *same* comparison — one guard neutralizes duplicates *and*
+reordering. (Caveat: this assumes each version is a full-state replacement or a
+strictly ordered delta. If v6 carried an independent field the projector needed,
+you'd instead buffer/gap-fill rather than drop — but for last-writer-wins state,
+skip is correct.)
+
 **Trade-offs.**
 - Dedup store adds latency, storage, and its own TTL/GC concerns, but is general.
 - Natural idempotency is cleanest but not always possible.
@@ -589,6 +666,14 @@ inspection, alerting, and manual/automated reprocessing. Distinguish *transient*
 failures (downstream 503, timeout — retry) from *permanent* ones (validation
 error — DLQ immediately). Use a **retry topic** ladder in Kafka (e.g.,
 retry-5s, retry-1m, retry-10m) since Kafka lacks per-message visibility timeouts.
+
+**Why jitter, not just backoff.** If a downstream outage fails 10,000 consumers at
+the same instant, pure exponential backoff makes them all retry at the *same*
+future moments (t+1s, t+2s, t+4s …) — synchronized retry storms that re-overwhelm
+the service the instant it recovers (a "thundering herd"). Jitter randomizes each
+retry's delay (e.g., pick uniformly in `[0, backoff]`) so the 10,000 retries
+spread out over the window instead of hitting in lockstep, letting the recovering
+downstream drain load gradually.
 
 **Trade-offs.**
 - Blocking retries preserve ordering but stall the whole partition on one bad

@@ -102,16 +102,17 @@ Key mental model:
   (frequent tiny blips that recover fast → high availability, low MTBF) or reliable
   but not highly available (fails rarely, but when it does it stays down for hours →
   high MTBF, low availability because MTTR is huge).
-- **Durability ≠ availability.** Amazon S3 advertises **11 nines of durability** but
-  only ~**99.99% availability** (S3 Standard SLA). Your objects will almost never be
-  *lost*, but the service can briefly be *unreachable*. RAID, replication, and
+- **Durability ≠ availability.** Amazon S3 advertises **11 nines of durability** but a
+  much lower availability: S3 Standard is **designed for 99.99% availability** while its
+  contractual **SLA is 99.9%** (credits begin below 99.9%). Your objects will almost
+  never be *lost*, but the service can briefly be *unreachable*. RAID, replication, and
   erasure coding protect durability; they don't by themselves guarantee availability.
 
 > [!INTERVIEW]
 > "S3 gives eleven nines — so it's basically never down, right?" Trap. Eleven nines
-> is **durability** (data won't be lost). S3's **availability** target is far lower
-> (99.9%–99.99% depending on tier). Getting this distinction right instantly signals
-> seniority.
+> is **durability** (data won't be lost). S3's **availability** is far lower — S3
+> Standard is *designed for* 99.99% but the *SLA* is 99.9% (other tiers differ).
+> Getting this distinction right instantly signals seniority.
 
 ## The time-based metrics: MTBF, MTTF, MTTR, MTTD, MTTA
 
@@ -715,7 +716,7 @@ business impact, not aspiration.
 - **"How much downtime does three/four/five nines allow per year?"** — 8.76 h,
   52.6 min, 5.26 min respectively. Each nine ÷10.
 - **"S3 has eleven nines — what does that describe?"** — Durability (data not lost),
-  *not* availability (~99.99%). Distinct properties.
+  *not* availability (S3 Standard: designed for 99.99%, SLA 99.9%). Distinct properties.
 - **"Your service target is 99.99% but a dependency is 99.9%. Achievable?"** — Only
   if that dependency is *soft* (fallback/cache). If hard, you're capped at 99.9%.
 - **"Cheaper to add a nine: fail less or recover faster?"** — Usually reduce MTTR
@@ -766,8 +767,9 @@ business impact, not aspiration.
   propagation).
 - AWS Well-Architected Framework — **Reliability Pillar** (availability design goals,
   hard/soft dependencies, dependency availability math).
-- Amazon S3 SLA and durability documentation (11 nines durability vs. availability
-  tiers).
+- Amazon S3 SLA and storage-class documentation (11 nines durability; S3 Standard
+  *designed for* 99.99% availability per `aws.amazon.com/s3/storage-classes`, with a
+  99.9% contractual SLA per `aws.amazon.com/s3/sla`).
 - Avižienis, Laprie, Randell, Landwehr — "Basic Concepts and Taxonomy of Dependable
   and Secure Computing" (fault/error/failure taxonomy).
 - Bronson, Aghayev, Charapko, Zhu — "Metastable Failures in Distributed Systems"
