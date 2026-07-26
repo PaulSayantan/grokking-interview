@@ -10,9 +10,9 @@ questions:
     In gRPC, how does every RPC (unary or streaming) terminate?
   options:
   - "With exactly one status: a code, an optional message, and optional details"
-  - "With an HTTP status line only, like REST"
+  - "With an HTTP status line only, exactly like a plain REST response's status code"
   - "With a boolean success flag in the response message body"
-  - "With a TCP FIN and no explicit outcome"
+  - "With a bare TCP FIN packet closing the socket and no explicit outcome field"
   answer: 0
   explanation: |
     Every gRPC call ends with a single status = (code, message, details). The code is
@@ -115,10 +115,10 @@ questions:
     Why does gRPC distinguish OUT_OF_RANGE from FAILED_PRECONDITION when both relate to
     an operation that can't proceed?
   options:
-  - "OUT_OF_RANGE is retryable and FAILED_PRECONDITION is not"
+  - "OUT_OF_RANGE is always safe to retry automatically, whereas FAILED_PRECONDITION is a permanently fatal, non-retryable error"
   - "OUT_OF_RANGE can be fixed by the client without changing system state (e.g. request an in-range value), so an iterator can detect completion"
-  - "OUT_OF_RANGE is only used by streaming RPCs"
-  - "They are aliases; the choice is purely stylistic"
+  - "OUT_OF_RANGE applies exclusively to streaming RPCs, while FAILED_PRECONDITION is reserved only for unary calls"
+  - "They are exact aliases mapped to the same numeric enum value, so the choice between them is purely stylistic"
   answer: 1
   explanation: |
     OUT_OF_RANGE is a specialization for reads/seeks past the valid range. Unlike
@@ -187,7 +187,7 @@ questions:
   options:
   - "Because INVALID_ARGUMENT responses are always sent without trailers"
   - "Because the error is deterministic — the same argument will fail identically, so retrying only wastes resources"
-  - "Because INVALID_ARGUMENT can only occur on streaming RPCs"
+  - "Because INVALID_ARGUMENT can only occur on streaming RPCs, which the retry framework refuses to replay"
   - "Because the server closes the TCP connection after INVALID_ARGUMENT"
   answer: 1
   explanation: |
@@ -203,10 +203,10 @@ questions:
     In the gRPC rich error model, which message type is serialized and placed in the
     grpc-status-details-bin trailer?
   options:
-  - "google.protobuf.Any wrapping the request"
+  - "A raw google.protobuf.Any that directly wraps the original request message bytes"
   - "google.rpc.Status (with code, message, and repeated Any details)"
-  - "grpc.health.v1.HealthCheckResponse"
-  - "google.rpc.Code"
+  - "A grpc.health.v1.HealthCheckResponse carrying the current serving status enum"
+  - "A bare google.rpc.Code enum value holding just the integer status number"
   answer: 1
   explanation: |
     Servers serialize a google.rpc.Status — int32 code, string message, and repeated
@@ -221,9 +221,9 @@ questions:
     A server wants to tell the client exactly which request field was invalid, in a
     machine-readable way. Which standard error detail should it attach?
   options:
-  - "RetryInfo"
-  - "QuotaFailure"
-  - "DebugInfo"
+  - "RetryInfo (carrying a retry_delay for the client to wait)"
+  - "QuotaFailure (listing the subjects whose quota was exceeded)"
+  - "DebugInfo (with server stack entries and a detail string)"
   - "BadRequest (with field violations)"
   answer: 3
   explanation: |
@@ -240,9 +240,9 @@ questions:
     cannot?
   options:
   - "A stable machine-readable reason plus a domain and a metadata map"
-  - "A different HTTP status per error"
-  - "Encryption of the error message"
-  - "A guaranteed retry by the client library"
+  - "A distinct HTTP/2 :status line mapped uniquely to each individual error"
+  - "Transparent encryption of the human-readable error message before transit"
+  - "A guaranteed automatic retry performed by the client library on the caller's behalf"
   answer: 0
   explanation: |
     ErrorInfo gives a stable reason (UPPER_SNAKE_CASE, e.g. USER_SUSPENDED), a domain
@@ -275,10 +275,10 @@ questions:
   question: |
     What characterizes a "Trailers-Only" gRPC response?
   options:
-  - "The server sends only DATA frames and no HEADERS"
+  - "The server sends only a sequence of DATA frames carrying the payload and never emits any HEADERS frame at all"
   - "A single HEADERS frame carries :status 200, content-type, and grpc-status together with END_STREAM, with no DATA frames"
-  - "The client omits the request body"
-  - "The response uses HTTP/1.1 instead of HTTP/2"
+  - "The client omits the request body and sends only an empty END_STREAM header block"
+  - "The response silently downgrades to HTTP/1.1 chunked transfer instead of HTTP/2 framing"
   answer: 1
   explanation: |
     When a server rejects a call immediately (e.g. auth failure, unimplemented method)
@@ -293,10 +293,10 @@ questions:
   question: |
     How is the grpc-message trailer value encoded on the wire?
   options:
-  - "Base64-encoded UTF-16"
+  - "Base64-encoded UTF-16 code units to preserve multi-byte characters"
   - "Percent-encoded (non-ASCII bytes escaped as %XX)"
-  - "Raw UTF-8 with no escaping"
-  - "gzip-compressed"
+  - "Raw UTF-8 bytes placed directly in the header with no escaping at all"
+  - "gzip-compressed and then wrapped in a length-prefixed binary frame"
   answer: 1
   explanation: |
     grpc-message is percent-encoded ASCII: bytes outside the safe ASCII range are
@@ -329,10 +329,10 @@ questions:
     During a server-streaming RPC, the server has already sent 3 messages and then hits
     a fatal error. What happens?
   options:
-  - "The server sends the error, then can resume sending more messages"
-  - "The 3 messages are retroactively discarded by the framework"
+  - "The server transmits the error status inline and can then resume sending additional messages on the same open stream"
+  - "The framework retroactively discards the 3 already-delivered messages so the client observes a clean, empty result set"
   - "A non-OK status terminates the stream; the 3 delivered messages stand as partial results and no further messages can follow"
-  - "The client automatically retries and receives all messages again"
+  - "The client library automatically re-issues the call and re-receives every message, including the original 3, from the start"
   answer: 2
   explanation: |
     The status is the single terminal event. A non-OK status ends the stream; you
@@ -347,9 +347,9 @@ questions:
     In Go, a client's stream.Recv() loop returns io.EOF. What does that signify?
   options:
   - "The stream completed successfully (status OK); io.EOF is the clean end-of-stream signal"
-  - "A network error occurred mid-stream"
-  - "The server returned CANCELLED"
-  - "The deadline was exceeded"
+  - "A transient network error interrupted the stream partway through message delivery"
+  - "The server terminated the call early by returning the CANCELLED status code to the client"
+  - "The configured RPC deadline elapsed before the server finished streaming its results"
   answer: 0
   explanation: |
     In Go, Recv() returns io.EOF on clean completion (status OK) and a status error on
@@ -381,9 +381,9 @@ questions:
   question: |
     What is the numeric value of UNAUTHENTICATED, and why is it a common surprise?
   options:
-  - "8, because it comes right after RESOURCE_EXHAUSTED"
-  - "7, the same neighborhood as PERMISSION_DENIED"
-  - "1, right after OK"
+  - "8, because it was slotted immediately after RESOURCE_EXHAUSTED when the auth codes were grouped together"
+  - "7, sharing an enum slot with PERMISSION_DENIED since both concern rejected credentials at the auth layer"
+  - "1, placed right after OK because credential checks run before any other server-side validation step"
   - "16, the last code — surprising because the name suggests it would sit near PERMISSION_DENIED (7)"
   answer: 3
   explanation: |
@@ -434,10 +434,10 @@ questions:
   question: |
     Why is it harmful to return INTERNAL for ordinary client-input validation failures?
   options:
-  - "INTERNAL is not a valid gRPC code"
-  - "INTERNAL forces the client library to drop the connection"
+  - "INTERNAL is not a valid canonical gRPC status code, so most client libraries reject it as an unknown enum value"
+  - "Returning INTERNAL forces the client library to immediately tear down the underlying HTTP/2 connection and reconnect"
   - "It inflates server error-rate/alerting, misleads on-call, and hides the client-fixable nature of the error (INVALID_ARGUMENT is correct)"
-  - "INTERNAL cannot carry a message"
+  - "The INTERNAL code is defined to carry no grpc-message, so the client can never see any explanatory text for it"
   answer: 2
   explanation: |
     INTERNAL (13) means a server invariant broke — something is badly wrong. Using it
@@ -469,10 +469,10 @@ questions:
   question: |
     In a gRPC service config retryPolicy, what is the role of retryableStatusCodes?
   options:
-  - "It lists codes the server is allowed to return"
+  - "It enumerates the exhaustive set of grpc-status codes the server is permitted to emit for that method"
   - "It defines which grpc-status codes trigger a client retry attempt (subject to gRFC A6 commit rules)"
-  - "It maps HTTP status codes to gRPC codes"
-  - "It sets the codes that count as success"
+  - "It provides the lookup table the client uses to translate inbound HTTP status codes into canonical gRPC codes"
+  - "It designates the additional non-OK codes that the client should treat as a successful call outcome"
   answer: 1
   explanation: |
     retryableStatusCodes is the explicit set of grpc-status values the client will retry
@@ -486,9 +486,9 @@ questions:
   question: |
     Why is blindly retrying INTERNAL or UNKNOWN on a non-idempotent method dangerous?
   options:
-  - "Those codes are never returned by real servers"
-  - "Retrying them always causes a deadlock"
-  - "They are only used for streaming RPCs, which can't be retried"
+  - "Those codes are synthetic placeholders that real production servers are specified never to actually return"
+  - "Retrying either of those codes always drives the client and server into an unrecoverable mutual deadlock"
+  - "They are emitted exclusively by streaming RPCs, which the retry framework is architecturally unable to replay"
   - "The server may have partially processed the request, so a retry can double-apply side effects"
   answer: 3
   explanation: |
@@ -504,10 +504,10 @@ questions:
     An intermediary proxy returns HTTP 502 to the gRPC client because it can't reach the
     backend. What gRPC code does the client surface?
   options:
-  - "INTERNAL"
-  - "NOT_FOUND"
+  - "INTERNAL, because a 502 always indicates a broken server-side invariant on the backend"
+  - "NOT_FOUND, since the proxy could not locate a route to any healthy backend instance"
   - "UNAVAILABLE"
-  - "PERMISSION_DENIED"
+  - "PERMISSION_DENIED, treating the proxy's rejection as an authorization failure at the edge"
   answer: 2
   explanation: |
     gRPC maps non-200 HTTP statuses to codes via a fixed table: 502/503/504 → UNAVAILABLE
@@ -523,9 +523,9 @@ questions:
     string?
   options:
   - "Messages are free-form and may change wording, while the code is a stable, closed enum meant for programmatic branching"
-  - "Messages are encrypted and unreadable"
-  - "Messages are not delivered to clients"
-  - "The code is only available on the server side"
+  - "The grpc-message trailer is transport-encrypted end-to-end and remains opaque to application code on the client"
+  - "The status message is stripped by the framework before delivery, so it never actually reaches the calling client"
+  - "The numeric status code is populated only on the server side and is unavailable to the client for branching"
   answer: 0
   explanation: |
     The message is human-oriented, free-form text for logs/debugging and can change.
@@ -540,10 +540,10 @@ questions:
     What is a real risk of packing large payloads (big stack traces, long lists) into
     the rich error details?
   options:
-  - "Details are always dropped by the client library"
-  - "They force the RPC to downgrade to HTTP/1.1"
+  - "Detail payloads are unconditionally discarded by the client library once they exceed the default 4 KB message limit"
+  - "Oversized details force the transport to silently downgrade the RPC from HTTP/2 framing back to HTTP/1.1 chunking"
   - "They ride in metadata/trailers, which are bounded by max header list size, so oversized details can be truncated or rejected and hurt every RPC"
-  - "They change the grpc-status code to INTERNAL automatically"
+  - "Attaching large details automatically rewrites the grpc-status code to INTERNAL regardless of the original outcome"
   answer: 2
   explanation: |
     Rich error details travel in the grpc-status-details-bin trailer — part of HTTP/2
@@ -591,10 +591,10 @@ questions:
   question: |
     Which situation is the intended use of RESOURCE_EXHAUSTED?
   options:
-  - "The requested record does not exist"
-  - "The client sent a malformed field"
+  - "The requested record does not exist in the backing store for the given lookup key"
+  - "The client sent a structurally malformed field that fails validation regardless of state"
   - "A per-user quota or rate limit is hit, or the system is out of space/memory"
-  - "The caller has no credentials"
+  - "The caller presented no credentials at all and cannot be authenticated by the server"
   answer: 2
   explanation: |
     RESOURCE_EXHAUSTED (8) covers exhausted quota, rate limiting, throttling, or running
@@ -610,9 +610,9 @@ questions:
     fails after the client has already received a message?
   options:
   - "Because gRFC A6 only retries before the attempt is committed (before the first message is received); once committed, recovery must be application-level or via hedging"
-  - "Because streaming RPCs never return a status"
-  - "Because the retryableStatusCodes list is ignored for streams"
-  - "Because streams always fail with a non-retryable code"
+  - "Because streaming RPCs terminate with a bare END_STREAM frame and never carry a grpc-status the policy can inspect"
+  - "Because the retryableStatusCodes configuration is silently ignored for any method declared as client- or server-streaming"
+  - "Because a streaming RPC is defined to always fail with a non-retryable code once even one message has crossed the wire"
   answer: 0
   explanation: |
     Per gRFC A6, retries apply only while the attempt is uncommitted — typically before
@@ -627,9 +627,9 @@ questions:
     In Go, what does status.Convert(err) return when err is a non-gRPC error?
   options:
   - "A *status.Status with code UNKNOWN (never nil)"
-  - "nil"
-  - "It panics"
-  - "A *status.Status with code OK"
+  - "A nil pointer, requiring the caller to nil-check before reading the code or message"
+  - "It panics, because status.Convert only accepts errors that already implement the GRPCStatus interface"
+  - "A *status.Status with code OK, since a converted non-gRPC error is treated as a benign outcome"
   answer: 0
   explanation: |
     status.Convert never returns nil; for a non-gRPC error it yields a status with code
@@ -646,8 +646,8 @@ questions:
   options:
   - "Java throws StatusRuntimeException; Python raises grpc.RpcError"
   - "Both return a nullable Status object the caller must inspect"
-  - "Both silently return an empty response message"
-  - "Both write the error to stderr and return null"
+  - "Both silently return a zero-valued, empty response message with no error signal"
+  - "Both log the error to stderr and hand the caller back a null response object"
   answer: 0
   explanation: |
     A non-OK status is delivered idiomatically: Java's blocking stub throws
@@ -681,9 +681,9 @@ questions:
     handlers in a service?
   options:
   - "Use a single translation layer (often an interceptor) that maps domain errors to status.Error(code, msg) plus details"
-  - "Let each handler invent its own codes"
-  - "Return every error as INTERNAL and log the real cause"
-  - "Encode the domain error type into the grpc-message string only"
+  - "Let each handler independently choose its own codes based on whatever fits that method locally"
+  - "Return every failure as INTERNAL uniformly and log the real underlying cause on the server side"
+  - "Encode the concrete domain error type into the free-form grpc-message string and parse it client-side"
   answer: 0
   explanation: |
     A single translation layer (commonly a server interceptor) maps domain
@@ -716,9 +716,9 @@ questions:
   question: |
     When is retrying a DEADLINE_EXCEEDED actually useful?
   options:
-  - "Always — it is a transient error like UNAVAILABLE"
-  - "Never — it is strictly non-retryable"
-  - "Only for streaming RPCs"
+  - "Always — the framework classifies it as a transient error identical to UNAVAILABLE and retries it by default"
+  - "Never — it is defined as strictly non-retryable and is permanently excluded from every retry policy"
+  - "Only for streaming RPCs, since the retry framework replays unary deadline failures automatically instead"
   - "Only if the client extends the deadline; retrying with the same already-blown deadline is pointless"
   answer: 3
   explanation: |
@@ -734,10 +734,10 @@ questions:
     A service returns NOT_FOUND for a resource the caller isn't authorized to see, even
     though it exists. What is the rationale?
   options:
-  - "NOT_FOUND is faster to compute than PERMISSION_DENIED"
-  - "PERMISSION_DENIED cannot carry a message"
+  - "NOT_FOUND is cheaper to compute because it skips the authorization lookup that PERMISSION_DENIED requires"
+  - "The PERMISSION_DENIED code is defined to carry no grpc-message, so the client would receive an empty error"
   - "To avoid leaking the resource's existence to an unauthorized caller (a deliberate choice over the default missing/forbidden mapping)"
-  - "The gRPC spec forbids PERMISSION_DENIED on reads"
+  - "The gRPC specification explicitly forbids returning PERMISSION_DENIED on any read-only method"
   answer: 2
   explanation: |
     Returning PERMISSION_DENIED would confirm the resource exists. Some services
@@ -753,10 +753,10 @@ questions:
     What is the intended role of the status message (as opposed to the code and
     details)?
   options:
-  - "A machine-readable key clients branch on"
+  - "A stable machine-readable key that clients are expected to switch on for programmatic branching logic"
   - "A free-form, human-oriented description for logs/debugging, not for programmatic branching"
-  - "A required retry delay in milliseconds"
-  - "The serialized google.rpc.Status"
+  - "A mandatory retry delay in milliseconds that the client must wait before re-issuing the request"
+  - "The base64-encoded serialized google.rpc.Status carrying the full repeated details list"
   answer: 1
   explanation: |
     The message is descriptive text meant for humans (logs, debugging). Programmatic
@@ -770,10 +770,10 @@ questions:
   question: |
     Which standard error detail is the natural companion to a FAILED_PRECONDITION status?
   options:
-  - "BadRequest"
+  - "BadRequest (listing the per-field violations that failed validation)"
   - "PreconditionFailure (type/subject/description of the failed precondition)"
-  - "QuotaFailure"
-  - "RequestInfo"
+  - "QuotaFailure (naming the subjects whose per-user quota was exceeded)"
+  - "RequestInfo (echoing the request id and serving-data correlation token)"
   answer: 1
   explanation: |
     PreconditionFailure describes which precondition(s) failed (type, subject,
@@ -823,10 +823,10 @@ questions:
     A client receives RESOURCE_EXHAUSTED with a RetryInfo detail specifying
     retry_delay=2s. What is the recommended client behaviour?
   options:
-  - "Ignore RetryInfo and retry immediately"
-  - "Treat it as non-retryable and fail permanently"
+  - "Discard the RetryInfo detail entirely and re-issue the identical request with zero delay"
+  - "Treat RESOURCE_EXHAUSTED as strictly non-retryable and surface a permanent failure to the caller"
   - "Honor the server-provided retry_delay (wait ~2s) rather than using its own backoff"
-  - "Downgrade the connection and reconnect"
+  - "Tear down the HTTP/2 connection and reconnect before immediately re-sending the request"
   answer: 2
   explanation: |
     When the server provides RetryInfo.retry_delay, well-behaved clients should respect
@@ -841,9 +841,9 @@ questions:
     Why should DebugInfo (stack entries + detail) generally be avoided in production
     error responses?
   options:
-  - "It is not a valid error detail type"
-  - "It forces the status code to become INTERNAL"
-  - "Clients cannot parse it"
+  - "It is not a recognized standard error detail type, so generic client libraries reject it outright"
+  - "Attaching it rewrites the grpc-status code to INTERNAL regardless of the handler's original outcome"
+  - "Clients have no way to parse or unpack it from the grpc-status-details-bin trailer at all"
   - "It can leak internal implementation details to clients and bloat trailers; it is intended for debugging, not production clients"
   answer: 3
   explanation: |

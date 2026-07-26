@@ -43,9 +43,9 @@ questions:
     question: |
       Where does the final gRPC status code (grpc-status) travel on the wire?
     options:
-      - "In the HTTP/2 :status pseudo-header"
+      - "In the HTTP/2 :status pseudo-header of the opening HEADERS frame"
       - "In the initial response headers, before the message"
-      - "Inside the protobuf response message itself"
+      - "Inside a dedicated status field of the protobuf response message"
       - "In the trailing metadata (HTTP/2 trailers), after the response messages"
     answer: 3
     explanation: |
@@ -62,9 +62,9 @@ questions:
       On a fully successful unary RPC, where is grpc-status: 0 sent?
     options:
       - "In the trailing metadata, just like on failure"
-      - "It is not sent at all on success"
-      - "In the initial response headers"
-      - "In the HTTP/2 :status header as 200"
+      - "It is omitted entirely and only sent on failure"
+      - "In the initial response headers, before the payload"
+      - "In the HTTP/2 :status header, set to 200 for success"
     answer: 0
     explanation: |
       The status code always travels in the trailers, even on success (grpc-status: 0).
@@ -129,10 +129,10 @@ questions:
     question: |
       Why can't an application set a metadata key like :authority or :path?
     options:
-      - "They are too long for HPACK compression"
+      - "They exceed the HPACK dynamic-table size limit and get dropped"
       - "They are HTTP/2 pseudo-headers, reserved and managed by the transport"
-      - "They must be base64-encoded first"
-      - "They are only valid on streaming RPCs"
+      - "They must be base64-encoded with a -bin suffix before sending"
+      - "They are only valid on streaming RPCs, not unary calls"
     answer: 1
     explanation: |
       Keys starting with a colon are HTTP/2 pseudo-headers (:method, :scheme, :path,
@@ -147,9 +147,9 @@ questions:
       When is client request (initial) metadata sent relative to the request message?
     options:
       - "Before the first request message, in the HEADERS frame that opens the stream"
-      - "After the last request message, in the trailers"
-      - "Interleaved with each request message"
-      - "Only if the server explicitly asks for it"
+      - "After the last request message, appended into the closing trailers frame"
+      - "Interleaved, with a small metadata block preceding each request message"
+      - "Only after the server explicitly requests it via a response header"
     answer: 0
     explanation: |
       Request metadata is sent in the HEADERS frame that opens the HTTP/2 stream,
@@ -164,10 +164,10 @@ questions:
       For a client-streaming RPC, can the client add new INITIAL metadata after sending
       the first message?
     options:
-      - "Yes, before each message"
-      - "Yes, but only binary metadata"
+      - "Yes, a fresh HEADERS frame is emitted before each request message"
+      - "Yes, but only binary (-bin) metadata keys can be appended mid-stream"
       - "No; initial metadata is sent once when the stream opens and cannot be added later"
-      - "Only if the server sends its headers first"
+      - "Only if the server flushes its response headers back first"
     answer: 2
     explanation: |
       Initial request metadata is sent once, when the stream opens. You cannot add
@@ -182,10 +182,10 @@ questions:
       A server sets some response header metadata, sends the first response message,
       then tries to add another header. What happens?
     options:
-      - "The new header is merged into the already-sent initial metadata"
+      - "The new header is silently merged into the already-sent initial metadata"
       - "The new header cannot be added to initial metadata; only trailers can carry more"
-      - "The RPC fails with INTERNAL"
-      - "The client retroactively receives both headers"
+      - "The RPC aborts immediately with an INTERNAL status returned to the client"
+      - "The client retroactively receives both headers once the stream closes"
     answer: 1
     explanation: |
       Initial (header) metadata is flushed and frozen once the first message is written
@@ -200,9 +200,9 @@ questions:
       A gRPC call is rejected by an auth interceptor before any message is produced.
       What does the response look like on the wire?
     options:
-      - "Initial headers, an empty message, then trailers"
-      - "An HTTP 401 with no gRPC headers"
-      - "A RST_STREAM frame with no status"
+      - "Initial headers, then a zero-length DATA frame, then trailers with the status"
+      - "An HTTP 401 response carrying no grpc-status or grpc-message headers at all"
+      - "A bare RST_STREAM frame that closes the stream with no gRPC status attached"
       - "A Trailers-Only response: a single HEADERS frame with HTTP status plus grpc-status/grpc-message and END_STREAM"
     answer: 3
     explanation: |
@@ -235,9 +235,9 @@ questions:
       What protects the confidentiality of metadata values in transit?
     options:
       - "Only the transport (TLS); metadata itself provides no confidentiality"
-      - "Metadata is always encrypted by gRPC independent of transport"
-      - "Base64 encoding of -bin values"
-      - "HPACK header compression"
+      - "gRPC always encrypts metadata with its own cipher, independent of the transport"
+      - "The base64 encoding applied to -bin metadata values scrambles them in transit"
+      - "HPACK header compression obscures the header bytes enough to protect them"
     answer: 0
     explanation: |
       Metadata is only protected by the transport (TLS). Metadata itself is not
@@ -269,9 +269,9 @@ questions:
     question: |
       Can a single gRPC metadata key have multiple values?
     options:
-      - "No, keys are unique like a map"
-      - "Only binary keys can repeat"
-      - "Only on the server side"
+      - "No, each key is unique like a plain map and later values overwrite earlier ones"
+      - "Only binary (-bin) keys are allowed to repeat with more than one value"
+      - "Only on the server side, where response trailers may duplicate keys"
       - "Yes; metadata is a multimap, so a key may map to multiple values"
     answer: 3
     explanation: |
@@ -302,9 +302,9 @@ questions:
       What is a gRPC interceptor?
     options:
       - "Middleware that sits between the transport and application code and can observe or modify every RPC"
-      - "A tool that generates stubs from a .proto file"
-      - "A load balancer that routes RPCs to backends"
-      - "A compression codec applied to messages"
+      - "A code-generation tool that emits client and server stubs from a .proto file"
+      - "A load balancer that routes incoming RPCs across a pool of backend servers"
+      - "A compression codec that gzip-encodes message payloads before they hit the wire"
     answer: 0
     explanation: |
       An interceptor is gRPC's middleware: it wraps each RPC, allowing you to inspect
@@ -318,10 +318,10 @@ questions:
     question: |
       How many interceptor types does gRPC provide across sides and call shapes?
     options:
-      - "Two: client and server"
+      - "Two: a client-side interceptor and a server-side interceptor"
       - "Four: client-unary, client-stream, server-unary, server-stream"
-      - "Three: request, response, error"
-      - "One generic interceptor for everything"
+      - "Three: one each for the request, response, and error phases"
+      - "One generic interceptor applied uniformly to every call shape"
     answer: 1
     explanation: |
       There are four interceptor types: the two sides (client, server) times the two
@@ -337,9 +337,9 @@ questions:
       choose to call?
     options:
       - "The handler — ultimately the service method implementation"
-      - "The invoker that sends the RPC over the wire"
-      - "The channel's subchannel picker"
-      - "The protobuf marshaller"
+      - "The invoker that marshals the request and sends the RPC over the wire"
+      - "The channel's subchannel picker that chooses a backend connection"
+      - "The protobuf marshaller that decodes the incoming request bytes"
     answer: 0
     explanation: |
       A server-side interceptor receives the handler (the "next" toward your service
@@ -371,10 +371,10 @@ questions:
       A developer's streaming interceptor logs a line, but it only runs once no matter
       how many messages flow. Why, and what is the fix?
     options:
-      - "Streaming interceptors are disabled by default; enable them in the channel"
-      - "Logging is rate-limited by gRPC; raise the limit"
+      - "Streaming interceptors are disabled by default; you must enable them explicitly via a channel option"
+      - "gRPC rate-limits log output from interceptors; raise the internal logging quota to see every line"
       - "The interceptor body runs once at stream setup; per-message logic must wrap SendMsg/RecvMsg on the stream object"
-      - "You must convert the RPC to unary to log per message"
+      - "You must first convert the streaming RPC into a unary call to log each message separately"
     answer: 2
     explanation: |
       A streaming interceptor runs once at stream setup. To observe individual
@@ -406,10 +406,10 @@ questions:
       How does an auth interceptor reject an unauthenticated call before any business
       logic runs?
     options:
-      - "It sets a flag the handler must check"
+      - "It sets a rejected flag in the context that the service handler is required to check"
       - "It returns an error without calling handler/invoker, short-circuiting the chain"
-      - "It closes the TCP connection"
-      - "It removes the authorization metadata"
+      - "It forcibly closes the underlying TCP connection to abort the in-flight call"
+      - "It strips the authorization metadata so the handler downstream sees no credentials"
     answer: 1
     explanation: |
       An interceptor that returns without calling handler/invoker short-circuits the
@@ -444,9 +444,9 @@ questions:
       Why is interceptor ordering a common footgun in grpc-java's
       ServerInterceptors.intercept(service, i1, i2, ...)?
     options:
-      - "Java runs interceptors concurrently"
-      - "Java ignores all but the first interceptor"
-      - "Java requires interceptors to be sorted alphabetically"
+      - "Java runs the listed interceptors concurrently on separate threads, so their order is nondeterministic"
+      - "Java silently ignores all but the first interceptor in the varargs list"
+      - "Java requires the interceptors to be sorted alphabetically by class name before they take effect"
       - "Java applies them so the LAST listed ends up outermost (reverse of intuition)"
     answer: 3
     explanation: |
@@ -498,9 +498,9 @@ questions:
       interceptor?
     options:
       - "The built-in service-config retry policy (per gRFC A6)"
-      - "A custom streaming interceptor that replays messages"
-      - "Retrying inside the server handler"
-      - "Using channel keepalive to retry"
+      - "A custom streaming interceptor that buffers and replays the sent messages on failure"
+      - "Retrying inside the server handler by re-dispatching the request internally"
+      - "Configuring channel keepalive pings to automatically re-issue the failed call"
     answer: 0
     explanation: |
       gRPC's built-in retry policy configured via service config (gRFC A6) is preferred
@@ -533,9 +533,9 @@ questions:
       An org wants uniform mTLS and authorization policy applied to all services
       regardless of language, without changing app code. Where does this best live?
     options:
-      - "In a server interceptor per service"
-      - "In a client-side unary interceptor"
-      - "In the .proto definitions"
+      - "In a server interceptor added separately to each service in every language"
+      - "In a client-side unary interceptor compiled into every calling application"
+      - "In the .proto definitions, declared with custom options on each service"
       - "In a proxy/mesh filter (e.g., Envoy sidecar) outside the process"
     answer: 3
     explanation: |
@@ -551,10 +551,10 @@ questions:
       What is the difference between channel (transport) credentials and
       CallCredentials?
     options:
-      - "Channel creds are per-RPC; call creds set up TLS once"
+      - "Channel creds are applied per-RPC as metadata, while CallCredentials establish the TLS handshake once at startup"
       - "Channel creds establish the secure channel (TLS/mTLS); CallCredentials are per-RPC, applied as metadata on every call"
-      - "They are two names for the same thing"
-      - "Channel creds are for servers; call creds are for load balancers"
+      - "They are two interchangeable names for the same configuration object in the gRPC credentials API"
+      - "Channel creds apply only on the server side, while call creds are used exclusively by intermediary load balancers"
     answer: 1
     explanation: |
       Channel/transport credentials establish the secure channel (TLS/mTLS), set once.
@@ -569,9 +569,9 @@ questions:
       Why do CallCredentials require a secure (TLS) transport by default?
     options:
       - "Because sending a bearer token over cleartext would leak it, so gRPC blocks per-call creds on plaintext by default"
-      - "Because base64 encoding needs TLS"
-      - "Because TLS is required for HTTP/2 multiplexing"
-      - "Because CallCredentials only work with mTLS client certs"
+      - "Because the base64 encoding of metadata values can only be performed once a TLS session key is negotiated"
+      - "Because TLS is a hard prerequisite for HTTP/2 stream multiplexing, which per-call creds depend on"
+      - "Because CallCredentials are implemented on top of, and only function with, mTLS client certificates"
     answer: 0
     explanation: |
       CallCredentials typically carry a bearer token in metadata. Sending it over an
@@ -587,9 +587,9 @@ questions:
       For injecting a refreshing OAuth token as the authorization header on every RPC,
       what is the framework-blessed mechanism?
     options:
-      - "A server-side interceptor"
-      - "Setting grpc-timeout"
-      - "A ServerTransportFilter"
+      - "A server-side interceptor that injects the token into each inbound request's metadata"
+      - "Setting the reserved grpc-timeout header, which the framework repurposes to carry the token"
+      - "A ServerTransportFilter that attaches the authorization header on every new connection"
       - "CallCredentials (PerRPCCredentials), which the library applies as metadata and can refresh"
     answer: 3
     explanation: |
@@ -604,10 +604,10 @@ questions:
     question: |
       In grpc-go, how does a server handler read incoming request metadata?
     options:
-      - "From a global registry"
+      - "From a process-wide global registry keyed by the current goroutine id"
       - "From the context via metadata.FromIncomingContext(ctx)"
-      - "From the request message fields"
-      - "From os.Getenv"
+      - "From reserved fields automatically injected into the request message struct"
+      - "From environment variables read via os.Getenv at the start of the handler"
     answer: 1
     explanation: |
       In Go, metadata rides on context.Context. The server reads it with
@@ -657,9 +657,9 @@ questions:
       line to include the request id. How should they be ordered?
     options:
       - "request-id outside (before) logging, so the id is set before logs are emitted"
-      - "Logging outside request-id, so logs run first"
-      - "Order does not matter"
-      - "They must be the same interceptor as validation"
+      - "Logging outside request-id, so logs run first and pick up the id later"
+      - "Order does not matter because gRPC merges the interceptor context automatically"
+      - "They must be fused into the same interceptor as validation to share one context"
     answer: 0
     explanation: |
       The request-id interceptor must run before the logging interceptor so the id is
@@ -709,10 +709,10 @@ questions:
       Why is trailing metadata a natural place to report per-call stats like elapsed
       time or cost?
     options:
-      - "Trailers are sent before the message, so stats arrive early"
-      - "Trailers are the only encrypted headers"
+      - "Trailers are sent before the first message, so per-call stats arrive early"
+      - "Trailers are the only headers gRPC encrypts, so stats stay confidential there"
       - "Trailers are sent after all messages, so end-of-call values (timing, cost) are known"
-      - "Trailers can be modified by the client"
+      - "Trailers can be freely modified by the client after the call to append stats"
     answer: 2
     explanation: |
       Trailing metadata is sent after the response messages, so values known only at
@@ -727,8 +727,8 @@ questions:
       A team stores a raw protobuf blob in a metadata key named "ctx" (no suffix) and
       sees corrupted headers. What is the correct fix?
     options:
-      - "Rename the key to grpc-ctx"
-      - "Gzip the value first"
+      - "Rename the key to grpc-ctx to let gRPC store the raw binary blob"
+      - "Gzip the value first so it fits into a plain ASCII metadata header"
       - "Rename the key to ctx-bin so the library base64-encodes the bytes"
       - "Split the value across multiple ASCII headers manually"
     answer: 2
@@ -745,10 +745,10 @@ questions:
       A gRPC call fails with grpc-status 7 (PERMISSION_DENIED). What is the HTTP-level
       :status likely to be?
     options:
-      - "403"
-      - "500"
+      - "403 — gRPC maps the PERMISSION_DENIED code straight onto the HTTP 403 status"
+      - "500 — a denied call is surfaced to the HTTP layer as a 500 server error"
       - "200 — the HTTP status is typically 200 and the real result is in grpc-status"
-      - "401"
+      - "401 — the HTTP status mirrors the gRPC code, so a denial becomes a 401"
     answer: 2
     explanation: |
       For a normal gRPC response the HTTP :status is 200 regardless of the gRPC outcome;
@@ -762,10 +762,10 @@ questions:
     question: |
       How do you combine mTLS transport security with a per-RPC bearer token in gRPC?
     options:
-      - "You cannot combine them; pick one"
-      - "Put the token in the TLS SNI field"
+      - "You cannot combine them; a channel is either mTLS-secured or token-authenticated"
+      - "Put the bearer token in the TLS SNI field so the handshake carries it alongside the cert"
       - "Compose channel (transport) credentials with call credentials (e.g. CompositeChannelCredentials)"
-      - "Put the client cert in a -bin metadata key"
+      - "Put the client certificate into a -bin metadata key so the token and cert travel together"
     answer: 2
     explanation: |
       gRPC lets you compose channel credentials (mTLS) with call credentials (per-RPC
@@ -798,9 +798,9 @@ questions:
       How does gRPC transmit rich error details (a google.rpc.Status with details) on
       the wire?
     options:
-      - "As plaintext JSON in grpc-message"
-      - "In a new DATA frame after the trailers"
-      - "It cannot; only a code and string message are supported"
+      - "As a plaintext JSON blob packed into the grpc-message trailer value"
+      - "In an extra DATA frame emitted immediately after the closing trailers frame"
+      - "It cannot; only a numeric code and a short string message are ever supported"
       - "In the grpc-status-details-bin trailer, a base64-encoded google.rpc.Status"
     answer: 3
     explanation: |
@@ -816,10 +816,10 @@ questions:
       In a grpc-go client unary interceptor, how do you add an outgoing header before
       calling the invoker?
     options:
-      - "Modify the reply object"
-      - "Set it on the ClientConn permanently"
+      - "Mutate the reply object so gRPC copies its fields back into the request headers"
+      - "Set the header once on the ClientConn so it is attached permanently to every RPC"
       - "metadata.AppendToOutgoingContext(ctx, key, value) then invoker(ctx, ...)"
-      - "Return the metadata from the interceptor"
+      - "Return the metadata from the interceptor and let gRPC merge it into the outgoing call"
     answer: 2
     explanation: |
       A client interceptor augments the outgoing context with
@@ -835,9 +835,9 @@ questions:
       cross-cutting concern?
     options:
       - "When the policy must apply uniformly across all languages and services"
-      - "When you want to avoid touching application code"
+      - "When you want to avoid touching application code and keep the logic fully out of process"
       - "When you need the decoded protobuf message or per-RPC metadata inside your service"
-      - "Never; mesh filters always supersede interceptors"
+      - "Never; mesh filters always supersede interceptors and make them redundant everywhere"
     answer: 2
     explanation: |
       Use an interceptor when the logic needs the decoded message or per-RPC metadata
@@ -851,9 +851,9 @@ questions:
     question: |
       Which belongs in the protobuf message rather than in metadata?
     options:
-      - "A distributed-tracing context header"
-      - "The bearer auth token"
-      - "The request correlation id"
+      - "A distributed-tracing context header propagated across services"
+      - "The bearer auth token that the server interceptor validates per call"
+      - "The request correlation id used to stitch logs across the call path"
       - "A domain field like the order's total amount"
     answer: 3
     explanation: |
@@ -868,10 +868,10 @@ questions:
     question: |
       What does the UnaryServerInfo passed to a server interceptor provide?
     options:
-      - "The client's IP address only"
+      - "The client's remote IP address only, with no method or service context"
       - "The full method name being invoked (e.g. /pkg.Service/Method)"
-      - "The negotiated TLS cipher"
-      - "The retry policy for the call"
+      - "The negotiated TLS cipher suite and protocol version for the connection"
+      - "The retry policy resolved from service config for this particular call"
     answer: 1
     explanation: |
       UnaryServerInfo carries the FullMethod name (e.g. /helloworld.Greeter/SayHello),
@@ -886,9 +886,9 @@ questions:
       For a distributed-tracing interceptor to measure the true end-to-end latency of an
       RPC including all other interceptors, where should it sit in the chain?
     options:
-      - "Innermost, closest to the handler"
-      - "It does not matter for latency"
-      - "It should be a separate transport filter only"
+      - "Innermost, closest to the handler, so the span times only the business logic"
+      - "It does not matter for latency because gRPC records the span duration itself"
+      - "It should be moved out into a separate transport filter that runs per connection"
       - "Outermost, so its span wraps every other interceptor and the handler"
     answer: 3
     explanation: |
@@ -923,9 +923,9 @@ questions:
       compression. What is the problem?
     options:
       - "grpc-encoding is a reserved grpc-* key managed by the framework's compression config, not settable as app metadata"
-      - "gzip is not a valid encoding"
-      - "Compression is only for streaming RPCs"
-      - "It must be a -bin key"
+      - "gzip is not a valid gRPC encoding, so only identity and deflate can be requested"
+      - "Compression is only ever applied to streaming RPCs, never to unary calls"
+      - "It must be renamed to a -bin key so the encoding value is base64-encoded first"
     answer: 0
     explanation: |
       grpc-encoding is a reserved grpc-* key managed by the framework based on
@@ -939,10 +939,10 @@ questions:
     question: |
       The interceptor chain is often described as an "onion." What does that mean?
     options:
-      - "Interceptors run in random order"
-      - "Only one interceptor executes per call"
+      - "Interceptors run in random order chosen freshly by gRPC on each call"
+      - "Only one interceptor from the chain actually executes per call, the rest are skipped"
       - "Each interceptor wraps the next; the outermost runs first inbound and last outbound"
-      - "Interceptors run on separate threads per layer"
+      - "Interceptors each run on a separate dedicated thread, one per onion layer"
     answer: 2
     explanation: |
       Interceptors nest like an onion: each wraps the next inner layer. The outermost

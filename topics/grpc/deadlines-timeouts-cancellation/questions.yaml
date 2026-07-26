@@ -12,7 +12,7 @@ questions:
     options:
       - "A deadline is an absolute point in time; a timeout is a relative duration"
       - "A deadline is a relative duration; a timeout is an absolute point in time"
-      - "They are exact synonyms in gRPC"
+      - "They are exact synonyms in gRPC with no behavioral difference at all"
       - "A deadline applies to streaming RPCs and a timeout to unary RPCs"
     answer: 0
     explanation: |
@@ -28,7 +28,7 @@ questions:
     question: |
       If a gRPC client sets no deadline on a call, what is the default behavior?
     options:
-      - "gRPC applies a default 30-second timeout"
+      - "gRPC applies a built-in default 30-second per-call timeout"
       - "The call fails immediately with DEADLINE_EXCEEDED"
       - "There is no deadline — the client can wait effectively forever"
       - "gRPC copies the connection's keepalive interval as the deadline"
@@ -64,10 +64,10 @@ questions:
       Per the gRPC-over-HTTP2 wire spec, what is the format of the `grpc-timeout`
       header value?
     options:
-      - "A floating-point number of seconds, e.g. 2.5"
-      - "An ISO-8601 duration string, e.g. PT2S"
+      - "A floating-point number of seconds with millisecond precision, e.g. 2.5"
+      - "An ISO-8601 duration string such as PT2S or PT0.5S per the spec"
       - "A positive integer of at most 8 digits followed by a single-letter unit code"
-      - "A 64-bit nanosecond count encoded as base64"
+      - "A 64-bit nanosecond count encoded as a base64 binary header value"
     answer: 2
     explanation: |
       The grammar is `TimeoutValue TimeoutUnit`, where TimeoutValue is a positive
@@ -137,9 +137,9 @@ questions:
       RPC observe?
     options:
       - "It also receives a DEADLINE_EXCEEDED status to return"
-      - "Nothing — the server has no way to know"
+      - "Nothing — the server has no way to learn the client gave up"
       - "Its RPC context is cancelled (the RPC appears as CANCELLED)"
-      - "The server process receives a SIGTERM"
+      - "The server process receives a SIGTERM from the gRPC runtime"
     answer: 2
     explanation: |
       From the server's side the deadline expiry manifests as its context being
@@ -174,10 +174,10 @@ questions:
       In a Go gRPC handler, what is the most common mistake that BREAKS deadline
       propagation to downstream calls?
     options:
-      - "Calling defer cancel() on the inbound context"
-      - "Reusing the same channel for multiple downstream calls"
+      - "Calling defer cancel() on the inbound context before the downstream call returns"
+      - "Reusing the same shared channel connection for all of the downstream calls"
       - "Passing context.Background() to downstream stub calls instead of the inbound ctx"
-      - "Setting a deadline on the client stub"
+      - "Setting an explicit per-call deadline on the client stub for the downstream RPC"
     answer: 2
     explanation: |
       Passing `context.Background()` gives the downstream call a brand-new INFINITE
@@ -193,9 +193,9 @@ questions:
       Why does gRPC propagate an absolute deadline down a call chain instead of letting
       each hop set its own fresh relative timeout?
     options:
-      - "To reduce the number of HTTP/2 headers sent"
+      - "To reduce the number of HTTP/2 header frames sent on each hop of the chain"
       - "So all hops share one budget and no inner call can outlive the original caller"
-      - "Because relative timeouts are not supported over HTTP/2"
+      - "Because relative per-hop timeouts are not representable over the HTTP/2 transport"
       - "To let each service independently extend the total time allowed"
     answer: 1
     explanation: |
@@ -212,9 +212,9 @@ questions:
       A long-running gRPC server handler is a tight loop that never inspects its
       context. The client cancels the RPC. What happens to the handler?
     options:
-      - "gRPC immediately terminates the handler thread"
-      - "The handler panics with a CancelledException"
-      - "The handler is paused until the client reconnects"
+      - "gRPC immediately terminates the handler's thread and reclaims its stack"
+      - "The handler panics with a CancelledException raised by the runtime"
+      - "The handler is paused and later resumed if the client ever reconnects"
       - "The handler keeps running — cancellation is cooperative and can't interrupt it"
     answer: 3
     explanation: |
@@ -231,10 +231,10 @@ questions:
       A client is consuming a server-streaming RPC (a live feed) and the user closes the
       view. What is the idiomatic way to stop the stream?
     options:
-      - "Stop calling Recv() and let the stream time out"
-      - "Close the whole channel to the server"
+      - "Stop calling Recv() and let the idle stream eventually time out on its own"
+      - "Close the whole underlying channel connection to the server to stop the feed"
       - "Cancel the call's context, which tears down the stream and fires ctx.Done() on the server"
-      - "Send an empty request message to signal completion"
+      - "Send an empty request message on the stream to signal orderly completion"
     answer: 2
     explanation: |
       Cancelling the context/call ends the stream in both directions via an HTTP/2
@@ -249,10 +249,10 @@ questions:
     question: |
       Which of the following does NOT trigger cancellation of a gRPC RPC?
     options:
-      - "The client explicitly calls cancel()"
-      - "The deadline expires"
+      - "The client explicitly calls cancel() on the pending call"
+      - "The call's absolute deadline expires before it completes"
       - "A successful response is returned normally"
-      - "The client disconnects or an I/O error occurs"
+      - "The client disconnects or an underlying I/O transport error occurs"
     answer: 2
     explanation: |
       A normal successful completion isn't a cancellation. Cancellation is triggered by
@@ -267,10 +267,10 @@ questions:
       When a server's RPC context is cancelled, what happens to the outbound RPCs it
       made from that context (in Go/Java/C++)?
     options:
-      - "They continue independently until they finish"
-      - "They are retried on a new connection"
+      - "They continue independently on their own budget until they finish"
+      - "They are transparently retried once on a freshly dialed connection"
       - "They are automatically cancelled, propagating the teardown downstream"
-      - "They are converted to fire-and-forget calls"
+      - "They are converted into fire-and-forget calls that ignore the response"
     answer: 2
     explanation: |
       Because the server is also a client, Go/Java/C++ auto-cancel outgoing RPCs made
@@ -284,10 +284,10 @@ questions:
     question: |
       What does the per-RPC Context object carry in gRPC?
     options:
-      - "Only the request payload bytes"
+      - "Only the serialized request payload bytes for the call"
       - "The deadline, cancellation signal, and request-scoped metadata/values"
-      - "The TCP congestion window and MSS"
-      - "The service's entire configuration"
+      - "The connection's TCP congestion window and negotiated MSS"
+      - "The service's entire channel and server configuration"
     answer: 1
     explanation: |
       The context is the single per-call carrier for the deadline (remaining budget),
@@ -303,9 +303,9 @@ questions:
       In Go, why should you always call `defer cancel()` after creating a context with
       `context.WithTimeout`?
     options:
-      - "It sends a cancellation to the server even on success"
-      - "It is required or the RPC will not start"
-      - "It converts the deadline into a keepalive interval"
+      - "It sends an explicit cancellation to the server even on the success path"
+      - "It is strictly required or the RPC will refuse to start at all"
+      - "It converts the remaining deadline into the channel's keepalive interval"
       - "It releases the associated timer and context resources, preventing a leak"
     answer: 3
     explanation: |
@@ -320,10 +320,10 @@ questions:
     question: |
       Which statement about the gRPC context/Context object is correct?
     options:
-      - "You mutate a single context in place to add a deadline"
+      - "You mutate a single long-lived context in place to attach a deadline and cancel func"
       - "You derive a child context (adding deadline/cancel); cancelling a parent cancels its children"
-      - "Contexts are shared globally across all RPCs in a process"
-      - "A context can only carry a deadline OR metadata, never both"
+      - "Contexts are shared globally across every concurrent RPC running in the process"
+      - "A context can only carry a deadline OR request metadata, but never both at once"
     answer: 1
     explanation: |
       Contexts are immutable/derived: you create a child that adds a deadline or cancel
@@ -338,7 +338,7 @@ questions:
       When choosing deadline values across a call chain with a 300ms edge SLO, what is
       the correct approach?
     options:
-      - "Give every hop its own fresh 300ms deadline"
+      - "Give every hop its own fresh, independent 300ms deadline"
       - "Set no deadline on inner hops so they never fail early"
       - "Set inner hops to 300ms times the number of hops"
       - "Treat 300ms as the total budget that inner hops must fit inside"
@@ -355,10 +355,10 @@ questions:
     question: |
       You should size a per-hop deadline based primarily on the downstream service's:
     options:
-      - "Mean (average) latency"
-      - "Minimum observed latency"
+      - "Mean (average) observed request latency"
+      - "Minimum observed successful call latency"
       - "p99 latency plus some headroom"
-      - "TCP round-trip time"
+      - "Underlying TCP round-trip time"
     answer: 2
     explanation: |
       Sizing on the p99 (plus headroom) accommodates legitimately slow-but-fine calls.
@@ -390,9 +390,9 @@ questions:
     question: |
       What is the purpose of gRPC keepalive (gRFC A8)?
     options:
-      - "To bound how long an individual RPC may run"
-      - "To retry failed RPCs automatically"
-      - "To compress headers on idle streams"
+      - "To bound how long an individual RPC may run before failing it"
+      - "To automatically retry failed RPCs on a freshly dialed connection"
+      - "To compress accumulated HPACK header state on idle open streams"
       - "To send periodic HTTP/2 PINGs detecting a dead/silently-dropped connection"
     answer: 3
     explanation: |
@@ -408,10 +408,10 @@ questions:
     question: |
       What can happen if a gRPC client configures overly aggressive keepalive PINGs?
     options:
-      - "The client's RPC deadlines are automatically shortened"
+      - "The client's outstanding RPC deadlines are proportionally shortened"
       - "The server may send GOAWAY / ENHANCE_YOUR_CALM, treating the PINGs as abusive"
-      - "The channel silently upgrades to HTTP/3"
-      - "All streams on the connection get a fresh deadline"
+      - "The channel silently negotiates an upgrade to the HTTP/3 transport"
+      - "All streams multiplexed on the connection are granted a fresh deadline"
     answer: 1
     explanation: |
       Servers enforce a minimum PING interval; a client that PINGs too frequently can be
@@ -426,10 +426,10 @@ questions:
       At the HTTP/2 level, how is a single RPC torn down when its deadline expires,
       without disturbing other RPCs on the same connection?
     options:
-      - "The whole TCP connection is closed"
-      - "A GOAWAY frame is sent for the connection"
+      - "The whole underlying TCP connection is torn down and closed"
+      - "A connection-level GOAWAY frame is sent to drain every stream"
       - "An RST_STREAM frame is sent for that RPC's stream"
-      - "The server stops sending WINDOW_UPDATE frames"
+      - "The server stops sending WINDOW_UPDATE frames for the flow"
     answer: 2
     explanation: |
       One RPC maps to one HTTP/2 stream, so an RST_STREAM tears down just that stream;
@@ -444,10 +444,10 @@ questions:
       Deadline propagation does NOT subtract in-flight network transit time when
       computing the downstream budget. What is the practical consequence?
     options:
-      - "Downstream calls can outlive the original client deadline"
+      - "Downstream calls can routinely outlive the original client's absolute deadline"
       - "Propagation is slightly generous but never exceeds the original absolute deadline"
-      - "The deadline is doubled at each hop"
-      - "The server ignores the deadline entirely"
+      - "The remaining deadline is silently doubled at every additional hop"
+      - "The receiving server ignores the propagated deadline header entirely"
     answer: 1
     explanation: |
       Not subtracting transit time makes the downstream budget slightly larger than the
@@ -480,10 +480,10 @@ questions:
       What is the recommended behavior for a long-running gRPC server handler with
       respect to cancellation and deadlines?
     options:
-      - "Ignore the context; gRPC will stop the handler automatically"
-      - "Set its own longer deadline to override the client's"
+      - "Ignore the context, since the gRPC runtime will forcibly stop the handler thread"
+      - "Set its own longer server-side deadline that overrides the client's remaining budget"
       - "Periodically check the context and stop processing if it is cancelled/expired"
-      - "Block on I/O so the OS handles cancellation"
+      - "Block on synchronous I/O so the kernel delivers cancellation as a signal"
     answer: 2
     explanation: |
       Because gRPC won't interrupt the handler, a well-behaved long-running handler
@@ -498,9 +498,9 @@ questions:
       Why must you leave budget headroom in a parent deadline if the client uses gRPC
       retries?
     options:
-      - "Retries always double the deadline automatically"
-      - "Retries disable deadline propagation"
-      - "The retry policy overrides the deadline entirely"
+      - "Each retry attempt automatically doubles the parent deadline to make room"
+      - "Enabling retries disables deadline propagation for the whole call chain"
+      - "The configured retry policy silently overrides the parent deadline entirely"
       - "A single attempt plus backoff must fit inside the parent budget, or the retry never runs"
     answer: 3
     explanation: |
@@ -516,10 +516,10 @@ questions:
     question: |
       In gRPC-Java, where is a deadline typically applied to an RPC?
     options:
-      - "On the ManagedChannel via a global setting"
-      - "In the .proto file as a service option"
+      - "On the ManagedChannel via a global builder setting applied to all calls"
+      - "In the .proto file as a per-method service option compiled into the stub"
       - "On the stub, e.g. stub.withDeadlineAfter(2, TimeUnit.SECONDS)"
-      - "On the protobuf message as a field annotation"
+      - "On the protobuf request message as a generated deadline field annotation"
     answer: 2
     explanation: |
       In Java, deadlines are set per-call on the stub with `withDeadlineAfter(...)` (or
@@ -534,9 +534,9 @@ questions:
       In gRPC-Python, how does a client typically bound an RPC's duration?
     options:
       - "By passing a timeout=<seconds> keyword argument to the stub call"
-      - "By setting an environment variable GRPC_DEADLINE"
-      - "By editing the channel's global config"
-      - "Python does not support deadlines"
+      - "By exporting a GRPC_DEADLINE environment variable read at channel creation"
+      - "By editing the channel's global config to set a process-wide default timeout"
+      - "Python's gRPC client has no per-call deadline support at all"
     answer: 0
     explanation: |
       Python's stub methods accept a `timeout` keyword (a relative duration in seconds),
@@ -551,8 +551,8 @@ questions:
       In which languages is gRPC deadline propagation enabled by default (versus opt-in)?
     options:
       - "Enabled by default in Go and Java; opt-in in C++"
-      - "Opt-in everywhere"
-      - "Enabled only in Python"
+      - "Opt-in everywhere, requiring an explicit interceptor in every language"
+      - "Enabled only in Python; all other language stubs must enable it manually"
       - "Enabled by default in C++; opt-in in Go and Java"
     answer: 0
     explanation: |
@@ -568,10 +568,10 @@ questions:
       A→B→C chain has a 2s edge deadline. A spends 0.5s, B spends 0.3s, then C is still
       working when the shared deadline hits. What is the observed outcome?
     options:
-      - "Only C fails; A and B return partial success"
+      - "Only C fails; A and B still return partial success to the caller"
       - "C fails DEADLINE_EXCEEDED, its cancellation unwinds B then A, and the client gets DEADLINE_EXCEEDED"
-      - "Each service independently retries with a fresh deadline"
-      - "B and C keep running; only A's client times out"
+      - "Each service independently retries the failed hop with a fresh 2s deadline"
+      - "B and C keep running to completion; only A's edge client times out"
     answer: 1
     explanation: |
       The shared absolute deadline fires for C first (it holds the tightest remaining
@@ -586,9 +586,9 @@ questions:
       When a client calls the cancel API on an RPC, what does the reason string it
       provides do?
     options:
-      - "It is sent to the server as the grpc-status message"
-      - "It changes the status code returned to the server"
-      - "It is ignored entirely"
+      - "It is forwarded to the server as the grpc-message trailer text"
+      - "It changes the numeric status code the server observes on cancel"
+      - "It is ignored entirely and discarded by the client runtime"
       - "It surfaces in a client-side exception and/or log describing why the call was cancelled"
     answer: 3
     explanation: |
@@ -603,10 +603,10 @@ questions:
     question: |
       A "connection (dial) timeout" in gRPC bounds which operation?
     options:
-      - "How long a single RPC may run"
-      - "How long the channel may stay idle"
+      - "How long a single in-flight RPC may run before it is failed"
+      - "How long the channel may stay idle before being torn down"
       - "How long establishing the connection (TCP + TLS handshake) may take"
-      - "How long the server may process a request"
+      - "How long the server handler may spend processing one request"
     answer: 2
     explanation: |
       A dial/connection timeout bounds only connection establishment (handshake), not
@@ -621,10 +621,10 @@ questions:
       What is the risk of a server that ignores its cancelled context after a client's
       deadline expires?
     options:
-      - "The client automatically retries forever"
-      - "The connection is upgraded to a new protocol"
+      - "The client automatically retries the same call forever in a loop"
+      - "The underlying connection is silently upgraded to a newer protocol"
       - "It keeps doing 'zombie work' — burning CPU and holding DB connections for a result no one will read"
-      - "The metadata is corrupted on subsequent calls"
+      - "Request metadata becomes corrupted on all subsequent calls on the channel"
     answer: 2
     explanation: |
       Since the client has already given up, any continued processing is wasted: it
@@ -640,9 +640,9 @@ questions:
       Where is the best place to set the primary deadline for a request that flows
       through many services?
     options:
-      - "At the deepest downstream service"
-      - "Independently at every hop with generous values"
-      - "Only on the database client at the bottom"
+      - "At the deepest downstream service, where the real work happens"
+      - "Independently at every hop, each with its own generous fresh value"
+      - "Only on the database client at the very bottom of the call chain"
       - "At the edge / entry handler, based on end-user tolerance, then let it propagate inward"
     answer: 3
     explanation: |
@@ -660,8 +660,8 @@ questions:
     options:
       - "In the initial response HEADERS frame"
       - "In the HTTP/2 trailers (trailing HEADERS)"
-      - "In the DATA frame payload"
-      - "In a separate SETTINGS frame"
+      - "In the DATA frame payload after the message bytes"
+      - "In a dedicated SETTINGS frame sent after the last DATA frame"
     answer: 1
     explanation: |
       gRPC uses HTTP/2 trailers to carry `grpc-status` (and optional `grpc-message`),
@@ -677,9 +677,9 @@ questions:
       A client wants a 100,000,000-second deadline (~3 years, hypothetically). Given the
       grpc-timeout TimeoutValue is capped at 8 digits, what must the library do?
     options:
-      - "Truncate the value to 99999999 seconds"
-      - "Send the deadline as two headers"
-      - "Reject the call"
+      - "Silently truncate the value to the maximum 99999999 seconds and send that"
+      - "Split the deadline across two grpc-timeout headers the server sums together"
+      - "Reject the call locally with an INVALID_ARGUMENT before it leaves the client"
       - "Choose a coarser unit (e.g. minutes or hours) so the integer fits within 8 digits"
     answer: 3
     explanation: |
@@ -696,9 +696,9 @@ questions:
       exits promptly when the client cancels?
     options:
       - "stream.Context().Done()"
-      - "os.Interrupt"
-      - "a package-level global flag"
-      - "the channel's connectivity state"
+      - "the process-wide os.Interrupt signal channel from os/signal"
+      - "a package-level global boolean flag toggled by the recv goroutine"
+      - "the client channel's connectivity state reported by GetState()"
     answer: 0
     explanation: |
       The stream's context carries the cancellation/deadline for that RPC, so watching
@@ -712,10 +712,10 @@ questions:
     question: |
       How is a timeout converted into a deadline?
     options:
-      - "By subtracting it from the server's clock"
-      - "By multiplying it by the number of hops"
+      - "By subtracting it from the server's wall clock on receipt"
+      - "By multiplying it by the number of hops in the call chain"
       - "By adding the timeout to the current time when the call starts"
-      - "They cannot be converted"
+      - "They cannot be converted; a timeout and a deadline are unrelated primitives"
     answer: 2
     explanation: |
       deadline = now() + timeout, computed at call start. This is exactly what client
@@ -729,10 +729,10 @@ questions:
     question: |
       What invariant does deadline propagation guarantee for a downstream call?
     options:
-      - "It always completes faster than the parent"
+      - "It always completes strictly faster than the parent RPC that invoked it"
       - "Its effective deadline can never extend beyond the original caller's absolute deadline"
-      - "It is retried until the parent deadline"
-      - "It gets exactly half the parent's remaining time"
+      - "It is transparently retried by the runtime until the parent deadline is reached"
+      - "It receives exactly half of the parent's remaining budget at each successive hop"
     answer: 1
     explanation: |
       The core guarantee is that no downstream call can outlive the original caller's
@@ -746,9 +746,9 @@ questions:
     question: |
       What does a channel "idle timeout" control?
     options:
-      - "How long a single RPC may run before failing"
-      - "The maximum message size"
-      - "How often keepalive PINGs are sent during active RPCs"
+      - "How long a single in-flight RPC may run before the client fails it"
+      - "The maximum inbound message size the channel will accept per call"
+      - "How often keepalive PINGs are sent while RPCs are actively in flight"
       - "Whether to drop an unused connection to save resources when no RPCs are active"
     answer: 3
     explanation: |
@@ -764,10 +764,10 @@ questions:
       In a language where outgoing-RPC cancellation is NOT automatic, how does a server
       handler ensure downstream work is cancelled when its own RPC is cancelled?
     options:
-      - "It cannot; downstream calls always run to completion"
+      - "It cannot; downstream calls always run to completion once dispatched"
       - "By manually wiring its context's cancellation to propagate to outbound calls"
-      - "By closing the whole process"
-      - "By lowering the downstream deadline to zero at startup"
+      - "By closing the whole server process so the OS reaps the outbound sockets"
+      - "By lowering every downstream deadline to zero at channel startup time"
     answer: 1
     explanation: |
       Where propagation isn't automatic, the handler author must explicitly forward the
@@ -782,9 +782,9 @@ questions:
       Which statement correctly distinguishes a deadline from keepalive?
     options:
       - "A deadline governs one logical call and can span retries; keepalive detects dead connections"
-      - "A deadline detects dead connections; keepalive bounds RPC duration"
-      - "They are two names for the same setting"
-      - "Both operate on individual HTTP/2 streams identically"
+      - "A deadline detects dead connections via PINGs; keepalive bounds each RPC's duration"
+      - "They are two names for the same underlying channel configuration setting"
+      - "Both operate identically on individual HTTP/2 streams and share one timer"
     answer: 0
     explanation: |
       A deadline is an application-level bound on a logical call (which may include
@@ -798,10 +798,10 @@ questions:
     question: |
       When a deadline expires mid-RPC, who is notified?
     options:
-      - "Only the client"
-      - "Only the server"
+      - "Only the client, which fails locally while the server keeps running unaware"
+      - "Only the server, which then sends a status back telling the client to give up"
       - "Both sides — the client fails with DEADLINE_EXCEEDED and the server's context is cancelled"
-      - "Neither; it is silent"
+      - "Neither; expiry is entirely silent and detected only by later health checks"
     answer: 2
     explanation: |
       Both endpoints learn of expiry: the client immediately fails the RPC with
@@ -817,10 +817,10 @@ questions:
       never times out even when the upstream client has already given up. What is the
       most likely cause?
     options:
-      - "Keepalive is disabled on the channel"
+      - "Keepalive PINGs are disabled on the channel to the dependency"
       - "The handler calls the dependency with a fresh context (Background/new deadline) instead of the inbound context"
-      - "The proto uses proto2 instead of proto3"
-      - "TLS renegotiation is resetting the deadline"
+      - "The proto uses proto2 syntax instead of proto3 for the request message"
+      - "TLS session renegotiation is silently resetting the propagated deadline"
     answer: 1
     explanation: |
       If the handler passes a fresh context (Go's Background, or a new stub without the
@@ -835,10 +835,10 @@ questions:
     question: |
       Cancellation in gRPC is best described as:
     options:
-      - "Guaranteed immediate termination of server work"
-      - "Only available for unary RPCs"
+      - "Guaranteed immediate termination of server work by the gRPC runtime"
+      - "Only available for unary RPCs, never for any of the streaming call types"
       - "Cooperative and best-effort — the server must notice and stop"
-      - "A feature that requires a service mesh"
+      - "A feature that requires a service mesh sidecar to intercept the RPC"
     answer: 2
     explanation: |
       gRPC cannot forcibly interrupt an application handler, so cancellation is
@@ -853,9 +853,9 @@ questions:
     question: |
       Why is "no deadline set" considered a top cause of cascading gRPC outages?
     options:
-      - "It doubles message sizes on the wire"
-      - "It disables TLS on the channel"
-      - "It forces every RPC to become a stream"
+      - "It doubles the serialized message sizes sent on the wire for every call"
+      - "It disables TLS encryption on the channel, forcing an insecure fallback"
+      - "It forces every unary RPC to be upgraded into a bidirectional stream"
       - "Blocked callers hold connections/threads/memory indefinitely, and under load this cascades across the fleet"
     answer: 3
     explanation: |
