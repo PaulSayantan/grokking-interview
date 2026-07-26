@@ -62,7 +62,7 @@ questions:
       Which threading model does classic Spring MVC use?
     options:
       - "Event loop with a few non-blocking threads"
-      - "A single thread for all requests"
+      - "A single shared thread that serially handles every request"
       - "One coroutine per request with no OS threads"
       - "Thread-per-request (a thread is held for the whole request)"
     answer: 3
@@ -132,9 +132,9 @@ questions:
       does not return or subscribe to the result, and the user is never saved.
       Why?
     options:
-      - "save() only works inside a @Transactional method"
-      - "The repository bean was not injected"
-      - "Netty drops writes that are not flushed manually"
+      - "save() only persists when the method is annotated @Transactional and enrolled in an active transaction"
+      - "The repository bean was silently proxied as a no-op because no datasource was auto-configured"
+      - "Netty discards buffered writes unless the channel is explicitly flushed with a manual flush() call"
       - "Mono/Flux are lazy — nothing happens until something subscribes"
     answer: 3
     explanation: |
@@ -151,9 +151,9 @@ questions:
       runs on a Netty event-loop thread dangerous?
     options:
       - "It blocks a scarce event-loop thread, and enough blocked loop threads can stall the whole application"
-      - "It throws a compile-time error"
-      - "JDBC is not on the classpath in WebFlux apps"
-      - "It automatically switches to Tomcat"
+      - "The reactive compiler rejects blocking calls in handlers and fails the build with a compile-time error"
+      - "The JDBC driver is excluded from the WebFlux classpath, so the query fails at runtime with ClassNotFound"
+      - "WebFlux detects the blocking call and transparently hands the request off to an embedded Tomcat instance"
     answer: 0
     explanation: |
       WebFlux uses only a few event-loop threads (~one per core). Blocking one
@@ -186,10 +186,10 @@ questions:
     question: |
       What is the difference between subscribeOn and publishOn in Reactor?
     options:
-      - "subscribeOn switches downstream operators' thread; publishOn sets the subscription thread"
-      - "They are aliases with identical behavior"
+      - "subscribeOn switches only the thread of operators placed after it, while publishOn fixes the thread on which the initial subscription is made"
+      - "They are exact aliases with identical behavior; the Reactor team kept both names purely for backward compatibility"
       - "subscribeOn affects where the subscription/source runs (whole chain upstream); publishOn switches the thread for operators downstream of it"
-      - "subscribeOn is for Mono, publishOn is for Flux"
+      - "subscribeOn is the correct scheduler operator for a Mono, whereas publishOn must be used whenever the pipeline is a Flux"
     answer: 2
     explanation: |
       subscribeOn influences where subscription and source emission happen and is
@@ -224,9 +224,9 @@ questions:
       explains this and the fix?
     options:
       - "flatMap subscribes to inner publishers concurrently and merges as they complete, so order is not preserved; use concatMap (or flatMapSequential) to keep order"
-      - "flatMap has a bug; downgrade Reactor"
-      - "flatMap always preserves order; the service is broken"
-      - "You must add .sort() which is the only way to order reactive streams"
+      - "This is a known ordering regression in flatMap; downgrade Reactor to an earlier release where order was preserved"
+      - "flatMap always preserves source order, so the remote service must be returning responses tagged with the wrong IDs"
+      - "You must append .sort() after flatMap, since it is the only supported way to reorder emissions in a reactive stream"
     answer: 0
     explanation: |
       flatMap interleaves results from concurrently-running inner publishers, so
@@ -257,10 +257,10 @@ questions:
     question: |
       Which scenario is the STRONGEST case for choosing WebFlux over MVC?
     options:
-      - "A CPU-bound image-processing batch job"
-      - "A low-traffic internal CRUD app backed by JPA"
+      - "A CPU-bound image-processing batch job that saturates every core with heavy computation"
+      - "A low-traffic internal CRUD app backed by JPA with only a handful of concurrent users"
       - "A gateway that fans out to many slow downstream services under high concurrency, using non-blocking clients end to end"
-      - "A simple app where the team only knows blocking JDBC"
+      - "A simple app maintained by a team that knows only blocking JDBC and imperative servlet code"
     answer: 2
     explanation: |
       WebFlux excels for I/O-bound, high-concurrency workloads (like a fan-out
@@ -274,9 +274,9 @@ questions:
     question: |
       Which statement about RestTemplate is accurate as of recent Spring versions?
     options:
-      - "It has been removed from Spring 6"
-      - "It is deprecated and throws warnings at runtime"
-      - "It is the recommended client for new reactive code"
+      - "It was fully removed in Spring 6, so any code still importing RestTemplate fails to compile"
+      - "It is formally deprecated and logs a runtime deprecation warning on every request it issues"
+      - "It is the officially recommended client for writing new non-blocking reactive code going forward"
       - "It is in maintenance mode (no new features) but still supported; WebClient/RestClient are the modern choices"
     answer: 3
     explanation: |
@@ -308,10 +308,10 @@ questions:
       Consider: `Flux.just("a","b").map(s -> webClient.get().uri(s).retrieve().bodyToMono(String.class))`.
       What is the resulting type and the problem?
     options:
-      - "Flux<String>; no problem, it fetches both"
+      - "Flux<String>; no problem at all, map auto-subscribes to each inner Mono and fetches both bodies"
       - "Flux<Mono<String>>; the inner Monos are never subscribed, so no HTTP calls happen unless you use flatMap"
-      - "Mono<String>; only the first is fetched"
-      - "It fails to compile because map cannot return a Mono"
+      - "Mono<String>; map collapses the two-element source so only the first URI is ever fetched"
+      - "It fails to compile because map's function signature forbids returning a publisher such as a Mono"
     answer: 1
     explanation: |
       map is a synchronous 1:1 transform, so returning a Mono yields a nested
@@ -345,9 +345,9 @@ questions:
       What happens if you call .block() on a Mono from within a handler running
       on a Reactor Netty event-loop thread?
     options:
-      - "It returns the value efficiently, same as WebClient"
-      - "It silently switches to boundedElastic"
-      - "Nothing — block() is a no-op in WebFlux"
+      - "It returns the resolved value efficiently, since Netty parks a spare loop thread during the wait"
+      - "It silently reschedules the blocking wait onto a boundedElastic worker so the loop stays free"
+      - "Nothing happens — block() is a documented no-op on the reactive stack and just returns null"
       - "Reactor throws an error because blocking is not supported on non-blocking threads"
     answer: 3
     explanation: |
@@ -364,9 +364,9 @@ questions:
       terminate?
     options:
       - "With exactly one terminal signal: either onComplete or onError, and nothing after"
-      - "With any number of onComplete and onError signals in any order"
-      - "Only by the publisher calling cancel()"
-      - "It never terminates; streams are infinite by definition"
+      - "With a paired onComplete and onError, emitted back-to-back so the subscriber can confirm both"
+      - "Only by the publisher calling cancel() on itself once the last onNext has been acknowledged"
+      - "It never terminates by contract; a valid sequence is infinite and closes only on socket teardown"
     answer: 0
     explanation: |
       A sequence emits zero or more onNext, then terminates with exactly one
@@ -379,10 +379,10 @@ questions:
     question: |
       A reactive delete operation returns Mono<Void>. What does this signify?
     options:
-      - "The operation failed and returned null"
+      - "The operation failed silently and handed back a null reference instead of a real result"
       - "A publisher that emits no value but signals completion (or error) when the task finishes"
-      - "A blocking call that returns void"
-      - "An infinite stream of Void objects"
+      - "A blocking call that returns void synchronously once the delete has been flushed to disk"
+      - "An unbounded stream that repeatedly emits singleton Void tokens until it is cancelled"
     answer: 1
     explanation: |
       Mono<Void> carries no value; it represents a task whose only meaningful
@@ -415,9 +415,9 @@ questions:
       A developer adds `.doOnError(e -> log.error("failed", e))` and expects the
       error to be handled so the subscriber sees a success. What actually happens?
     options:
-      - "The error is swallowed and the stream completes normally"
-      - "doOnError converts the error into onComplete"
-      - "It retries automatically three times"
+      - "The error is swallowed by the callback and the stream then completes normally with no value"
+      - "doOnError intercepts the throwable and rewrites the terminal signal into a clean onComplete"
+      - "It transparently retries the failing source three times before finally giving up on the error"
       - "doOnError only performs a side effect (logging); the error still propagates downstream to the subscriber"
     answer: 3
     explanation: |
@@ -434,9 +434,9 @@ questions:
       lost in a reactive pipeline, and what does Reactor provide instead?
     options:
       - "Because operators may execute on different threads (scheduler hops), ThreadLocals don't follow the chain; Reactor's immutable Context (contextWrite/deferContextual) carries request data instead"
-      - "It isn't lost; ThreadLocal works fine across reactive operators"
-      - "Reactor deletes all ThreadLocals on subscribe; use static fields"
-      - "Because Netty disables ThreadLocal entirely; use System properties"
+      - "It isn't lost; Reactor pins each subscription to one thread so ThreadLocals propagate along the chain unchanged"
+      - "Reactor proactively clears every ThreadLocal on subscribe to avoid leaks, so you must stash request data in static fields"
+      - "Because Netty disables the ThreadLocal API entirely on loop threads, request-scoped data must live in JVM System properties"
     answer: 0
     explanation: |
       A reactive chain can hop threads, so ThreadLocal-bound state doesn't
@@ -451,10 +451,10 @@ questions:
       Why is using JPA/Hibernate under WebFlux problematic for a fully
       non-blocking stack?
     options:
-      - "JPA is not compatible with Java 17"
+      - "JPA is not compatible with Java 17 and later, so it cannot even be placed on a modern WebFlux classpath"
       - "JPA/Hibernate are blocking APIs with no reactive equivalent, so they reintroduce blocking; R2DBC is the non-blocking alternative for SQL"
-      - "JPA only works with Netty"
-      - "JPA automatically converts to R2DBC at runtime"
+      - "JPA only works behind a servlet container and will refuse to initialize when Netty is the active server"
+      - "JPA quietly rewrites its blocking JDBC calls into R2DBC calls at runtime, but the translation layer adds high latency"
     answer: 1
     explanation: |
       JDBC/JPA are inherently blocking. Calling them on event-loop threads blocks
@@ -487,9 +487,9 @@ questions:
     question: |
       What does the map operator do in Reactor?
     options:
-      - "Subscribes to an inner publisher for each item and merges results"
-      - "Combines multiple publishers into tuples"
-      - "Delays each item by a fixed duration"
+      - "Subscribes to an inner publisher for each item and merges the resulting streams together"
+      - "Combines several concurrent publishers into tuples once every one of them has emitted a value"
+      - "Delays each item by a fixed duration, scheduling the emission on a timer without transforming it"
       - "Applies a synchronous 1-to-1 transformation to each emitted item"
     answer: 3
     explanation: |
@@ -504,9 +504,9 @@ questions:
       What best distinguishes a COLD publisher from a HOT publisher?
     options:
       - "A cold publisher produces the sequence fresh for each subscriber; a hot publisher emits regardless of subscribers and shares emissions, so late subscribers may miss earlier items"
-      - "Cold publishers are faster; hot publishers are slower"
-      - "Cold publishers only work with Mono; hot only with Flux"
-      - "Hot publishers cannot error; cold ones can"
+      - "Cold publishers are inherently faster because they precompute results, while hot ones recompute lazily and lag"
+      - "Cold publishers are only ever backed by Mono, whereas hot publishers can only ever be modelled as a Flux"
+      - "Hot publishers are structurally unable to emit an onError signal; only cold publishers may terminate with an error"
     answer: 0
     explanation: |
       Cold publishers restart data generation per subscription (e.g. an HTTP call
@@ -521,10 +521,10 @@ questions:
       An architect claims "migrating our JPA-backed CRUD service to WebFlux will
       make it faster for free." Which is the most accurate rebuttal?
     options:
-      - "Correct, WebFlux is always faster than MVC"
+      - "Correct — WebFlux always outperforms MVC because the event loop serves every request with far fewer threads"
       - "WebFlux is not automatically faster; for CPU-bound or low-concurrency work it can be equal or slower, and JPA remains blocking so you gain complexity without the non-blocking benefit unless the whole stack is reactive"
-      - "WebFlux will fail to compile with JPA"
-      - "You must first rewrite everything in Kotlin coroutines"
+      - "WebFlux physically cannot compile against JPA entities, so the migration would fail at build time regardless"
+      - "You must first rewrite the entire service in Kotlin coroutines, since WebFlux refuses to run plain imperative Java"
     answer: 1
     explanation: |
       WebFlux's advantage is for I/O-bound, high-concurrency, streaming workloads
@@ -539,10 +539,10 @@ questions:
       Which statement correctly contrasts annotated controllers with functional
       endpoints in WebFlux?
     options:
-      - "Functional endpoints run on a different engine (servlet), annotated ones on Netty"
-      - "Annotated controllers cannot return Flux; functional endpoints can"
+      - "Functional endpoints run on the servlet engine while annotated controllers are dispatched directly by Reactor Netty"
+      - "Annotated controllers are limited to returning a single Mono, whereas only functional endpoints are permitted to return a Flux"
       - "Both run on the same reactive engine (DispatcherHandler); functional endpoints declare routing explicitly with RouterFunctions while annotated controllers use annotations and reflection"
-      - "Functional endpoints are blocking; annotated controllers are reactive"
+      - "Functional endpoints execute their handlers on blocking servlet threads while annotated controllers alone are truly reactive"
     answer: 2
     explanation: |
       Both models sit on the same reactive runtime. The difference is stylistic:
@@ -558,9 +558,9 @@ questions:
       With WebClient, calling retrieve() and then bodyToMono on a response with
       HTTP status 500 will, by default, do what?
     options:
-      - "Return an empty Mono"
-      - "Retry indefinitely"
-      - "Return the raw error body as a successful value"
+      - "Return an empty Mono, silently completing with no value so the caller treats the 500 as a missing resource"
+      - "Retry the request indefinitely with a fixed backoff until the server eventually responds with a 2xx status"
+      - "Return the raw error-response body decoded as a normal successful value, discarding the 500 status code"
       - "Emit a WebClientResponseException (error signal) which you can handle with onStatus/onErrorResume"
     answer: 3
     explanation: |
@@ -577,9 +577,9 @@ questions:
       which scheduler does f1 run?
     options:
       - "Scheduler A, because publishOn(A) switches the thread for downstream operators including f1 (until publishOn(B) takes over for f2)"
-      - "Scheduler C, because subscribeOn overrides everything"
-      - "Scheduler B"
-      - "The main thread, since map ignores schedulers"
+      - "Scheduler C, because subscribeOn always overrides every publishOn and pins the whole chain to a single worker"
+      - "Scheduler B, since the publishOn closest to the subscriber governs the thread for all upstream operators"
+      - "The original calling thread, because map is a synchronous transform that ignores any scheduler placed around it"
     answer: 0
     explanation: |
       publishOn switches the execution context for operators downstream of it, so
@@ -593,10 +593,10 @@ questions:
     question: |
       Reactive programming is best described as which kind of paradigm?
     options:
-      - "Synchronous, imperative, pull-based blocking"
+      - "Synchronous, imperative, pull-based blocking, where each step waits on the previous call before advancing"
       - "Asynchronous, declarative, built around data streams and propagation of change with non-blocking backpressure"
-      - "A caching strategy for HTTP responses"
-      - "A database indexing technique"
+      - "A caching strategy that memoizes HTTP responses at the edge to reduce round trips to the origin server"
+      - "A database indexing technique that reorders rows on disk so range scans over streamed data run faster"
     answer: 1
     explanation: |
       Reactive programming is asynchronous and declarative, centered on streams
@@ -648,8 +648,8 @@ questions:
       classpath, what does Spring Boot do by default?
     options:
       - "Defaults to MVC (servlet stack) unless you set spring.main.web-application-type=reactive"
-      - "Fails to start with an ambiguity error"
-      - "Defaults to WebFlux always"
+      - "Fails to start with a ConflictingBeanDefinitionException over the two web stacks"
+      - "Always defaults to WebFlux, since the reactive stack has higher auto-config priority"
       - "Runs both stacks simultaneously on different ports"
     answer: 0
     explanation: |
@@ -665,9 +665,9 @@ questions:
       To stream server events continuously to a client as they occur, a WebFlux
       controller method would typically return which type with which media type?
     options:
-      - "Mono<T> with application/json"
+      - "Mono<T> as one buffered application/json body"
       - "Flux<T> with text/event-stream (Server-Sent Events)"
-      - "List<T> with application/xml"
+      - "List<T> rendered as an application/xml document"
       - "ResponseEntity<byte[]> with application/octet-stream"
     answer: 1
     explanation: |
@@ -719,9 +719,9 @@ questions:
       is which of the following?
     options:
       - "Push with pull-based backpressure — the subscriber pulls demand via request(n) and the publisher pushes up to that demand"
-      - "Pure pull, like an Iterator"
-      - "Pure push with no flow control at all"
-      - "Polling at fixed intervals"
+      - "Pure pull, like an Iterator, where the subscriber blocks and yanks one element at a time with no push involved"
+      - "Pure push with no flow control at all, so the publisher floods the subscriber as fast as it can produce items"
+      - "Polling at fixed intervals, where the subscriber wakes on a timer and asks whether new data has arrived"
     answer: 0
     explanation: |
       It's a hybrid: the consumer expresses demand (pull) through request(n), and
@@ -771,9 +771,9 @@ questions:
       Can a traditional Spring MVC controller return a Mono or Flux, and if so,
       what is the caveat?
     options:
-      - "No, reactive types are illegal in MVC"
-      - "Yes, and it automatically becomes fully non-blocking on Netty"
-      - "Only Mono is allowed, never Flux"
+      - "No, reactive return types are rejected by the DispatcherServlet and trigger an HttpMediaTypeNotAcceptableException at runtime"
+      - "Yes, and returning one automatically swaps the servlet container for embedded Netty, making the endpoint fully non-blocking"
+      - "Only Mono is allowed; Flux is rejected in MVC because a servlet response cannot carry more than one emitted element"
       - "Yes, MVC supports reactive return types via async servlet support, but it still uses a servlet thread per request, so the concurrency benefit is limited compared to WebFlux"
     answer: 3
     explanation: |
@@ -789,9 +789,9 @@ questions:
       What is a best practice regarding WebClient instances in an application?
     options:
       - "Reuse a single shared, immutable WebClient bean (thread-safe, backed by a connection pool) rather than creating one per call"
-      - "Create a new WebClient per request for isolation"
-      - "Always call .block() to reuse connections"
-      - "Store WebClient in a ThreadLocal"
+      - "Construct a brand-new WebClient for every request so each call gets an isolated connection pool and cannot share state"
+      - "Always call .block() on the response so the underlying TCP connection is returned to the pool and can be reused"
+      - "Store the WebClient in a ThreadLocal so each request thread keeps its own dedicated, non-shared client instance"
     answer: 0
     explanation: |
       A configured WebClient is immutable and thread-safe and is backed by a
@@ -823,10 +823,10 @@ questions:
       Which transaction abstraction is appropriate for a fully reactive
       (e.g. R2DBC) WebFlux application?
     options:
-      - "PlatformTransactionManager with JpaTransactionManager"
-      - "Manual JDBC commit/rollback on the event loop"
+      - "PlatformTransactionManager with JpaTransactionManager, bound to the request thread via a ThreadLocal-scoped connection"
+      - "Manual JDBC commit/rollback issued directly on the event-loop thread once each save() call returns synchronously"
       - "ReactiveTransactionManager (with TransactionalOperator or @Transactional on reactive types)"
-      - "No transactions are possible in reactive apps"
+      - "No transactions are possible in reactive apps, so you must design every write to be individually idempotent instead"
     answer: 2
     explanation: |
       Reactive apps use ReactiveTransactionManager (e.g. R2DBC's) with
@@ -935,9 +935,9 @@ questions:
       clients?
     options:
       - "It is a synchronous (blocking) client offering WebClient's fluent API, positioned as the modern successor to RestTemplate"
-      - "It is a reactive replacement for WebClient"
-      - "It is only for GraphQL"
-      - "It replaces Netty in WebFlux"
+      - "It is a reactive replacement for WebClient that returns Mono/Flux and is meant to retire it in WebFlux apps"
+      - "It is a specialized client only for GraphQL over HTTP, wrapping query and mutation documents into typed requests"
+      - "It replaces Reactor Netty as the default embedded server that WebFlux uses to accept inbound connections"
     answer: 0
     explanation: |
       RestClient is a synchronous client with a fluent, WebClient-like API,
@@ -971,10 +971,10 @@ questions:
       By default (no subscribeOn/publishOn), on which thread does a Reactor
       operator chain execute?
     options:
-      - "Always Schedulers.parallel()"
-      - "A new thread per operator"
+      - "Always Schedulers.parallel(), because Reactor pins every operator chain to the fixed CPU-bound pool by default"
+      - "A brand-new dedicated thread is spawned for each operator in the chain, one thread hop per transformation step"
       - "The thread that performed the subscription / emitted the signal — Reactor does not switch threads unless asked"
-      - "boundedElastic by default"
+      - "Schedulers.boundedElastic() by default, since Reactor assumes most pipelines are wrapping blocking I/O calls"
     answer: 2
     explanation: |
       Reactor is concurrency-agnostic: without an explicit scheduler operator, the
@@ -989,9 +989,9 @@ questions:
       In a WebFlux @RestController method that returns Mono<User>, who subscribes
       to the Mono to actually trigger execution?
     options:
-      - "You must call .subscribe() yourself inside the method"
-      - "Nobody; you must call .block()"
-      - "The database driver subscribes automatically at startup"
+      - "You must explicitly call .subscribe() yourself inside the controller method or the response body stays empty"
+      - "Nobody subscribes for you, so you have to call .block() to materialize the value before returning it"
+      - "The reactive database driver subscribes automatically during application startup and caches the emitted result"
       - "The WebFlux framework subscribes when it writes the HTTP response"
     answer: 3
     explanation: |
@@ -1010,9 +1010,9 @@ questions:
       subscription observe a fresh value?
     options:
       - "Because System.currentTimeMillis() is evaluated eagerly at assembly time (when Mono.just's argument is computed), not per subscription; wrap it in Mono.fromCallable(...) or Mono.defer(...) so it runs at subscription time"
-      - "Because Mono caches its first value forever; add .cache(Duration.ZERO) to disable caching"
-      - "Because Mono.just is a hot publisher; switch to Flux.just which is cold"
-      - "Because the two subscriptions share a Reactor Context; call contextWrite to isolate them"
+      - "Because Mono caches its first emitted value forever by design; add .cache(Duration.ZERO) to disable the internal cache and force re-evaluation"
+      - "Because Mono.just is a hot publisher that shares one live emission; switch to Flux.just, which is cold and recomputes per subscriber"
+      - "Because the two subscriptions share a single Reactor Context instance; call contextWrite on each to isolate them and get distinct timestamps"
     answer: 0
     explanation: |
       The argument to Mono.just is computed once, eagerly, at assembly time — the
@@ -1030,10 +1030,10 @@ questions:
       where `compute()` throws a RuntimeException. What happens when this LINE
       executes (before anyone subscribes)?
     options:
-      - "Nothing; the exception is captured and replaced by 'fallback' when subscribed"
-      - "onErrorReturn converts it to an onComplete with no value"
+      - "Nothing happens on this line; the exception is captured into the pipeline and transparently replaced by 'fallback' the moment a subscriber subscribes"
+      - "onErrorReturn intercepts the throwable at assembly time and converts it into a clean onComplete signal carrying no value"
       - "The RuntimeException is thrown immediately on this line, escaping the reactive pipeline entirely, because compute() runs eagerly at assembly time and onErrorReturn only catches onError SIGNALS during subscription"
-      - "It is deferred and only thrown on the first request(n)"
+      - "It is deferred by Mono.just and only thrown lazily on the first downstream request(n) demand signal"
     answer: 2
     explanation: |
       compute() is a plain method call whose result is the argument to Mono.just —
@@ -1052,9 +1052,9 @@ questions:
       possible" but ops observes at most 256 concurrent in-flight calls. Why?
     options:
       - "flatMap's default concurrency parameter is Queues.SMALL_BUFFER_SIZE (256), so it subscribes to at most 256 inner publishers at once; pass an explicit concurrency argument to raise or lower it"
-      - "Netty caps outbound connections at 256 regardless of code"
-      - "The JVM default thread pool has exactly 256 threads"
-      - "flatMap is actually concatMap under the hood and runs strictly sequentially"
+      - "Reactor Netty hard-caps outbound HTTP connections at 256 per client instance, regardless of any concurrency argument in code"
+      - "The JVM's default common ForkJoinPool is fixed at exactly 256 worker threads, and flatMap dispatches one call per thread"
+      - "flatMap is actually implemented as concatMap under the hood and runs inners strictly sequentially, so 256 is a coincidental batching artifact"
     answer: 0
     explanation: |
       flatMap(fn) defaults its max concurrency to Queues.SMALL_BUFFER_SIZE = 256:
@@ -1071,10 +1071,10 @@ questions:
       (not one-at-a-time). A dev picks flatMapSequential. What is the key
       performance/memory caveat versus concatMap?
     options:
-      - "flatMapSequential preserves order by running inners sequentially, identical to concatMap"
+      - "flatMapSequential preserves order by running its inner publishers strictly one-at-a-time, making it behaviorally identical to concatMap with no concurrency gain"
       - "flatMapSequential subscribes to inners eagerly (concurrently) but must BUFFER completed-out-of-order results until earlier ones emit, so a slow early item holds back and accumulates later completed results in memory; concatMap avoids buffering by running strictly one at a time"
-      - "flatMapSequential drops out-of-order items; concatMap keeps them"
-      - "There is no difference; both are aliases"
+      - "flatMapSequential silently drops any item whose inner completes out of order, whereas concatMap retains and re-sorts them"
+      - "There is no operational difference; flatMapSequential and concatMap are just two registered aliases for the same method"
     answer: 1
     explanation: |
       flatMapSequential gains concurrency (eager subscription up to its concurrency
@@ -1092,9 +1092,9 @@ questions:
       inner performs a non-idempotent DB write, what correctness hazard exists?
     options:
       - "switchMap cancels the previous inner when a new source item arrives; a DB write started in a cancelled inner may have already partially executed or committed but its completion signal is discarded, and cancellation does not roll back the side effect — leaving inconsistent state"
-      - "switchMap guarantees every inner completes, so there is no hazard"
-      - "switchMap buffers all inners and runs them at the end, so writes happen twice"
-      - "switchMap only works with Mono, so it would fail to compile with a DB Flux"
+      - "switchMap guarantees each inner publisher runs to completion before the next begins, so every DB write commits exactly once and there is no hazard"
+      - "switchMap buffers all inner publishers and replays them together at the end of the source, causing each DB write to be executed twice"
+      - "switchMap only accepts a Mono-returning mapper, so a DB call that returns a Flux would fail to compile and never reach runtime"
     answer: 0
     explanation: |
       switchMap cancels the in-flight previous inner on each new source emission.
@@ -1111,9 +1111,9 @@ questions:
       to the OTHER concurrently-running inner lookups and the outer Flux?
     options:
       - "The error propagates to the outer Flux, which terminates with onError and cancels the other in-flight inners; to isolate failures, attach onErrorResume/onErrorReturn to the INNER publisher"
-      - "Only the failing inner is dropped; all others complete normally and the outer Flux completes successfully"
-      - "flatMap automatically retries the failing inner three times before failing"
-      - "The outer Flux pauses until the failing inner is manually resumed"
+      - "Only the failing inner lookup is silently dropped; all other inners complete normally and the outer Flux still finishes with a successful onComplete"
+      - "flatMap automatically retries the failing inner up to three times with backoff before letting the error surface to the outer sequence"
+      - "The outer Flux pauses and holds all demand until the failing inner is manually resumed via a call to Subscription.request"
     answer: 0
     explanation: |
       An unhandled inner error propagates out of flatMap: the outer sequence emits
@@ -1129,10 +1129,10 @@ questions:
       Which statement most accurately describes how onErrorContinue differs
       mechanically from onErrorResume?
     options:
-      - "They are synonyms; onErrorContinue is just the newer name"
-      - "onErrorContinue only works on Mono; onErrorResume only on Flux"
+      - "They are exact synonyms with identical mechanics; onErrorContinue is simply the newer, preferred name introduced to replace onErrorResume"
+      - "onErrorContinue is defined only on Mono and onErrorResume only on Flux, so the choice is dictated purely by the publisher's cardinality"
       - "onErrorResume terminates the failing sequence and swaps in a fallback publisher; onErrorContinue writes into the Reactor Context to instruct COMPATIBLE upstream operators (map/flatMap) to drop the offending element and keep the same sequence alive, which is why it only works with operators that opted in and can behave surprisingly across flatMap boundaries"
-      - "onErrorContinue retries the element while onErrorResume skips it"
+      - "onErrorContinue transparently retries the offending element until it succeeds, whereas onErrorResume permanently skips it"
     answer: 2
     explanation: |
       onErrorContinue is not a normal downstream operator: it uses the Context to
@@ -1150,10 +1150,10 @@ questions:
       permanently down. How many TOTAL HTTP attempts are made, and why does retry
       re-issue the request at all?
     options:
-      - "3 attempts, because retry(n) means n total attempts; it works by replaying cached results"
-      - "1 attempt; retry only re-delivers the already-received error"
+      - "Exactly 3 attempts, because retry(n) caps the TOTAL number of executions at n and works by replaying the source's cached result each round"
+      - "Just 1 attempt; retry never re-issues the request and merely re-delivers the already-received error signal downstream once more"
       - "4 attempts (1 initial + 3 retries), because retry re-SUBSCRIBES to the upstream, and a cold WebClient publisher re-executes the request on each subscription"
-      - "Infinite attempts; retry(3) sets the backoff exponent, not a limit"
+      - "Infinite attempts; the 3 in retry(3) sets the exponential backoff multiplier, not any upper bound on the number of resubscriptions"
     answer: 2
     explanation: |
       retry(n) counts retries, not total attempts, so retry(3) allows up to 4
@@ -1169,9 +1169,9 @@ questions:
       expecting the two CPU-heavy maps to run in parallel on multiple cores. What
       actually happens?
     options:
-      - "Each map runs on a separate core automatically"
-      - "The maps run on the boundedElastic pool instead of parallel"
-      - "It throws because map cannot follow subscribeOn"
+      - "Each map is automatically dispatched to a separate core, so cpuHeavy1 and cpuHeavy2 execute concurrently across the parallel pool"
+      - "The two maps silently run on the boundedElastic pool instead of parallel, because CPU-heavy work is rerouted there for isolation"
+      - "It throws an IllegalStateException at assembly time because a map operator is not permitted to directly follow a subscribeOn call"
       - "subscribeOn moves the ENTIRE chain onto ONE worker thread of the parallel pool; the maps run sequentially on that single thread — subscribeOn does not parallelize. Real parallelism needs flatMap with per-item subscribeOn, or .parallel(n).runOn(scheduler)"
     answer: 3
     explanation: |
@@ -1189,10 +1189,10 @@ questions:
       In `Flux.range(1,3).subscribeOn(schedA).map(f).subscribeOn(schedB)`, which
       scheduler does the SOURCE (Flux.range) emit on?
     options:
-      - "schedB, because the last subscribeOn wins"
-      - "Both alternate items between schedA and schedB"
+      - "schedB, because when several subscribeOn calls are chained the one placed LAST (closest to the subscriber) always wins and governs the source"
+      - "Both schedulers are used, with the source alternating its three emitted items round-robin between schedA and schedB"
       - "schedA, because when multiple subscribeOn are present, the one CLOSEST TO THE SOURCE determines where subscription/emission begins; the later subscribeOn has little additional effect on source placement"
-      - "The calling thread, because subscribeOn is ignored when used twice"
+      - "The original calling thread, because Reactor ignores subscribeOn entirely whenever it appears more than once in the same chain"
     answer: 2
     explanation: |
       Unlike publishOn (where each occurrence re-routes everything downstream of
@@ -1210,9 +1210,9 @@ questions:
       Is the blocking call safe, and what nuance matters?
     options:
       - "Safe — publishOn shifts everything DOWNSTREAM of it (including the blocking map) onto boundedElastic; the nuance is that operators UPSTREAM of the publishOn still run on the original thread (possibly the event loop), so placement of publishOn is load-bearing"
-      - "Unsafe — publishOn cannot protect blocking calls; only subscribeOn can"
-      - "Safe only if you also add .block() after it"
-      - "Unsafe — boundedElastic threads are also non-blocking and BlockHound will flag it"
+      - "Unsafe — publishOn is incapable of protecting blocking calls; only subscribeOn can relocate blocking work off the event loop safely"
+      - "Safe only if you additionally append a terminal .block() call after the chain so the blocking DAO result is fully materialized first"
+      - "Unsafe — boundedElastic threads are themselves marked non-blocking, so BlockHound will still flag the legacyDao.load() call at runtime"
     answer: 0
     explanation: |
       publishOn re-routes downstream operators to the given scheduler, so a
@@ -1230,9 +1230,9 @@ questions:
       Inside a reactive chain running on a Netty event-loop thread you need a
       2-second delay before the next step. Which is correct and non-blocking?
     options:
-      - "Thread.sleep(2000) inside a map"
-      - "await Thread.currentThread().wait(2000)"
-      - "TimeUnit.SECONDS.sleep(2) in a flatMap"
+      - "Call Thread.sleep(2000) inside a map operator so the pipeline pauses before emitting the next transformed item"
+      - "Use Thread.currentThread().wait(2000) on the event-loop thread to yield it cooperatively for the two-second interval"
+      - "Invoke TimeUnit.SECONDS.sleep(2) within a flatMap, which offloads the pause onto a timer without holding the thread"
       - "Mono.delay(Duration.ofSeconds(2)) / .delayElement(Duration.ofSeconds(2)), which schedule on a timer (Schedulers.parallel) without blocking the thread"
     answer: 3
     explanation: |
@@ -1249,10 +1249,10 @@ questions:
       `Mono.deferContextual(ctx -> Mono.just(ctx.getOrDefault("k","none"))).contextWrite(c -> c.put("k","v"))`
       What does the Mono emit, and what principle does this demonstrate?
     options:
-      - "'none', because contextWrite placed AFTER deferContextual runs too late"
-      - "It throws because Context keys must be typed"
+      - "'none', because a contextWrite placed AFTER deferContextual in the chain runs too late for the value to be visible to it"
+      - "It throws an IllegalArgumentException at subscription time because Reactor Context keys must be strongly typed rather than raw strings"
       - "'v', because the Reactor Context is immutable and propagates UPSTREAM during subscription — contextWrite affects operators ABOVE (earlier in the chain than) it, so deferContextual sees the written value even though it appears first"
-      - "An empty Mono, because contextWrite consumes the value"
+      - "An empty Mono, because contextWrite consumes the key/value pair as it writes it, leaving nothing for deferContextual to read"
     answer: 2
     explanation: |
       The Reactor Context flows from the subscriber upward at subscription time, so
@@ -1270,10 +1270,10 @@ questions:
       explicit subscribe). After a later failure the tx rolls back A and B but NOT
       C. Why?
     options:
-      - "repoC is a different database, so it cannot participate"
+      - "repoC necessarily points at a different physical database, and reactive transactions cannot span more than one datasource, so it cannot participate"
       - "Because the reactive transaction context rides in the Reactor Context of the ONE subscription the method returns; calling .subscribe() on repoC starts an INDEPENDENT subscription with a fresh Context, so that write runs outside the transaction"
-      - "subscribe() always commits immediately, bypassing all transactions"
-      - "@Transactional only works on the first statement in a method"
+      - "Calling subscribe() always forces an immediate commit of any pending work, bypassing every enclosing transaction boundary"
+      - "@Transactional in reactive code only wraps the very first reactive statement in a method, so repoC being third leaves it uncovered"
     answer: 1
     explanation: |
       Reactive transactions bind connection/tx state to the subscriber's Reactor
@@ -1309,9 +1309,9 @@ questions:
       Sinks.many().multicast() sink. What is the defined behavior?
     options:
       - "One (or both) may return EmitResult.FAIL_NON_SERIALIZED, because Reactive Streams forbids concurrent onNext; Sinks detect the race and refuse rather than corrupt the stream — the caller must serialize emissions (or use an EmitFailureHandler like busyLooping)"
-      - "Both succeed; Sinks internally lock and serialize the emissions"
-      - "It throws OutOfMemoryError"
-      - "The second emission silently overwrites the first with no signal"
+      - "Both calls succeed; Sinks internally acquire a lock and serialize the two emissions so each element is delivered downstream in turn"
+      - "It throws an OutOfMemoryError, because concurrent tryEmitNext calls each allocate an unbounded overflow buffer that exhausts the heap"
+      - "The second emission silently overwrites the first in the sink's single-element slot and returns EmitResult.OK with no warning"
     answer: 0
     explanation: |
       The Reactive Streams spec requires serialized onNext signals. tryEmitNext
@@ -1328,9 +1328,9 @@ questions:
       subscriber attaches 5 seconds after several events were emitted. What does the
       late subscriber receive by default?
     options:
-      - "All previously emitted events, replayed from the beginning"
-      - "The single most recent event, then live events"
-      - "An error, because multicast requires all subscribers to attach simultaneously"
+      - "All previously emitted events are replayed from the beginning, because a multicast sink retains a complete backlog of every emission and re-delivers it to any subscriber that connects at any time"
+      - "Only the single most recent event that the sink buffered, delivered immediately on subscribe, followed by the live stream of events emitted from that point onward"
+      - "An error, because a multicast sink requires all of its subscribers to attach simultaneously before the first emission and rejects any subscriber that connects afterward"
       - "Only events emitted AFTER it subscribed; a plain multicast sink does not replay history to late subscribers (use Sinks.many().replay() for replay semantics)"
     answer: 3
     explanation: |
@@ -1348,10 +1348,10 @@ questions:
       the query executes three times. You add `.share()`. What changes, and what is
       the risk for a subscriber that attaches slightly later?
     options:
-      - ".share() caches all results forever, so every subscriber (early or late) sees the full sequence"
-      - ".share() switches the Flux to boundedElastic so the query runs faster"
+      - ".share() caches every emitted result forever in an unbounded internal buffer, so any subscriber (early or late) always replays the complete sequence from the very first item"
+      - ".share() transparently relocates the cold source onto Schedulers.boundedElastic() and parallelizes its internal work, so the expensive query executes measurably faster for every attached subscriber"
       - ".share() = publish().refCount(1): the source is subscribed ONCE when the first subscriber arrives and multicast to all current subscribers; a subscriber attaching after emission started may MISS earlier items, and if all subscribers leave the source is cancelled"
-      - ".share() forces sequential subscription, running the query three times but serially"
+      - ".share() forces the three subscriptions to be processed strictly one after another, still running the expensive query three separate times but serializing them so they never overlap in execution"
     answer: 2
     explanation: |
       share() makes the cold source hot via publish().refCount(1): one upstream
@@ -1368,9 +1368,9 @@ questions:
       PoolAcquirePendingLimitException and connection leaks. What is the root cause
       and the recommended fix?
     options:
-      - "exchange() opens too many event-loop threads; raise the Netty thread count"
-      - "The connection pool default is 1; there is no way to increase it"
-      - "PoolAcquirePendingLimitException means the DNS cache expired; disable DNS caching"
+      - "exchange() spawns a fresh event-loop thread for each in-flight request, so under load the Netty thread count explodes; raise the loop-resources thread count to give the extra requests somewhere to run"
+      - "The Reactor Netty connection pool is hard-coded to a maximum size of 1 connection per host and exposes no builder setting to increase it, so concurrency is fundamentally capped"
+      - "PoolAcquirePendingLimitException is emitted whenever the JVM's DNS cache entry expires mid-request; disabling DNS caching with networkaddress.cache.ttl=0 removes the error entirely"
       - "exchange() (deprecated) returns a ClientResponse whose body MUST be consumed/released or the connection is never returned to the pool, eventually exhausting it; switch to retrieve() or exchangeToMono() which guarantee body release"
     answer: 3
     explanation: |
@@ -1387,10 +1387,10 @@ questions:
       Relying solely on the Reactor `.timeout(Duration.ofSeconds(2))` operator on a
       WebClient call is insufficient for robust timeouts. Why?
     options:
-      - "The .timeout operator does not exist for Mono"
-      - ".timeout blocks the event loop while counting down"
+      - "The .timeout operator is defined only on Flux and is entirely absent from the Mono API, so a WebClient call returning a Mono cannot be guarded by it at all"
+      - ".timeout parks the current event-loop thread in a busy-wait while it counts down the duration, so using it on a WebClient call actively blocks the loop and starves other requests"
       - ".timeout cancels the subscription after the duration but there are distinct lower-level timeouts (TCP connect, response timeout, read/write idle, pool-acquire) governed by the Netty HttpClient; a slow connection establishment or a stuck read may need those configured too, and .timeout alone can leave underlying handling to defaults"
-      - ".timeout only works if you also call .block()"
+      - ".timeout has no effect at all unless you also terminate the chain with a .block() call, because the operator only arms its countdown timer once a blocking subscriber materializes the value"
     answer: 2
     explanation: |
       There are multiple independent timeout layers (connect, response, read/write
@@ -1410,9 +1410,9 @@ questions:
       and what media type fixes true streaming?
     options:
       - "With application/json a Flux is rendered as a SINGLE JSON ARRAY, so the framework emits one document (the client sees it when the array is complete/flushed); to stream item-by-item use application/x-ndjson or text/event-stream, which flush each element as produced and enable per-item backpressure over the connection"
-      - "JSON cannot serialize a Flux; return List<Trade> instead"
-      - "Netty buffers all JSON by default; disabling the buffer streams it"
-      - "You must call .subscribe() per element to flush"
+      - "The Jackson encoder cannot serialize a reactive Flux at all, so the endpoint silently produces an empty body; you must first collect it into a List<Trade> before any JSON can be written to the client"
+      - "Reactor Netty aggregates every JSON response into one buffer as a fixed default; setting the codec's max-in-memory-size to zero disables that buffer and makes the same application/json endpoint stream item-by-item"
+      - "You must manually invoke .subscribe() on each individual element inside the controller so that Netty flushes that element to the socket, otherwise the array is only sent once at completion"
     answer: 0
     explanation: |
       A JSON response of a Flux is one array document, so the consumer effectively
@@ -1429,10 +1429,10 @@ questions:
       Mono<Void>. What does completing that Mono do, and how do you keep the socket
       open while echoing messages?
     options:
-      - "Completing it sends a heartbeat; return Mono.never() to close"
+      - "Completing the returned Mono transmits a protocol-level heartbeat frame to the peer; to actually close the socket you must instead return Mono.never() so the framework tears the session down"
       - "Completing the returned Mono<Void> signals the end of the session (closes the socket); to keep it open you compose the receive/send pipelines (e.g., session.send(session.receive()...)) so the returned Mono only completes when that composed flow completes"
-      - "The return value is ignored; the socket closes only on client disconnect"
-      - "You must return a Flux<WebSocketMessage>, not Mono<Void>"
+      - "The returned Mono<Void> is completely ignored by the framework; the socket stays open and can only ever be closed when the remote client itself sends a close frame or disconnects"
+      - "The handle method is required to return a Flux<WebSocketMessage> rather than a Mono<Void>, and each emitted message is written to the socket while an empty Flux closes it"
     answer: 1
     explanation: |
       The Mono<Void> represents the session lifetime — when it completes/errors the
@@ -1448,10 +1448,10 @@ questions:
       For a `text/event-stream` endpoint, how does end-to-end backpressure actually
       reach the server Flux when a browser consumer reads slowly?
     options:
-      - "The browser sends explicit request(n) frames over HTTP that map to Reactor demand"
-      - "HTTP/1.1 has no flow control, so backpressure is impossible; the server always drops events"
+      - "The browser periodically sends explicit request(n) control frames over the HTTP connection, and Reactor Netty decodes each one directly into downstream demand on the server-side Flux"
+      - "HTTP/1.1 defines no flow-control mechanism whatsoever, so end-to-end backpressure is impossible over SSE and the server simply drops any events the slow consumer cannot keep up with"
       - "Reactor Netty maps downstream demand onto TCP flow control: when the slow client stops reading, the OS TCP receive window fills, Netty stops reading/writing, and the server-side Flux observes reduced demand — so backpressure is realized via TCP, and only for streaming media types (not the single JSON array case)"
-      - "The server polls the client every 100 ms to check readiness"
+      - "The server issues a readiness poll to the client on a fixed 100 ms timer, and only emits the next event once that poll returns an acknowledgement that the browser is ready for more data"
     answer: 2
     explanation: |
       There is no application-level request(n) over HTTP. Instead Reactor Netty
@@ -1468,10 +1468,10 @@ questions:
       `StepVerifier.create(service.stream()).expectNext("a").expectNext("b").expectComplete();`
       It always passes even when service.stream() emits wrong values. What is wrong?
     options:
-      - "expectNext is deprecated; use assertNext"
-      - "You must call .block() before create"
+      - "The expectNext method has been deprecated in recent Reactor Test releases and now silently passes; you must replace every call with assertNext to get real value assertions"
+      - "StepVerifier.create requires the publisher to be materialized first, so you must call .block() on service.stream() before passing it to create or the expectations are skipped"
       - "The chain is never triggered because the terminal .verify() (or verifyComplete/verifyError) call is missing — without it StepVerifier never subscribes or asserts, so the test is a silent no-op"
-      - "expectComplete must come before expectNext"
+      - "The expectComplete expectation must be declared before the expectNext calls, because StepVerifier evaluates its expectation chain in reverse and a trailing expectComplete swallows the preceding value checks"
     answer: 2
     explanation: |
       StepVerifier is lazy: the expectations are only evaluated when you invoke a
@@ -1486,9 +1486,9 @@ questions:
       To test `Flux.interval(Duration.ofHours(1)).take(3)` without waiting 3 real
       hours, which StepVerifier approach is correct?
     options:
-      - "StepVerifier.create(flux).thenAwait(Duration.ofHours(3)) — create fast-forwards time automatically"
-      - "Use Thread.sleep(3*3600*1000) in the test"
-      - "Replace interval with delayElement; virtual time cannot test interval"
+      - "StepVerifier.create(flux).thenAwait(Duration.ofHours(3)) works directly, because the plain create() factory installs a VirtualTimeScheduler that fast-forwards any time-based operator automatically"
+      - "Use Thread.sleep(3*3600*1000) inside the test method so the interval fires its three emissions in real elapsed time before StepVerifier checks the values"
+      - "Replace Flux.interval with a chain of delayElement calls, since the VirtualTimeScheduler is fundamentally unable to advance the clock for interval-based publishers"
       - "StepVerifier.withVirtualTime(() -> Flux.interval(...).take(3)).thenAwait(Duration.ofHours(3)).expectNext(0L,1L,2L).verifyComplete() — the SUPPLIER lambda ensures the interval is assembled within the VirtualTimeScheduler's scope so thenAwait can advance the virtual clock"
     answer: 3
     explanation: |
@@ -1507,9 +1507,9 @@ questions:
       Which statement is correct?
     options:
       - "Cancellation is an upstream signal that stops further emissions/work but does NOT undo already-performed side effects; to react to it use doOnCancel/doFinally, and design writes to be idempotent or wrapped in a reactive transaction that the cancellation aborts"
-      - "Cancellation automatically rolls back any in-progress writes"
-      - "Cancellation is impossible in WebFlux; the request always completes"
-      - "doOnComplete fires on cancellation and can undo the write"
+      - "Cancellation automatically issues a compensating rollback for any in-progress DB writes, because Reactor tracks every side effect performed upstream and reverses them when the subscription is cancelled"
+      - "Cancellation is impossible in WebFlux once a handler has started; a subscribed request is guaranteed to run to completion regardless of whether the HTTP client disconnects early"
+      - "The doOnComplete callback fires when a subscription is cancelled, and placing your rollback logic inside it will reliably undo the partial write before the chain tears down"
     answer: 0
     explanation: |
       Cancellation flows upstream and halts further processing, but it does not
@@ -1526,10 +1526,10 @@ questions:
       cancelled. Which operator fits, and how does it differ from doOnComplete +
       doOnError?
     options:
-      - "doOnTerminate — it also covers cancellation"
-      - "finally { } block around the pipeline works the same"
+      - "doOnTerminate is the right choice, because in addition to complete and error signals it also fires its callback on subscriber cancellation, covering every terminal condition"
+      - "Wrapping the pipeline declaration in an ordinary Java finally { } block works identically, since the block executes once the reactive chain has released the resource on any terminal signal"
       - "doFinally(signalType -> ...) — it runs exactly once on ANY terminal condition including cancel; doOnComplete/doOnError/doOnTerminate do NOT fire on cancellation, so they would leak the resource when the subscriber cancels"
-      - "doOnNext, because cleanup should happen per item"
+      - "doOnNext, because resource cleanup should be performed once per emitted item so the resource is released incrementally as each element flows through the pipeline"
     answer: 2
     explanation: |
       doFinally receives a SignalType (ON_COMPLETE, ON_ERROR, CANCEL) and runs once
@@ -1544,9 +1544,9 @@ questions:
       A subscriber requests Long.MAX_VALUE downstream of a `publishOn`. Does
       publishOn request Long.MAX_VALUE from its upstream source?
     options:
-      - "Yes, unbounded demand always propagates unchanged to the source"
-      - "No — it requests exactly 1 at a time always"
-      - "It requests the number of CPU cores"
+      - "Yes, publishOn forwards downstream demand verbatim, so an unbounded Long.MAX_VALUE request always propagates unchanged straight through to the upstream source"
+      - "No — publishOn strictly requests exactly one element at a time from its upstream and waits for each to be drained before asking for the next, regardless of downstream demand"
+      - "It requests a batch equal to the number of available CPU cores from upstream, matching its internal queue size to the parallelism of the machine it runs on"
       - "No — publishOn (like flatMap/concatMap) requests a bounded PREFETCH (default 256) from upstream and replenishes as items are drained (~75% threshold), regardless of unbounded downstream demand; this bounds its internal queue and prevents unbounded buffering"
     answer: 3
     explanation: |
@@ -1564,10 +1564,10 @@ questions:
       getOrders returns Mono.empty() (user has no orders). What does the zipped
       Mono emit?
     options:
-      - "A tuple with a null second element"
-      - "An error, because zip cannot handle empty sources"
+      - "A tuple whose second element is null, because Mono.zip substitutes a null placeholder for any source that completes without emitting and still fires the .map"
+      - "An IllegalArgumentException at subscription time, because Mono.zip explicitly rejects any source that is capable of completing empty rather than emitting a value"
       - "Nothing — the zipped Mono COMPLETES EMPTY, because Mono.zip requires ALL sources to emit a value; if any source completes empty, the combined Mono completes empty (the .map never runs). Use defaultIfEmpty/switchIfEmpty on the empty source to supply a placeholder"
-      - "A tuple with an Optional.empty() second element"
+      - "A tuple whose second element is an Optional.empty(), because Mono.zip automatically wraps any absent source value in an empty Optional so the combinator can still produce a result"
     answer: 2
     explanation: |
       Mono.zip only emits when every source emits; an empty source makes the whole
@@ -1583,9 +1583,9 @@ questions:
       `repo.deleteAll().thenMany(repo.saveAll(items))` — what is the guarantee, and
       what value(s) does the resulting publisher emit?
     options:
-      - "It runs deleteAll and saveAll concurrently and emits both results interleaved"
-      - "It emits deleteAll's count followed by the saved items"
-      - "It emits nothing because thenMany discards all values"
+      - "It subscribes to deleteAll and saveAll concurrently the moment the chain is subscribed, and emits both operations' results interleaved as each one produces them"
+      - "It first emits the number of rows deleted by deleteAll as a leading count value, and then continues by emitting each of the saved items after it"
+      - "It emits nothing at all downstream, because thenMany discards every value from both the upstream deleteAll and the following saveAll and only forwards a completion signal"
       - "thenMany ignores deleteAll's (Void) emissions and only subscribes to saveAll AFTER deleteAll completes, emitting the saved items; sequencing-by-completion is guaranteed"
     answer: 3
     explanation: |
@@ -1603,9 +1603,9 @@ questions:
       load latency still collapses. What is the subtle problem?
     options:
       - "boundedElastic is CAPPED (default ~10x CPU cores threads, with a bounded task queue); under high concurrency all its threads are stuck in blocking JDBC and tasks queue up — you have merely moved the thread-per-blocking-call bottleneck off the event loop, not eliminated it. True scalability needs a non-blocking driver (R2DBC) or right-sizing the pool to the DB connection pool"
-      - "boundedElastic is not allowed to block; BlockHound blocks it"
-      - "subscribeOn does not work with fromCallable"
-      - "Mono.fromCallable executes eagerly, so it never offloads"
+      - "boundedElastic threads are explicitly marked non-blocking, so BlockHound intercepts and aborts the JDBC call on them exactly as it would on the event loop, defeating the whole offload"
+      - "subscribeOn has no effect when the source is a Mono.fromCallable, because fromCallable pins itself to the subscribing thread and ignores any scheduler declared after it"
+      - "Mono.fromCallable evaluates its supplier eagerly at assembly time, so the blocking JDBC call runs on the caller's thread and is never actually offloaded to boundedElastic"
     answer: 0
     explanation: |
       Offloading to boundedElastic protects the event loop but reintroduces a
@@ -1623,9 +1623,9 @@ questions:
       that later has `.flatMap(...)` with concurrency, and the counter is wrong.
       What is the best explanation?
     options:
-      - "doOnNext is not called for every item"
-      - "doOnNext runs after onComplete, so the count is off by one"
-      - "counter++ is fine; the bug is in flatMap ordering"
+      - "doOnNext is invoked only for a sampled subset of the emitted items rather than every one, so the counter systematically undercounts the true number of elements"
+      - "doOnNext callbacks are deferred and executed only after the onComplete signal fires, so the counter is consistently off by exactly one relative to the emitted items"
+      - "The counter++ statement is perfectly safe on its own; the incorrect count is entirely caused by flatMap reordering the items so some are visited twice"
       - "Downstream concurrent operators can invoke callbacks on multiple threads, and a non-atomic counter++ is a data race; use an AtomicInteger/AtomicLong or accumulate reactively (e.g., count()/reduce). Reactor serializes signals PER SUBSCRIBER but concurrency introduced by flatMap inners means shared mutable state must be thread-safe"
     answer: 3
     explanation: |
@@ -1643,9 +1643,9 @@ questions:
       (spring.threads.virtual.enabled=true), how does the WebFlux value proposition
       shift?
     options:
-      - "WebFlux becomes obsolete; virtual threads are strictly superior in every case"
-      - "Virtual threads only work with WebFlux, not MVC"
-      - "Virtual threads eliminate backpressure entirely, so streaming is no longer needed"
+      - "WebFlux becomes entirely obsolete the moment virtual threads are enabled, because Loom's carrier-thread scheduling is strictly superior to an event loop for every conceivable workload"
+      - "Virtual threads are wired only into the WebFlux reactive stack and cannot be enabled for blocking Spring MVC controllers, so MVC gains nothing from spring.threads.virtual.enabled"
+      - "Virtual threads remove the need for backpressure altogether, since a cheap thread per element can absorb any producer speed, making Reactor's streaming and demand signaling unnecessary"
       - "Virtual threads let blocking MVC-style code scale to many concurrent requests cheaply, narrowing WebFlux's advantage for the 'many blocking I/O calls' case; however WebFlux still uniquely offers composable streaming, end-to-end backpressure, and declarative operators (retry/timeout/zip), which virtual threads alone do not provide"
     answer: 3
     explanation: |
@@ -1664,9 +1664,9 @@ questions:
       second, whichever first) before a bulk DB insert. Which operator family fits?
     options:
       - "buffer(100, ...) / bufferTimeout(100, Duration.ofSeconds(1)) to collect items into List batches (window(...) is the analogous Flux-of-Flux version) which you then bulk-insert"
-      - "flatMap with concurrency 100"
-      - "reduce, which emits a single list at the very end only"
-      - "collectList, which is identical to buffer"
+      - "flatMap configured with a concurrency argument of 100, which naturally accumulates items into fixed groups of 100 and emits each group as a batch for the bulk insert"
+      - "reduce, which continuously folds the incoming stream and periodically flushes a list of 100 items or after one second, whichever threshold is reached first"
+      - "collectList, which behaves identically to buffer by slicing the continuous stream into successive 100-element Lists as items arrive from the fast source"
     answer: 0
     explanation: |
       bufferTimeout(maxSize, maxTime) groups items into Lists by count or elapsed
@@ -1682,9 +1682,9 @@ questions:
       An expensive cold Mono is shared as a bean and reused with `.cache()`. A month
       later the app OOMs slowly. Which explanation is most plausible?
     options:
-      - "cache() re-runs the source on every subscribe, leaking each result"
-      - "cache() only works on Flux, so on a Mono it silently buffers infinitely"
-      - "cache() disables garbage collection for the JVM"
+      - "cache() re-runs the cold source afresh on every new subscribe and retains a separate copy of each run's result, so the retained memory grows by one full dataset per subscriber until the heap is exhausted"
+      - "cache() is implemented only for Flux; when applied to a Mono it silently falls back to an unbounded internal buffer that accumulates every replayed signal, which is what steadily exhausts the heap over time"
+      - "cache() installs a JVM-wide finalizer that pins the emitted objects as permanent GC roots, effectively disabling garbage collection for anything the publisher has ever touched"
       - "cache() with no TTL memoizes the emitted value(s) for the LIFETIME of the publisher and never evicts; if the cached Flux holds a large/growing dataset (or many distinct cached publishers accumulate), memory is retained indefinitely — use cache(ttl) or cache(maxSize) to bound it"
     answer: 3
     explanation: |
@@ -1702,9 +1702,9 @@ questions:
       simultaneously for the same Subscriber. Which Reactive Streams rule does this
       violate, and what is a typical consequence?
     options:
-      - "It violates nothing; concurrent onNext is allowed if backpressure is honored"
-      - "It violates the rule that request(n) must be positive"
-      - "It violates the rule that Publishers must be hot"
+      - "It violates nothing at all; the Reactive Streams contract explicitly permits concurrent onNext from multiple threads as long as the total emitted count never exceeds the outstanding request(n) demand"
+      - "It violates Rule 3.9, which requires that every request(n) demand signal carry a strictly positive value, and emitting from two threads is really just an illegal non-positive request in disguise"
+      - "It violates the rule that every Publisher must be hot and multicast its signals, since only a hot publisher is permitted to deliver onNext to a Subscriber from more than a single source thread"
       - "It violates the rule that signals (onNext/onError/onComplete) to a given Subscriber MUST be serialized (no concurrent invocation); consequences include corrupted operator state, lost items, or ambiguous terminal signals — Reactor operators assume serialized signals and are not internally synchronized for concurrent onNext"
     answer: 3
     explanation: |
@@ -1724,9 +1724,9 @@ questions:
       by the SAME event-loop group. Beyond the usual "blocking is bad," what acute
       failure can occur?
     options:
-      - "Nothing different; it just wastes a thread"
-      - "Netty spawns a new event loop to service the nested call, so it succeeds"
-      - "The nested call is automatically moved to boundedElastic"
+      - "Nothing different from an ordinary blocking wait; the thread is merely parked and wasted for the duration, and the nested call still completes correctly once the downstream service responds"
+      - "Netty transparently spawns a brand-new dedicated event loop to service the nested WebClient call while the first loop is parked, so the outer request eventually succeeds without any stall"
+      - "The nested WebClient call is automatically detected and rescheduled onto a boundedElastic worker thread, so it runs safely off the loop and returns its value without any risk of stalling"
       - "A deadlock/stall: the blocked event-loop thread cannot process the I/O for the nested call it is waiting on (the loop it occupies is the very one that would complete that call), so it waits forever; Reactor typically pre-empts this by throwing 'block()... not supported in thread reactor-http-nio-*'"
     answer: 3
     explanation: |
@@ -1744,9 +1744,9 @@ questions:
       a custom publisher?
     options:
       - "Flux.generate is SYNCHRONOUS and emits AT MOST ONE item per request (naturally honoring backpressure, one-at-a-time); Flux.create is for ASYNCHRONOUS, possibly multi-threaded emission of many items and requires an OverflowStrategy because the source may not honor demand"
-      - "generate is deprecated in favor of create"
-      - "generate is for Mono; create is for Flux"
-      - "create is synchronous; generate is asynchronous"
+      - "generate was deprecated in Reactor 3.4 in favor of create, which now supersedes it for every custom-publisher use case including purely synchronous ones, so new code should never call generate"
+      - "generate is the factory reserved for building a single-valued Mono while create is the factory reserved for building a multi-valued Flux, so the choice is dictated entirely by the publisher's cardinality"
+      - "create is the strictly synchronous, one-item-per-request factory that honors backpressure, whereas generate is the asynchronous factory intended for callback-driven sources that emit regardless of demand"
     answer: 0
     explanation: |
       generate uses a synchronous, state-based SynchronousSink emitting one item per
@@ -1762,10 +1762,10 @@ questions:
       With `Flux.just(1,2,3).flatMap(i -> Mono.just(i).delayElement(Duration.ofMillis(400 - i*100)))`,
       in what order are values most likely emitted, and why?
     options:
-      - "1,2,3 — flatMap preserves source order"
-      - "It errors because delayElement is not allowed inside flatMap"
+      - "1,2,3 — flatMap always preserves the original source order, so the per-item delayElement durations merely stagger the timing while the emission sequence stays identical to the input"
+      - "It fails at assembly time because delayElement returns a time-shifted publisher that flatMap's mapper signature explicitly forbids, so the chain never compiles or subscribes"
       - "3,2,1 — because flatMap subscribes to all three inners concurrently and emits each as its delay elapses; item 3 has the shortest delay (100 ms), then 2 (200 ms), then 1 (300 ms), so they emit in reverse of the source order"
-      - "Only 3 is emitted; the others are cancelled"
+      - "Only the value 3 is emitted while 1 and 2 are silently cancelled, because flatMap keeps just the inner publisher with the shortest delay and discards the slower ones"
     answer: 2
     explanation: |
       flatMap runs inners concurrently and emits results as they arrive. Delays are
@@ -1781,9 +1781,9 @@ questions:
       (like auth or logging) across routes, analogous to a servlet Filter/
       HandlerInterceptor?
     options:
-      - "You cannot; functional endpoints don't support filters"
-      - "Annotate the handler with @Around like Spring AOP"
-      - "Only @ControllerAdvice works, which requires annotated controllers"
+      - "You cannot apply them at all; functional endpoints deliberately omit any filtering hook, so cross-cutting concerns like auth must be duplicated inline inside every individual HandlerFunction"
+      - "You annotate the handler method with @Around and register an aspect, since Spring AOP interception is the only supported way to wrap functional-endpoint handlers with cross-cutting logic"
+      - "Only @ControllerAdvice classes can apply cross-cutting behavior, and because they bind exclusively to annotated controllers you must convert your routes away from the functional model first"
       - "Use RouterFunction.filter(HandlerFilterFunction) (or .filter on the builder) to wrap HandlerFunctions, and/or a WebFilter bean for global concerns; HandlerFilterFunction receives (request, next) and returns Mono<ServerResponse>"
     answer: 3
     explanation: |
@@ -1801,9 +1801,9 @@ questions:
       ReactiveSecurityContextHolder. A dev captures the principal in a controller
       field at bean-construction time and reuses it. Why is this catastrophic?
     options:
-      - "Fields are always null in WebFlux"
-      - "Spring Security is not available in WebFlux"
-      - "ReactiveSecurityContextHolder uses ThreadLocal, so it works in fields"
+      - "Instance fields are always left null in WebFlux because the reactive stack constructs controllers lazily per request and never populates their fields, so the captured principal is meaningless"
+      - "Spring Security has no reactive implementation and is unavailable under WebFlux, so any attempt to read a principal — from a field or the Context — simply returns nothing on the reactive stack"
+      - "ReactiveSecurityContextHolder is backed by a ThreadLocal just like the servlet SecurityContextHolder, so caching the principal it returns in a controller field is perfectly safe and thread-confined"
       - "The bean (controller) is a shared singleton; there is no per-request field state. The security context lives in the per-subscription Reactor Context, so you must read it reactively (ReactiveSecurityContextHolder.getContext() / deferContextual) WITHIN the request chain — a captured field would leak one user's identity across all concurrent requests"
     answer: 3
     explanation: |
@@ -1820,10 +1820,10 @@ questions:
     question: |
       Which statement about WebTestClient is accurate?
     options:
-      - "It can only test against a fully started server on a real port"
+      - "It can only exercise endpoints against a fully started server bound to a real TCP port, so it cannot bind directly to a controller or RouterFunction and always incurs the cost of network round-trips"
       - "It can bind directly to a controller, a RouterFunction, an application context, or connect to a running server, and it works for both WebFlux and (via mock request/response) MVC endpoints; it is the reactive analogue of MockMvc/TestRestTemplate"
-      - "It blocks the event loop and therefore cannot be used in reactive tests"
-      - "It only asserts status codes, never response bodies"
+      - "It blocks the Netty event loop while awaiting each response, so it must never be used inside reactive tests and is limited to purely synchronous MVC assertions"
+      - "It asserts only the HTTP status line and response headers, offering no support for decoding or asserting the response body, which must instead be verified with a separate StepVerifier"
     answer: 1
     explanation: |
       WebTestClient offers multiple bind modes (bindToController, bindToRouterFunction,
@@ -1840,9 +1840,9 @@ questions:
       attach, THEN `cf.connect()` is called. What do the subscribers receive, and
       what would happen if only one subscriber attached before connect()?
     options:
-      - "Each subscriber independently re-runs the range; connect() is a no-op"
-      - "connect() throws if more than one subscriber is present"
-      - "The subscribers each receive only the last item, 3"
+      - "Each subscriber independently re-runs the underlying range and receives its own full 1,2,3 sequence, so connect() is effectively a no-op that publish() keeps only for API symmetry"
+      - "connect() throws an IllegalStateException whenever more than one subscriber is already attached, because a ConnectableFlux is restricted to exactly one downstream consumer at connect time"
+      - "Both subscribers receive only the final item, 3, because a ConnectableFlux buffers the range internally and replays just the most recent value once connect() fires"
       - "publish() creates a hot ConnectableFlux that emits nothing until connect(); both subscribers attached before connect() therefore both receive 1,2,3. Any subscriber attaching AFTER connect() begins would miss already-emitted items (hot semantics)"
     answer: 3
     explanation: |
@@ -1860,9 +1860,9 @@ questions:
       `service.call().timeout(Duration.ofSeconds(1)).retryWhen(Retry.backoff(2, Duration.ofMillis(50))).onErrorResume(ex -> Mono.just(CACHED));`
       The downstream is slow (every call takes 3s). Describe the observable behavior.
     options:
-      - "It waits 3s once, then returns the real result"
-      - "It returns CACHED immediately without calling the service"
-      - "It throws TimeoutException to the client because onErrorResume only catches WebClientResponseException"
+      - "It waits the full 3 seconds on a single attempt because the timeout only arms after the first retry, then returns the real downstream result without ever supplying the cached fallback"
+      - "It returns CACHED immediately at subscription time without ever calling the service, because onErrorResume is evaluated eagerly at assembly and short-circuits the whole chain"
+      - "It throws TimeoutException straight to the client because onErrorResume is wired to catch only WebClientResponseException and therefore ignores the timeout-driven error signal"
       - "Each attempt times out after 1s (TimeoutException); retryWhen retries up to 2 times with backoff; after retries are exhausted the error propagates to onErrorResume, which returns CACHED — so the caller gets the cached fallback after roughly 3+ seconds of attempts, never blocking a thread"
     answer: 3
     explanation: |
