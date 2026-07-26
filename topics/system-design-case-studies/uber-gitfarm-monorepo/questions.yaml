@@ -1,0 +1,192 @@
+topic: "Uber GitFarm: Git-as-a-Service for Monorepos at Scale"
+domain: system-design-case-studies
+topic_slug: uber-gitfarm-monorepo
+version: 1
+questions:
+  - id: uber-gitfarm-monorepo-001
+    difficulty: beginner
+    tags: [problem, monorepo, motivation]
+    question: |
+      What core problem motivated Uber to build GitFarm?
+    options:
+      - "Hundreds of automation systems each kept their own heavyweight local checkout, duplicating expensive clones and overloading upstream Git servers"
+      - "Concurrent pushes were corrupting Git objects because the upstream servers lacked proper reference locking, forcing on-call engineers to run frequent manual repository repairs"
+      - "Developers wanted a prettier web UI for browsing code"
+      - "The monorepos had grown too large to fit on the largest available single disk, so storage had to be sharded across many hosts"
+    answer: 0
+    explanation: |
+      Each of the hundreds of automation systems maintained its own full checkout to
+      run even lightweight Git reads, so they duplicated multi-gigabyte clones and
+      collectively hammered the upstream Git servers. GitFarm centralizes Git
+      execution to remove that duplicated cost. It was not about corruption, a UI, or
+      disks being too small.
+    ref: "concepts.md#the-problem-everyone-keeps-their-own-giant-checkout"
+
+  - id: uber-gitfarm-monorepo-002
+    difficulty: beginner
+    tags: [clone-cost, numbers]
+    question: |
+      According to the post, roughly how long does cloning Uber's Go monorepo take,
+      and what does it consume?
+    options:
+      - "About 1 minute end to end, and only a few hundred megabytes of memory"
+      - "Roughly 15 minutes, using around 6 CPU cores, 32 GB memory, and 40+ GB disk"
+      - "About 3 hours of wall-clock time, saturating roughly 100 CPU cores the whole run"
+      - "Under 10 seconds with partial clone enabled, consuming only about 2 CPU cores and 4 GB of memory on the client"
+    answer: 1
+    explanation: |
+      The post states a Go monorepo clone takes roughly 15 minutes and uses around 6
+      CPU cores, 32 GB of memory, and over 40 GB of disk. A service touching all major
+      monorepos could need 16 cores, 64 GB, and 96 GB. That heavyweight cost per client
+      is exactly what GitFarm eliminates.
+    ref: "concepts.md#the-problem-everyone-keeps-their-own-giant-checkout"
+
+  - id: uber-gitfarm-monorepo-003
+    difficulty: intermediate
+    tags: [shallow-clone, naive-approach, git-internals]
+    question: |
+      Why did shallow, partial, and single-branch clones fail to solve the problem?
+    options:
+      - "They are simply not supported by any modern Git version running on the upstream servers"
+      - "They require a paid Git enterprise server license plus specialized proxy hardware that Uber was unwilling to purchase, deploy, and operate for this workload"
+      - "The server still enumerates objects and streams a packfile per request, and they break operations like merge-base and bisect that need full history"
+      - "They can only be used by a single client at a time, so hundreds of automation systems would still contend for one shared connection"
+    answer: 2
+    explanation: |
+      Trimmed clones shrink transfer size but the server still enumerates objects and
+      streams a packfile on every request, so the core cost remains. Worse, they
+      remove history needed by operations such as merge-base (common ancestor) and
+      bisect (search history for a bad commit). They optimize the copy rather than
+      removing the per-client copy.
+    ref: "concepts.md#why-the-naive-fixes-broke"
+
+  - id: uber-gitfarm-monorepo-004
+    difficulty: intermediate
+    tags: [architecture, framing, scm]
+    question: |
+      Which statement best describes what GitFarm actually is?
+    options:
+      - "A replacement Git server that stores every repository centrally and fully supplants the existing upstream Git hosting infrastructure across the company"
+      - "A distributed key-value store optimized for holding raw Git objects and packfiles spread across many storage nodes"
+      - "A CI system that builds and tests every commit"
+      - "A centralized Git client in the cloud that runs commands on warm checkouts and relies on upstream servers for storage"
+    answer: 3
+    explanation: |
+      GitFarm is explicitly a centralized Git client, not a server. It stores no
+      repositories itself; it runs git commands against warm local clones on the
+      caller's behalf and depends on the upstream Git servers for actual storage. It
+      is neither an SCM nor a CI system.
+    ref: "concepts.md#the-architecture-a-git-client-in-the-cloud-exposed-over-grpc"
+
+  - id: uber-gitfarm-monorepo-005
+    difficulty: advanced
+    tags: [pooling, latency, design-move]
+    question: |
+      Why does GitFarm rely on pre-warmed pools of containers and checkouts rather
+      than creating them on demand?
+    options:
+      - "Because pooling is a hard prerequisite for encrypting checkout data at rest on the backend hosts"
+      - "Because the container runtime on the backend hosts cannot create more than one container per physical host, severely capping concurrency"
+      - "Because materializing a checkout can take up to 3 minutes, so pooling turns that cold cost into sub-second warm acquisition"
+      - "Because Redis can only track a fixed number of backends, so the pool size must be capped well in advance of any load"
+    answer: 2
+    explanation: |
+      Spinning up a container takes 1-2 seconds and materializing a checkout can take
+      up to 3 minutes, making on-demand provisioning impractical. Keeping fixed-size
+      pools of pre-warmed containers and checkouts drops acquisition to under a second.
+      You trade warm idle capacity for predictable low latency.
+    ref: "concepts.md#the-architecture-a-git-client-in-the-cloud-exposed-over-grpc"
+
+  - id: uber-gitfarm-monorepo-006
+    difficulty: intermediate
+    tags: [gateway, load-balancing, throttling]
+    question: |
+      How does the GitFarm Gateway route requests and behave under overload?
+    options:
+      - "It tracks backend load via Redis heartbeats, picks the backend with the most available checkouts, and rejects requests when no capacity exists"
+      - "It sends every request to a uniformly random backend and blindly retries forever with no backoff until some checkout eventually frees up"
+      - "It queues all incoming requests indefinitely in an in-memory buffer until some backend eventually frees up capacity"
+      - "It broadcasts each request to every backend simultaneously and returns whichever response arrives first"
+    answer: 0
+    explanation: |
+      The Gateway authenticates callers, tracks backend availability through
+      heartbeats stored in Redis, and selects the backend with the most available
+      checkouts for the requested repo. When no backend has capacity it rejects the
+      request, deliberately throttling so the system degrades gracefully instead of
+      collapsing.
+    ref: "concepts.md#the-architecture-a-git-client-in-the-cloud-exposed-over-grpc"
+
+  - id: uber-gitfarm-monorepo-007
+    difficulty: advanced
+    tags: [freshness, consistency, backend]
+    question: |
+      How does a GitFarm backend keep its data fresh, and what consistency guarantee
+      does that give clients?
+    options:
+      - "It re-clones the full repository from scratch on every single incoming request, giving strong consistency at the cost of enormous redundant data transfer"
+      - "It never updates the clone once it is first created, so the data served is always stale"
+      - "It refreshes on push events and via a git fetch every 5 minutes, giving eventual consistency; clients needing the latest run an explicit fetch"
+      - "It relies solely on a nightly batch job that runs at midnight, guaranteeing data no fresher than roughly 24 hours old"
+    answer: 2
+    explanation: |
+      Each backend keeps one bare clone per repo, refreshed by push-based events plus a
+      periodic git fetch every 5 minutes. That makes freshness eventually consistent; a
+      client needing the absolute latest state forces it with an explicit git fetch in
+      its session, trading latency for freshness.
+    ref: "concepts.md#the-architecture-a-git-client-in-the-cloud-exposed-over-grpc"
+
+  - id: uber-gitfarm-monorepo-008
+    difficulty: intermediate
+    tags: [codeowners, numbers, savings]
+    question: |
+      For the read-heavy CODEOWNERS service, what improvements did GitFarm deliver?
+    options:
+      - "CPU usage actually rose modestly while memory consumption fell, netting roughly no overall change in cost"
+      - "Startup time doubled but memory usage was halved"
+      - "It reduced the number of replicas from 6 hosts down to 1, but delivered essentially no measurable change in CPU, memory, or startup time"
+      - "CPU dropped from 70+ cores to 16 (77%), memory from 400-600 GB to 32 GB (90%+), and startup from 15-20 min to under 1 min"
+    answer: 3
+    explanation: |
+      The CODEOWNERS service previously ran on 6 hosts synced every 15 minutes. After
+      GitFarm, CPU fell from over 70 cores to 16 (a 77% reduction), memory from
+      400-600 GB to 32 GB (over 90%), and startup from 15-20 minutes to under a
+      minute. These are among the post's headline wins.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+
+  - id: uber-gitfarm-monorepo-009
+    difficulty: advanced
+    tags: [clustering, noisy-neighbor, isolation]
+    question: |
+      Why does GitFarm run multiple specialized backend clusters plus a shared one,
+      instead of a single large pool?
+    options:
+      - "To avoid the noisy-neighbor problem where one heavy workload starves others"
+      - "Because the gRPC layer cannot address more than one backend pool at a time"
+      - "Because each individual Git repository legally requires its own dedicated cluster under data-residency and compliance rules"
+      - "To store multiple encrypted copies of every repository across separate availability zones"
+    answer: 0
+    explanation: |
+      Multiple specialized clusters plus a generic shared cluster prevent the
+      noisy-neighbor problem, where one heavy workload would starve unrelated ones. New
+      use cases go through review, sizing, and config tuning before onboarding onto an
+      appropriate cluster.
+    ref: "concepts.md#the-architecture-a-git-client-in-the-cloud-exposed-over-grpc"
+
+  - id: uber-gitfarm-monorepo-010
+    difficulty: advanced
+    tags: [trade-offs, write-latency, gotchas]
+    question: |
+      The post reports a write workflow end-to-end p50 of about 25 seconds. What does
+      Uber attribute this latency to?
+    options:
+      - "Slow Redis heartbeat propagation between the gateway instances, which delayed backend selection on each call"
+      - "The inherent cost of native Git operations (fetch ~5s, push ~12s), not GitFarm overhead — latency was near-identical to calling the server directly"
+      - "Time spent materializing a completely fresh checkout on every write, because the backend discards its warm working directory immediately after each push"
+      - "Extra network round-trips added by deep gRPC request chaining across services"
+    answer: 1
+    explanation: |
+      The ~25s write p50 (git fetch ~5s, git push ~12s) is dominated by native Git
+      doing real work, not by GitFarm overhead; Uber confirmed near-identical latency
+      versus direct server calls. GitFarm removes the checkout-management burden, not
+      the inherent cost of the Git operations themselves.
+    ref: "concepts.md#trade-offs-and-gotchas"

@@ -1,0 +1,171 @@
+topic: "Discord: Automating ScyllaDB Clusters at Scale"
+domain: system-design-case-studies
+topic_slug: discord-automates-scylladb-at-scale
+version: 1
+questions:
+  - id: discord-automates-scylladb-at-scale-001
+    difficulty: beginner
+    tags: [motivation, toil, automation]
+    question: |
+      What manual operation motivated Discord to build the Scylla Control Plane,
+      and roughly how long did it take before automation?
+    options:
+      - "A routine nightly backup job that ran unattended in roughly fifteen minutes each night"
+      - "Building a full shadow-cluster replica, which took about a day and a half (36 hours)"
+      - "Rotating TLS certificates across the fleet every few weeks"
+      - "Rebalancing shards after a region outage, taking under an hour"
+    answer: 1
+    explanation: |
+      Before shipping a new ScyllaDB release, Discord stands up a full production
+      replica (a "shadow cluster") to validate it against realistic data. Doing this
+      by hand took "a day and a half" — a 36-hour operation — and the goal was to
+      shrink it to under two hours.
+    ref: "concepts.md#the-problem-a-36-hour-operation-that-couldnt-be-interrupted"
+  - id: discord-automates-scylladb-at-scale-002
+    difficulty: intermediate
+    tags: [recoverability, scripts, failure]
+    question: |
+      Which specific pain point of the old ad-hoc Python and bash scripts is captured
+      by the phrase "any failure between steps 7 to 12 meant starting over"?
+    options:
+      - "The scripts were unsafe because they ran steps against the wrong nodes"
+      - "The scripts were unrecoverable — they had no memory of progress"
+      - "The scripts were hard to extend without copying existing code"
+      - "The scripts consumed too much memory during long operations"
+    answer: 1
+    explanation: |
+      That line describes the recoverability failure: the scripts tracked no progress,
+      so a crash partway through discarded all prior work and forced a full restart.
+      SCP fixed this with resumable, SQLite-backed job state.
+    ref: "concepts.md#why-the-naive-approach-broke-ad-hoc-scripts-nobody-could-run-safely"
+  - id: discord-automates-scylladb-at-scale-003
+    difficulty: intermediate
+    tags: [architecture, abstractions, scp]
+    question: |
+      What are the three layered concepts that make up the Scylla Control Plane (SCP)?
+    options:
+      - "Nodes, Shards, and Replica Sets"
+      - "Producers, Brokers, and Consumers"
+      - "Tasks, Workflows, and Jobs"
+      - "Plugins, Rankings, and Runbooks"
+    answer: 2
+    explanation: |
+      SCP layers Tasks (single units of work, in Rust), Workflows (task sequences in
+      YAML), and Jobs (one execution of a workflow bound to a specific cluster).
+    ref: "concepts.md#the-architecture-scylla-control-plane-scp-built-in-rust"
+  - id: discord-automates-scylladb-at-scale-004
+    difficulty: advanced
+    tags: [idempotency, retries, safety]
+    question: |
+      Why does SCP require every Task to be idempotent?
+    options:
+      - "To let tasks be safely retried or resumed without double-applying an operation"
+      - "To reduce the compiled binary size of the Rust framework"
+      - "To allow workflows to be written in declarative YAML config files instead of compiled Rust code"
+      - "To guarantee tasks always run in strict alphabetical order"
+    answer: 0
+    explanation: |
+      Both retries and resumption re-run tasks. If a task weren't idempotent, re-running
+      it after a partial failure could double-apply an operation and corrupt cluster
+      state. Idempotency is what makes "just retry" and "resume where we left off" safe.
+    ref: "concepts.md#the-architecture-scylla-control-plane-scp-built-in-rust"
+  - id: discord-automates-scylladb-at-scale-005
+    difficulty: advanced
+    tags: [concurrency, quorum, availability-zones]
+    question: |
+      Setting a job's concurrency_unit to "zone" prevents simultaneous operations
+      across availability zones. What risk does that guard against?
+    options:
+      - "Exceeding the SQLite database connection limit while a long-running job is in progress"
+      - "Losing quorum by taking down a majority of replicas at once"
+      - "Recompiling the Rust binary during a live deploy"
+      - "Sending duplicate webhook notifications to the ops channel"
+    answer: 1
+    explanation: |
+      A distributed database needs a strict majority of replicas available to serve
+      reads and writes safely. Operating across multiple AZs at once could remove too
+      many replicas simultaneously and lose quorum, so concurrency_unit=zone serializes
+      per-zone work.
+    ref: "concepts.md#the-architecture-scylla-control-plane-scp-built-in-rust"
+  - id: discord-automates-scylladb-at-scale-006
+    difficulty: intermediate
+    tags: [state, sqlite, resumability]
+    question: |
+      Where does SCP store job state so an interrupted job can resume from where it
+      left off, and why was that backend chosen?
+    options:
+      - "In a distributed Cassandra keyspace, chosen for high write throughput"
+      - "In Prometheus time-series metrics, chosen for easy dashboards"
+      - "In an in-memory cache, chosen for the lowest possible latency"
+      - "In a SQLite file-based database, chosen for operational simplicity"
+    answer: 3
+    explanation: |
+      SCP tracks which tasks finished on which nodes in a SQLite database, letting
+      interrupted jobs resume. Discord deliberately picked a file-based DB for
+      operational simplicity over a heavier backend.
+    ref: "concepts.md#resumability-sqlite-backed-job-state"
+  - id: discord-automates-scylladb-at-scale-007
+    difficulty: advanced
+    tags: [error-handling, retries, gotcha]
+    question: |
+      What danger does the post warn about when classifying errors in SCP?
+    options:
+      - "Marking too many errors unrecoverable, which floods the ops channel with pages"
+      - "Marking everything recoverable, since retrying a genuinely broken state can cause real harm"
+      - "Using YAML for workflows, which makes all workflow error handling completely untyped and unchecked at compile time"
+      - "Storing errors in SQLite, which slows down job resumption"
+    answer: 1
+    explanation: |
+      The tempting instinct is to mark everything recoverable so the system keeps
+      trying, but "a retry loop on a genuinely broken state can cause real harm." SCP
+      halts on unrecoverable errors and fires a webhook to page a human instead.
+    ref: "concepts.md#error-classification-recoverable-vs-unrecoverable"
+  - id: discord-automates-scylladb-at-scale-008
+    difficulty: intermediate
+    tags: [yaml, config, design]
+    question: |
+      Why are SCP Workflows defined in YAML rather than in Rust?
+    options:
+      - "YAML runs faster than compiled Rust at execution time"
+      - "Rust cannot express task sequences or retry logic"
+      - "So operators can tune sequencing, retries, and concurrency without recompiling and redeploying a binary"
+      - "Because YAML automatically guarantees idempotency for every task without any extra work from the framework authors"
+    answer: 2
+    explanation: |
+      Tasks are safety-critical primitives written in type-checked Rust; workflows are
+      policy (ordering, retries, concurrency) that operators need to tune quickly. YAML
+      lets that policy change without a binary rebuild and redeploy.
+    ref: "concepts.md#the-architecture-scylla-control-plane-scp-built-in-rust"
+  - id: discord-automates-scylladb-at-scale-009
+    difficulty: beginner
+    tags: [scale, numbers, team]
+    question: |
+      Which set of figures does the post give about Discord's ScyllaDB footprint?
+    options:
+      - "Thousands of ScyllaDB clusters run by a 200-person infrastructure org spread across five continents"
+      - "A 7-person team managing dozens of clusters and hundreds of nodes storing trillions of messages"
+      - "A single cluster of 30 nodes storing a few billion messages"
+      - "Twelve clusters run by a 3-person team storing petabytes of media files"
+    answer: 1
+    explanation: |
+      A 7-person Persistence Infrastructure team manages "dozens of clusters, with
+      hundreds of database nodes in total," and ScyllaDB stores messages, channels,
+      servers, and most user data — referenced as trillions of messages.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+  - id: discord-automates-scylladb-at-scale-010
+    difficulty: advanced
+    tags: [conditions, health-checks, mechanisms]
+    question: |
+      In SCP, what is a "Condition" and how does it work?
+    options:
+      - "A task type that blocks until a criterion is met, polling Scylla's API or Prometheus metrics until it passes or times out"
+      - "A YAML flag that marks an entire workflow as unrecoverable"
+      - "A SQLite table that records which operator triggered each job"
+      - "A CLI subcommand that lists every ScyllaDB cluster along with all of its member nodes within a given availability zone and region"
+    answer: 0
+    explanation: |
+      A Condition is a special task that blocks execution until some criterion holds,
+      polling Scylla's API or Prometheus metrics until it passes or times out. Example:
+      is-up-normal waits for a joining node to be healthy (86400s timeout, 60s success
+      window).
+    ref: "concepts.md#the-architecture-scylla-control-plane-scp-built-in-rust"

@@ -1,0 +1,206 @@
+topic: "Stripe: Zero-Downtime Data Migrations on a Custom MongoDB-Based DBaaS"
+domain: system-design-case-studies
+topic_slug: stripe-zero-downtime-data-migrations
+version: 1
+
+questions:
+  - id: stripe-zero-downtime-data-migrations-001
+    difficulty: beginner
+    tags: [scaling, mongodb, motivation]
+    question: |
+      What scaling limitation pushed Stripe to build the Data Movement Platform
+      on top of its MongoDB-based DocDB?
+    options:
+      - "They had hit the ceiling of vertical scaling on single MongoDB machines and needed a way to scale horizontally across many shards"
+      - "MongoDB had officially deprecated the flexible document data model that Stripe's product teams had long relied on for their development speed"
+      - "Their financial-services regulators had mandated a wholesale switch away from any NoSQL database technology"
+      - "MongoDB Atlas had abruptly raised its managed-service pricing far beyond the budget Stripe had allocated for it"
+    answer: 0
+    explanation: |
+      Stripe chose MongoDB in 2011 for developer productivity but eventually hit the
+      limits of vertical scaling — a single machine's CPU, memory, and disk can only
+      grow so far. Horizontal scaling across many shards was the answer, and moving
+      data between those shards safely and online is exactly what the Data Movement
+      Platform provides. Atlas simply didn't exist yet when they started; it wasn't a
+      pricing issue.
+    ref: "concepts.md#why-the-naive-approach-broke-mongodb-scaled-up-not-out"
+
+  - id: stripe-zero-downtime-data-migrations-002
+    difficulty: intermediate
+    tags: [proxy, routing, client-transparency]
+    question: |
+      In DocDB, what makes a data migration "client-transparent" — invisible to the
+      application?
+    options:
+      - "The application aggressively caches every query result in a local store, so it never needs to re-read data that moved"
+      - "MongoDB automatically pauses each client driver connection for the entire duration of any shard membership change"
+      - "The app talks only to Go proxy servers that route via a chunk→shard map, so moving a chunk just updates that map"
+      - "Every shard is kept as a full replica of all data, so the physical location of any given chunk never actually matters"
+    answer: 2
+    explanation: |
+      Applications never address shards directly; they talk to the Go proxy layer,
+      which parses each query and routes it using the chunk-to-shard map from the Chunk
+      Metadata service. A migration updates that map, so the app keeps issuing the same
+      queries and never learns the data physically moved. Shards do not each hold a full
+      copy of everything, and there is no client-driver pause.
+    ref: "concepts.md#the-docdb-architecture-proxies-chunks-and-shards"
+
+  - id: stripe-zero-downtime-data-migrations-003
+    difficulty: advanced
+    tags: [migration-steps, snapshot, replication]
+    question: |
+      During a chunk migration, why does Stripe bulk-copy a point-in-time snapshot
+      and then apply asynchronous replication from the CDC/oplog stream, rather than
+      copying live data in one pass?
+    options:
+      - "Because MongoDB physically forbids reading any collection at all while that same collection is being actively written to"
+      - "Because taking a point-in-time snapshot is effectively instantaneous, whereas a single straight live copy of the whole chunk would instead take several days to fully finish"
+      - "Because repeatedly reading the live source during the copy would gradually corrupt the source shard's on-disk indexes"
+      - "Because writes keep flowing during the copy, so the snapshot goes stale and replication from the change log catches the target up without loading the live source"
+    answer: 3
+    explanation: |
+      A snapshot captures data as of time T, but writes continue during the bulk copy,
+      so the target is immediately behind. Replaying every change since T from the CDC
+      stream (the oplog) catches the target up. Reading from the durable change log
+      rather than the live source avoids stealing throughput from production traffic —
+      a core constraint since the source shard is still serving payments.
+    ref: "concepts.md#the-data-movement-platform-six-steps-to-move-a-chunk-with-zero-downtime"
+
+  - id: stripe-zero-downtime-data-migrations-004
+    difficulty: intermediate
+    tags: [traffic-switch, versioned-gating, cutover]
+    question: |
+      How long does Stripe report the traffic-switch phase — the only downtime-risking
+      moment — takes to complete?
+    options:
+      - "About thirty seconds"
+      - "Less than two seconds"
+      - "Roughly five minutes"
+      - "Under ten milliseconds"
+    answer: 1
+    explanation: |
+      All the expensive work (bulk copy, catch-up replication, correctness check)
+      happens online and off the critical path. Only the final route flip is
+      synchronous, and Stripe engineered it to take less than two seconds — deliberately
+      shorter than a normal database failover, so from the application's view it is
+      indistinguishable from routine operation.
+    ref: "concepts.md#the-data-movement-platform-six-steps-to-move-a-chunk-with-zero-downtime"
+
+  - id: stripe-zero-downtime-data-migrations-005
+    difficulty: advanced
+    tags: [bulk-import, b-tree, optimization]
+    question: |
+      Stripe achieved a 10x improvement in bulk-import throughput. What change
+      produced it, after batching and storage-engine tuning had little success?
+    options:
+      - "Disabling every index on the target shard until the entire bulk import had fully finished, then rebuilding them"
+      - "Compressing each document with a much faster codec before writing it into the target shard's storage engine"
+      - "Sorting documents by their common index attributes before insertion, exploiting the B-tree's sorted structure"
+      - "Splitting each chunk into far smaller sub-chunks that could then be copied fully in parallel across many workers"
+    answer: 2
+    explanation: |
+      Because the underlying index is a B-tree kept in sorted order, inserting keys in
+      sorted order lets each new key land next to the previous one, minimizing random
+      page splits and cache misses. That understanding of the data structure — not
+      generic batching or engine tuning — gave the 10x gain. Indexes are actually built
+      up front (in the registration step), not disabled.
+    ref: "concepts.md#the-10x-bulk-import-trick-insert-in-sorted-order"
+
+  - id: stripe-zero-downtime-data-migrations-006
+    difficulty: intermediate
+    tags: [bidirectional-replication, rollback, tagged-writes]
+    question: |
+      Why does the Data Movement Platform use bidirectional replication with tagged
+      writes during a migration?
+    options:
+      - "To let Stripe revert traffic to the source if issues emerge, while tagged writes stop replicated changes from looping back"
+      - "To double the overall write throughput by splitting incoming writes evenly across both the source and the target shards"
+      - "To keep two fully independent backup copies of the chunk running purely for long-term disaster-recovery purposes"
+      - "To let the source and target shards each serve reads from two entirely different geographic world regions at once"
+    answer: 0
+    explanation: |
+      Two-way replication keeps the source in sync with the target so Stripe can roll
+      traffic back to the source if something looks wrong after the switch — safety over
+      simplicity. Tagged writes prevent an infinite loop, so a change replicated to the
+      target isn't bounced straight back to the source. It isn't about doubling
+      throughput or geo-distributing reads.
+    ref: "concepts.md#the-data-movement-platform-six-steps-to-move-a-chunk-with-zero-downtime"
+
+  - id: stripe-zero-downtime-data-migrations-007
+    difficulty: beginner
+    tags: [scale, numbers, uptime]
+    question: |
+      Which figure does Stripe cite for the query load DocDB serves?
+    options:
+      - "Around fifty thousand queries per second"
+      - "Exactly one billion queries per day"
+      - "About one hundred queries per second per shard"
+      - "Over five million queries per second"
+    answer: 3
+    explanation: |
+      Stripe reports DocDB serving over five million queries per second, across 10,000+
+      distinct query shapes over petabytes of data, on 5,000+ collections spread across
+      2,000+ database shards — all while supporting 99.999% ("five nines") uptime. These
+      concrete figures are worth quoting to ground the scale of the migration challenge.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+
+  - id: stripe-zero-downtime-data-migrations-008
+    difficulty: advanced
+    tags: [correctness-check, versioned-gating, consistency]
+    question: |
+      Just before repointing traffic to the target, what does versioned gating do to
+      guarantee a clean, consistent hand-off?
+    options:
+      - "It replays the entire oplog from the very beginning of time in order to fully rebuild the target shard from scratch"
+      - "It bumps a version token on the source so the source starts rejecting requests for the migrating chunk, fencing off any straggler writes"
+      - "It takes the target shard completely offline until the chunk→shard route change has been fully propagated out to every single proxy server in the fleet"
+      - "It merges the source and target shards together into a single combined replica set before the route is repointed"
+    answer: 1
+    explanation: |
+      Versioned gating bumps a version token on the source so it begins rejecting
+      requests for the migrating chunk. That fence guarantees no straggler write lands
+      on the source after cutover, so once the last replication drains and the route is
+      updated to the target, the hand-off is clean and consistent — no writes are lost
+      to the abandoned location.
+    ref: "concepts.md#the-data-movement-platform-six-steps-to-move-a-chunk-with-zero-downtime"
+
+  - id: stripe-zero-downtime-data-migrations-009
+    difficulty: intermediate
+    tags: [cdc, oplog, source-protection]
+    question: |
+      Both catch-up replication and the correctness check are designed to read from
+      snapshots and the CDC/oplog stream instead of the source's live path. What is
+      the main reason?
+    options:
+      - "The source shard's live query path happens to return data in the wrong sort order for a byte-for-byte comparison"
+      - "MongoDB bills Stripe a per-operation fee for every live read but never charges anything at all for reading the oplog"
+      - "To protect the source shard's production throughput, since it is still serving live payment traffic"
+      - "Point-in-time snapshots are the only place in the system where already-deleted documents happen to remain visible"
+    answer: 2
+    explanation: |
+      The source shard is still handling live production traffic during the migration,
+      and a core constraint is not degrading its performance. Reading catch-up changes
+      from the durable CDC stream and comparing point-in-time snapshots avoids consuming
+      the source's live read throughput and avoids straining the oplog — keeping
+      production unaffected while the migration proceeds in the background.
+    ref: "concepts.md#trade-offs-and-gotchas"
+
+  - id: stripe-zero-downtime-data-migrations-010
+    difficulty: advanced
+    tags: [bin-packing, consolidation, elasticity]
+    question: |
+      In its 2023 bin-packing (consolidation) effort, what did Stripe achieve with the
+      Data Movement Platform?
+    options:
+      - "It permanently doubled the total number of underlying database shards in order to raise redundancy and headroom"
+      - "It migrated just a few gigabytes of data as a small test of the pipeline before abandoning the consolidation effort"
+      - "It replaced MongoDB entirely with a traditional relational database across the whole DocDB fleet in one campaign"
+      - "It migrated 1.5 petabytes of data and reduced the shard count by approximately three quarters"
+    answer: 3
+    explanation: |
+      The same online-migration machinery that splits hot shards also consolidates idle
+      ones. In 2023 Stripe used it to migrate 1.5 petabytes of data and cut the number
+      of shards by roughly three quarters — a large cost saving, achieved with no
+      downtime because each chunk move is client-transparent. This elasticity (scale out
+      under load, pack in when idle) is the payoff of the whole platform.
+    ref: "concepts.md#concrete-numbers-from-the-post"

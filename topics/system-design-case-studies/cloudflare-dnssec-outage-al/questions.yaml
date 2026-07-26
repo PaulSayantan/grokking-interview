@@ -1,0 +1,178 @@
+topic: "Cloudflare: When a Broken DNSSEC Rollover Took an Entire Country's TLD Offline"
+domain: "system-design-case-studies"
+topic_slug: "cloudflare-dnssec-outage-al"
+version: 1
+questions:
+  - id: cloudflare-dnssec-outage-al-001
+    difficulty: beginner
+    tags: [dnssec, blast-radius, fail-closed]
+    question: |
+      Why did a single mistake by the .al operator make every site under .al
+      unreachable from DNSSEC-validating resolvers at once?
+    options:
+      - "Cloudflare's 1.1.1.1 rate-limited all .al queries after detecting an unusual traffic spike from the region"
+      - "The .al authoritative servers were physically offline, so no records for any child domain could be served"
+      - "DNSSEC validation is fail-closed: a break in the parent zone's chain of trust invalidates everything below it"
+      - "Every .al site happened to share one hosting provider whose data center failed at the same time"
+    answer: 2
+    explanation: |
+      DNSSEC builds a chain of trust from the root downward. If a resolver can't
+      validate .al itself, it can't establish trust for anything beneath it, so it
+      fails closed for the entire subtree — regardless of hosting or each child's
+      own config.
+    ref: "concepts.md#the-problem-one-broken-key-and-a-whole-countrys-domain-goes-dark"
+  - id: cloudflare-dnssec-outage-al-002
+    difficulty: intermediate
+    tags: [dnssec, ds-record, dnskey]
+    question: |
+      In DNSSEC, where does the DS (Delegation Signer) record live, and what does
+      it do?
+    options:
+      - "In the child zone; it stores the private signing key used to produce that zone's RRSIG signatures"
+      - "In the parent zone; it holds a fingerprint (hash) of the child zone's DNSKEY to link the chain of trust"
+      - "At the resolver; it caches the last known-good answer so lookups can be served during an outage"
+      - "In the root zone only; it lists every signed domain name on the internet in one central registry"
+    answer: 1
+    explanation: |
+      The DS record is a fingerprint of the child's DNSKEY stored in the PARENT
+      zone. A resolver checks the child's served DNSKEY against the parent's DS; if
+      they match, the child's signatures can be trusted. That parent/child split is
+      what makes rollovers delicate.
+    ref: "concepts.md#dnssec-in-plain-terms-a-chain-of-trust-from-the-root-down"
+  - id: cloudflare-dnssec-outage-al-003
+    difficulty: advanced
+    tags: [key-rollover, incident, ordering]
+    question: |
+      What was the specific initial mistake in the .al key rollover at ~14:15 UTC?
+    options:
+      - "The operator published a new DNSKEY and stopped serving the old one while the root DS still pointed at the old key"
+      - "The operator changed the root DS record before publishing any new DNSKEY in the child zone"
+      - "The operator signed the zone with an RRSIG that had already expired, so every validating resolver rejected the answer on sight"
+      - "The operator pointed the root DS at a key belonging to a completely different TLD by mistake"
+    answer: 0
+    explanation: |
+      At ~14:15 the operator published a new DNSKEY and stopped serving the old one,
+      but the root DS still pointed at the old key (id=26319). The served key's
+      fingerprint no longer matched the parent's DS, so validation failed. A safe
+      rollover keeps the old key servable until the new DS propagates.
+    ref: "concepts.md#what-actually-broke-a-key-rollover-done-in-the-wrong-order"
+  - id: cloudflare-dnssec-outage-al-004
+    difficulty: intermediate
+    tags: [nta, rfc-7646, remediation]
+    question: |
+      What does a Negative Trust Anchor (NTA), defined in RFC 7646, do?
+    options:
+      - "It permanently deletes a zone's DNSKEY records from the resolver's cache"
+      - "It forces the parent zone to re-sign the child's DS record automatically"
+      - "It blocks all queries to a broken zone until the operator fixes the chain"
+      - "It tells a resolver to treat a zone as unsigned and bypass DNSSEC validation"
+    answer: 3
+    explanation: |
+      An NTA is a resolver-side override that treats a zone as unsigned, bypassing
+      validation. It restores reachability immediately at the cost of dropping
+      DNSSEC's spoofing protection for that zone while active.
+    ref: "concepts.md#the-emergency-lever-a-negative-trust-anchor-nta"
+  - id: cloudflare-dnssec-outage-al-005
+    difficulty: advanced
+    tags: [nta, trade-offs, security]
+    question: |
+      Why did Cloudflare judge applying an NTA to .al an acceptable trade-off?
+    options:
+      - "Because .al ranks #191 on Cloudflare Radar, low enough that few users would notice the downgrade"
+      - "Because the failure was public, confirmed, and affecting every validating resolver equally, so an attacker gained no edge"
+      - "Because RFC 7646 makes NTAs mandatory whenever a TLD's DNSKEY goes missing"
+      - "Because the NTA still preserved full cryptographic verification of every answer served for the zone while the anchor was active"
+    answer: 1
+    explanation: |
+      The break was already failing for every validating resolver, so bypassing
+      validation gave no attacker a special advantage. The bar for an NTA is
+      "public, confirmed, everyone-equally-affected" — it does drop spoofing
+      protection, so it isn't safe for a targeted attack.
+    ref: "concepts.md#the-emergency-lever-a-negative-trust-anchor-nta"
+  - id: cloudflare-dnssec-outage-al-006
+    difficulty: intermediate
+    tags: [ede, rfc-8914, ede-33]
+    question: |
+      What does Extended DNS Error (EDE) code 33 signal to a client?
+    options:
+      - "That the queried domain does not exist anywhere in the DNS hierarchy"
+      - "That the resolver could not reach any authoritative server for the zone"
+      - "That an NTA was applied and the response was served without DNSSEC validation"
+      - "That the response was truncated and the client should retry over TCP"
+    answer: 2
+    explanation: |
+      EDE 33 (Negative Trust Anchor), defined via RFC 8914's extensible mechanism,
+      tells the client that an NTA is in effect and the answer was served without
+      DNSSEC validation — closing the silent-NTA transparency gap.
+    ref: "concepts.md#the-new-signal-extended-dns-error-code-33"
+  - id: cloudflare-dnssec-outage-al-007
+    difficulty: advanced
+    tags: [ede-33, transparency, semantics]
+    question: |
+      A notable property of EDE 33 is that under an active NTA it is returned on
+      which responses?
+    options:
+      - "Only on SERVFAIL responses, since EDE codes attach exclusively to error results"
+      - "Only on responses for domains that are actually signed with DNSSEC"
+      - "Only on the first response after the NTA is applied, as a one-time notice"
+      - "On every response served under the NTA, even for domains not using DNSSEC"
+    answer: 3
+    explanation: |
+      The NTA is a property of the resolver's state for the whole zone, not of any
+      single record. So EDE 33 is attached to every response served under it — even
+      for domains that don't use DNSSEC — because transparency applies equally to
+      every response.
+    ref: "concepts.md#the-new-signal-extended-dns-error-code-33"
+  - id: cloudflare-dnssec-outage-al-008
+    difficulty: intermediate
+    tags: [silent-nta, de-incident, observability]
+    question: |
+      What was the key shortcoming of Cloudflare's earlier NTA response during the
+      near-identical .de incident?
+    options:
+      - "The fix was silent and even returned the wrong error code (EDE 22), so clients couldn't tell validation was bypassed"
+      - "The NTA was never removed, leaving .de permanently unvalidated for years afterward"
+      - "It applied the NTA to the wrong TLD entirely, briefly breaking .com resolution"
+      - "It required every downstream resolver operator to manually opt in to the change before it would take effect anywhere at all"
+    answer: 0
+    explanation: |
+      The .de fix worked but was invisible: RFC 7646 only recommends out-of-band
+      disclosure, and 1.1.1.1 returned EDE 22 (No Reachable Authority) instead of
+      the real cause. That silent, mislabeled remediation is the gap EDE 33 was
+      built to close.
+    ref: "concepts.md#why-this-wasnt-the-first-time-the-silent-nta-problem"
+  - id: cloudflare-dnssec-outage-al-009
+    difficulty: beginner
+    tags: [detection, servfail, timeline]
+    question: |
+      How did Cloudflare detect and confirm the .al outage, given no report came
+      from Albania?
+    options:
+      - "AKEP immediately filed a detailed support ticket with Cloudflare the moment the botched rollover began"
+      - "SERVFAIL rates climbed as caches expired and resolvers re-validated the broken chain"
+      - "A downstream ISP escalated through Cloudflare's enterprise support line"
+      - "An automated DNSSEC monitor from IANA paged the on-call team directly"
+    answer: 1
+    explanation: |
+      Detection was via Cloudflare's own metrics: SERVFAIL rates rose as cached
+      records expired and resolvers were forced to re-validate against the broken
+      chain, then dropped sharply once the NTA was applied at 17:15 UTC. The
+      operator's own .al contacts were unreachable during the outage.
+    ref: "concepts.md#the-data-flow-how-the-outage-was-detected-signaled-and-resolved"
+  - id: cloudflare-dnssec-outage-al-010
+    difficulty: advanced
+    tags: [resolution, ds-record, unsigned-zone]
+    question: |
+      What final operator action fully restored .al resolution at ~19:15 UTC?
+    options:
+      - "Re-publishing the original DNSKEY id=26319 so it matched the existing root DS again"
+      - "Rotating in a brand-new signing key and updating the root DS to match it"
+      - "Removing the DS record from the root, making .al a cleanly unsigned zone"
+      - "Asking every resolver operator to manually flush their DNSSEC caches"
+    answer: 2
+    explanation: |
+      At ~19:15 the operator removed the DS record from the root. With no DS in the
+      parent, .al became simply an unsigned zone — there was nothing left to
+      validate against, so resolution was fully restored. Cloudflare then removed
+      the NTA the following day.
+    ref: "concepts.md#what-actually-broke-a-key-rollover-done-in-the-wrong-order"

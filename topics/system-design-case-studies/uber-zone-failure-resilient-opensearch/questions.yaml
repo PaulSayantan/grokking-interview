@@ -1,0 +1,209 @@
+topic: "Uber: Zone-Failure-Resilient Search (OpenSearch)"
+domain: system-design-case-studies
+topic_slug: uber-zone-failure-resilient-opensearch
+version: 1
+
+questions:
+  - id: uber-zone-failure-resilient-opensearch-001
+    difficulty: intermediate
+    tags: [failure-domains, isolation-groups, abstraction]
+    question: |
+      Why did Uber introduce logical "Isolation Groups" instead of mapping
+      shard placement directly onto physical availability zones?
+    options:
+      - "Physical zones have uneven node counts and there are usually more than three, so the balancer often could not place every shard copy validly"
+      - "Physical zones are billed separately by the cloud provider, so introducing a logical grouping layer made the monthly cost reporting far easier to reconcile across the many teams sharing each cluster"
+      - "OpenSearch has no built-in awareness of physical availability zones at all, so writing a fully custom placement layer was the only possible way to spread shard copies across failure domains"
+      - "Logical groups let Uber run more availability zones than the cloud provider physically offers, expanding failure isolation"
+    answer: 0
+    explanation: |
+      Uber's post is explicit: physical zones have uneven node counts and there are
+      typically more than three, so mapping shards straight onto them left the
+      balancer unable to place every copy (yellow clusters, disk skew, hot nodes).
+      Isolation Groups are an equal-sized logical layer over the messy hardware, so
+      placement logic has clean, balanced failure domains to reason about. OpenSearch
+      does support zone awareness natively — the problem was the unevenness, not a
+      missing feature.
+    ref: "concepts.md#why-the-naive-approach-broke-mapping-shards-straight-onto-physical-zones"
+
+  - id: uber-zone-failure-resilient-opensearch-002
+    difficulty: beginner
+    tags: [opensearch, shards, cluster-health]
+    question: |
+      In OpenSearch, what does a "yellow" cluster status indicate?
+    options:
+      - "The cluster has completely run out of disk space on its data nodes and has therefore stopped accepting any new writes until an operator frees capacity"
+      - "Primary shards are assigned and serving, but some replica shards are unassigned, so redundancy is reduced"
+      - "A rolling version upgrade is currently in progress and roughly half of the data nodes are temporarily running the newer build while the rest await restart"
+      - "The elected cluster-manager node has been lost and a fresh leader election among the remaining managers is currently underway across the cluster"
+    answer: 1
+    explanation: |
+      Yellow means the primaries are up — the cluster is fully readable and writable —
+      but some replica copies are unassigned, so you have lost redundancy, not service.
+      That distinction is central to the case study: during a zone outage Uber
+      deliberately accepts yellow (lost redundancy) rather than forcing a risky
+      re-replication that could threaten availability.
+    ref: "concepts.md#why-the-naive-approach-broke-mapping-shards-straight-onto-physical-zones"
+
+  - id: uber-zone-failure-resilient-opensearch-003
+    difficulty: advanced
+    tags: [forced-awareness, cascading-failure, recovery]
+    question: |
+      When a zone is lost, why does Uber use "forced" shard allocation awareness
+      to leave the missing copies unassigned rather than immediately re-replicating
+      them onto the surviving isolation groups?
+    options:
+      - "Re-replication is blocked by the OpenSearch license terms unless every configured zone is currently online and reporting itself healthy"
+      - "The surviving isolation groups lack the disk capacity to hold even one additional shard copy, so re-replication would always fail"
+      - "Aggressively rebuilding copies floods the survivors with I/O, CPU, and network load while they already serve everything, risking cascading failure"
+      - "Unassigned shards are faster to query because OpenSearch skips the replica-consistency check on them, so leaving them unassigned is a win"
+    answer: 2
+    explanation: |
+      Uber trades immediate full replication for cluster stability. After losing ~33%
+      of capacity, an aggressive rebalance dumps a flood of shard-copy traffic (disk
+      I/O, CPU, network) onto the two surviving groups that are already serving all
+      live queries — a classic recipe for cascading failure. Forced awareness keeps
+      the lost copies unassigned (yellow) and defers restoration to zone recovery or a
+      deliberate operator action.
+    ref: "concepts.md#idea-3--forced-awareness-choose-calm-recovery-over-a-rebalancing-storm"
+
+  - id: uber-zone-failure-resilient-opensearch-004
+    difficulty: advanced
+    tags: [quorum, cluster-manager, zone-plus-one]
+    question: |
+      Uber moved from 3 to 5 cluster-manager nodes. Under the "zone + 1" scenario
+      (a zone fails, then one more manager fails), why do 3 managers fail but 5 survive?
+    options:
+      - "Five managers each hold a complete copy of every shard in the entire index, so the actual shard data survives even when several manager nodes happen to be lost simultaneously"
+      - "Five is the fixed minimum OpenSearch hard-codes before it permits shard allocation awareness"
+      - "With three managers a zone loss and one more failure leaves one, which is not a majority; five leaves three then two, keeping a quorum"
+      - "Extra manager nodes make each leader election run measurably faster, so the cluster always manages to re-elect a leader before the second node failure can ever take effect"
+    answer: 2
+    explanation: |
+      Quorum needs a strict majority. With 3 managers: a zone loss removes 1 (2 remain,
+      still a majority), but the "+1" failure leaves 1 of 3 — not a majority — so the
+      cluster goes red. With 5 managers plus auto_shrink_voting_configuration: a zone
+      loss removes up to 2 (3 remain, a majority), voting shrinks to judge against 3,
+      and the "+1" leaves 2 of 3 — still a majority. Manager count protects quorum;
+      it is a separate concern from shard-copy count.
+    ref: "concepts.md#the-quorum-trap-why-5-cluster-managers-not-3"
+
+  - id: uber-zone-failure-resilient-opensearch-005
+    difficulty: intermediate
+    tags: [isolation-groups, blast-radius, replication]
+    question: |
+      Why did Uber choose 3 isolation groups for OpenSearch specifically?
+    options:
+      - "Three matches the number of physical availability zones Uber operates in within every cloud region"
+      - "Three is the largest group count OpenSearch permits before shard allocation awareness stops working"
+      - "Three gives the fastest query latency, because every search fans out to exactly three parallel nodes"
+      - "Three is the minimum that keeps a majority alive when one is lost (2 of 3) and caps a single-zone loss at about a third of capacity"
+    answer: 3
+    explanation: |
+      Three is the sweet spot: it is the smallest count that still leaves a majority
+      (2 of 3) when one group is lost, and it bounds a single-zone failure to removing
+      at most ~33% of capacity. Fewer groups cannot form a surviving majority; more add
+      coordination overhead for little extra resilience at this tier. It is not tied to
+      the physical zone count (which is usually more than three and uneven).
+    ref: "concepts.md#idea-1--isolation-groups-a-clean-logical-layer-over-messy-hardware"
+
+  - id: uber-zone-failure-resilient-opensearch-006
+    difficulty: advanced
+    tags: [shard-allocation-awareness, balance, prerequisite]
+    question: |
+      What key precondition must hold for OpenSearch shard allocation awareness
+      to place copies correctly — and which part of Uber's design guarantees it?
+    options:
+      - "A reasonably balanced pool of nodes across the failure domains, guaranteed by equal-sized Isolation Groups"
+      - "A dedicated coordinating-only node running in every physical zone, guaranteed by the Odin Worker sidecar process that executes during each node's startup sequence"
+      - "A minimum of five replica copies per shard, guaranteed by the five-node cluster-manager quorum"
+      - "A shared network file system mounted across all zones so copies stay in sync, guaranteed by enabling the forced-awareness configuration setting on the cluster"
+    answer: 0
+    explanation: |
+      Awareness assumes a reasonably balanced pool of nodes; if the domains are
+      lopsided it cannot place copies evenly and shards go unassigned. That is the exact
+      reason Isolation Groups are built to be equal-sized — the two features are a
+      matched pair. The sidecar only injects the IG attribute at startup; it does not
+      create balance by itself.
+    ref: "concepts.md#idea-2--shard-allocation-awareness-spread-the-copies-across-groups"
+
+  - id: uber-zone-failure-resilient-opensearch-007
+    difficulty: intermediate
+    tags: [replication, shard-copies, distribution]
+    question: |
+      Uber keeps at least 3 copies of each shard across 3 isolation groups. If a
+      shard instead had 5 copies spread across those 3 groups, how are they distributed?
+    options:
+      - "All 5 copies are deliberately placed into one single isolation group, so that the other two groups stay completely free to hold future indices as they are created"
+      - "2, 2, and 1 across the three groups, so the copy count in any two groups never differs by more than one"
+      - "The 2 extra copies are simply dropped on creation, because a layout of only 3 isolation groups can ever physically hold at most 3 copies of any shard in total"
+      - "5 copies are split as 3, 1, 1 so that the isolation group holding the primary shard always deliberately carries the clear majority of the copies"
+    answer: 1
+    explanation: |
+      Five copies over three groups land 2, 2, 1 — and the rule that matters is that
+      the count in any two groups never differs by more than one. That even spread is
+      what prevents any single group from becoming a hot spot and keeps load and disk
+      usage balanced.
+    ref: "concepts.md#idea-2--shard-allocation-awareness-spread-the-copies-across-groups"
+
+  - id: uber-zone-failure-resilient-opensearch-008
+    difficulty: intermediate
+    tags: [isolation-groups, stable-membership, node-replacement]
+    question: |
+      Why is it important that a replaced node is guaranteed to rejoin the SAME
+      isolation group it left?
+    options:
+      - "So the replacement node can reuse the previous node's IP address and avoid a slow DNS propagation delay"
+      - "Because cloud billing is charged per isolation group, and moving a node between two groups would awkwardly split that node's monthly cost across two separate invoices"
+      - "Because shard placement is computed against IG identity, so a node changing groups would silently churn the balanced layout"
+      - "So that the node keeps its fixed position in the leader-election ordering and can therefore be promoted to cluster-manager sooner than newly added nodes"
+    answer: 2
+    explanation: |
+      Shard placement is reasoned about in terms of IG identity. If a replacement node
+      landed in a different IG, every routine node replacement would quietly reshuffle
+      the carefully balanced shard layout — undermining both even distribution and the
+      failure-domain guarantees. Stable membership keeps placement deterministic across
+      replacements.
+    ref: "concepts.md#idea-1--isolation-groups-a-clean-logical-layer-over-messy-hardware"
+
+  - id: uber-zone-failure-resilient-opensearch-009
+    difficulty: beginner
+    tags: [node-attributes, sidecar, configuration]
+    question: |
+      How does an OpenSearch node come up already knowing which isolation group
+      it belongs to, without manual configuration?
+    options:
+      - "An operator manually edits the opensearch.yml file by hand on each individual host before every single deploy and then restarts the affected node for the change to take effect"
+      - "OpenSearch auto-detects the correct group on its own by carefully measuring the network round-trip latency to every other node in the cluster during its startup phase"
+      - "The isolation group is encoded in the node's hostname, which OpenSearch parses out when it boots"
+      - "An Odin Worker sidecar fetches the node's group and writes it into opensearch.yml as a node attribute before the container starts"
+    answer: 3
+    explanation: |
+      At container startup an Odin Worker sidecar fetches the node's isolation group
+      from Odin and generates opensearch.yml with the IG injected as a custom node
+      attribute, before the OpenSearch container starts. Cluster-level awareness is then
+      enabled on that attribute so it is treated as a failure domain. No manual editing
+      or latency probing is involved.
+    ref: "concepts.md#how-a-node-learns-its-isolation-group-the-wiring"
+
+  - id: uber-zone-failure-resilient-opensearch-010
+    difficulty: advanced
+    tags: [patterns, transfer, replica-placement]
+    question: |
+      The "spread replicas across failure domains, and don't stampede to
+      re-replicate on failure" pattern from this case study also appears in which
+      of the following?
+    options:
+      - "Kafka rack awareness, Cassandra's NetworkTopologyStrategy, and Kubernetes pod topology-spread constraints"
+      - "TCP slow-start, Nagle's algorithm, and the sliding-window flow-control mechanism that together govern how a single TCP connection paces its bytes"
+      - "The first, second, and third normal forms that are applied step by step when carefully normalizing a relational database schema to remove redundancy"
+      - "Bloom filters, the count-min sketch, and the other probabilistic membership data structures used to answer approximate set-membership queries cheaply"
+    answer: 0
+    explanation: |
+      This is a general replica-placement-across-failure-domains pattern. Kafka rack
+      awareness, Cassandra's NetworkTopologyStrategy, and Kubernetes pod
+      topology-spread constraints all solve the same problem: distribute copies so any
+      one domain can be lost, and recover deliberately rather than overwhelming the
+      survivors. The other options are unrelated networking, schema-design, and
+      probabilistic-structure topics.
+    ref: "concepts.md#common-follow-up-questions"

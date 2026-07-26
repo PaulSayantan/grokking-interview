@@ -24,6 +24,7 @@ export const DOMAIN_BLURBS: Record<string, string> = {
   "reliability-ops": "SLOs and error budgets, resilience patterns (retries, circuit breakers, bulkheads), incident response, chaos engineering, and disaster recovery.",
   "hibernate-jpa": "The ORM layer in depth — persistence context, entity lifecycle, the N+1 problem, caching, and locking across JPA and Hibernate 6/7.",
   grpc: "High-performance RPC with Protocol Buffers over HTTP/2 — the four streaming modes, schema evolution, deadlines, and gRPC versus REST.",
+  "system-design-case-studies": "Real architecture stories from company engineering blogs — Stripe, Dropbox, Slack, Uber — retold in plain language as sourced, interview-grade case studies.",
 };
 
 /** Blurb for a domain, or a sensible generic fallback built from the count. */

@@ -17,6 +17,7 @@ Frequency = how often the topic shows up in interviews (very-high → low).
 - [Hibernate & JPA](#hibernate-jpa) — 15 topics
 - [Java & JVM (framework-relevant)](#java-jvm) — 25 topics
 - [Messaging & Databases](#messaging-databases) — 12 topics
+- [System Design Case Studies](#system-design-case-studies) — real engineering-blog architecture stories (pilot: 11 topics)
 
 <a id="system-design"></a>
 ## System Design

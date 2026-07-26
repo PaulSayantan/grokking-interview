@@ -1,0 +1,175 @@
+topic: "Uber: A Data Abstraction Layer over Heterogeneous Stores"
+domain: system-design-case-studies
+topic_slug: uber-data-abstraction-layer
+version: 1
+questions:
+  - id: uber-data-abstraction-layer-001
+    difficulty: beginner
+    tags: [abstraction, coupling, motivation]
+    question: |
+      What core problem was Uber's Data Abstraction Layer (DAL) built to solve?
+    options:
+      - "Data queries were tightly bound to the physical structure of tables, so every schema change forced consumers to rewrite their queries"
+      - "The advertiser-facing databases kept running out of provisioned disk space during peak reporting traffic, causing dashboards to time out and fail to load"
+      - "Advertisers were being billed twice because of a duplicate-write bug"
+      - "The company needed to migrate all data off Apache Hive onto Docstore"
+    answer: 0
+    explanation: |
+      The DAL exists because consumer queries were welded to the exact shape and
+      location of physical tables. When tables evolved (v1 to v2, renamed metrics,
+      added/dropped columns), every consumer had to track the change. The DAL lets
+      consumers say WHAT they want, not HOW to fetch it, so producers and consumers
+      can evolve independently.
+    ref: "concepts.md#the-problem-queries-are-welded-to-the-tables-underneath"
+  - id: uber-data-abstraction-layer-002
+    difficulty: beginner
+    tags: [rpc, architecture, placement]
+    question: |
+      Architecturally, where does the DAL sit?
+    options:
+      - "As a caching sidecar co-located inside each database node"
+      - "As a client library compiled directly into every consumer application"
+      - "As an RPC service between the data consumers and the data producers"
+      - "As a nightly batch job that materializes reports into flat files"
+    answer: 2
+    explanation: |
+      The post describes the DAL as an RPC service that sits between a data consumer
+      and a data producer. It accepts a request, decides which sources can answer it,
+      orchestrates the queries, and assembles the response.
+    ref: "concepts.md#the-architecture-an-rpc-service-between-consumers-and-producers"
+  - id: uber-data-abstraction-layer-003
+    difficulty: intermediate
+    tags: [impact, metrics]
+    question: |
+      What concrete improvement in report turnaround does the post report?
+    options:
+      - "From several days down to a few minutes"
+      - "From several weeks to a couple of months, down to under two days"
+      - "A roughly 10x reduction in total database storage costs across every backend engine the layer touches"
+      - "A 50% drop in query latency across all dashboards"
+    answer: 1
+    explanation: |
+      Building a new report previously took anywhere from several weeks to a couple
+      of months of hand-building queries against specific tables. With the DAL, that
+      turnaround dropped to under two days. The post gives no QPS, latency, or
+      storage figures.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+  - id: uber-data-abstraction-layer-004
+    difficulty: intermediate
+    tags: [logical-tables, schema, metadata]
+    question: |
+      In the DAL, what is a "logical table"?
+    options:
+      - "A physical table that has been denormalized for faster reads"
+      - "A materialized view refreshed on a fixed nightly schedule"
+      - "A short-lived temporary table that the query engine materializes on the fly during the result-assembly stage of each request"
+      - "A data interface defining the shape (dimensions and metrics) without saying where the data physically lives"
+    answer: 3
+    explanation: |
+      A logical table is an interface defined in YAML in terms of dimensions
+      (attributes you group/filter by) and metrics (measured values). Each metric
+      has a source attribute listing candidate physical tables, so one logical
+      metric can be backed by several real tables the DAL chooses among at runtime.
+    ref: "concepts.md#the-architecture-an-rpc-service-between-consumers-and-producers"
+  - id: uber-data-abstraction-layer-005
+    difficulty: advanced
+    tags: [table-resolution, phases]
+    question: |
+      Which sequence correctly describes the DAL's three table-resolution phases?
+    options:
+      - "Schema eligibility, then dataset availability, then column continuity"
+      - "Column continuity, then schema eligibility, then dataset availability"
+      - "Dataset availability, then column continuity, then schema eligibility"
+      - "Cost estimation, then caching check, then replica selection"
+    answer: 0
+    explanation: |
+      First schema eligibility discards candidates missing any requested dimension
+      or metric. Then dataset availability discards tables whose freshness/retention
+      window doesn't intersect the requested time range. Finally column continuity
+      prefers the candidate closest in cardinality to the request.
+    ref: "concepts.md#table-resolution-choosing-which-physical-tables-can-answer"
+  - id: uber-data-abstraction-layer-006
+    difficulty: intermediate
+    tags: [query-execution, latency, parallelism]
+    question: |
+      Why does the DAL execute the generated queries in parallel?
+    options:
+      - "To guarantee strong consistency across the different databases"
+      - "Because each database engine can only accept one query per connection"
+      - "A request often fans out to several physical tables, so parallel execution keeps latency bounded by the slowest single query rather than their sum"
+      - "To ensure that failed queries can be retried in a strict order"
+    answer: 2
+    explanation: |
+      A single logical request can resolve to multiple physical tables (the post
+      shows one producing three queries across realtime and daily tables). Running
+      them sequentially would add up their latencies; running them in parallel bounds
+      total latency by the slowest query, keeping the endpoint fast.
+    ref: "concepts.md#query-generation-parallel-execution-and-result-assembly"
+  - id: uber-data-abstraction-layer-007
+    difficulty: advanced
+    tags: [result-assembly, operations]
+    question: |
+      Which of these is one of the result-assembly operations the DAL uses to combine partial results?
+    options:
+      - "Sharding the response across multiple regions"
+      - "Concatenation of temporally adjacent data"
+      - "Encrypting each column with a per-tenant key"
+      - "Compressing the payload before returning it"
+    answer: 1
+    explanation: |
+      Result assembly stitches partial results using four operation types:
+      concatenation (glue temporally adjacent data), joins (combine complementary
+      datasets on shared dimensions), rollups (aggregate over omitted dimensions),
+      and scalar transformations (virtual columns, normalizations, reference joins).
+    ref: "concepts.md#query-generation-parallel-execution-and-result-assembly"
+  - id: uber-data-abstraction-layer-008
+    difficulty: intermediate
+    tags: [extensibility, connectors]
+    question: |
+      How does the DAL integrate a brand-new database technology?
+    options:
+      - "By rewriting large portions of the metadata subsystem and the query-engine core specifically for that new engine"
+      - "By exporting all existing data into the new engine first"
+      - "By adding it to a hard-coded switch statement in the query generator"
+      - "By implementing a connector interface, leaving the core engine unchanged"
+    answer: 3
+    explanation: |
+      New databases are integrated through a connector interface, so adding a store
+      means implementing that interface rather than modifying the core. This
+      pluggability, plus decorator extension points for domain-specific behavior, is
+      what let the DAL start with ads and expand into non-ads domains.
+    ref: "concepts.md#storage-engines-and-extensibility"
+  - id: uber-data-abstraction-layer-009
+    difficulty: advanced
+    tags: [result-assembly, constraints, gotcha]
+    question: |
+      What is a required condition for the DAL's result assembly to combine partial results across candidate physical tables?
+    options:
+      - "The candidate physical tables must share the same dimensions"
+      - "All candidate tables must reside in the same database engine"
+      - "Every candidate table must be refreshed at exactly the same time"
+      - "The candidate tables must all be smaller than a fixed row limit"
+    answer: 0
+    explanation: |
+      Result assembly can only combine partial results when the candidate physical
+      tables expose the same dimensions. A missing dimension isn't a minor detail; it
+      disqualifies a table during the schema-eligibility phase of resolution.
+    ref: "concepts.md#query-generation-parallel-execution-and-result-assembly"
+  - id: uber-data-abstraction-layer-010
+    difficulty: advanced
+    tags: [trade-offs, design]
+    question: |
+      Which statement best captures a genuine trade-off the DAL design accepts?
+    options:
+      - "It sacrifices query correctness in order to reduce storage costs"
+      - "It requires every consumer to learn the physical schema of each table"
+      - "It absorbs deep, multi-layer physical dependency complexity internally, so consumers get a simple, stable interface in exchange for per-request resolution and assembly overhead"
+      - "It eliminates all query latency by precomputing every possible report"
+    answer: 2
+    explanation: |
+      The DAL hides that real physical dependency graphs can be multiple layers deep
+      and span multiple database technologies. Every request now pays resolution,
+      generation, and assembly overhead, but consumers stop paying the weeks-to-months
+      integration tax and reports ship in under two days. That is the deliberate
+      trade: internal complexity for consumer simplicity and evolvability.
+    ref: "concepts.md#trade-offs-and-gotchas-gathered"

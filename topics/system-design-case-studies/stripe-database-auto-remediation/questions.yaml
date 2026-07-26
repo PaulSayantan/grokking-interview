@@ -1,0 +1,199 @@
+topic: "Stripe: Auto-Remediating a Global MongoDB Fleet with Graph Search and State Machines"
+domain: system-design-case-studies
+topic_slug: stripe-database-auto-remediation
+version: 1
+
+questions:
+  - id: stripe-database-auto-remediation-001
+    difficulty: intermediate
+    tags: [problem-framing, failure-modes, scale]
+    question: |
+      According to Stripe, what made static, hand-coded automation unable to keep
+      up with recovering its MongoDB fleet?
+    options:
+      - "The combinatorial explosion of failure modes across many cluster shapes made it impossible to anticipate and script every scenario"
+      - "MongoDB removed the replica-set reconfiguration APIs that the automation depended on to add, remove, or reweight member votes during recovery"
+      - "The cloud compute and storage costs of continuously running the recovery scripts across every region grew faster than the team's budget"
+      - "The fleet was being migrated off MongoDB onto a new datastore, so investing further in recovery tooling was deprioritized"
+    answer: 0
+    explanation: |
+      The post states the "combinatorial explosion of failure modes made it impossible
+      to anticipate every scenario with static, hand-coded automation." With 40+ shard
+      layouts and many independent attributes (votes, priority, hidden status, oplogs)
+      that can each break, no finite set of hand-written runbooks can cover every
+      combination — which is what motivated the graph-search reframe.
+    ref: "concepts.md#the-problem-too-many-failure-modes-to-ever-script-them-all"
+
+  - id: stripe-database-auto-remediation-002
+    difficulty: intermediate
+    tags: [v1, plugins, ordering]
+    question: |
+      What was a core weakness of Stripe's original V1 remediation system?
+    options:
+      - "It required a dedicated GPU cluster to run its ranking model, which was too expensive to keep provisioned across every region"
+      - "It could only ever repair a single shard per calendar day because each remediation held a global fleet-wide lock until completion"
+      - "Its hard-coded, ranked plugins produced circular dependencies and could not find a valid ordering when multiple things failed at once"
+      - "It stored no history of the actions it took, so post-incident audits and reviews were impossible"
+    answer: 2
+    explanation: |
+      V1 was a "single-step, hard-coded state machine" of plugins run in a hard-coded
+      ranking. Implicit dependencies between plugins caused circular dependencies, and
+      the single-issue-at-a-time approach "couldn't find a valid ordering" under
+      multiple simultaneous failures, so it paged a human. That inability to reason
+      about ordering across faults is exactly what the graph model fixes.
+    ref: "concepts.md#why-the-naive-approach-broke-a-hard-coded-single-step-state-machine"
+
+  - id: stripe-database-auto-remediation-003
+    difficulty: intermediate
+    tags: [graph-model, nodes, edges]
+    question: |
+      In Stripe's graph model of a shard, what do a graph node and a graph edge
+      represent?
+    options:
+      - "A node is a physical database server in a region and an edge is the replicated network link that carries oplog traffic between two such servers"
+      - "A node is a possible configuration state of the shard and an edge is an atomic operation that transitions between states"
+      - "A node is a single MongoDB document and an edge is a foreign-key reference pointing to a related document in another collection"
+      - "A node is an on-call engineer and an edge is a page routed to them"
+    answer: 1
+    explanation: |
+      Stripe models a shard's state (per-member votes, priority, hidden status, plus
+      shard-level oplog sizes, regional distribution, quorum) as a graph node, and each
+      atomic operation (add/remove vote, change priority, hide/unhide, rebuild, resize
+      oplog) as an edge. Note "node" here is a graph vertex — a state — not a database
+      machine. Remediation becomes finding a path from the current state to the goal.
+    ref: "concepts.md#the-reframe-model-the-fleet-as-a-directed-graph"
+
+  - id: stripe-database-auto-remediation-004
+    difficulty: advanced
+    tags: [invariants, safety, quorum]
+    question: |
+      What role do "invalid states" play in Stripe's pathfinding, and what is an
+      example?
+    options:
+      - "They are the preferred goal states because they minimize the total number of votes the shard must maintain, which lowers reconfiguration overhead"
+      - "They are logged for analytics dashboards but are otherwise traversed completely normally during the search, exactly like any valid state"
+      - "They are the specific candidate states that the operator manually selects and pins before each remediation run begins"
+      - "They violate a safety invariant (e.g., even votes or a minority of healthy voting nodes) and are pruned so no path routes through them"
+    answer: 3
+    explanation: |
+      Invalid states violate safety invariants — the post cites an even number of votes,
+      a minority of healthy voting nodes (losing quorum), or "priority=1 and vote=0."
+      Every intermediate state is validated and invalid ones are pruned, so the search
+      never reaches the goal by passing through a dangerous configuration. Invariants
+      replace hand-written runbooks as the safety definition.
+    ref: "concepts.md#the-reframe-model-the-fleet-as-a-directed-graph"
+
+  - id: stripe-database-auto-remediation-005
+    difficulty: intermediate
+    tags: [bfs, dijkstra, pathfinding]
+    question: |
+      Why did Stripe evolve from BFS to Dijkstra's algorithm for pathfinding?
+    options:
+      - "BFS guarantees the fewest operations but fails entirely when no complete path exists, whereas Dijkstra supports weighted edges and can return the path to the least misconfigured reachable state"
+      - "Dijkstra is fundamentally simpler to implement than BFS and required far less planner code, which is why the team standardized on it once the graph model settled"
+      - "BFS cannot run inside Temporal workflows because its queue-based traversal is incompatible with the durable-execution event history that Temporal replays on recovery"
+      - "Dijkstra uses substantially less memory than BFS on very large graphs because it never has to hold an entire frontier layer of states in the queue at once"
+    answer: 0
+    explanation: |
+      BFS "guarantees minimum operations" but "fails entirely if no complete path
+      exists." Dijkstra over a weighted graph lets Stripe (1) weight operations by real
+      cost and (2) do partial remediation — returning "the path to the least
+      misconfigured state" and leaving the residue for an operator — instead of giving
+      up when a full fix isn't reachable.
+    ref: "concepts.md#pathfinding-from-bfs-to-dijkstra-and-partial-remediation"
+
+  - id: stripe-database-auto-remediation-006
+    difficulty: advanced
+    tags: [edge-weight, cost-model, estimated-time]
+    question: |
+      How does Stripe compute the weight of an edge (operation) for Dijkstra's search?
+    options:
+      - "As a fixed constant of 1 for every operation, so the search simply minimizes the raw number of operations regardless of their real-world cost"
+      - "As misconfiguration(state) multiplied by estimatedTime(operation), so both how broken the state is and how slow the operation is factor in"
+      - "As the number of replica-set members currently unreachable or down at the moment the edge would be traversed during recovery"
+      - "As the shard's total on-disk data size in gigabytes, so that operations on larger shards are treated as proportionally more expensive"
+    answer: 1
+    explanation: |
+      The formula is edgeWeight = misconfiguration(state) x estimatedTime(operation).
+      estimatedTime is a constant per operation (config update = 3, oplog resize = 19,
+      rebuild = 101 — a rebuild is ~33x a config change), and misconfiguration is scored
+      by composable rules. Weighting by time steers the search away from slow rebuilds
+      when a cheap fix suffices.
+    ref: "concepts.md#pathfinding-from-bfs-to-dijkstra-and-partial-remediation"
+
+  - id: stripe-database-auto-remediation-007
+    difficulty: advanced
+    tags: [simulation, durable-execution, temporal]
+    question: |
+      What is the point of Stripe's "what you simulate is what you execute" principle?
+    options:
+      - "It lets the team skip writing unit and integration tests entirely, because simulating a plan end-to-end is treated as sufficient verification of correctness before rollout"
+      - "It means the planning simulations are scheduled onto faster, higher-clock-rate hardware than production so that exploring hundreds of state transitions never becomes a bottleneck"
+      - "The same business logic runs in both simulated (in-memory) and real (Temporal-backed) modes, so the validated plan cannot drift from what actually executes"
+      - "It allows a broken shard to be repaired purely in the model, without ever having to run any real reconfiguration operations against the live cluster"
+    answer: 2
+    explanation: |
+      A CommonContext interface runs identical business logic against either an
+      in-memory implementation (planning) or Temporal's real workflow context
+      (execution), swapped via WithExternalDeps. Because both modes run the same logic,
+      the plan you validated in simulation is the plan that executes — no drift.
+      Simulation turns minutes of I/O into milliseconds of CPU, exploring hundreds of
+      transitions per second.
+    ref: "concepts.md#pathfinding-from-bfs-to-dijkstra-and-partial-remediation"
+
+  - id: stripe-database-auto-remediation-008
+    difficulty: beginner
+    tags: [numbers, impact, pager]
+    question: |
+      Which concrete outcome does Stripe report from the new auto-remediation system?
+    options:
+      - "A complete, 100% elimination of every database-related page, so on-call engineers were never again paged for shard health"
+      - "A 30% reduction in pager volume, roughly 200 fewer pages per year"
+      - "A 5x increase in fleet size"
+      - "A doubling of the oplog sizes configured on every member across the entire fleet as part of the rollout"
+    answer: 1
+    explanation: |
+      The post reports a "30% reduction in pager volume (~200 fewer pages per year)"
+      and "12 fewer days of shards stuck in unhealthy states annually." It does not
+      claim pages were fully eliminated — partial-remediation cases still escalate the
+      residue to a human.
+    ref: "concepts.md#concrete-numbers-from-the-post"
+
+  - id: stripe-database-auto-remediation-009
+    difficulty: intermediate
+    tags: [partial-remediation, human-in-the-loop, resilience]
+    question: |
+      When Dijkstra cannot find a complete path to the goal (Source of Truth) state,
+      what does Stripe's system do?
+    options:
+      - "It aborts the entire attempt and deterministically rolls the shard all the way back to its original broken configuration before doing anything else"
+      - "It picks a random legal operation and keeps retrying different random sequences until one of them happens to reach the goal state"
+      - "It escalates the incident to an on-call operator immediately, without applying any changes at all to the shard's current configuration"
+      - "It applies partial remediation — moving to the least misconfigured reachable state and leaving the ephemeral node for operator attention"
+    answer: 3
+    explanation: |
+      Dijkstra returns "the path to the least misconfigured state," so the system fixes
+      everything it safely can and "leaves the ephemeral node for operator attention."
+      This is the key advantage over BFS, which would fail entirely. The human only
+      handles the residue, not the whole incident.
+    ref: "concepts.md#pathfinding-from-bfs-to-dijkstra-and-partial-remediation"
+
+  - id: stripe-database-auto-remediation-010
+    difficulty: advanced
+    tags: [layout-independence, scoring-rules, extensibility]
+    question: |
+      Why can Stripe onboard a new shard layout with essentially zero code changes,
+      unlike the old plugin system?
+    options:
+      - "Because remediation depends only on states, operations, invariants, and composable scoring rules, none of which hard-code a cluster's shape"
+      - "Because every distinct shard layout was first standardized and migrated into a single identical shape, so the planner only ever sees one topology"
+      - "Because any new or unrecognized shard layout is simply rejected by the system until an engineer writes bespoke code to support it"
+      - "Because Temporal's workflow engine automatically detects the new layout and rewrites the old ranked plugins to match it"
+    answer: 0
+    explanation: |
+      The old plugins baked in layout assumptions, so each new layout meant auditing
+      every plugin (~1 week each). The graph model reasons purely over states, atomic
+      operations, safety invariants, and composable scoring rules — all layout-
+      independent — so a new cluster shape needs no planner changes. Adding a new
+      failure type just means adding a scoring rule and an operation (edge).
+    ref: "concepts.md#trade-offs-and-gotchas"

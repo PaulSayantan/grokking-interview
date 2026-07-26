@@ -1,0 +1,169 @@
+topic: "LinkedIn: Northguard and Xinfra — Rebuilding Log Storage Past Kafka's Scaling Walls"
+domain: system-design-case-studies
+topic_slug: linkedin-northguard-xinfra-log-storage
+version: 1
+questions:
+  - id: linkedin-northguard-xinfra-log-storage-001
+    difficulty: intermediate
+    tags: [kafka, scalability, motivation]
+    question: |
+      According to the post, where were Kafka's real scaling walls at LinkedIn?
+    options:
+      - "In raw disk throughput, which forced LinkedIn onto SSD-only brokers and a bespoke storage engine to keep up with write volume"
+      - "In the network fabric between data centers, where cross-region replication traffic saturated the available inter-DC bandwidth"
+      - "In the metadata plane (one controller per cluster) and the heavyweight partition as the unit of replication"
+      - "In the client libraries, which could not batch produce requests efficiently enough to sustain the required per-topic throughput"
+    answer: 2
+    explanation: |
+      The post is explicit that storage throughput was not the bottleneck. The limits
+      were the metadata/control plane — effectively one controller per Kafka cluster —
+      and the partition being a heavyweight unit for replication and rebalancing.
+    ref: "concepts.md#the-problem-kafka-couldnt-grow-with-linkedin-anymore"
+  - id: linkedin-northguard-xinfra-log-storage-002
+    difficulty: beginner
+    tags: [scale, numbers]
+    question: |
+      What scale figure does the post give for Kafka at LinkedIn?
+    options:
+      - "Over 32T records/day at 17 PB/day on 400K topics across 10K+ machines in 150 clusters"
+      - "About 1T records/day at 2 PB/day on 40K topics across 1K machines in 15 clusters"
+      - "Roughly 5T records/day at 50 PB/day on 4M topics across 100K machines in 900 clusters"
+      - "Around 100B records/day at 1 PB/day on 10K topics across 500 machines in 12 clusters"
+    answer: 0
+    explanation: |
+      The post reports over 32 trillion records/day at 17 PB/day on 400K topics,
+      distributed across 10K+ machines within 150 clusters — the scale that pushed
+      Kafka past its limits.
+    ref: "concepts.md#the-problem-kafka-couldnt-grow-with-linkedin-anymore"
+  - id: linkedin-northguard-xinfra-log-storage-003
+    difficulty: intermediate
+    tags: [segments, replication, self-balancing]
+    question: |
+      In Northguard, what is the unit of replication, and why does that choice matter?
+    options:
+      - "The topic; replicating an entire topic as one indivisible unit keeps all of that topic's data physically colocated on the same fixed set of brokers, which maximizes read locality"
+      - "The partition; replicating at partition granularity is precisely what keeps Northguard fully wire-compatible with existing Kafka consumers, offset semantics, and operational tooling"
+      - "The vnode; replicating metadata shards across the hash ring is what makes the stored records durable and recoverable"
+      - "The segment; because segments are small and self-contained, re-replication and balancing move small lumps and happen automatically via log striping"
+    answer: 3
+    explanation: |
+      Northguard replicates at the segment level. Segments are small and immutable once
+      sealed, so re-replicating one is cheap. With log striping each segment has its own
+      replica set, so new brokers organically pick up new segments and the cluster
+      balances "by design."
+    ref: "concepts.md#northguards-data-model-records-segments-ranges-topics"
+  - id: linkedin-northguard-xinfra-log-storage-004
+    difficulty: advanced
+    tags: [segments, sealing]
+    question: |
+      Which of these does the post list as a trigger for sealing an active segment?
+    options:
+      - "A consumer group falling more than an hour behind the head of the log for that range"
+      - "Reaching 1 GB in size (also: being active over an hour, or a replica failing)"
+      - "A rebalance of the consistent-hash ring triggered by adding a new vnode to the metadata plane"
+      - "A coordinator election that changes which replica is the leader of the owning vnode"
+    answer: 1
+    explanation: |
+      A segment is sealed (made immutable) when it reaches 1 GB, when it has been active
+      for over an hour, or when a replica fails. The other options describe unrelated
+      membership/consumer events.
+    ref: "concepts.md#northguards-data-model-records-segments-ranges-topics"
+  - id: linkedin-northguard-xinfra-log-storage-005
+    difficulty: advanced
+    tags: [ranges, partitions, elasticity]
+    question: |
+      Why does the post favor splittable ranges over Kafka-style indexed partitions?
+    options:
+      - "Ranges remove the need for any per-key ordering guarantees between records altogether, deliberately trading global consistency away in exchange for substantially higher aggregate write throughput"
+      - "Ranges are held entirely in broker memory rather than on disk, so splitting or merging them is instantaneous and never has to touch persistent storage or reseal any existing segment"
+      - "Splitting a range only interrupts producers to that one range, whereas repartitioning needs a stop-the-world synchronization barrier"
+      - "Ranges let LinkedIn drop the Raft consensus layer entirely in favor of eventual consistency across brokers"
+    answer: 2
+    explanation: |
+      Repartitioning a partitioned topic requires a stop-the-world barrier while the
+      key-to-partition mapping is rebuilt. Splitting a range is local: it only interrupts
+      producers to the range being split, and happens-before ordering is preserved across
+      splits and merges.
+    ref: "concepts.md#ranges-vs-partitions-why-splitting-beats-a-fixed-grid"
+  - id: linkedin-northguard-xinfra-log-storage-006
+    difficulty: intermediate
+    tags: [metadata, ds-rsm, vnodes]
+    question: |
+      How does Northguard scale its metadata past Kafka's single-controller ceiling?
+    options:
+      - "DS-RSM shards metadata across many Raft-backed vnodes on a consistent-hash ring, giving 128+ coordinators instead of 1 controller"
+      - "It stores all cluster metadata in a single very large ZooKeeper ensemble that is vertically sized and provisioned to hold the entire fleet's brokers, topics, and partition assignments"
+      - "It replaces server-side metadata with aggressive client-side caching layered on top, removing the control plane from the write path entirely and pushing all coordination onto producers"
+      - "It elects one super-controller per data center to divide the metadata management load geographically"
+    answer: 0
+    explanation: |
+      DS-RSM (Dynamically-Sharded Replicated State Machine) places Raft-backed vnodes,
+      each owning a metadata shard, on a consistent-hash ring. The vnode leader is the
+      coordinator, so Kafka's 1 controller becomes N (128+) coordinators.
+    ref: "concepts.md#sharded-metadata-ds-rsm-vnodes-and-coordinators"
+  - id: linkedin-northguard-xinfra-log-storage-007
+    difficulty: intermediate
+    tags: [membership, swim, gossip]
+    question: |
+      What does Northguard use for cluster membership and failure detection?
+    options:
+      - "A single membership master that every broker heartbeats to for liveness and cluster-view updates"
+      - "Raft leader election extended to cover membership for every single broker in the cluster"
+      - "A Vitess-backed membership registry that each broker polls once every second for changes"
+      - "The SWIM protocol: random probing for failure detection with infection-style dissemination"
+    answer: 3
+    explanation: |
+      Northguard uses SWIM — nodes randomly probe each other to detect failures and use
+      gossip/infection-style dissemination to spread membership changes — so there is no
+      single membership master to bottleneck or fail.
+    ref: "concepts.md#sharded-metadata-ds-rsm-vnodes-and-coordinators"
+  - id: linkedin-northguard-xinfra-log-storage-008
+    difficulty: advanced
+    tags: [durability, fsync]
+    question: |
+      How does Northguard's durability differ from Kafka's at LinkedIn?
+    options:
+      - "Northguard disables fsync entirely on the hot write path and depends on replica redundancy alone to achieve materially lower end-to-end produce latency than Kafka does"
+      - "Both systems acknowledge a write only after synchronous replication to three geographically separate data centers has fully completed and been confirmed"
+      - "Northguard fsyncs before acking (10 ms / 20k records / 10 MB), whereas Kafka lazily flushes every 10 s / 20k records"
+      - "Kafka fsyncs before every ack, while Northguard instead relies on the OS page cache for durability"
+    answer: 2
+    explanation: |
+      Kafka does lazy syncs (flush every 10 s / 20k records), so an ack can precede a
+      durable write. Northguard fsyncs before it acks (tuned at 10 ms / 20k records /
+      10 MB), so an acked write is truly on disk — better durability while still meeting
+      Kafka's SLOs.
+    ref: "concepts.md#durability-fsync-before-ack"
+  - id: linkedin-northguard-xinfra-log-storage-009
+    difficulty: intermediate
+    tags: [xinfra, epochs, virtualization]
+    question: |
+      What is a Xinfra "epoch" and why is it central to the migration?
+    options:
+      - "An entry in a virtual topic's change history; one topic can hold a Kafka epoch and a Northguard epoch at once, so the physical backing migrates transparently"
+      - "A fixed recurring time window, configured per topic, after which every registered consumer group's committed offsets for that topic are automatically reset back to zero and replay begins"
+      - "The monotonically increasing Raft term number used internally by a single vnode leader to totally order and fence the metadata writes it applies against its replicated state machine"
+      - "A periodic snapshot of broker attributes that Xinfra uses to enforce rack and datacenter awareness"
+    answer: 0
+    explanation: |
+      An epoch captures a slice of a Xinfra topic's change history. Because one virtual
+      topic can have both a Kafka epoch and a Northguard epoch simultaneously, clients
+      keep a stable virtual name while the underlying system is migrated transparently.
+    ref: "concepts.md#xinfra-virtualize-the-bus-so-you-can-migrate-under-it"
+  - id: linkedin-northguard-xinfra-log-storage-010
+    difficulty: advanced
+    tags: [migration, dual-write, zero-downtime]
+    question: |
+      How does Xinfra migrate a topic from Kafka to Northguard with zero downtime?
+    options:
+      - "It pauses all producers to the topic, takes one full point-in-time snapshot of every partition, then bulk-restores that snapshot into a freshly provisioned Northguard cluster before resuming writes"
+      - "It relies on every consumer independently replaying the entire topic from offset zero immediately after a single hard, coordinated cutover event across the whole fleet"
+      - "It runs both the Kafka and Northguard systems in parallel forever, never actually completing any migration"
+      - "It creates a new epoch in the target and dual-writes, cutting over producers first then consumers, which preserves ordering and allows rollback"
+    answer: 3
+    explanation: |
+      Migration creates the new epoch in the target system and uses dual-writes,
+      migrating producers first and then consumers. Dual writes preserve ordering and
+      allow rollback — enabling zero-downtime moves, with 90%+ of apps now on Xinfra
+      clients.
+    ref: "concepts.md#xinfra-virtualize-the-bus-so-you-can-migrate-under-it"
