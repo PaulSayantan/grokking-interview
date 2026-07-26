@@ -28,7 +28,7 @@ questions:
       A table has 6 indexes. Roughly how many index structures must be updated
       when you INSERT one new row (assuming all indexed columns are populated)?
     options:
-      - "Only the primary key index"
+      - "Only the primary key index that the new row lands in"
       - "Exactly 1 — the engine batches index updates lazily"
       - "All 6 indexes, in addition to writing the row itself"
       - "None — indexes are only rebuilt nightly"
@@ -48,10 +48,10 @@ questions:
       `true`, and queries filtering `WHERE is_active = true` still do a seq scan.
       Why is the planner right to ignore the index here?
     options:
-      - "Boolean columns can never be indexed by a B-tree"
-      - "The statistics are stale and must be manually forced"
+      - "Boolean columns can never be indexed by a B-tree, as two-valued keys are disallowed"
+      - "The statistics are stale and must be manually refreshed before the planner touches the index"
       - "The predicate has low selectivity; scanning is cheaper than millions of random index+heap lookups"
-      - "Indexes only work on unique columns"
+      - "Indexes only work on unique columns, so a duplicated boolean flag can never be indexed"
     answer: 2
     explanation: |
       Selectivity is the fraction of rows kept. `is_active = true` matches 90% of
@@ -66,8 +66,8 @@ questions:
     question: |
       Why is a B+tree index described as "balanced," and what does that guarantee?
     options:
-      - "It stores equal numbers of NULL and non-NULL values"
-      - "It balances reads and writes to the same disk sector"
+      - "It stores an equal number of NULL and non-NULL entries per leaf page"
+      - "It balances read and write operations evenly across the same disk sector"
       - "It keeps the number of indexes equal to the number of columns"
       - "Every leaf is at the same depth, so every lookup costs the same (log N) page reads"
     answer: 3
@@ -84,10 +84,10 @@ questions:
     question: |
       Which capability does a B-tree index have that a hash index does NOT?
     options:
-      - "Equality lookups (`col = 'x'`)"
+      - "Equality lookups such as `col = 'x'` on the exact stored value"
       - "Range scans, `ORDER BY` without a sort, and prefix `LIKE 'abc%'`"
-      - "Enforcing a UNIQUE constraint"
-      - "Being stored on disk"
+      - "Enforcing a UNIQUE constraint on duplicate key values"
+      - "Being stored on disk rather than only in memory"
     answer: 1
     explanation: |
       Because B+tree leaves are sorted and linked, it supports ranges, ordered
@@ -102,9 +102,9 @@ questions:
       In a B+tree index, where do the actual indexed key values and row pointers
       live, and how are those nodes connected?
     options:
-      - "Only in the root node, which points directly to disk sectors"
-      - "Spread randomly across all levels with no ordering"
-      - "In a separate hash table alongside the tree"
+      - "Only in the root node, which points directly to raw disk sectors on the device"
+      - "Spread randomly across all levels of the tree with no consistent ordering"
+      - "In a separate hash table maintained alongside the tree structure"
       - "In the leaf level; leaves hold the keys/pointers and are linked in a doubly-linked list"
     answer: 3
     explanation: |
@@ -120,10 +120,10 @@ questions:
       Why can `WHERE name LIKE 'abc%'` use a B-tree index on `name`, but
       `WHERE name LIKE '%abc'` cannot?
     options:
-      - "`%abc` is invalid SQL syntax"
+      - "`%abc` is invalid SQL syntax that the parser rejects before the planner sees it"
       - "A B-tree is ordered by the leading characters; `%abc` leaves the sort prefix unknown so there is no range to seek"
-      - "Trailing wildcards disable all indexes globally"
-      - "`LIKE` never uses indexes in any form"
+      - "Trailing wildcards disable all indexes globally, forcing every table query to scan"
+      - "`LIKE` never uses indexes in any form because matching always runs row-by-row"
     answer: 1
     explanation: |
       A B-tree is sorted left-to-right on the key. `'abc%'` fixes a known prefix,
@@ -138,9 +138,9 @@ questions:
     question: |
       What defines a clustered index?
     options:
-      - "An index stored on a separate disk from the table"
-      - "Any index on more than one column"
-      - "An index shared across multiple tables"
+      - "An index physically stored on a separate disk volume from the table"
+      - "Any index built over more than one column, grouped into a single composite key"
+      - "An index shared across multiple tables so several reference one structure"
       - "An index that determines the physical on-disk order of the table rows, with full rows in the leaf pages"
     answer: 3
     explanation: |
@@ -158,10 +158,10 @@ questions:
       physical row address) as its pointer. What is the direct consequence when a
       query reads columns not present in that secondary index?
     options:
-      - "The query fails with a missing-column error"
-      - "InnoDB rebuilds the secondary index on the fly"
+      - "The query fails with a missing-column error until every column is added to the index"
+      - "InnoDB rebuilds the secondary index on the fly to inline the missing columns"
       - "A second lookup into the clustered (primary-key) index is needed to fetch the row — a bookmark/double lookup"
-      - "The secondary index is automatically converted to clustered"
+      - "The secondary index is automatically converted into a clustered index holding the full row"
     answer: 2
     explanation: |
       Because InnoDB secondary indexes point via the PK value, retrieving columns
@@ -176,9 +176,9 @@ questions:
     question: |
       Which statement about PostgreSQL and clustered indexes is correct?
     options:
-      - "PostgreSQL clusters every table on its primary key like InnoDB"
-      - "PostgreSQL forbids secondary indexes entirely"
-      - "PostgreSQL clusters tables alphabetically by column name"
+      - "PostgreSQL clusters every table on its primary key exactly like InnoDB, storing whole rows in the index leaves"
+      - "PostgreSQL forbids secondary indexes entirely, so a table may carry only its single primary-key index"
+      - "PostgreSQL clusters tables alphabetically by column name, sorting rows by the first column's identifier"
       - "PostgreSQL has no clustered index; all indexes are secondary pointing to a heap tuple (ctid), and CLUSTER only reorders once and is not maintained"
     answer: 3
     explanation: |
@@ -195,10 +195,10 @@ questions:
       In InnoDB, why can a monotonically increasing primary key outperform a
       random UUIDv4 primary key for insert-heavy workloads?
     options:
-      - "Random UUIDs are rejected by InnoDB"
-      - "UUIDs cannot be used as primary keys, only as secondary indexes"
+      - "Random UUIDs are rejected by InnoDB, which requires every primary key to be a monotonically increasing integer and errors otherwise"
+      - "UUIDs cannot be used as primary keys and are permitted only as secondary indexes, since the clustered key is reserved for auto-increment integers"
       - "Sequential keys append to the rightmost leaf (few page splits, good locality); random UUIDs scatter inserts across the clustered index causing splits, fragmentation, and cache misses"
-      - "Integer keys are stored uncompressed while UUIDs are always compressed"
+      - "Integer keys are stored uncompressed while UUIDs are always transparently compressed, and the per-row decompression on insert is what slows them"
     answer: 2
     explanation: |
       Because InnoDB clusters the table on the PK, inserts land where the key sorts.
@@ -233,10 +233,10 @@ questions:
       For a composite index, what is the recommended ordering of columns given a
       query with both equality and range predicates?
     options:
-      - "Range columns first, then equality columns"
+      - "Range columns first, then equality columns, so the widest scan happens before narrowing"
       - "Equality columns first, then a single range column, then columns used only for ordering/output"
-      - "Alphabetical by column name"
-      - "Highest-cardinality column always last"
+      - "Alphabetical by column name, so the optimizer resolves predicates predictably"
+      - "Highest-cardinality column always placed last, saving the most selective filter"
     answer: 1
     explanation: |
       A range predicate stops the index from using subsequent columns as seek keys.
@@ -251,8 +251,8 @@ questions:
     question: |
       An index on `(a, b)` can satisfy which `ORDER BY` without a separate sort step?
     options:
-      - "ORDER BY b"
-      - "ORDER BY b, a"
+      - "ORDER BY b (the trailing column alone)"
+      - "ORDER BY b, a (reverse of index order)"
       - "ORDER BY a, b (and also ORDER BY a alone)"
       - "Any ordering of any columns in the table"
     answer: 2
@@ -268,10 +268,10 @@ questions:
     question: |
       What makes an index a "covering index" for a given query?
     options:
-      - "It has a UNIQUE constraint"
-      - "It covers more than half the rows in the table"
+      - "It carries a UNIQUE constraint forcing each combination of its key columns to appear at most once"
+      - "It spans more than half the rows in the table, so the planner treats it as broad enough for any query"
       - "It contains all the columns the query needs (both filter and output), so the query is answered from the index without touching the table"
-      - "It is defined on the primary key"
+      - "It is defined on the primary key, which by definition includes every column the query could request"
     answer: 2
     explanation: |
       A covering index includes every column the query references, so the engine
@@ -286,10 +286,10 @@ questions:
       What is the advantage of PostgreSQL/SQL Server's `INCLUDE (cols)` clause over
       simply adding those columns to the index key?
     options:
-      - "Included columns are encrypted at rest"
+      - "Included columns are automatically encrypted at rest, adding a security layer key columns never receive"
       - "Included columns are stored only in leaf pages as payload (not part of the sort key), making the index cheaper when you never filter or sort on them"
-      - "It allows more than 16 columns in the key"
-      - "It automatically makes the index unique"
+      - "It allows more than the usual 16-column key limit, letting you pack far wider composite keys than normal"
+      - "It automatically makes the index unique, enforcing distinct values across the key and included columns"
     answer: 1
     explanation: |
       `INCLUDE` stores payload columns only in the leaves, not in the ordered key
@@ -306,9 +306,9 @@ questions:
       Why, and what keeps it truly index-only?
     options:
       - "Row visibility must be confirmed; if the page is not marked all-visible in the visibility map, a heap fetch occurs — keeping VACUUM current avoids it"
-      - "The index is corrupted; reindexing is required"
-      - "PostgreSQL always fetches from the heap and never does index-only scans"
-      - "The query used SELECT * which disables index-only scans"
+      - "The index has become corrupted, so a full REINDEX is required before index-only scans return correct rows"
+      - "PostgreSQL always fetches from the heap for every query and never performs true index-only scans in any version"
+      - "The query used SELECT *, which permanently disables index-only scans because every column comes from the heap"
     answer: 0
     explanation: |
       Postgres MVCC means the index alone can't prove a tuple is visible to the
@@ -326,9 +326,9 @@ questions:
       the raw `email` column?
     options:
       - "The index stores `email`, not `LOWER(email)`; wrapping the column in a function makes the predicate non-sargable"
-      - "LOWER() is not a valid SQL function"
-      - "String comparisons never use indexes"
-      - "The email column must be the primary key first"
+      - "LOWER() is not a valid SQL function, so the engine silently falls back to a table scan"
+      - "String comparisons never use indexes because text collation is recomputed for every row"
+      - "The email column must be designated the primary key before any index on it can be used"
     answer: 0
     explanation: |
       The index is ordered by the stored values of `email`. Applying LOWER() means
@@ -345,9 +345,9 @@ questions:
       index on `created_at` be used?
     options:
       - "WHERE created_at >= '2026-01-01' AND created_at < '2027-01-01'"
-      - "WHERE created_at LIKE '2026%'"
-      - "WHERE CAST(created_at AS TEXT) = '2026'"
-      - "WHERE YEAR(created_at) = 2026"
+      - "WHERE created_at::text LIKE '2026-%' AND created_at IS NOT NULL"
+      - "WHERE CAST(created_at AS TEXT) = '2026' OR created_at IS NULL"
+      - "WHERE YEAR(created_at) = 2026 AND MONTH(created_at) >= 1"
     answer: 0
     explanation: |
       Keeping the column bare and expressing the condition as a half-open range
@@ -364,9 +364,9 @@ questions:
       full scan. What is the most likely cause?
     options:
       - "The integer literal forces an implicit type conversion on the column, defeating the index"
-      - "VARCHAR columns cannot be indexed"
-      - "The query needs an ORDER BY to use the index"
-      - "Indexes are disabled for numeric comparisons"
+      - "VARCHAR columns cannot be indexed unless capped at 255 characters, and phone exceeds the B-tree key limit"
+      - "The query needs an explicit ORDER BY phone clause before the optimizer will consider seeking the index"
+      - "Indexes are automatically disabled for any comparison whose right-hand side is a bare numeric literal"
     answer: 0
     explanation: |
       Comparing a VARCHAR column to a numeric literal triggers an implicit cast.
@@ -400,9 +400,9 @@ questions:
       What is the key difference between `EXPLAIN` and `EXPLAIN ANALYZE`?
     options:
       - "EXPLAIN shows the planner's chosen plan and cost estimates; EXPLAIN ANALYZE actually runs the query and reports real timings and row counts"
-      - "EXPLAIN runs the query; EXPLAIN ANALYZE only estimates it"
-      - "They are identical aliases"
-      - "EXPLAIN ANALYZE only works on views"
+      - "EXPLAIN executes the query and caches the result set; EXPLAIN ANALYZE only prints estimated costs without running anything"
+      - "They are identical aliases that both execute the query and emit the same estimated plan with no runtime measurements"
+      - "EXPLAIN ANALYZE works only on materialized views and indexed views, not on plain base tables or ad-hoc SELECT statements"
     answer: 0
     explanation: |
       EXPLAIN prints the estimated plan without executing. EXPLAIN ANALYZE executes
@@ -418,9 +418,9 @@ questions:
       `Bitmap Heap Scan` combination?
     options:
       - "For medium selectivity: too many rows for cheap random Index Scan I/O, too few to scan the whole table — it collects matching tuple locations in a bitmap and reads heap pages in physical order"
-      - "Only when there is no index at all"
-      - "Exclusively for unique-key equality lookups"
-      - "Only for queries with ORDER BY"
+      - "Only when there is no usable index at all, so the planner emulates one by building a temporary in-memory bitmap on the fly"
+      - "Exclusively for unique-key equality lookups where a single row is guaranteed to match the primary-key constraint"
+      - "Only for queries containing an ORDER BY, because the bitmap is what physically sorts the output rows for the client"
     answer: 0
     explanation: |
       A bitmap scan is the planner's medium-selectivity answer. It builds a bitmap
@@ -455,9 +455,9 @@ questions:
       that removes many rows. What does the `Filter` line most likely indicate?
     options:
       - "Rows were fetched and then discarded by a condition not pushed into the index seek — a hint of wrong index column order or a missing index column"
-      - "The index is corrupt"
-      - "The query cannot be executed"
-      - "The planner disabled statistics"
+      - "The index is physically corrupt, and the Filter line is Postgres discarding pages that failed a checksum on read"
+      - "The query cannot be executed as written, so the Filter line lists the rows the planner refused to process this run"
+      - "The planner disabled column statistics for this table, forcing it to filter every row against a default 0.5 estimate"
     answer: 0
     explanation: |
       `Index Cond` is what the index seek used; a `Filter` that discards many rows
@@ -475,9 +475,9 @@ questions:
       fix to try?
     options:
       - "Run ANALYZE (PostgreSQL) / ANALYZE TABLE (MySQL) to refresh statistics so the planner estimates cardinality correctly"
-      - "Drop and recreate every index on the table"
-      - "Restart the database server"
-      - "Add a FORCE INDEX hint permanently"
+      - "Drop and recreate every index on the table so the leaf pages are rebuilt with fresh row-count metadata"
+      - "Restart the database server to flush the shared buffer pool and force the planner to recompute estimates"
+      - "Add a permanent FORCE INDEX hint to every query so the planner never has to estimate cardinality again"
     answer: 0
     explanation: |
       A large estimated-vs-actual divergence points to stale statistics after the
@@ -492,9 +492,9 @@ questions:
       Which of these is NOT a statistic the planner typically stores to estimate
       cardinality?
     options:
-      - "n_distinct (number of distinct values)"
+      - "n_distinct, the estimated number of distinct values in the column"
       - "A list of most common values (MCVs) and their frequencies"
-      - "A histogram of value distribution"
+      - "A histogram of the value distribution across equal-height buckets"
       - "The exact query text of the last 100 executed queries"
     answer: 3
     explanation: |
@@ -512,9 +512,9 @@ questions:
       underestimated row count. Why, and what PostgreSQL feature addresses it?
     options:
       - "The planner assumes the two predicates are independent and multiplies their selectivities; extended statistics (CREATE STATISTICS ... dependencies) capture the correlation"
-      - "The planner overestimates correlated columns; disable statistics"
-      - "City and country columns cannot be indexed together"
-      - "The issue is unfixable without a materialized view"
+      - "The planner systematically overestimates correlated columns, so the fix is to disable per-column statistics on both"
+      - "City and country columns cannot appear together in one index, so their combined selectivity can never be estimated"
+      - "The underestimate is unfixable in PostgreSQL without maintaining a precomputed materialized view of the join result"
     answer: 0
     explanation: |
       By default the planner treats predicates as independent and multiplies
@@ -530,10 +530,10 @@ questions:
       Why are optimizer hints like MySQL's `FORCE INDEX` generally considered a last
       resort?
     options:
-      - "They permanently corrupt the index"
+      - "They permanently corrupt the forced index, requiring a full REINDEX before it can be used again"
       - "They mask the real cause (usually stale or missing statistics) and rot as the data distribution changes over time"
-      - "They only work on empty tables"
-      - "They require superuser privileges on every query"
+      - "They only take effect on empty tables and are silently ignored once a table holds any rows"
+      - "They require superuser privileges to be granted for every individual query that carries the hint"
     answer: 1
     explanation: |
       Hints override the cost-based optimizer's judgment with a fixed choice that
@@ -548,9 +548,9 @@ questions:
     question: |
       A nested-loop join is efficient under which condition?
     options:
-      - "Both inputs are huge and unsorted"
-      - "The join is a non-equi range join with no indexes"
-      - "Only when both tables are empty"
+      - "Both inputs are huge and unsorted, so each outer row scans the entire inner table"
+      - "The join is a non-equi range join with no indexes on either side of the condition"
+      - "Only when both tables are empty and the loop terminates before probing any rows"
       - "The outer input is small and the inner table has an index on the join key"
     answer: 3
     explanation: |
@@ -566,9 +566,9 @@ questions:
     question: |
       Which statement about hash joins is correct?
     options:
-      - "They support arbitrary join conditions including `t1.a < t2.b`"
-      - "They require both inputs to be pre-sorted"
-      - "They are the only join type available in all databases"
+      - "They support arbitrary join conditions including range predicates like `t1.a < t2.b` and `BETWEEN`"
+      - "They require both inputs to be pre-sorted on the join key before the hash table can be built"
+      - "They are the only join algorithm available across all relational databases, replacing nested-loop entirely"
       - "They handle equi-joins only, building a hash table on the smaller input and probing with the larger; they need memory (work_mem) or spill to disk"
     answer: 3
     explanation: |
@@ -584,9 +584,9 @@ questions:
     question: |
       A merge join is most efficient when:
     options:
-      - "One input is tiny and the other is huge and unindexed"
-      - "The join condition is always inequality"
-      - "There is no index anywhere and inputs are random"
+      - "One input is tiny and the other is huge and unindexed on the join key"
+      - "The join condition is always an inequality that no sorted walk could satisfy"
+      - "There is no index anywhere and both inputs arrive in fully random order"
       - "Both inputs are already sorted on the join key (e.g. via an index) or cheaply sortable"
     answer: 3
     explanation: |
@@ -602,9 +602,9 @@ questions:
     question: |
       Which fact about MySQL join algorithms is correct?
     options:
-      - "MySQL has always supported hash joins since version 3"
-      - "MySQL only supports merge joins"
-      - "MySQL never supports nested-loop joins"
+      - "MySQL has supported hash joins since version 3, making it the default algorithm for every equi-join"
+      - "MySQL only supports sort-merge joins and requires both inputs to be indexed on the join key first"
+      - "MySQL never uses nested-loop joins, having removed them in favor of block-nested-loop scans in 5.6"
       - "MySQL used only nested-loop joins until 8.0.18, which added hash join; before that, joining two large unindexed tables was very slow"
     answer: 3
     explanation: |
@@ -620,10 +620,10 @@ questions:
       In a PostgreSQL EXPLAIN ANALYZE, a hash join shows `Batches: 8`. What does
       that most likely indicate?
     options:
-      - "The join produced 8 output rows"
+      - "The join produced exactly 8 output rows after applying every filter condition"
       - "The build side exceeded work_mem, so the hash table spilled to disk in multiple batches, degrading performance"
-      - "There are 8 indexes on the joined tables"
-      - "The join ran on 8 CPU cores in parallel"
+      - "There are 8 indexes on the joined tables that the planner considered before hashing"
+      - "The join ran across 8 CPU cores in parallel, one worker allocated per batch"
     answer: 1
     explanation: |
       More than one batch means the hash table did not fit in work_mem and Postgres
@@ -637,10 +637,10 @@ questions:
     question: |
       What is a partial index (SQL Server: filtered index)?
     options:
-      - "An index that only stores half of each column value"
-      - "An index that is only built during business hours"
+      - "An index that stores only the leading half of each column value to save space in the leaf pages"
+      - "An index that is built only during off-peak business hours and torn down before the next workday begins"
       - "An index built over only the rows matching a WHERE predicate — smaller, cheaper to maintain, usable when the query predicate is implied by the index predicate"
-      - "An index automatically dropped after each query"
+      - "An index automatically dropped after each query completes and rebuilt the next time the table is read"
     answer: 2
     explanation: |
       A partial index covers only rows satisfying its WHERE clause (e.g. only
@@ -656,9 +656,9 @@ questions:
       Which databases support partial/filtered indexes directly?
     options:
       - "PostgreSQL, SQLite, and SQL Server (filtered) — but MySQL/InnoDB does NOT"
-      - "Only MySQL/InnoDB"
-      - "No relational database supports them"
-      - "Only Oracle"
+      - "Only MySQL/InnoDB supports them natively, exposed through the WHERE clause of CREATE INDEX since 5.7"
+      - "No relational database supports partial indexes; they exist only in specialized document and search engines"
+      - "Only Oracle supports them, via its function-based index feature that filters rows at index-build time"
     answer: 0
     explanation: |
       PostgreSQL and SQLite have partial indexes; SQL Server calls them filtered
@@ -672,9 +672,9 @@ questions:
     question: |
       To make `WHERE LOWER(email) = 'a@b.com'` use an index, what should you create?
     options:
-      - "A partial index on email WHERE email IS NOT NULL"
-      - "A hash index on the raw email column"
-      - "A BRIN index on email"
+      - "A partial index on email with a WHERE email IS NOT NULL predicate"
+      - "A hash index on the raw email column for constant-time equality lookups"
+      - "A BRIN index on email summarizing the min/max of each block range"
       - "An expression (functional) index: CREATE INDEX ON users (LOWER(email))"
     answer: 3
     explanation: |
@@ -690,10 +690,10 @@ questions:
       `CREATE UNIQUE INDEX one_active ON subscriptions (user_id) WHERE active;`
       What does this enforce?
     options:
-      - "Every user must have an active subscription"
-      - "All subscriptions must be active"
+      - "Every user is required to have at least one active subscription at all times"
+      - "All subscription rows in the table are forced to have active set to true"
       - "At most one active subscription per user, while allowing many inactive rows per user"
-      - "It disables uniqueness entirely"
+      - "It disables uniqueness entirely, allowing unlimited duplicate user_id rows"
     answer: 2
     explanation: |
       A partial unique index enforces uniqueness only over the subset of rows where
@@ -708,10 +708,10 @@ questions:
       For indexing JSONB containment queries (`data @> '{"k":"v"}'`), arrays, or
       full-text search in PostgreSQL, which index type is the go-to?
     options:
-      - "B-tree"
+      - "A plain B-tree ordered on the whole JSONB document as a single scalar key"
       - "GIN (Generalized Inverted Index)"
-      - "Hash"
-      - "BRIN"
+      - "A hash index keyed on the entire JSONB value for constant-time containment"
+      - "A BRIN index summarizing each block range's min and max JSONB value"
     answer: 1
     explanation: |
       GIN builds posting lists mapping each element/token to the rows containing it
@@ -726,9 +726,9 @@ questions:
       A BRIN index is tiny and can index a huge table cheaply, but it only helps
       under one condition. Which?
     options:
-      - "The indexed column has very high cardinality"
-      - "The table has fewer than 1000 rows"
-      - "The column is the primary key"
+      - "The indexed column has very high cardinality, so each block range holds a distinct summary value"
+      - "The table has fewer than 1000 rows, small enough for BRIN to summarize in a single block range"
+      - "The column is the primary key, letting BRIN inherit the clustered ordering guarantee"
       - "The indexed column's values correlate with the physical row order (e.g. append-only created_at); otherwise it degrades toward a full scan"
     answer: 3
     explanation: |
@@ -744,10 +744,10 @@ questions:
     question: |
       Which workload is GiST specifically well-suited for that GIN is not?
     options:
-      - "Static full-text token lookups"
+      - "Static full-text token lookups over an inverted list of every word occurrence"
       - "Geometric/spatial queries and nearest-neighbor (KNN, `<->`) ordering, plus range-type overlap"
-      - "Simple integer equality"
-      - "Counting distinct values"
+      - "Simple integer equality lookups on a single high-cardinality numeric column"
+      - "Counting distinct values quickly by maintaining a running cardinality estimate per page"
     answer: 1
     explanation: |
       GiST is an extensible balanced tree supporting spatial data (PostGIS),
@@ -764,9 +764,9 @@ questions:
       lookups in PostgreSQL?
     options:
       - "Hash indexes cannot enforce uniqueness and B-trees can, plus B-trees also serve ranges and ORDER BY at similar equality cost"
-      - "Hash indexes are always slower for equality"
-      - "B-trees use less disk in every case"
-      - "Hash indexes only work on integers"
+      - "Hash indexes are always slower than a B-tree even for exact equality probes"
+      - "B-trees consume strictly less disk than a hash index in every possible case"
+      - "Hash indexes only work on integer columns and reject text or composite keys"
     answer: 0
     explanation: |
       A hash index does O(1) equality but nothing else — no ranges, no ordering.
@@ -781,10 +781,10 @@ questions:
     question: |
       What is the N+1 query problem?
     options:
-      - "A query that returns N+1 rows instead of N"
-      - "A join that produces a Cartesian product"
+      - "A query that mistakenly returns N+1 rows instead of the N rows the caller expected"
+      - "A join whose missing ON clause produces an N-by-N Cartesian product of both tables"
       - "One query to load N parent rows, then one additional query per parent to load its children — 1 + N round trips"
-      - "Adding one index too many"
+      - "Adding one index too many, so the planner is forced to evaluate N+1 candidate paths"
     answer: 2
     explanation: |
       N+1 is: 1 query for the parent list, then a separate child query for each of
@@ -798,9 +798,9 @@ questions:
     question: |
       Which pair of techniques fixes an N+1 query problem?
     options:
-      - "Adding more indexes and increasing work_mem"
-      - "Switching from B-tree to hash indexes"
-      - "Running ANALYZE more often"
+      - "Adding more covering indexes on the child table and raising work_mem for the loop"
+      - "Switching every join column from a B-tree to a hash index to speed each lookup"
+      - "Running ANALYZE more often so the planner batches the per-parent queries itself"
       - "A single JOIN / eager fetch, or batching child loads with `WHERE author_id IN (?, ?, ...)`"
     answer: 3
     explanation: |
@@ -815,10 +815,10 @@ questions:
     question: |
       Why is the N+1 problem easy to miss during development?
     options:
-      - "It only occurs on weekends"
-      - "It always throws an exception immediately"
+      - "It only occurs on weekends when scheduled batch reporting jobs hold the connection"
+      - "It always throws a distinct N+1 exception immediately on the first extra child query"
       - "It looks fine with a handful of test rows and only collapses at production scale; it's invisible unless you count queries via a statement log/APM trace"
-      - "Databases automatically warn about it"
+      - "Databases automatically emit a warning to the server log whenever the pattern is detected"
     answer: 2
     explanation: |
       With 3 test rows, 1+3 queries is unnoticeable. At production scale (N=500+)
@@ -834,10 +834,10 @@ questions:
       Comparing a composite index `(a, b)` against two separate single-column
       indexes on `a` and `b`, which statement is most accurate?
     options:
-      - "Two single-column indexes are always strictly better"
+      - "Two separate single-column indexes are always strictly better than any composite index"
       - "The composite serves `a` and `(a,b)` with one seek and can cover/sort; two singles let Postgres combine them via BitmapAnd but each alone is less selective"
-      - "They are functionally identical in all cases"
-      - "A composite index cannot be used for a query on `a` alone"
+      - "They are functionally identical in all cases, so the choice never affects the query plan"
+      - "A composite index on `(a, b)` cannot be used for a query that filters on column `a` alone"
     answer: 1
     explanation: |
       A composite `(a,b)` gives a precise single seek for combined predicates and
@@ -853,10 +853,10 @@ questions:
       You added an index but the query is still slow. Which debugging sequence is
       the most sound first pass?
     options:
-      - "Immediately add FORCE INDEX and move on"
+      - "Immediately add a FORCE INDEX hint pinning the new index and consider the issue resolved"
       - "Run EXPLAIN ANALYZE; compare estimated vs actual rows (ANALYZE if stale); verify the predicate is sargable; check leftmost-prefix and selectivity; look for a Filter line hinting at wrong column order"
-      - "Drop all indexes and rebuild the table"
-      - "Increase the connection pool size"
+      - "Drop every index and rebuild the whole table from scratch to reset its physical layout"
+      - "Increase the connection pool size so the slow query gets more concurrent worker threads"
     answer: 1
     explanation: |
       Start with EXPLAIN ANALYZE and reason from evidence: estimate-vs-actual
@@ -873,10 +873,10 @@ questions:
       On a write-heavy table, how would you identify indexes that cost you on every
       write but are never read?
     options:
-      - "There is no way to tell; keep all indexes forever"
+      - "There is no reliable way to tell which indexes are unused, so keep all of them forever"
       - "Check idx_scan in pg_stat_user_indexes (PostgreSQL) or sys.schema_unused_indexes (MySQL) and drop the ones never used"
-      - "Count the columns in each index"
-      - "Measure only the table's total size"
+      - "Count the columns in each index and drop whichever ones have the most key columns"
+      - "Measure only the table's total on-disk size and drop indexes once it exceeds a threshold"
     answer: 1
     explanation: |
       PostgreSQL's pg_stat_user_indexes.idx_scan counts how often each index was
@@ -891,9 +891,9 @@ questions:
     question: |
       What does it mean for a predicate to be "SARGable" (Search ARGument able)?
     options:
-      - "It returns at most one row"
-      - "It has been rewritten to avoid all JOINs"
-      - "It scans the table in a single pass with no random I/O"
+      - "It is guaranteed to return at most one row because it filters on a unique key"
+      - "It has been rewritten by the optimizer to eliminate all JOINs against other tables"
+      - "It scans the entire table in a single sequential pass with no random I/O at all"
       - "The engine can use it as a search argument to seek a B-tree index instead of testing it row-by-row"
     answer: 3
     explanation: |
@@ -948,9 +948,9 @@ questions:
       still chooses a sequential scan. What best explains this?
     options:
       - "Sargability is necessary but not sufficient; if the column is low-selectivity (matches most rows) the planner costs a scan cheaper than millions of random index lookups"
-      - "Equality predicates are never sargable"
-      - "The index must be dropped and recreated to become usable"
-      - "The engine ignores sargable predicates on string columns"
+      - "Equality predicates are never sargable because equality forces a per-row comparison"
+      - "The index must be dropped and recreated after every bulk write before it becomes usable"
+      - "The engine categorically ignores sargable predicates whenever they are on string columns"
     answer: 0
     explanation: |
       Sargability only lets the index be considered. Selectivity and statistics decide
@@ -966,10 +966,10 @@ questions:
       You must keep `WHERE LOWER(email) = 'a@b.com'` for case-insensitive lookups.
       How do you make it use an index across engines?
     options:
-      - "Add a plain B-tree index on the raw `email` column"
-      - "Rewrite it to `WHERE email = 'a@b.com'` and hope collation handles case"
+      - "Add a plain B-tree index on the raw `email` column and let the planner apply LOWER at seek time"
+      - "Rewrite it to `WHERE email = 'a@b.com'` and rely on the column's collation to fold case for you"
       - "Create an expression index on `LOWER(email)` (Postgres, MySQL 8.0.13+); on older MySQL, add a generated column and index that"
-      - "Force a hash index on `email`"
+      - "Force a hash index on `email` so the hashed lowercase form can be probed directly"
     answer: 2
     explanation: |
       When the function can't be removed, index the expression itself so the stored
@@ -985,10 +985,10 @@ questions:
       A column `account_no` is `VARCHAR` with a B-tree index, but `WHERE account_no =
       100245` triggers a full scan. Which rewrite is sargable, and why?
     options:
-      - "`WHERE CAST(account_no AS INT) = 100245` — normalizes the column to a number"
+      - "`WHERE CAST(account_no AS INT) = 100245` — normalizes the column to a number so the integer literal matches exactly"
       - "`WHERE account_no = '100245'` — matching the literal's type keeps the column bare and avoids a per-row implicit cast"
-      - "`WHERE account_no LIKE '100245'` — LIKE is always sargable"
-      - "`WHERE TRIM(account_no) = '100245'` — trimming ensures an exact match"
+      - "`WHERE account_no LIKE '100245'` — LIKE is always sargable and seeks the index for any pattern with no wildcard"
+      - "`WHERE TRIM(account_no) = '100245'` — trimming both sides guarantees an exact match that the index can still seek"
     answer: 1
     explanation: |
       Comparing a VARCHAR column to a numeric literal can force the engine to convert
@@ -1005,10 +1005,10 @@ questions:
       For a high-insert-rate table in InnoDB, you must choose between a random UUIDv4
       and a time-ordered UUIDv7 as the primary key. Which and why?
     options:
-      - "UUIDv4, because randomness spreads writes evenly and prevents any hot leaf page"
+      - "UUIDv4, because its full 128-bit randomness spreads inserts evenly across every leaf of the clustered index, eliminating any hot page and balancing write throughput perfectly"
       - "UUIDv7, because its time-ordered prefix makes inserts append near the rightmost leaf of the clustered index, minimizing page splits and fragmentation"
-      - "Either one performs identically since both are 128-bit values"
-      - "UUIDv4, because InnoDB cannot cluster on a UUIDv7 value"
+      - "Either one performs identically, since both are 128-bit values that InnoDB hashes to the same clustered slot regardless of their internal byte ordering"
+      - "UUIDv4, because InnoDB cannot physically cluster a table on a UUIDv7 key and silently falls back to a heap-organized layout for time-based identifiers"
     answer: 1
     explanation: |
       InnoDB clusters the table on the PK, so rows are stored in PK order. UUIDv7's
@@ -1026,9 +1026,9 @@ questions:
       served by one composite index seek. Which approach can restore index usage?
     options:
       - "Split it into a UNION of two individually sargable branches, or keep per-column indexes the planner can combine (Postgres BitmapOr)"
-      - "Wrap both conditions in COALESCE to merge them"
-      - "Replace OR with a single BETWEEN across both columns"
-      - "Add a leading-wildcard LIKE so both columns match"
+      - "Wrap both conditions in a single COALESCE(archived, deleted_at) expression so the planner treats them as one bare, seekable index key"
+      - "Replace the OR with a single BETWEEN spanning both columns, which collapses the two predicates into one contiguous range seek on a composite index"
+      - "Add a leading-wildcard LIKE '%' clause on each column so the B-tree matches both conditions in one ordered forward scan of the leaves"
     answer: 0
     explanation: |
       An OR across different columns defeats a single composite seek. Rewriting as a

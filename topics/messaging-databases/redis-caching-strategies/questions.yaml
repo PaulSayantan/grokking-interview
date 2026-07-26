@@ -27,10 +27,10 @@ questions:
     question: |
       What is the primary reason Redis achieves microsecond-level latency for a GET?
     options:
-      - "It compresses all values with LZ4 before storing them"
+      - "It compresses all values with LZ4 before caching them in RAM"
       - "Data lives in RAM, so a GET is an in-memory hash-table lookup with no disk seek"
-      - "It caches query plans like a relational database"
-      - "It uses one OS thread per connection to parallelize reads"
+      - "It caches parsed query plans in a shared buffer like a relational engine"
+      - "It uses one dedicated OS thread per client connection to parallelize reads"
     answer: 1
     explanation: |
       Redis keeps the whole dataset in memory, so reads are hash-table lookups with no
@@ -45,10 +45,10 @@ questions:
       A developer runs KEYS * on a production instance with 20 million keys and every
       other client suddenly times out. Why?
     options:
-      - "KEYS replicates to every replica synchronously, saturating the network"
-      - "KEYS acquires a global write lock that blocks readers"
+      - "KEYS replicates to every replica synchronously, saturating the replication link"
+      - "KEYS acquires a global write lock on the keyspace that blocks all readers"
       - "KEYS is O(N) and runs on the single command thread, blocking all other clients until it finishes"
-      - "KEYS triggers an immediate BGSAVE that pauses the server"
+      - "KEYS triggers an immediate synchronous BGSAVE fork that pauses the server"
     answer: 2
     explanation: |
       KEYS scans the entire keyspace (O(N)) and executes on the one command thread, so no
@@ -62,9 +62,9 @@ questions:
     question: |
       What did the io-threads option introduced in Redis 6 actually parallelize?
     options:
-      - "Execution of commands across multiple CPU cores"
-      - "Background RDB snapshotting"
-      - "Lua script evaluation"
+      - "Execution of read and write commands spread across multiple CPU cores"
+      - "Background RDB snapshotting so the fork stops competing for the main thread"
+      - "Lua script evaluation, letting EVAL bodies run in parallel on worker threads"
       - "Reading requests from and writing replies to client sockets, while command execution stays single-threaded"
     answer: 3
     explanation: |
@@ -80,9 +80,9 @@ questions:
       just the login count atomically. Which Redis type fits best?
     options:
       - "A Hash, using HINCRBY to bump the login-count field"
-      - "A single String holding JSON"
-      - "A List, pushing each field"
-      - "A separate String key per field"
+      - "A single String holding the object as JSON"
+      - "A List, pushing each field as an ordered element"
+      - "A separate String key for each object field"
     answer: 0
     explanation: |
       A Hash stores an object's fields together and supports HINCRBY for atomic per-field
@@ -97,10 +97,10 @@ questions:
       Which Redis type is the natural fit for storing the set of unique tags on an article
       and testing membership quickly?
     options:
-      - "List"
+      - "List (RPUSH / LRANGE), scanning the list for membership"
       - "Set (SADD / SISMEMBER)"
-      - "Sorted set"
-      - "Stream"
+      - "Sorted set (ZADD), using rank order for membership"
+      - "Stream (XADD), appending each tag as an entry"
     answer: 1
     explanation: |
       A Set stores unordered unique members and offers O(1) SISMEMBER membership tests plus
@@ -113,10 +113,10 @@ questions:
     question: |
       A small hash with a few integer fields uses far less memory than expected. Why?
     options:
-      - "Redis transparently gzip-compresses every value"
-      - "Integer fields are stored as pointers into a shared pool"
+      - "Redis transparently gzip-compresses every field value before storing it"
+      - "Integer fields are stored as shared pointers into a global interned-integer pool"
       - "Small hashes use a compact listpack encoding until hash-max-listpack-entries/-value is exceeded"
-      - "Redis deduplicates identical field names across all hashes"
+      - "Redis deduplicates identical field names across all hashes into one shared table"
     answer: 2
     explanation: |
       Small collections use compact encodings (listpack for small hashes/zsets, intset for
@@ -149,9 +149,9 @@ questions:
       leaderboard sorted set?
     options:
       - "ZREVRANGE leaderboard 0 9 WITHSCORES"
-      - "ZRANGE leaderboard 0 9"
-      - "SORT leaderboard DESC LIMIT 0 10"
-      - "LRANGE leaderboard 0 9"
+      - "ZRANGE leaderboard 0 9 WITHSCORES ASC"
+      - "SORT leaderboard BY score DESC LIMIT 0 10"
+      - "LRANGE leaderboard 0 9 REV WITHSCORES"
     answer: 0
     explanation: |
       ZREVRANGE returns members ordered by descending score; 0 9 selects the top ten, and
@@ -165,10 +165,10 @@ questions:
       What internal structures let a ZSET answer both "rank of member X" and "top N by
       score" efficiently?
     options:
-      - "A single balanced B-tree keyed by member"
+      - "A single balanced B-tree keyed by member name for both queries"
       - "A skip list ordered by score plus a hash table mapping member to score"
-      - "A red-black tree keyed by score only"
-      - "Two sorted arrays kept in lockstep"
+      - "A red-black tree keyed only by score, with member rank scanned linearly"
+      - "Two parallel sorted arrays kept in lockstep, one by member and one by score"
     answer: 1
     explanation: |
       A ZSET pairs a skip list (ordered by score, giving O(log N) rank/range) with a hash
@@ -183,10 +183,10 @@ questions:
       In a sliding-window rate limiter built on a sorted set (score = timestamp), what does
       ZREMRANGEBYSCORE accomplish on each request?
     options:
-      - "It increments the request counter atomically"
-      - "It blocks new requests once the limit is reached"
+      - "It increments the request counter atomically and returns the new total"
+      - "It blocks and queues new requests server-side once the configured limit is reached"
       - "It removes entries older than the window so ZCARD reflects only the current window"
-      - "It resets the entire key to empty"
+      - "It resets the entire sorted set to empty at the start of each window"
     answer: 2
     explanation: |
       ZREMRANGEBYSCORE drops entries whose timestamp score is older than (now - window), so
@@ -201,9 +201,9 @@ questions:
       Compared with a sliding-window limiter, a simple fixed-window counter (INCR + EXPIRE
       per minute) has which drawback?
     options:
-      - "It cannot use EXPIRE to self-clean"
-      - "It requires a Lua script to be atomic"
-      - "It stores unbounded history and never frees memory"
+      - "It cannot use EXPIRE to self-clean and must be swept by a background job"
+      - "It requires a Lua script wrapping INCR and EXPIRE to be atomic at all"
+      - "It stores the full per-request timestamp history and never frees that memory"
       - "It can allow up to roughly 2x the limit as a burst across the window boundary"
     answer: 3
     explanation: |
@@ -220,9 +220,9 @@ questions:
       issuing the same commands separately from the client?
     options:
       - "The whole script executes atomically on the single thread, eliminating check-then-act races and extra round-trips"
-      - "Lua scripts run on a dedicated thread for extra speed"
-      - "Lua automatically retries on WATCH conflicts"
-      - "EVAL bypasses the AOF so it is more durable"
+      - "Lua scripts run on a dedicated scripting thread pool for extra parallel speed"
+      - "Lua automatically retries the check on optimistic WATCH/MULTI conflicts for you"
+      - "EVAL bypasses the AOF append path, making the limiter counters more durable"
     answer: 0
     explanation: |
       A Lua script runs to completion on Redis's single thread with no interleaving from
@@ -236,10 +236,10 @@ questions:
     question: |
       HyperLogLog (PFADD/PFCOUNT) is the right choice when you need to:
     options:
-      - "Retrieve the exact list of unique visitors"
+      - "Retrieve the exact enumerated list of every unique visitor seen"
       - "Approximate the count of distinct elements in tiny fixed memory (~12 KB, ~0.81% error)"
-      - "Rank elements by frequency"
-      - "Store per-user boolean flags compactly"
+      - "Rank elements by access frequency and return the top-K heavy hitters"
+      - "Store a compact per-user boolean flag indexed by numeric user id"
     answer: 1
     explanation: |
       HyperLogLog estimates cardinality (distinct count) in ~12 KB regardless of how many
@@ -270,9 +270,9 @@ questions:
       A consumer in a Redis Streams consumer group crashes after reading messages but before
       XACK. What tracks those un-acknowledged messages and how are they reassigned?
     options:
-      - "They are lost permanently once the consumer disconnects"
-      - "They are re-broadcast to every consumer via Pub/Sub"
-      - "A background job re-runs XADD to duplicate them"
+      - "They are lost permanently the moment the consumer's connection drops"
+      - "They are automatically re-broadcast to every consumer in the group via Pub/Sub"
+      - "A background sweeper job re-runs XADD to duplicate them back onto the stream"
       - "The Pending Entries List (PEL) tracks them; XCLAIM/XAUTOCLAIM reassign them to another consumer"
     answer: 3
     explanation: |
@@ -289,9 +289,9 @@ questions:
       underlying data structure?
     options:
       - "A Sorted set whose scores are geohash values"
-      - "A Set of coordinate strings"
-      - "A Hash keyed by grid cell"
-      - "A Stream of location events"
+      - "A Set holding longitude/latitude coordinate pair strings"
+      - "A Hash keyed by discrete grid-cell identifier"
+      - "A Stream appending each location update as an event"
     answer: 0
     explanation: |
       Geo commands encode longitude/latitude into a 52-bit geohash used as the score in a
@@ -320,8 +320,8 @@ questions:
     question: |
       By what two mechanisms does Redis actually remove keys whose TTL has elapsed?
     options:
-      - "Only when the OS reclaims the page"
-      - "A single sweep performed during each BGSAVE"
+      - "Only when the operating system reclaims the memory page holding that key"
+      - "A single expiry sweep performed by the child process during each BGSAVE snapshot"
       - "Passively on access, plus an active background cycle that samples keys with TTLs"
       - "A dedicated expiry thread that scans every key continuously"
     answer: 2
@@ -339,8 +339,8 @@ questions:
       fills up, what happens with the default policy?
     options:
       - "The oldest keys are automatically evicted (allkeys-lru)"
-      - "Redis flushes the entire database"
-      - "Redis starts swapping to disk transparently"
+      - "Redis flushes the entire database to reclaim space instantly"
+      - "Redis transparently swaps colder keys out to disk to free up RAM"
       - "Writes are rejected with an OOM error because the default is noeviction"
     answer: 3
     explanation: |
@@ -357,9 +357,9 @@ questions:
       though many keys exist. What is the most likely cause?
     options:
       - "volatile-lru only evicts keys that have a TTL, and too few keys have one"
-      - "volatile-lru requires AOF to be enabled"
+      - "volatile-lru silently requires AOF persistence to be enabled first"
       - "volatile-lru evicts randomly and missed the large keys"
-      - "volatile-lru never evicts; it only expires"
+      - "volatile-lru never actually evicts anything; it only passively expires keys"
     answer: 0
     explanation: |
       volatile-* policies consider only keys that have a TTL set. If most keys have no
@@ -374,10 +374,10 @@ questions:
       Redis's LRU and LFU eviction are described as "approximate." What does that mean
       mechanically?
     options:
-      - "They evict keys at random and hope for the best"
+      - "They pick keys uniformly at random from the whole keyspace, ignoring recency or frequency entirely"
       - "Redis samples maxmemory-samples candidate keys and evicts the best among the sample, not a globally exact LRU/LFU"
-      - "They only run during BGSAVE"
-      - "They track exact access order in a global linked list"
+      - "They only run during the BGSAVE fork, evicting candidates while the snapshot child process is active"
+      - "They maintain a global doubly-linked list threading every key in exact last-access order"
     answer: 1
     explanation: |
       Rather than maintain a global exact ordering, Redis samples a small number of keys
@@ -391,10 +391,10 @@ questions:
     question: |
       How does BGSAVE avoid blocking the main Redis process while writing a snapshot?
     options:
-      - "It streams keys to disk one at a time between client commands"
-      - "It pauses writes and only allows reads during the dump"
+      - "It streams keys to disk one at a time in between servicing individual client commands"
+      - "It pauses all incoming writes and only allows read commands for the duration of the dump"
       - "It fork()s a child that uses copy-on-write memory while the parent keeps serving"
-      - "It offloads the dump to a replica"
+      - "It offloads the entire snapshot dump to a connected replica over the replication link"
     answer: 2
     explanation: |
       BGSAVE forks a child process that shares memory copy-on-write with the parent. The
@@ -427,9 +427,9 @@ questions:
       Which statement correctly contrasts RDB and AOF?
     options:
       - "RDB gives a smaller/faster-to-load file but a wider data-loss window; AOF gives better durability but larger files and slower replay"
-      - "AOF produces a smaller file and faster restarts than RDB"
-      - "RDB logs every write command; AOF stores a binary snapshot"
-      - "RDB guarantees zero data loss; AOF cannot be used for backups"
+      - "AOF always produces a smaller on-disk file and restarts faster than loading an RDB snapshot"
+      - "RDB logs every individual write command as it happens; AOF instead stores a compact binary snapshot"
+      - "RDB guarantees zero data loss on any crash; AOF files can never be used for backups or restores"
     answer: 0
     explanation: |
       RDB is a compact binary snapshot: fast to load and small, but you lose everything since
@@ -443,10 +443,10 @@ questions:
     question: |
       Why does Redis periodically perform an AOF rewrite (BGREWRITEAOF)?
     options:
-      - "To convert the AOF into an RDB snapshot"
+      - "To convert the AOF command log into an equivalent compact RDB binary snapshot"
       - "To compact the ever-growing log into fewer commands that reproduce current state"
-      - "To fsync the AOF more aggressively"
-      - "To replicate the AOF to replicas"
+      - "To fsync the AOF to disk far more aggressively than the appendfsync setting allows"
+      - "To stream the AOF file over to each connected replica for durable off-node storage"
     answer: 1
     explanation: |
       The AOF grows with every write. A rewrite produces a compact AOF that reproduces the
@@ -460,10 +460,10 @@ questions:
     question: |
       When both RDB and AOF are enabled, which file does Redis load on restart, and why?
     options:
-      - "The RDB, because it loads faster"
-      - "Whichever file is smaller"
+      - "The RDB snapshot, because its binary format always loads faster than replaying an AOF"
+      - "Whichever of the two files currently has the smaller on-disk size at startup"
       - "The AOF, because it is the more complete and recent record of writes"
-      - "It merges both files field by field"
+      - "It merges the two files key by key, preferring the newest value it finds in either"
     answer: 2
     explanation: |
       With both enabled, Redis loads the AOF on restart because it captures writes since the
@@ -476,9 +476,9 @@ questions:
     question: |
       In the cache-aside (lazy loading) pattern, what happens on a cache miss for a read?
     options:
-      - "The cache library transparently loads from the DB"
-      - "The request fails and the client retries"
-      - "The DB pushes the value into the cache asynchronously"
+      - "The cache library itself transparently loads the value from the database for you"
+      - "The request fails immediately and the client is expected to retry the read later"
+      - "The database asynchronously pushes the freshly-read value back into the cache itself"
       - "The application reads from the DB, then populates the cache with a TTL"
     answer: 3
     explanation: |
@@ -512,8 +512,8 @@ questions:
     options:
       - "Write-through deletes the cached key and lets the next read repopulate it"
       - "Write-through routes the write through the cache, which synchronously writes to the DB before acking"
-      - "Write-through never touches the database"
-      - "Write-through only applies to read-heavy workloads"
+      - "Write-through never touches the database at all, keeping the written value only in the cache"
+      - "Write-through applies only to read-heavy workloads and is skipped entirely for write paths"
     answer: 1
     explanation: |
       In write-through, writes go through the caching layer, which synchronously updates the
@@ -528,10 +528,10 @@ questions:
       On a database write, why is deleting the cached key generally safer than updating it in
       place?
     options:
-      - "Deleting is faster than SET in Redis"
-      - "Redis cannot update existing keys"
+      - "The DEL command executes measurably faster than an in-place SET update in Redis"
+      - "Redis strings are immutable, so an existing key can never be overwritten in place"
       - "Updating in place can race with concurrent readers/writers and persist a stale value; deleting forces a fresh reload from the source of truth"
-      - "Deleting frees memory that updates would leak"
+      - "Updating a key in place leaks the old allocation, whereas deleting reclaims that memory"
     answer: 2
     explanation: |
       Updating the cache in place invites lost-update/interleaving races where a stale value
@@ -545,9 +545,9 @@ questions:
     question: |
       What is a cache stampede (thundering herd / dogpile)?
     options:
-      - "The cache runs out of memory and evicts everything"
-      - "Replication lag causes stale reads"
-      - "A client floods the server with KEYS commands"
+      - "The cache exhausts its maxmemory budget and evicts the entire keyspace at once"
+      - "Replication lag between primary and replicas causes clients to read stale values"
+      - "A single client floods the server with repeated O(N) KEYS commands, blocking it"
       - "A hot key expires and many concurrent requests all miss and hit the database at once, often recomputing the same value"
     answer: 3
     explanation: |
@@ -564,9 +564,9 @@ questions:
       others briefly wait and re-read?
     options:
       - "A short-lived lock (SET lock:key uuid NX PX ...) for request coalescing"
-      - "TTL jitter"
-      - "Increasing maxmemory-samples"
-      - "Switching to write-through"
+      - "Adding random TTL jitter so the hot key's expirations are spread over time"
+      - "Increasing the maxmemory-samples value so eviction inspects more candidate keys"
+      - "Switching the caching pattern from cache-aside over to synchronous write-through"
     answer: 0
     explanation: |
       A mutex/coalescing lock (SET ... NX PX) lets the first caller win the right to
@@ -580,10 +580,10 @@ questions:
     question: |
       Why add randomness (jitter) to cache TTLs?
     options:
-      - "To make eviction more accurate"
+      - "To make the approximate LRU/LFU eviction sampling more accurate under pressure"
       - "So many keys do not expire at the same instant and cause a synchronized flood of misses"
-      - "To reduce memory usage"
-      - "To force LFU counters to decay faster"
+      - "To reduce overall memory usage by letting some keys expire sooner than intended"
+      - "To force the per-key LFU access counters to decay noticeably faster over time"
     answer: 1
     explanation: |
       Setting TTL = base + random spread staggers expirations. Without jitter, keys populated
@@ -598,10 +598,10 @@ questions:
       A team wants to invalidate a cached object without a race between delete and reload.
       Which approach avoids deleting and instead makes stale reads impossible?
     options:
-      - "Disable TTLs entirely"
-      - "Switch maxmemory-policy to allkeys-lfu"
+      - "Disable TTLs entirely so the cached object simply never expires or reloads"
+      - "Switch the maxmemory-policy over to allkeys-lfu so hot objects are kept longer"
       - "Use versioned keys (e.g. user:42:v7) and bump the version on write so readers fetch a fresh key"
-      - "Increase appendfsync to always"
+      - "Increase the appendfsync setting to always so every write is durably flushed"
     answer: 2
     explanation: |
       Versioned keys let you bump a version identifier on write so subsequent reads target a
@@ -616,9 +616,9 @@ questions:
       Attackers repeatedly request random IDs that exist neither in the cache nor the
       database, so every request hits the DB. What are the two standard defenses?
     options:
-      - "Increase maxmemory and enable AOF"
-      - "Switch to write-behind caching"
-      - "Enable Redis Cluster"
+      - "Increase the maxmemory limit and enable AOF persistence on the cache node"
+      - "Switch the write path over to asynchronous write-behind (write-back) caching"
+      - "Enable Redis Cluster and shard the keyspace across more primary nodes"
       - "Cache the negative (null) result with a short TTL and/or front the lookups with a Bloom filter"
     answer: 3
     explanation: |
@@ -635,9 +635,9 @@ questions:
       breakdown)?
     options:
       - "A large batch of keys expire at the same time (or the node goes down), flooding the DB with misses"
-      - "Requests for keys that exist nowhere pound the DB"
-      - "One single hot key expires and stampedes the DB"
-      - "The DB is slow so the cache fills with stale data"
+      - "Requests for keys that exist in neither the cache nor the database repeatedly pound the DB directly"
+      - "One single extremely hot key expires and a burst of concurrent requests all stampede the DB at once"
+      - "The database is slow to respond, so the cache gradually fills up with stale, outdated cached values"
     answer: 0
     explanation: |
       An avalanche is a mass simultaneous expiration (or a whole-node failure) that sends a
@@ -652,10 +652,10 @@ questions:
       For cache breakdown on a single extremely hot key, which mitigation avoids a hard
       expiry entirely?
     options:
-      - "Negative caching of null values"
+      - "Negative caching of null sentinel values with a short TTL to block repeated misses for the same id"
       - "Logical expiry: store the value with an expiry timestamp, never let it hard-expire, and refresh asynchronously"
-      - "A Bloom filter over valid IDs"
-      - "Switching maxmemory-policy to volatile-ttl"
+      - "A Bloom filter over the set of valid IDs to reject nonexistent keys before they ever reach the DB"
+      - "Switching the maxmemory-policy over to volatile-ttl so keys carrying the shortest TTL are evicted first"
     answer: 1
     explanation: |
       Logical (soft) expiry keeps the value in Redis without a hard TTL, embedding an expiry
@@ -671,10 +671,10 @@ questions:
       Redis replication is asynchronous by default. What consistency risk does that create on
       failover?
     options:
-      - "Replicas can serve reads that are newer than the primary"
-      - "Writes are duplicated on every replica"
+      - "Replicas can serve reads that are strictly newer than the primary because they apply writes first"
+      - "Every write is silently duplicated and applied twice on each replica, doubling the stored values"
       - "The primary can ack a write to the client and crash before a replica receives it, losing that write on promotion"
-      - "Replicas expire keys independently, diverging from the primary"
+      - "Replicas independently run their own expiry cycles, so their keyspaces steadily diverge from the primary"
     answer: 2
     explanation: |
       Because replication is async, a primary may confirm a write and then fail before the
@@ -688,9 +688,9 @@ questions:
     question: |
       What does the WAIT command do, and what does it NOT guarantee?
     options:
-      - "It permanently switches replication to synchronous mode"
-      - "It elects a new primary when replicas lag"
-      - "It guarantees the write can never be lost under any failure"
+      - "It permanently switches the whole replication link into fully synchronous mode for all future writes"
+      - "It triggers an immediate failover, electing a new primary whenever the connected replicas fall behind"
+      - "It guarantees the acknowledged write can never be lost under any node or network failure whatsoever"
       - "It blocks a write until N replicas acknowledge it, but it is not full consensus and does not roll back on timeout"
     answer: 3
     explanation: |
@@ -706,9 +706,9 @@ questions:
       What does Redis Sentinel provide, and what does it NOT do?
     options:
       - "It monitors a primary/replicas and performs automatic failover, but it does not shard data"
-      - "It shards data across nodes but does not monitor health"
-      - "It provides both sharding and failover in one process"
-      - "It only sends alerts and cannot promote a replica"
+      - "It partitions the keyspace across many nodes for scale but performs no health monitoring at all"
+      - "It provides both automatic keyspace sharding and replica failover together within one Sentinel process"
+      - "It only sends operator alerts about an unhealthy primary and can never actually promote a replica"
     answer: 0
     explanation: |
       Sentinel monitors a single-primary topology, reaches quorum that the primary is down,
@@ -722,10 +722,10 @@ questions:
     question: |
       How does Redis Cluster decide which node owns a given key?
     options:
-      - "Consistent hashing over the node IPs"
+      - "Consistent hashing of each key onto a ring built from the primary node IP addresses"
       - "CRC16(key) mod 16384 maps the key to one of 16384 hash slots, and each primary owns a slot range"
-      - "A central coordinator assigns each key on write"
-      - "Round-robin across primaries"
+      - "A central coordinator node assigns every key to a primary at write time and records the mapping"
+      - "Plain round-robin distribution that assigns each successive key to the next primary in turn"
     answer: 1
     explanation: |
       Redis Cluster uses 16384 fixed hash slots; the slot is CRC16(key) mod 16384 and each
@@ -740,10 +740,10 @@ questions:
       A multi-key MGET across keys user:42:profile and user:42:cart fails with a CROSSSLOT
       error in Redis Cluster. How do you make such multi-key operations work?
     options:
-      - "Disable cluster-require-full-coverage"
-      - "Wrap the MGET in MULTI/EXEC"
+      - "Disable the cluster-require-full-coverage setting so partial-slot reads are permitted across nodes"
+      - "Wrap the MGET inside a MULTI/EXEC transaction so the two keys are fetched as one atomic unit"
       - "Use a hash tag so only the shared substring is hashed, e.g. {user42}:profile and {user42}:cart"
-      - "Increase the number of hash slots"
+      - "Increase the total number of cluster hash slots well beyond the default 16384 to spread keys"
     answer: 2
     explanation: |
       Multi-key commands require all keys in the same slot. A hash tag {..} tells Redis to
@@ -758,9 +758,9 @@ questions:
       When implementing a single-instance Redis lock with SET lock:res token NX PX 30000,
       why must the release step check the token before deleting?
     options:
-      - "Because DEL is slower than UNLINK"
-      - "To refresh the TTL on release"
-      - "Because NX prevents deletion otherwise"
+      - "Because the DEL command runs measurably slower than UNLINK and must be avoided on release"
+      - "To atomically refresh and extend the lock's remaining TTL at the moment the holder releases it"
+      - "Because the NX flag on the original SET otherwise blocks any later deletion of that same key"
       - "To avoid deleting a lock that a different client acquired after your TTL expired"
     answer: 3
     explanation: |
@@ -776,9 +776,9 @@ questions:
       In SET lock:res token NX PX 30000, what is the role of the PX 30000 argument?
     options:
       - "It sets a 30-second auto-expiry so a crashed lock holder does not deadlock the resource forever"
-      - "It retries the SET for 30 seconds"
-      - "It fsyncs the lock to the AOF"
-      - "It sets the lock only if the value equals token"
+      - "It transparently retries the SET for up to 30 seconds until the lock key is successfully acquired"
+      - "It forces an fsync of the lock key to the AOF so the lock survives a crash of the Redis process"
+      - "It sets the lock key only when its current stored value already equals the supplied token string"
     answer: 0
     explanation: |
       PX 30000 gives the lock a 30-second TTL. If the holder crashes without releasing, the
@@ -793,10 +793,10 @@ questions:
       In Kleppmann's critique of Redlock, why can a TTL-based lock allow two clients to
       believe they hold the lock, and what is the recommended safeguard?
     options:
-      - "Network compression corrupts the token; use TLS"
+      - "Network-level compression corrupts the lock token in transit; enable TLS on all client connections"
       - "A process can pause (GC/network) after acquiring, its TTL expires, another client acquires it; use monotonic fencing tokens that the protected resource checks"
-      - "Redis loses the lock during BGSAVE; disable RDB"
-      - "Clocks drift on replicas; use volatile-ttl"
+      - "Redis drops the lock key during the BGSAVE fork; disable RDB snapshotting to keep the lock intact"
+      - "Wall-clock drift across replicas mis-times the TTL; switch the eviction policy over to volatile-ttl"
     answer: 1
     explanation: |
       A long GC or network pause can outlast the lock TTL, so the lock expires and another
@@ -811,10 +811,10 @@ questions:
     question: |
       What does the Redlock algorithm require to consider a lock successfully acquired?
     options:
-      - "A single SET NX on the primary that replicates to all replicas"
-      - "A quorum of Sentinels agreeing the lock is free"
+      - "A single SET NX issued on one primary that then replicates the lock out to all of its replicas"
+      - "A quorum of monitoring Sentinel processes agreeing that the lock key is currently free to take"
       - "Acquiring the lock on a majority (N/2+1) of independent Redis primaries within a bounded time budget"
-      - "Writing the lock to the AOF with appendfsync always"
+      - "Writing the lock key to the AOF with appendfsync always so the acquisition is durably persisted"
     answer: 2
     explanation: |
       Redlock runs against N independent (non-replicated) Redis primaries; the client must
@@ -829,9 +829,9 @@ questions:
       A subscriber using Redis Pub/Sub disconnects for two seconds during a burst of
       PUBLISH calls. What happens to those messages?
     options:
-      - "They are queued and delivered when the subscriber reconnects"
-      - "They are written to the AOF and replayed on reconnect"
-      - "They are redelivered from the Pending Entries List"
+      - "They are buffered server-side in a per-subscriber backlog and delivered once it reconnects"
+      - "They are appended to the AOF as they publish and replayed to the subscriber on reconnect"
+      - "They are tracked and redelivered from the channel's Pending Entries List after reconnection"
       - "They are lost; Pub/Sub is fire-and-forget and delivers only to currently-connected subscribers"
     answer: 3
     explanation: |
@@ -847,9 +847,9 @@ questions:
       Which statement correctly contrasts Redis Streams with Pub/Sub?
     options:
       - "Streams persist an append-only log allowing replay and at-least-once delivery with consumer groups; Pub/Sub is ephemeral at-most-once with no replay"
-      - "Both persist messages, but only Pub/Sub supports consumer groups"
-      - "Streams are at-most-once; Pub/Sub is at-least-once"
-      - "Neither supports load-balancing messages across multiple consumers"
+      - "Both persist messages to an append-only log, but only Pub/Sub exposes consumer groups and XACK"
+      - "Streams deliver at-most-once with no acknowledgment, whereas Pub/Sub is durable and at-least-once"
+      - "Neither Streams nor Pub/Sub can load-balance messages across multiple competing consumers"
     answer: 0
     explanation: |
       Streams store a bounded append-only log, allow re-reading from any ID, and provide
@@ -864,10 +864,10 @@ questions:
       What problem does sharded Pub/Sub (SPUBLISH/SSUBSCRIBE, Redis 7) address in a Redis
       Cluster?
     options:
-      - "It makes Pub/Sub at-least-once by persisting messages"
+      - "It upgrades Pub/Sub to at-least-once delivery by persisting every message to the shard's AOF"
       - "It keeps a published message within its shard's slot instead of broadcasting it across all cluster nodes, improving scalability"
-      - "It adds consumer groups to Pub/Sub"
-      - "It replaces Streams for durable queues"
+      - "It adds consumer groups and Pending Entries List tracking on top of the existing Pub/Sub channels"
+      - "It fully replaces Redis Streams as the recommended primitive for durable, replayable work queues"
     answer: 1
     explanation: |
       In regular cluster Pub/Sub, messages are propagated to all nodes. Sharded Pub/Sub

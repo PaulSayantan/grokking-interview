@@ -30,9 +30,9 @@ questions:
       Why does `SELECT price * 1.1 AS gross FROM items WHERE gross > 100` raise an
       error in standard SQL?
     options:
-      - Arithmetic is not allowed in a SELECT list
-      - Aliases must be quoted with double quotes
-      - gross is a reserved keyword
+      - Arithmetic is not permitted anywhere in a SELECT projection list
+      - Aliases must always be quoted with double quotes to be valid
+      - gross is a reserved SQL keyword and cannot be used as an alias
       - WHERE is evaluated before SELECT, so the alias 'gross' does not yet exist
     answer: 3
     explanation: |
@@ -49,8 +49,8 @@ questions:
       A query uses `LIMIT 10` with no `ORDER BY`. What is guaranteed about the rows
       returned?
     options:
-      - The 10 most recently inserted rows
-      - The 10 rows with the smallest primary key
+      - The 10 most recently inserted rows, in reverse insertion timestamp order
+      - The 10 rows with the smallest primary key, scanned in ascending index order
       - An arbitrary, non-deterministic subset that may change between runs
       - The first 10 rows in physical disk order, always stable
     answer: 2
@@ -124,8 +124,8 @@ questions:
       You wrote `FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
       WHERE o.status = 'paid'` and customers with no orders disappeared. Why?
     options:
-      - LEFT JOIN silently became a CROSS JOIN
-      - customers with no orders were never in the table
+      - The LEFT JOIN was silently rewritten into a CROSS JOIN by the query planner
+      - Customers with no orders were never physically present in the customers table
       - The WHERE predicate on o.status rejects NULL-extended rows, turning the outer join into an inner
         join
       - LEFT JOIN requires an index on customer_id or it drops unmatched rows
@@ -162,9 +162,9 @@ questions:
       table with a `manager_id` column, you should use:
     options:
       - 'A self join: FROM employees e JOIN employees m ON e.manager_id = m.id'
-      - A UNION of employees with itself
-      - A CROSS JOIN of employees with employees
-      - A recursive CTE (the only way)
+      - A UNION of the employees table with itself to stack manager rows below employee rows
+      - A CROSS JOIN of employees with employees, then filtering on the manager_id equality
+      - A recursive CTE, which is the only construct capable of resolving the manager name
     answer: 0
     explanation: |
       A self join references the same table twice under different aliases. Here e is the
@@ -180,9 +180,9 @@ questions:
     question: |
       Why is `NATURAL JOIN` discouraged in production schemas?
     options:
-      - It is not part of the SQL standard
-      - It always produces a Cartesian product
-      - It cannot use indexes
+      - It is a vendor extension that is not part of the ANSI SQL standard
+      - It always degenerates into a Cartesian product regardless of column names
+      - It is fundamentally unable to use any index on the joined columns
       - It joins on all identically named columns, so adding a column later can silently change the join
     answer: 3
     explanation: |
@@ -199,10 +199,10 @@ questions:
     question: |
       What is the correct, NULL-safe way to find customers that have NO matching orders?
     options:
-      - INNER JOIN orders and check id IS NULL
+      - INNER JOIN orders o ON o.customer_id = c.id and then keep rows where o.id IS NULL
       - customers WHERE id NOT IN (SELECT customer_id FROM orders)
       - LEFT JOIN orders o ON o.customer_id = c.id WHERE o.id IS NULL (or NOT EXISTS)
-      - CROSS JOIN orders WHERE customer_id IS NULL
+      - CROSS JOIN orders o WHERE o.customer_id IS NULL to pair every unmatched customer
     answer: 2
     explanation: |
       A LEFT JOIN keeping only rows where the right key is NULL is a classic anti-join;
@@ -217,10 +217,10 @@ questions:
     question: |
       What is the difference between `COUNT(*)` and `COUNT(email)`?
     options:
-      - They are always identical
+      - They are always identical regardless of whether email contains NULL values
       - COUNT(*) counts all rows; COUNT(email) counts only rows where email is not NULL
-      - COUNT(*) counts distinct rows; COUNT(email) counts all rows
-      - COUNT(*) ignores NULLs; COUNT(email) includes NULLs
+      - COUNT(*) counts only distinct rows while COUNT(email) counts every row including NULLs
+      - COUNT(*) ignores NULL rows entirely, whereas COUNT(email) explicitly includes NULLs
     answer: 1
     explanation: |
       COUNT(*) counts rows regardless of NULLs. COUNT(col) counts only non-NULL values of
@@ -237,8 +237,8 @@ questions:
     options:
       - 15 (divides by the 2 non-NULL values)
       - 7.5 (divides by 4 rows)
-      - 'NULL'
-      - '0'
+      - NULL (any NULL in the column poisons AVG and yields NULL)
+      - 0 (each NULL is coerced to zero before the average)
     answer: 0
     explanation: |
       Aggregates (except COUNT(*)) ignore NULLs. AVG sums the non-NULL values (30) and
@@ -252,9 +252,9 @@ questions:
     question: |
       Running `SELECT SUM(amount), COUNT(*) FROM orders WHERE 1=0` (no rows match) returns:
     options:
-      - 0 and 0
-      - NULL and NULL
-      - An error (aggregate over empty set)
+      - 0 and 0, because both aggregates default to zero over no rows
+      - NULL and NULL, because every aggregate returns NULL on an empty set
+      - An error is raised because aggregating over an empty set is undefined
       - NULL and 0
     answer: 3
     explanation: |
@@ -270,10 +270,10 @@ questions:
       For best performance, where should you put a filter on a raw column (e.g.
       status = 'paid') before aggregating?
     options:
-      - In HAVING, because it runs after grouping
-      - It makes no difference which clause you use
+      - In HAVING, because it runs after grouping and prunes whole groups efficiently
+      - It makes no measurable difference which clause you use, as the planner reorders them
       - In WHERE, so rows are filtered before GROUP BY and fewer rows are aggregated
-      - In the ORDER BY clause
+      - In the ORDER BY clause, so unwanted rows are skipped as the result is sorted
     answer: 2
     explanation: |
       WHERE filters rows before grouping, so the aggregation processes fewer rows. HAVING
@@ -289,10 +289,10 @@ questions:
     question: |
       Which statement about MySQL's `ONLY_FULL_GROUP_BY` (default since 5.7.5) is correct?
     options:
-      - It disables GROUP BY entirely
+      - It disables the GROUP BY clause entirely and forces the use of window functions
       - It requires every non-aggregated SELECT column to appear in GROUP BY, matching standard SQL
-      - It forces all aggregates to ignore NULLs
-      - It is a PostgreSQL-only setting
+      - It forces every aggregate function to ignore NULLs, changing SUM and AVG results
+      - It is a PostgreSQL-only setting that has no effect on any MySQL server version
     answer: 1
     explanation: |
       Historically MySQL let you SELECT bare columns not in GROUP BY and returned an
@@ -310,9 +310,9 @@ questions:
       total orders?
     options:
       - COUNT(*) FILTER (WHERE status = 'paid')  -- or SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END)
-      - COUNT(*) WHERE status = 'paid'
-      - COUNT(status = 'paid')
-      - HAVING status = 'paid'
+      - COUNT(*) WHERE status = 'paid' attached directly to the single aggregate expression
+      - COUNT(status = 'paid'), passing the boolean predicate as the argument to COUNT
+      - HAVING status = 'paid' placed after the aggregate to restrict which rows are counted
     answer: 0
     explanation: |
       The SQL-standard FILTER clause (PostgreSQL) restricts an aggregate to matching rows.
@@ -328,9 +328,9 @@ questions:
       A scalar subquery used as a column value returns more than one row at runtime. What
       happens?
     options:
-      - It returns the first row
-      - It returns NULL
-      - It returns a comma-separated list
+      - It silently returns the first row in physical scan order and ignores the rest
+      - It returns NULL because the ambiguous result collapses to the unknown value
+      - It returns a comma-separated list concatenating every matching row into one string
       - The query raises a runtime error
     answer: 3
     explanation: |
@@ -348,11 +348,14 @@ questions:
       `SELECT * FROM customers WHERE id NOT IN (SELECT customer_id FROM orders)` returns
       zero rows even though many customers have no orders. The most likely cause is:
     options:
-      - orders is empty
-      - NOT IN is not valid SQL
+      - The orders table is completely empty, so the subquery returns no rows and the NOT IN predicate
+        therefore matches nothing
+      - NOT IN with a subquery is not valid SQL syntax, so the engine silently discards the entire result
+        set
       - At least one row in orders has a NULL customer_id, making the NOT IN predicate UNKNOWN for every
         customer
-      - customers has a NULL primary key
+      - The customers table has a NULL primary key value, so every id comparison inside NOT IN evaluates to
+        false
     answer: 2
     explanation: |
       NOT IN with a subquery containing a NULL expands to `id <> v1 AND id <> NULL AND ...`,
@@ -368,10 +371,11 @@ questions:
     question: |
       Why is `EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)` often efficient?
     options:
-      - It caches the entire orders table in memory
+      - It caches the entire orders table into a hash structure in memory before the outer query runs even
+        once
       - It can short-circuit and stop scanning as soon as the first matching row is found
-      - It never uses an index
-      - It automatically deduplicates the outer query
+      - It always performs a full sequential scan of orders and can never use an index on customer_id
+      - It automatically deduplicates the outer query result, silently removing rows that share a customer_id
     answer: 1
     explanation: |
       EXISTS only tests for the presence of at least one matching row, so the engine can
@@ -388,9 +392,9 @@ questions:
     options:
       - Multiplying outer rows when the join key matches multiple inner rows (a semi-join returns each
         outer row at most once)
-      - Filtering out NULL columns
-      - Automatically sorting the output
-      - Converting the query to a CROSS JOIN
+      - Silently filtering out rows that contain any NULL column, which EXISTS would have retained
+      - Automatically sorting the output by the join key, which EXISTS leaves in arbitrary order
+      - Converting the query into an unfiltered CROSS JOIN that pairs every outer row with every inner row
     answer: 0
     explanation: |
       EXISTS is a semi-join: each qualifying outer row appears once. A plain JOIN emits one
@@ -405,9 +409,9 @@ questions:
     question: |
       A subquery used in the FROM clause (a derived table) must:
     options:
-      - Be correlated to the outer query
-      - Return exactly one row
-      - Not contain a GROUP BY
+      - Be correlated to the outer query, referencing at least one of its columns to be valid
+      - Return exactly one row and one column, just like a scalar subquery in the SELECT list
+      - Avoid using GROUP BY, since aggregation is disallowed inside a FROM-clause derived table
       - Have a table alias in standard SQL / MySQL / PostgreSQL
     answer: 3
     explanation: |
@@ -422,10 +426,10 @@ questions:
     question: |
       What distinguishes a window function from an aggregate with GROUP BY?
     options:
-      - Window functions can only be used on numeric columns
-      - Window functions cannot use PARTITION BY
+      - Window functions can only be applied to numeric columns, so text and date columns cannot appear in an OVER clause
+      - Window functions cannot use PARTITION BY and instead must always scan the entire result set as one group
       - A window function computes across related rows but preserves every input row (no collapsing)
-      - Window functions require a subquery
+      - Window functions require a surrounding subquery or CTE and cannot appear directly in a top-level SELECT
     answer: 2
     explanation: |
       GROUP BY collapses rows into one per group. A window function computes over a window
@@ -460,9 +464,9 @@ questions:
       Which pattern correctly returns the top 3 highest-paid employees per department?
     options:
       - Compute ROW_NUMBER() in a subquery/CTE, then filter WHERE rn <= 3 in the outer query
-      - SELECT ... WHERE ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) <= 3
-      - SELECT ... GROUP BY dept HAVING salary IN (top 3)
-      - SELECT TOP 3 ... GROUP BY dept
+      - SELECT ... WHERE ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC) <= 3 in a single flat query
+      - SELECT ... GROUP BY dept HAVING salary IN (top 3), letting HAVING pick the three largest per group
+      - SELECT TOP 3 ... GROUP BY dept, which returns three rows total and applies the limit per department
     answer: 0
     explanation: |
       Window functions are computed in the SELECT step, after WHERE, so you cannot filter
@@ -479,9 +483,9 @@ questions:
       To compute each day's revenue change versus the previous day within a partition, you
       would use:
     options:
-      - SUM() OVER ()
-      - COUNT(*) OVER (ORDER BY day)
-      - RANK() OVER (ORDER BY day)
+      - SUM() OVER () with no ordering, which totals every partition into one grand sum on each row
+      - COUNT(*) OVER (ORDER BY day), which returns a running count of rows rather than a revenue difference
+      - RANK() OVER (ORDER BY day), which assigns an ordinal position per day instead of a value delta
       - revenue - LAG(revenue) OVER (PARTITION BY ... ORDER BY day)
     answer: 3
     explanation: |
@@ -499,11 +503,11 @@ questions:
       A window has `ORDER BY order_date` but no explicit frame clause. What is the default
       frame, and why can a running SUM behave unexpectedly?
     options:
-      - ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW; no peer issue
-      - RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
+      - ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW; a strict physical frame that never has a peer issue
+      - RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING; the frame extends forward, giving a reverse running total
       - RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW; peer rows with equal order values are all included
         together
-      - There is no default frame; it errors
+      - There is no default frame at all, so the window function raises an error until you write one explicitly
     answer: 2
     explanation: |
       With ORDER BY and no frame, the default is RANGE UNBOUNDED PRECEDING to CURRENT ROW.
@@ -519,10 +523,10 @@ questions:
     question: |
       What does `AVG(salary) OVER (PARTITION BY department_id)` produce?
     options:
-      - One row per department with the average
+      - One collapsed row per department containing that department's average salary
       - The department average repeated on every employee row, keeping all rows
-      - The overall company average on every row
-      - An error because AVG requires GROUP BY
+      - The overall company-wide average salary repeated identically on every employee row
+      - A syntax error, because AVG is an aggregate and requires an accompanying GROUP BY clause
     answer: 1
     explanation: |
       PARTITION BY defines the window per department but does not collapse rows. Each
@@ -538,9 +542,9 @@ questions:
       What is the primary purpose of a Common Table Expression (`WITH` clause)?
     options:
       - To name a subquery so it can be referenced and reused within a single statement, improving readability
-      - To create a permanent table
-      - To index a query result
-      - To enforce a foreign key
+      - To create a permanent table that persists in the schema and is reusable across many later statements
+      - To build a persistent index over a query result so repeated executions are served faster
+      - To declare and enforce a foreign-key relationship between two tables at query time
     answer: 0
     explanation: |
       A CTE is a named, statement-scoped inline view. It improves readability and lets you
@@ -555,9 +559,9 @@ questions:
       A recursive CTE (`WITH RECURSIVE`) is composed of which two parts joined by UNION
       [ALL]?
     options:
-      - A SELECT and an INSERT
-      - Two independent aggregates
-      - A WHERE and a HAVING
+      - A read-only SELECT member and an INSERT member that writes each iteration's rows back to the table
+      - Two independent aggregate queries whose grouped results are merged together on a shared key
+      - A row-level WHERE member and a group-level HAVING member that filter the iteration in two stages
       - An anchor member (base case) and a recursive member that references the CTE
     answer: 3
     explanation: |
@@ -574,11 +578,11 @@ questions:
     question: |
       Regarding PostgreSQL CTE materialization, which statement is accurate?
     options:
-      - CTEs are never materialized in any version
-      - CTEs always create temporary tables on disk
+      - CTEs are never materialized in any PostgreSQL version and are always inlined into the outer query
+      - CTEs always spill to temporary tables physically written on disk before the outer query can read them
       - Before v12 a CTE was always an optimization fence (materialized); since v12 a single-reference,
         side-effect-free CTE is inlined by default
-      - MATERIALIZED is the only allowed keyword
+      - MATERIALIZED is the only keyword PostgreSQL accepts; NOT MATERIALIZED is rejected as a syntax error
     answer: 2
     explanation: |
       Historically PostgreSQL materialized every CTE, blocking predicate push-down. Since
@@ -595,10 +599,10 @@ questions:
       When traversing a graph that may contain cycles with a recursive CTE, which technique
       helps avoid an infinite loop?
     options:
-      - Always use UNION ALL and no other guard
+      - Always use UNION ALL with no other guard, relying on the engine to detect repeated rows automatically
       - Use UNION (dedup), a depth counter/LIMIT, or a CYCLE clause / MAXRECURSION option
-      - Disable the recursive member
-      - Add an ORDER BY to the recursive member
+      - Disable the recursive member entirely so only the anchor seed rows are ever returned by the query
+      - Add an ORDER BY to the recursive member, which sorts visited nodes and prevents any node being revisited
     answer: 1
     explanation: |
       UNION removes already-seen rows (helping on cycles); a depth column with a bound, a
@@ -614,9 +618,9 @@ questions:
       What is the difference between `UNION` and `UNION ALL`?
     options:
       - UNION removes duplicate rows (implicit DISTINCT); UNION ALL keeps all rows and is faster
-      - UNION keeps duplicates; UNION ALL removes them
-      - They are identical
-      - UNION combines columns horizontally; UNION ALL stacks rows
+      - UNION keeps every duplicate row while UNION ALL applies an implicit DISTINCT to remove duplicates
+      - They are completely identical in both result set and performance, so the keywords are interchangeable
+      - UNION joins the two result sets side by side by column, whereas UNION ALL stacks their rows vertically
     answer: 0
     explanation: |
       UNION performs an implicit DISTINCT (sort/hash to deduplicate), which costs extra
@@ -650,10 +654,10 @@ questions:
     question: |
       For `UNION` between two SELECTs to be valid, the queries must have:
     options:
-      - Identical table names
-      - The same WHERE clause
+      - Identical source table names referenced in both SELECTs so the engine can align their columns
+      - The same WHERE clause in both branches so the two row sets are filtered on identical predicates
       - The same number of columns with compatible data types
-      - A shared primary key
+      - A shared primary key column present in both queries to serve as the row-matching identifier
     answer: 2
     explanation: |
       Set operators combine rows vertically, so both inputs must project the same number of
@@ -668,10 +672,10 @@ questions:
       How do set operators (UNION/INTERSECT/EXCEPT) treat two NULL values when matching
       rows for duplicate elimination?
     options:
-      - As unequal, like WHERE comparisons
+      - As unequal, exactly like WHERE comparisons where NULL = NULL evaluates to UNKNOWN and never matches
       - As equal, so two all-NULL rows are considered duplicates
-      - They raise an error
-      - NULLs are always removed from the result
+      - They raise a runtime error, because set operators forbid NULL values in any of the compared columns
+      - NULLs are always stripped from the result entirely before duplicate elimination compares the rows
     answer: 1
     explanation: |
       For duplicate/row matching in set operations, NULL is treated as equal to NULL - the
@@ -704,9 +708,9 @@ questions:
     question: |
       When a WHERE predicate evaluates to UNKNOWN for a row, that row is:
     options:
-      - Included in the result
-      - Converted to NULL and included
-      - Duplicated
+      - Included in the result, since WHERE treats UNKNOWN like TRUE
+      - Converted to a NULL row and still kept in the result output
+      - Duplicated once for every UNKNOWN the predicate produced
       - Excluded from the result (only TRUE rows are kept)
     answer: 3
     explanation: |
@@ -761,9 +765,9 @@ questions:
     options:
       - Standard SQL/PostgreSQL/MySQL allow multiple NULLs (two NULLs are not equal); SQL Server allows
         only one NULL
-      - No database allows NULL in a unique column
-      - UNIQUE constraints convert NULL to an empty string
-      - NULLs are always rejected by UNIQUE
+      - No mainstream database engine permits a NULL value in any column covered by a UNIQUE constraint
+      - UNIQUE constraints silently coerce every NULL to an empty string before checking for duplicates
+      - NULLs are always rejected by UNIQUE because the SQL standard treats two NULLs as strictly equal
     answer: 0
     explanation: |
       Because NULL = NULL is UNKNOWN, most engines permit many NULLs in a unique column.
@@ -777,9 +781,9 @@ questions:
     question: |
       What does `SELECT DISTINCT country, city FROM customers` return?
     options:
-      - Distinct countries, with any arbitrary city
-      - Distinct cities only
-      - All rows, unchanged
+      - Distinct countries only, pairing each with an arbitrarily chosen city per country
+      - Distinct cities only, silently discarding the country column from the projection
+      - All rows unchanged, because DISTINCT applies only to the first column listed
       - Unique (country, city) pairs across the whole select list
     answer: 3
     explanation: |
@@ -795,10 +799,10 @@ questions:
     question: |
       When DISTINCT eliminates duplicates, how are NULL values treated?
     options:
-      - Every NULL is treated as unique, so all are kept
-      - NULLs are removed entirely
+      - Every NULL is treated as a distinct value, so all NULL rows are kept unchanged
+      - NULLs are stripped out entirely, so no NULL row ever survives the DISTINCT step
       - Multiple NULLs are treated as equal and collapse to a single row
-      - It raises an error
+      - It raises an error, because DISTINCT cannot compare NULL against NULL for equality
     answer: 2
     explanation: |
       For duplicate elimination, NULLs are considered equal to each other, so repeated NULL
@@ -814,10 +818,10 @@ questions:
       In PostgreSQL, `SELECT DISTINCT ON (customer_id) customer_id, id, created_at FROM
       orders ORDER BY customer_id, created_at DESC` returns:
     options:
-      - All orders sorted by date
+      - Every order row for every customer, globally sorted by created_at descending
       - The most recent order per customer (first row per customer_id per the ORDER BY)
-      - Distinct customer_ids only, dropping other columns
-      - A syntax error - DISTINCT ON is not valid
+      - Distinct customer_id values only, silently dropping the id and created_at columns
+      - A syntax error, because DISTINCT ON is a non-standard clause PostgreSQL does not support
     answer: 1
     explanation: |
       DISTINCT ON (expr) keeps the first row for each distinct expr according to ORDER BY.
@@ -835,9 +839,9 @@ questions:
     options:
       - The duplication likely comes from a one-to-many join; fix the join logic rather than masking it
         with DISTINCT (which adds a sort/hash cost)
-      - DISTINCT is free, so it is fine
-      - DISTINCT should be replaced with GROUP BY on all columns for correctness
-      - The table needs a new primary key
+      - DISTINCT is essentially free on modern engines, so leaving it in place is perfectly fine
+      - DISTINCT should always be replaced with a GROUP BY on every selected column for correctness
+      - The base table is simply missing a primary key, and adding one will remove the duplicates
     answer: 0
     explanation: |
       Row multiplication usually signals a join matching multiple rows on one side. DISTINCT
@@ -854,9 +858,9 @@ questions:
       In PostgreSQL's `INSERT ... ON CONFLICT (sku) DO UPDATE SET qty = inventory.qty +
       EXCLUDED.qty`, what does `EXCLUDED` refer to?
     options:
-      - The rows that were excluded by a WHERE filter
-      - The existing row in the table
-      - A temporary table you must create first
+      - The set of rows that a WHERE filter excluded from the statement's insert candidates
+      - The existing row already stored in the target table before the conflict was detected
+      - A temporary staging table that you must explicitly CREATE before running the upsert
       - The pseudo-table holding the row proposed for insertion (the new values)
     answer: 3
     explanation: |
@@ -873,10 +877,10 @@ questions:
       What problem does an atomic UPSERT (e.g. INSERT ... ON CONFLICT) solve versus doing a
       SELECT then INSERT-or-UPDATE in application code?
     options:
-      - It reduces the number of columns
-      - It makes the query case-insensitive
+      - It reduces the number of columns the statement has to write on each affected row
+      - It makes the key comparison case-insensitive so mixed-case values match the same row
       - It avoids a race condition where two concurrent writers both see 'not present' and both insert
-      - It removes the need for a primary key
+      - It removes the need for a primary key by resolving duplicates at read time instead
     answer: 2
     explanation: |
       A check-then-act in application code has a window where two sessions both find no row
@@ -891,10 +895,10 @@ questions:
     question: |
       Which MySQL syntax performs an upsert?
     options:
-      - INSERT ... ON CONFLICT DO UPDATE
+      - INSERT ... ON CONFLICT (col) DO UPDATE SET col = VALUES(col)
       - INSERT ... ON DUPLICATE KEY UPDATE ...
-      - UPSERT INTO ...
-      - REPLACE ... WHERE EXISTS
+      - UPSERT INTO tbl (...) VALUES (...) ON EXISTING KEY MERGE
+      - REPLACE INTO tbl SET ... WHERE EXISTS (SELECT 1 FROM tbl)
     answer: 1
     explanation: |
       MySQL uses INSERT ... ON DUPLICATE KEY UPDATE, which fires when a unique/primary key
@@ -912,9 +916,9 @@ questions:
     options:
       - It is SQL-standard (SQL Server, Oracle, DB2, PostgreSQL 15+) with WHEN MATCHED / WHEN NOT MATCHED
         branches; SQL Server's MERGE has documented concurrency pitfalls
-      - MERGE is only available in MySQL
-      - MERGE cannot insert new rows
-      - MERGE guarantees no deadlocks under any concurrency
+      - MERGE is a proprietary MySQL-only statement that no other database engine implements
+      - MERGE can only update or delete existing rows and is structurally unable to insert new ones
+      - MERGE is guaranteed by the SQL standard to be fully deadlock-free under any level of concurrency
     answer: 0
     explanation: |
       MERGE joins a target and source and takes WHEN MATCHED (update/delete) and WHEN NOT
@@ -932,9 +936,9 @@ questions:
       Using `INSERT ... ON CONFLICT DO NOTHING` on a table with a serial/AUTO_INCREMENT
       primary key, what side effect can occur on a conflict?
     options:
-      - The sequence rolls back to the previous value
-      - The conflicting row is deleted
-      - The whole transaction aborts
+      - The sequence automatically rolls back to its previous value so no number is ever wasted
+      - The conflicting existing row is silently deleted and replaced by the new insertion attempt
+      - The whole surrounding transaction aborts and every earlier statement in it is rolled back
       - A sequence value may still be consumed ('burned'), producing gaps in the IDs
     answer: 3
     explanation: |
@@ -952,10 +956,10 @@ questions:
       A developer needs a FULL OUTER JOIN on MySQL, which has no FULL OUTER JOIN keyword.
       What is the standard workaround?
     options:
-      - Use a CROSS JOIN and filter
-      - Use two INNER JOINs
+      - Use a CROSS JOIN and then filter out the non-matching pairs with a WHERE predicate
+      - Use two INNER JOINs chained together, one for each table's side of the relationship
       - Combine a LEFT JOIN and a RIGHT JOIN with UNION
-      - FULL OUTER JOIN cannot be emulated
+      - FULL OUTER JOIN cannot be emulated on MySQL by any combination of joins or set operators
     answer: 2
     explanation: |
       A FULL OUTER JOIN equals (LEFT JOIN) UNION (RIGHT JOIN). UNION removes the duplicated
@@ -969,10 +973,10 @@ questions:
     question: |
       By default, where do NULLs sort in an ascending ORDER BY in PostgreSQL versus MySQL?
     options:
-      - Both put NULLs first
+      - Both engines put NULLs first for ascending order, matching the ANSI SQL default
       - PostgreSQL puts NULLs last; MySQL puts NULLs first (for ASC), by default
-      - Both put NULLs last
-      - NULLs are always excluded from ORDER BY
+      - Both engines put NULLs last for ascending order, matching the ANSI SQL default
+      - NULLs are always excluded from an ORDER BY sort and appended in arbitrary order
     answer: 1
     explanation: |
       SQL standard/PostgreSQL default NULLs last for ascending order (configurable with
@@ -991,9 +995,9 @@ questions:
     options:
       - Modern optimizers often rewrite IN, EXISTS, and JOIN into the same semi-join plan, so performance
         is often similar; the real difference is NULL semantics (NOT IN vs NOT EXISTS)
-      - IN is always faster than EXISTS
-      - EXISTS cannot use indexes
-      - They produce different result sets in all cases
+      - IN is always faster than EXISTS because it evaluates the subquery only once and caches it
+      - EXISTS can never use an index on the correlated column and always forces a full table scan
+      - IN and EXISTS produce different result sets in every case, so they are never interchangeable
     answer: 0
     explanation: |
       Cost-based optimizers frequently transform IN/EXISTS/JOIN into equivalent semi-join
@@ -1008,9 +1012,9 @@ questions:
     question: |
       In the logical processing order, GROUP BY is evaluated:
     options:
-      - Before WHERE
-      - After SELECT
-      - After ORDER BY
+      - Before WHERE, so rows are grouped first and then individually filtered
+      - After SELECT, once the projection and its column aliases have been computed
+      - After ORDER BY, grouping the already-sorted rows as the final processing step
       - After WHERE and before HAVING
     answer: 3
     explanation: |
@@ -1045,10 +1049,10 @@ questions:
       To produce per-category subtotals plus a grand total in a single query, which feature
       helps?
     options:
-      - DISTINCT
+      - DISTINCT, which automatically appends a grand-total row after de-duplicating
       - GROUP BY ... WITH ROLLUP / GROUPING SETS / CUBE
-      - A recursive CTE
-      - UNION ALL is the only option
+      - A recursive CTE that iterates once per category to emit each subtotal row
+      - Stacking separately aggregated queries with UNION ALL is the only possible way
     answer: 1
     explanation: |
       ROLLUP, CUBE, and GROUPING SETS generate multiple grouping levels (subtotals and grand
@@ -1062,10 +1066,10 @@ questions:
     question: |
       Which group of statements belongs to DDL (Data Definition Language)?
     options:
-      - INSERT, UPDATE, DELETE
+      - INSERT, UPDATE, DELETE, and MERGE for modifying rows
       - CREATE, ALTER, DROP, TRUNCATE
-      - GRANT, REVOKE
-      - COMMIT, ROLLBACK, SAVEPOINT
+      - GRANT, REVOKE, and DENY for managing object privileges
+      - COMMIT, ROLLBACK, SAVEPOINT, SET TRANSACTION
     answer: 1
     explanation: |
       DDL defines schema objects: CREATE, ALTER, DROP, TRUNCATE, COMMENT, RENAME.
@@ -1082,10 +1086,10 @@ questions:
       You run several UPDATEs, then an `ALTER TABLE`, inside a transaction on MySQL/InnoDB,
       and later issue ROLLBACK. What happens to the earlier UPDATEs?
     options:
-      - They roll back cleanly along with the ALTER
+      - They roll back cleanly along with the ALTER, since InnoDB logs DDL to the undo log
       - They were already committed, because DDL causes an implicit commit before it runs
-      - The ALTER is rejected inside a transaction
-      - Nothing is committed until an explicit COMMIT
+      - The ALTER is rejected inside a transaction with an error that DDL is not permitted here
+      - Nothing is committed until an explicit COMMIT is issued at the very end of the block
     answer: 1
     explanation: |
       On Oracle and MySQL most DDL triggers an implicit commit: the pending
@@ -1102,11 +1106,11 @@ questions:
     question: |
       Which statement about TRUNCATE versus DELETE is correct?
     options:
-      - TRUNCATE fires per-row triggers just like DELETE
-      - DELETE can reset the identity/sequence but TRUNCATE cannot
+      - TRUNCATE fires per-row DELETE triggers and writes each removed row to the redo log just like DELETE
+      - DELETE can reset the identity/sequence counter to its seed while TRUNCATE always leaves it untouched
       - TRUNCATE (DDL) deallocates pages in bulk and typically resets identity; DELETE (DML) removes rows
         per-row with optional WHERE
-      - Both support a WHERE clause to filter which rows are removed
+      - Both TRUNCATE and DELETE accept an optional WHERE clause to filter which rows are removed
     answer: 2
     explanation: |
       TRUNCATE is DDL: it bulk-deallocates storage, is minimally logged, usually resets the
@@ -1124,11 +1128,11 @@ questions:
       `(SELECT ... FROM orders o WHERE o.customer_id = c.id ORDER BY o.created_at DESC LIMIT 3)`
       in the FROM clause require LATERAL (or CROSS APPLY)?
     options:
-      - Because LIMIT is not allowed in a normal derived table
+      - Because a row-limiting LIMIT clause is syntactically forbidden inside any normal derived table
       - Because a normal derived table in FROM cannot reference columns from tables listed to its left; LATERAL
         lifts that restriction
-      - Because ORDER BY is illegal inside a subquery without LATERAL
-      - Because CROSS JOIN forbids subqueries
+      - Because an ORDER BY clause is illegal inside a FROM-clause subquery unless LATERAL is present
+      - Because CROSS JOIN forbids a subquery on its right side and demands a plain base table there
     answer: 1
     explanation: |
       A plain derived table is evaluated independently and cannot see left-side columns, so
@@ -1146,9 +1150,9 @@ questions:
       have disappeared. How do you keep those left rows?
     options:
       - Use LEFT JOIN LATERAL (...) ON true (equivalent to OUTER APPLY)
-      - Add DISTINCT to the outer query
-      - Wrap the subquery in COALESCE
-      - Replace LATERAL with a scalar subquery in SELECT
+      - Add DISTINCT to the outer query so the dropped left rows are restored during de-duplication
+      - Wrap the entire correlated subquery in a COALESCE call so empty results become a default row
+      - Replace the LATERAL join with a scalar subquery embedded directly in the SELECT projection list
     answer: 0
     explanation: |
       CROSS JOIN LATERAL behaves like an inner join and drops left rows with no subquery
@@ -1167,8 +1171,8 @@ questions:
     options:
       - data -> 'name' (returns jsonb, not text)
       - data ->> 'name' (returns text)
-      - data @> 'name'
-      - data ? 'name'
+      - data @> 'name' (returns the containment boolean cast to the field's text value)
+      - data ? 'name' (returns the text of the key when the key-existence test succeeds)
     answer: 1
     explanation: |
       ->> returns the field as text (comparable to a string / castable), while -> returns it
@@ -1186,8 +1190,8 @@ questions:
     options:
       - A plain B-tree index on the whole column: CREATE INDEX ON events (data)
       - A GIN index: CREATE INDEX ON events USING GIN (data)
-      - A hash index on data
-      - No index can accelerate @> containment
+      - A hash index on data, which stores a hash of each document to satisfy @> containment probes
+      - No index of any kind can accelerate @> containment, so it always requires a full sequential scan
     answer: 1
     explanation: |
       Containment (@>) and key-existence (?) queries are accelerated by a GIN index over the
@@ -1204,11 +1208,11 @@ questions:
       When is a normalized column the better choice over stuffing a value into a jsonb
       document?
     options:
-      - When the attribute is sparse and its shape is unknown
-      - When it is an external payload you do not own the schema of
+      - When the attribute is sparse, its shape is unknown, and it appears on only a few rows in the table
+      - When it is an external payload you do not own the schema of and whose structure changes frequently
       - When you constantly filter, join, or aggregate on the attribute and want column statistics, typing,
         and cheap B-tree indexes
-      - When you want the whole row rewritten on every update
+      - When you want the whole row physically rewritten on every update to the attribute for durability
     answer: 2
     explanation: |
       Frequently filtered/joined/aggregated attributes benefit from per-column statistics,
@@ -1225,11 +1229,11 @@ questions:
     question: |
       What is a key difference between PostgreSQL's `json` and `jsonb` types?
     options:
-      - json is binary and indexable; jsonb is plain text
+      - json stores a decomposed binary form and is GIN-indexable, whereas jsonb keeps the raw plain text
       - jsonb stores a decomposed binary form (reorders keys, drops whitespace, last duplicate key wins) and
         is GIN-indexable; json keeps the exact text and is not
-      - They are identical aliases
-      - json supports containment queries but jsonb does not
+      - They are identical aliases for the same underlying storage format with no behavioral difference
+      - json supports @> containment queries directly on the column but jsonb cannot express containment
     answer: 1
     explanation: |
       json preserves the exact input text (whitespace, key order, duplicate keys) and reparses

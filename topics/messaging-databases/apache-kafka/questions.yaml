@@ -27,10 +27,10 @@ questions:
     question: |
       In Kafka, what happens to a record when a consumer reads it?
     options:
-      - "The broker deletes the record once the consumer acknowledges it"
-      - "The record is moved to a dead-letter topic after delivery"
+      - "The broker deletes the record from the partition once the consumer sends an acknowledgement back for that offset"
+      - "The record is moved to an internal dead-letter topic and purged from the original partition after delivery"
       - "Nothing is removed; the consumer just advances its offset and the record stays until retention expires"
-      - "The record is locked so no other consumer can read it"
+      - "The record is locked for the reading consumer so no other consumer group can access it until the lease expires"
     answer: 2
     explanation: |
       Kafka reads are non-destructive. A consumer only advances its offset; the record
@@ -45,8 +45,8 @@ questions:
       Why is "replay" considered a native capability of Kafka?
     options:
       - "Because Kafka stores messages in a relational database that supports point-in-time recovery"
-      - "Because Kafka automatically re-sends every message every 24 hours"
-      - "Because the broker keeps a separate copy of each message per consumer"
+      - "Because Kafka automatically re-sends every message on a fixed 24-hour timer to all subscribed consumers"
+      - "Because the broker maintains a separate physical copy of each message for every registered consumer group"
       - "Because a consumer can seek to an older offset and re-read historical records that are still retained"
     answer: 3
     explanation: |
@@ -61,10 +61,10 @@ questions:
     question: |
       What is a partition offset in Kafka?
     options:
-      - "A global sequence number unique across the entire topic"
+      - "A single global sequence number that is unique across every partition in the entire topic"
       - "A monotonically increasing sequence number unique within a single partition"
-      - "The timestamp at which a record was produced"
-      - "The consumer group ID assigned to the record"
+      - "The wall-clock timestamp, in milliseconds, at which the producer created the record"
+      - "The identifier of the consumer group that was assigned to process the record"
     answer: 1
     explanation: |
       An offset is a monotonically increasing sequence number unique WITHIN a partition.
@@ -78,10 +78,10 @@ questions:
     question: |
       What ordering guarantee does Kafka provide?
     options:
-      - "Total ordering across all records in a topic"
-      - "Ordering by producer timestamp across the whole cluster"
+      - "Total ordering across every record written to a topic, regardless of partition"
+      - "Global ordering by producer timestamp across every partition in the whole cluster"
       - "Ordering only within a single partition; no global ordering across partitions"
-      - "Ordering per consumer group regardless of partition"
+      - "Guaranteed ordering per consumer group, regardless of how records are spread across partitions"
     answer: 2
     explanation: |
       Kafka guarantees ordering only within a single partition. There is no global
@@ -97,9 +97,9 @@ questions:
       the risk of increasing the partition count later?
     options:
       - "Keys hashed after the change map to different partitions, so a key's history can split or reorder across partitions"
-      - "It is impossible; Kafka never allows adding partitions"
-      - "Existing offsets are renumbered, corrupting committed positions"
-      - "All consumers are permanently evicted from their group"
+      - "It is impossible; Kafka rejects any attempt to add partitions to an existing keyed topic"
+      - "Existing offsets are renumbered across all partitions, corrupting every consumer's committed positions"
+      - "All consumers are permanently evicted from their group and must re-register with a new group ID"
     answer: 0
     explanation: |
       Adding partitions changes the key->partition mapping (hash(key) % numPartitions) for
@@ -115,9 +115,9 @@ questions:
       With the default partitioner, how does Kafka decide which partition a keyed record
       goes to?
     options:
-      - "Round-robin regardless of the key"
-      - "Random selection weighted by partition size"
-      - "Always partition 0 for keyed records"
+      - "Plain round-robin across partitions, ignoring the record key entirely"
+      - "Random selection weighted by the current on-disk size of each partition"
+      - "Always partition 0, with keyed records pinned to the first partition of the topic"
       - "hash(key) % numPartitions, so equal keys land on the same partition"
     answer: 3
     explanation: |
@@ -132,10 +132,10 @@ questions:
     question: |
       Why does the partition key drive both ordering AND parallelism?
     options:
-      - "Because the key determines message priority in the queue"
+      - "Because the key sets a per-message priority that determines its position in a shared queue"
       - "Because each partition is an ordered log and each partition is consumed by exactly one member of a group, so keys pin ordering and partitions cap parallelism"
-      - "Because keys are stored in a separate index that parallelizes reads"
-      - "Because the key sets the replication factor for that record"
+      - "Because keys are stored in a separate global index that lets brokers parallelize reads by key"
+      - "Because the key value directly sets the replication factor applied to that individual record"
     answer: 1
     explanation: |
       A key routes all its records to one partition (ordering domain). Since a partition is
@@ -152,9 +152,9 @@ questions:
       partition is a bottleneck. Why, and what is a reasonable fix?
     options:
       - "A partition is processed by exactly one consumer in the group, so one hot key can't be parallelized; use a composite or salted key to spread its load"
-      - "The partition is slow because Kafka replicates hot keys twice; disable replication"
-      - "Kafka rate-limits popular keys; raise the quota to fix it"
-      - "Hot keys corrupt the murmur2 hash; switch to round-robin partitioning"
+      - "The partition is slow because Kafka replicates records for hot keys twice for safety; disable replication on that topic to fix it"
+      - "Kafka automatically rate-limits any key that exceeds a traffic threshold; raise the per-key quota to remove the throttle"
+      - "Hot keys overflow and corrupt the murmur2 hash buckets; switch the topic to round-robin partitioning to fix it"
     answer: 0
     explanation: |
       Because a partition is consumed by exactly one member of a group, all traffic for a
@@ -169,10 +169,10 @@ questions:
     question: |
       With modern clients (Kafka >= 2.4), how are records with a null key distributed?
     options:
-      - "Strict round-robin, one partition per record"
-      - "They are rejected because a key is mandatory"
+      - "Strict round-robin, alternating to a new partition on every single record produced"
+      - "They are rejected with an error because a non-null key is mandatory on modern clients"
       - "Using the sticky partitioner: batch to one partition until the batch is sent, then switch, for better batching"
-      - "All null-key records go to the highest-numbered partition"
+      - "All null-key records are funneled to the highest-numbered partition of the topic"
     answer: 2
     explanation: |
       Since Kafka 2.4 the sticky partitioner sends null-key records to one partition until
@@ -186,9 +186,9 @@ questions:
     question: |
       A producer is configured with acks=1. What durability does this provide?
     options:
-      - "The record is safe once all in-sync replicas have it"
-      - "No durability at all; it is fire-and-forget"
-      - "The record is committed to disk on every broker synchronously"
+      - "The record is durable only once every in-sync replica has fully persisted it to disk"
+      - "No durability at all; acks=1 is a pure fire-and-forget send with no broker acknowledgement"
+      - "The record is fsync'd to disk synchronously on every broker in the replica set before the ack"
       - "The leader writes to its log and replies; the record can be lost if the leader dies before followers replicate it"
     answer: 3
     explanation: |
@@ -203,9 +203,9 @@ questions:
     question: |
       Which statement about the acks setting is correct?
     options:
-      - "acks=all gives the lowest latency because it skips replication"
+      - "acks=all gives the lowest latency because it skips waiting on any replication step"
       - "acks=all offers the strongest durability but higher latency because the leader waits for the in-sync replicas"
-      - "acks=0 offers the strongest durability but highest latency"
+      - "acks=0 offers the strongest durability but the highest latency of the three settings"
       - "acks=1 and acks=all are identical when replication factor is 1"
     answer: 1
     explanation: |
@@ -221,10 +221,10 @@ questions:
     question: |
       What does linger.ms control on a Kafka producer?
     options:
-      - "How long the broker retains a record before deletion"
-      - "The maximum time a consumer can go without polling"
+      - "How long the broker retains a produced record on the log before it is deleted"
+      - "The maximum time a consumer can go without calling poll() before being evicted"
       - "How long the producer waits for more records to accumulate before sending a (partial) batch"
-      - "The timeout for leader election"
+      - "The timeout the controller allows for a partition leader election to complete"
     answer: 2
     explanation: |
       linger.ms is how long the producer waits for additional records before sending a
@@ -239,9 +239,9 @@ questions:
       What happens when a producer's buffer.memory fills up?
     options:
       - "send() blocks (up to max.block.ms), applying backpressure to the application"
-      - "The producer silently drops the oldest buffered records"
-      - "The broker rejects the connection"
-      - "Kafka automatically increases the buffer size"
+      - "The producer silently drops the oldest buffered records to make room for new ones"
+      - "The broker rejects the producer's connection and forces it to reconnect and retry"
+      - "Kafka automatically grows buffer.memory by allocating more heap on demand"
     answer: 0
     explanation: |
       buffer.memory bounds the producer's send buffer. When it is full, send() blocks for
@@ -255,9 +255,9 @@ questions:
     question: |
       Why does larger batching improve the effectiveness of producer compression?
     options:
-      - "Compression is applied per record, so batch size is irrelevant"
-      - "Only the first record in each batch is compressed"
-      - "Compression only works when linger.ms is 0"
+      - "Compression is applied separately to each individual record, so the batch size is irrelevant"
+      - "Only the first record in each batch is compressed and the rest are stored uncompressed"
+      - "Compression only takes effect when linger.ms is set to 0 and batching is disabled"
       - "Compression is applied to the whole batch, so bigger batches compress better and cut network and disk cost"
     answer: 3
     explanation: |
@@ -274,10 +274,10 @@ questions:
       Without the idempotent producer, how can a normal producer retry create a duplicate
       record?
     options:
-      - "The consumer reads the same offset twice"
+      - "The consumer reads the same offset twice because auto-commit failed to advance the position"
       - "The broker writes the record but the ack is lost in the network, so the producer retries and the record is written twice"
-      - "Two producers accidentally share a producer ID"
-      - "Log compaction duplicates records with the same key"
+      - "Two producer instances accidentally share the same producer ID and both write the record"
+      - "Log compaction accidentally duplicates records that share the same key during cleanup"
     answer: 1
     explanation: |
       If the broker successfully writes a record but the acknowledgement is lost in
@@ -292,9 +292,9 @@ questions:
       How does the idempotent producer eliminate duplicates from retries?
     options:
       - "It assigns a producer ID (PID) and a per-partition monotonic sequence number, so the broker rejects an already-seen sequence number"
-      - "It disables retries entirely"
-      - "It routes every record to a special de-dup topic first"
-      - "It compresses records so duplicates are collapsed"
+      - "It disables producer retries entirely so a record is only ever sent once"
+      - "It routes every record through a special server-side de-duplication topic first"
+      - "It compresses records so that byte-identical duplicates are automatically collapsed"
     answer: 0
     explanation: |
       With enable.idempotence=true (default since Kafka 3.0), the producer gets a PID and
@@ -310,10 +310,10 @@ questions:
       A topic has replication.factor=3 and min.insync.replicas=2, and the producer uses
       acks=all. Two of the three replicas for a partition go down. What happens to writes?
     options:
-      - "Writes succeed against the leader alone with reduced durability"
-      - "Kafka automatically lowers min.insync.replicas to 1 and continues"
+      - "Writes succeed against the surviving leader alone, just with reduced durability guarantees"
+      - "Kafka automatically lowers min.insync.replicas to 1 for that partition and keeps accepting writes"
       - "Writes are rejected with NotEnoughReplicas because the in-sync set (1) is below min.insync.replicas (2)"
-      - "The partition is silently deleted"
+      - "The partition is silently deleted and recreated once the failed replicas rejoin the cluster"
     answer: 2
     explanation: |
       With only the leader in-sync, ISR size is 1, below min.insync.replicas=2. An
@@ -328,9 +328,9 @@ questions:
     question: |
       Why is "acks=all" NOT sufficient on its own to guarantee no data loss?
     options:
-      - "Because acks=all disables replication"
-      - "Because acks=all only applies to compacted topics"
-      - "Because consumers ignore acks=all writes"
+      - "Because acks=all quietly turns off follower replication, leaving the leader as the only copy of the data"
+      - "Because acks=all only takes effect on compacted topics and is silently downgraded to acks=1 elsewhere"
+      - "Because consumers using read_committed ignore acks=all writes until a transaction marker is appended"
       - "Because 'all in-sync replicas' could be just the leader if min.insync.replicas=1, so a leader failure can still lose data"
     answer: 3
     explanation: |
@@ -346,10 +346,10 @@ questions:
     question: |
       Within a single consumer group, how are a topic's partitions assigned to consumers?
     options:
-      - "Every consumer receives every partition"
+      - "Every consumer in the group is assigned a full copy of all partitions to read"
       - "Each partition is assigned to exactly one consumer in the group"
-      - "Partitions are shared, and multiple consumers read the same partition simultaneously"
-      - "Only the group leader reads all partitions"
+      - "Partitions are shared so multiple consumers in one group read the same partition at once"
+      - "Only the elected group leader reads partitions while the other members stay on standby"
     answer: 1
     explanation: |
       Within a group, each partition is assigned to exactly one consumer, so records are
@@ -363,10 +363,10 @@ questions:
     question: |
       A topic has 4 partitions and a consumer group has 6 consumers. What happens?
     options:
-      - "Each of the 6 consumers gets a fraction of every partition"
-      - "Kafka splits partitions to give all 6 work"
+      - "Each of the 6 consumers is assigned an equal fraction of every partition to share the load"
+      - "Kafka dynamically subdivides the 4 partitions into 6 slices so all consumers get work"
       - "4 consumers are each assigned one partition and the other 2 sit idle"
-      - "The group fails to start because consumers exceed partitions"
+      - "The group refuses to start and errors out because the consumer count exceeds the partition count"
     answer: 2
     explanation: |
       Parallelism is capped by partition count. With 4 partitions and 6 consumers, 4
@@ -381,9 +381,9 @@ questions:
       Two separate consumer groups subscribe to the same topic. How do they interact?
     options:
       - "They are independent; each group gets a full copy of every record and tracks its own offsets"
-      - "They compete; each record goes to only one of the two groups"
-      - "The second group is blocked until the first finishes"
-      - "They must share a single committed offset"
+      - "They compete for the stream, so each record is delivered to only one of the two groups"
+      - "The second group is blocked from reading until the first group finishes consuming the topic"
+      - "They are forced to share a single committed offset stored under the topic name"
     answer: 0
     explanation: |
       Different consumer groups are independent. Each group receives a full copy of every
@@ -398,9 +398,9 @@ questions:
       A consumer's heartbeats are healthy, but its message handler occasionally takes
       longer than max.poll.interval.ms between poll() calls. What is the consequence?
     options:
-      - "Nothing; only session.timeout.ms matters"
-      - "The broker automatically increases max.poll.interval.ms"
-      - "The consumer is switched to at-most-once delivery"
+      - "Nothing happens because only session.timeout.ms governs liveness and heartbeats are healthy"
+      - "The broker automatically raises max.poll.interval.ms for that consumer to accommodate the slow handler"
+      - "The consumer is silently downgraded to at-most-once delivery for the remainder of its session"
       - "The consumer is considered dead and its partitions are reassigned via a rebalance, even though heartbeats were fine"
     answer: 3
     explanation: |
@@ -417,10 +417,10 @@ questions:
       What is the key difference between eager (stop-the-world) and cooperative
       (incremental) rebalancing?
     options:
-      - "Eager only revokes partitions that must move; cooperative revokes everything"
+      - "Eager revokes only the partitions that must move while cooperative revokes every partition group-wide"
       - "Eager revokes all partitions from every consumer during the rebalance; cooperative only revokes the partitions that actually need to move, so most consumers keep processing"
-      - "Cooperative rebalancing disables consumer groups"
-      - "They are two names for the same protocol"
+      - "Cooperative rebalancing disables consumer groups and assigns partitions statically instead"
+      - "They are two interchangeable names for the exact same underlying assignment protocol"
     answer: 1
     explanation: |
       In eager rebalancing every consumer revokes all its partitions and processing halts
@@ -437,9 +437,9 @@ questions:
       rolling restarts?
     options:
       - "It gives a consumer a stable identity so a transient restart within session.timeout.ms does not trigger a rebalance"
-      - "It disables rebalancing permanently for the group"
-      - "It merges all consumers into one static member"
-      - "It commits offsets synchronously on every poll"
+      - "It disables rebalancing permanently for the whole group so partitions never get reassigned"
+      - "It merges all consumers in the group into one static member that reads every partition"
+      - "It forces synchronous offset commits on every poll() call to survive restarts"
     answer: 0
     explanation: |
       Static membership assigns a stable group.instance.id. If that instance restarts and
@@ -454,10 +454,10 @@ questions:
       Which set of changes best mitigates a "rebalance storm" caused by a handler that
       occasionally exceeds max.poll.interval.ms?
     options:
-      - "Lower max.poll.interval.ms and increase max.poll.records"
-      - "Set acks=0 and disable idempotence"
+      - "Lower max.poll.interval.ms and increase max.poll.records so each poll pulls more work with a tighter deadline"
+      - "Set acks=0 and disable idempotence on the producer to lighten the consumer's processing load"
       - "Raise max.poll.interval.ms, lower max.poll.records, move slow work off the poll thread, and use cooperative rebalancing"
-      - "Reduce replication factor to 1 to speed up processing"
+      - "Reduce the topic's replication factor to 1 so the consumer has fewer replicas to keep up with"
     answer: 2
     explanation: |
       A rebalance storm feeds on itself: slow handlers get evicted, triggering rebalances
@@ -472,9 +472,9 @@ questions:
     question: |
       Where does Kafka store a consumer group's committed offsets by default?
     options:
-      - "In ZooKeeper"
-      - "In a local file on each consumer"
-      - "In the producer's buffer.memory"
+      - "In ZooKeeper, under a per-group znode maintained by the controller"
+      - "In a local offset file persisted on each consumer instance's disk"
+      - "In the producer's buffer.memory alongside pending unsent record batches"
       - "In the internal __consumer_offsets topic"
     answer: 3
     explanation: |
@@ -490,10 +490,10 @@ questions:
       A brand-new consumer group with no committed offsets starts on an existing topic.
       What controls where it begins reading?
     options:
-      - "It always starts from offset 0"
+      - "It always starts from offset 0 regardless of the topic's current retention window"
       - "The auto.offset.reset setting (earliest or latest)"
-      - "It starts from the current wall-clock timestamp"
-      - "It cannot start until an admin sets an offset manually"
+      - "It begins reading from the record nearest the current wall-clock timestamp"
+      - "It cannot start until an administrator manually seeds an initial committed offset"
     answer: 1
     explanation: |
       When no committed offset exists, auto.offset.reset decides the start position:
@@ -508,10 +508,10 @@ questions:
       To achieve at-least-once processing, in what order should a consumer process and
       commit?
     options:
-      - "Commit the offset first, then process the record"
-      - "Commit and process simultaneously in one atomic step without transactions"
+      - "Commit the offset first, then process the record so the position is saved before work begins"
+      - "Commit and process simultaneously in a single atomic step without using Kafka transactions"
       - "Process the record first, then commit the offset"
-      - "Never commit; rely on auto.offset.reset"
+      - "Never commit at all and instead rely on auto.offset.reset to resume after a crash"
     answer: 2
     explanation: |
       At-least-once requires processing the record and THEN committing. If a crash happens
@@ -528,7 +528,7 @@ questions:
       does this produce?
     options:
       - "At-most-once (may lose records)"
-      - "Exactly-once"
+      - "Exactly-once (no loss, no duplicates)"
       - "At-least-once (may duplicate)"
       - "Ordered delivery across partitions"
     answer: 0
@@ -544,9 +544,9 @@ questions:
     question: |
       Why can the default enable.auto.commit=true be risky for correctness?
     options:
-      - "It commits offsets synchronously on every record, hurting throughput"
-      - "It never commits offsets, so consumers always reprocess everything"
-      - "It disables consumer groups"
+      - "It commits offsets synchronously after every single record, which badly hurts consumer throughput"
+      - "It never actually commits offsets, so on restart consumers always reprocess the entire retained log"
+      - "It disables consumer groups and forces every consumer to read the topic independently"
       - "It periodically commits the last polled offset, so offsets can be committed for records you have not finished processing (loss on crash)"
     answer: 3
     explanation: |
@@ -581,9 +581,9 @@ questions:
       What does the In-Sync Replica (ISR) set represent?
     options:
       - "The replicas (including the leader) that are fully caught up with the leader within replica.lag.time.max.ms"
-      - "All replicas that exist for a partition regardless of state"
-      - "The set of consumers currently reading the partition"
-      - "Replicas that have fallen behind and need re-sync"
+      - "All replicas assigned to a partition regardless of how far behind the leader they are"
+      - "The set of consumer instances currently fetching records from that partition leader"
+      - "The replicas that have fallen behind the leader and are queued for a re-sync fetch"
     answer: 0
     explanation: |
       The ISR is the set of replicas (leader plus caught-up followers, within
@@ -598,10 +598,10 @@ questions:
     question: |
       In the default Kafka model, where do a partition's reads and writes go?
     options:
-      - "Reads from followers, writes to the leader"
-      - "Any replica can serve any request with no coordination"
+      - "Reads are served by followers while all writes are routed to the partition leader"
+      - "Any replica can serve any read or write request with no leader coordination needed"
       - "Both reads and writes go through the partition leader; followers pull from the leader to stay caught up"
-      - "Writes go to ZooKeeper, reads to the broker"
+      - "Writes are persisted to ZooKeeper first and reads are then served by the broker"
     answer: 2
     explanation: |
       By default all reads and writes go through the partition leader; followers fetch from
@@ -615,9 +615,9 @@ questions:
     question: |
       What is the effect of setting unclean.leader.election.enable=true?
     options:
-      - "It forces every write to be acknowledged by all replicas"
-      - "It disables leader election entirely"
-      - "It guarantees zero data loss under all failures"
+      - "It forces every write to be acknowledged by all assigned replicas before the leader responds"
+      - "It disables partition leader election entirely and pins each partition to its original leader"
+      - "It guarantees zero data loss under all failure scenarios by blocking risky elections"
       - "It allows an out-of-sync replica to become leader when no ISR replica is available, restoring availability but potentially losing unreplicated records"
     answer: 3
     explanation: |
@@ -634,10 +634,10 @@ questions:
       With the default unclean.leader.election.enable=false, what happens if all ISR
       replicas for a partition become unavailable?
     options:
-      - "An out-of-sync replica is promoted immediately"
+      - "An out-of-sync replica is promoted to leader immediately to keep the partition available"
       - "The partition goes offline and waits, prioritizing consistency/durability over availability"
-      - "The topic is deleted"
-      - "Producers switch to acks=0 automatically"
+      - "The entire topic is deleted and must be recreated once a replica comes back online"
+      - "Producers automatically fall back to acks=0 so writes can continue without any replica"
     answer: 1
     explanation: |
       With unclean leader election disabled (the recommended default), if no in-sync
@@ -653,9 +653,9 @@ questions:
       considered committed?
     options:
       - "Every replica in the assigned replica list, even out-of-sync ones"
-      - "Only the leader"
+      - "Only the partition leader, before any follower has fetched the record"
       - "All replicas currently in the ISR (with min.insync.replicas as the floor)"
-      - "A majority of consumers"
+      - "A majority quorum of the consumers currently subscribed to the partition"
     answer: 2
     explanation: |
       acks=all waits for all IN-SYNC replicas (the ISR), not necessarily every assigned
@@ -670,9 +670,9 @@ questions:
       With the default cleanup.policy=delete, how does Kafka decide what to remove?
     options:
       - "It deletes whole segments older than retention.ms or beyond retention.bytes; the active segment is never deleted"
-      - "It deletes each record immediately after a consumer reads it"
-      - "It keeps only the last record per key"
-      - "It never deletes anything"
+      - "It deletes each record individually the moment a consumer acknowledges reading that offset"
+      - "It keeps only the single most recent record per key and discards every earlier value on write"
+      - "It never deletes anything and instead relies on operators to truncate partitions manually"
     answer: 0
     explanation: |
       cleanup.policy=delete removes data at segment granularity: segments older than
@@ -686,9 +686,9 @@ questions:
     question: |
       What does cleanup.policy=compact do?
     options:
-      - "Deletes all records after 7 days"
-      - "Compresses records with gzip"
-      - "Removes duplicate offsets"
+      - "Deletes every record once it is 7 days old, ignoring keys and applying a strict time-only retention window"
+      - "Compresses each record on disk with gzip to reclaim space while preserving the full ordered history of the log"
+      - "Scans the partition and removes any records that were assigned duplicate offsets during producer retries"
       - "Keeps the latest value for each key and garbage-collects superseded older values, behaving like a changelog/snapshot"
     answer: 3
     explanation: |
@@ -704,10 +704,10 @@ questions:
     question: |
       In a compacted topic, what is a record with a null value?
     options:
-      - "An invalid record that is rejected by the broker"
+      - "An invalid record that the broker rejects at produce time because compacted topics require non-null values"
       - "A tombstone that marks the key as deleted; after delete.retention.ms the tombstone itself is removed"
-      - "A heartbeat record for the consumer group"
-      - "A marker for the start of a new segment"
+      - "A liveness heartbeat that the consumer group coordinator writes to track member session timeouts"
+      - "A segment boundary marker the broker appends to signal the start of a fresh log segment file"
     answer: 1
     explanation: |
       In a compacted topic, a null-value record is a tombstone: it signals that the key is
@@ -722,9 +722,9 @@ questions:
       Which statement about log compaction is accurate?
     options:
       - "Compaction guarantees the latest value per key survives, but recently written duplicates in the log's head are compacted only in the background"
-      - "Compaction guarantees exactly one value per key at all times, synchronously"
-      - "Compaction deletes the latest value and keeps the oldest"
-      - "Compaction and time-based deletion cannot be combined"
+      - "Compaction guarantees exactly one value per key at all times, running synchronously on every append"
+      - "Compaction keeps the oldest value for each key and discards the most recently written value as stale"
+      - "Compaction and time-based deletion are mutually exclusive and can never be enabled on the same topic"
     answer: 0
     explanation: |
       Compaction guarantees the LATEST value per key survives, but it runs in the
@@ -740,10 +740,10 @@ questions:
       In a consume->process->produce pipeline, what makes exactly-once processing possible
       in Kafka?
     options:
-      - "Setting acks=0 and disabling retries"
-      - "Committing offsets before producing output"
+      - "Setting acks=0 and disabling retries so each record is delivered at most once end-to-end"
+      - "Committing the consumer offset first and then producing the output records afterward"
       - "The idempotent producer plus transactions, where sendOffsetsToTransaction writes the consumer's offset commit inside the same transaction as the output records"
-      - "Using a single partition for all topics"
+      - "Routing every input and output topic through a single shared partition to serialize processing"
     answer: 2
     explanation: |
       Exactly-once processing combines the idempotent producer (removes duplicate writes)
@@ -777,10 +777,10 @@ questions:
       Your Kafka "process" step also writes to an external SQL database that is not part of
       the Kafka transaction. What is true about exactly-once here?
     options:
-      - "Exactly-once still holds end-to-end automatically"
+      - "Exactly-once still holds end-to-end automatically because the transaction coordinator enlists the SQL write too"
       - "Exactly-once is scoped to Kafka; at the external boundary you are back to at-least-once unless that system is idempotent or you use an outbox/2PC pattern"
-      - "The database write is automatically rolled back if the Kafka transaction aborts"
-      - "Kafka transactions extend to any JDBC datasource by default"
+      - "The external SQL write is automatically rolled back by the broker whenever the enclosing Kafka transaction aborts"
+      - "Kafka transactions transparently extend to any JDBC datasource by enlisting it as an XA resource by default"
     answer: 1
     explanation: |
       Kafka's exactly-once is scoped to Kafka. A side effect to an external
@@ -795,10 +795,10 @@ questions:
     question: |
       What is the difference between the idempotent producer and Kafka transactions?
     options:
-      - "They are the same feature with two names"
-      - "Transactions only work with acks=0"
+      - "They are the same underlying feature exposed under two different configuration names"
+      - "Transactions only work when the producer is configured with acks=0 and retries disabled"
       - "The idempotent producer removes duplicate writes to one partition within a session; transactions add atomic multi-partition writes plus atomic offset commit"
-      - "The idempotent producer provides multi-partition atomicity; transactions only de-dup"
+      - "The idempotent producer provides atomic multi-partition writes while transactions merely de-duplicate retries"
     answer: 2
     explanation: |
       The idempotent producer eliminates duplicate writes to a single partition within a
@@ -814,9 +814,9 @@ questions:
       What does Kafka's use of the sendfile (zero-copy) syscall accomplish?
     options:
       - "It copies log bytes directly from the page cache to the network socket, bypassing user space and avoiding redundant copies"
-      - "It compresses records before storing them"
-      - "It replicates data to followers without acks"
-      - "It writes records to disk twice for durability"
+      - "It compresses each record batch with zstd before storing it, shrinking the on-disk log footprint"
+      - "It streams data to follower replicas over a fast path that skips the usual acknowledgement round-trip"
+      - "It writes every record to two separate disks synchronously to double the partition's durability"
     answer: 0
     explanation: |
       Zero-copy via sendfile transfers log bytes straight from the OS page cache to the
@@ -831,9 +831,9 @@ questions:
     question: |
       Why does Kafka rely on the OS page cache instead of a large in-JVM message cache?
     options:
-      - "Because the JVM cannot allocate large heaps"
-      - "Because the page cache guarantees data is flushed synchronously on every write"
-      - "Because it disables sequential I/O"
+      - "Because the JVM is architecturally unable to allocate a heap large enough to cache the message log"
+      - "Because the page cache guarantees every write is flushed synchronously to disk before the append returns"
+      - "Because relying on the page cache lets Kafka disable sequential I/O and issue random writes instead"
       - "Because recently produced data is served to consumers straight from RAM via the page cache, keeping the JVM heap small and GC pressure low"
     answer: 3
     explanation: |
@@ -849,10 +849,10 @@ questions:
       A team enables TLS encryption on their Kafka brokers and notices a throughput drop.
       What is a likely contributing cause?
     options:
-      - "TLS forces acks=0"
+      - "Enabling TLS silently forces the producer to acks=0, which throttles the broker's write path"
       - "Enabling TLS forfeits the zero-copy (sendfile) path, because encryption must process the bytes in user space"
-      - "TLS disables the page cache"
-      - "TLS reduces the replication factor"
+      - "Enabling TLS disables the OS page cache, forcing every consumer fetch to hit disk directly"
+      - "Enabling TLS reduces the topic's effective replication factor to one, adding follower catch-up overhead"
     answer: 1
     explanation: |
       With TLS, bytes must be encrypted in user space, so Kafka can no longer use the
@@ -867,9 +867,9 @@ questions:
       Why are Kafka's writes fast even on spinning disks?
     options:
       - "Appends go to the end of a segment file (sequential I/O), which is far faster than random writes and friendly to the page cache"
-      - "It performs random writes spread across the disk"
-      - "It writes only to RAM and never persists"
-      - "It uses one file per record to parallelize writes"
+      - "It performs random writes scattered across the disk and relies on the drive's controller to reorder them efficiently"
+      - "It buffers records only in RAM and never persists them, trading durability for raw write speed"
+      - "It writes each record to its own dedicated file so that many small writes can proceed fully in parallel"
     answer: 0
     explanation: |
       Kafka appends to the end of a segment file, which is sequential I/O — far faster than
@@ -883,10 +883,10 @@ questions:
     question: |
       What did KRaft replace in Kafka, and how does it store cluster metadata?
     options:
-      - "It replaced the producer client; metadata lives in the producer buffer"
-      - "It replaced consumer groups with static assignment"
+      - "It replaced the producer client and now keeps all cluster metadata inside the producer's send buffer"
+      - "It replaced dynamic consumer groups with static partition assignment configured by the operator"
       - "It replaced ZooKeeper with a built-in Raft-based controller quorum, storing metadata in an internal __cluster_metadata log"
-      - "It replaced log compaction with time-based retention"
+      - "It replaced log compaction with a purely time-based retention scheme for storing cluster metadata"
     answer: 2
     explanation: |
       KRaft ("Kafka Raft") replaces ZooKeeper for cluster metadata (brokers, topics,
@@ -901,9 +901,9 @@ questions:
     question: |
       Which statement about the KRaft/ZooKeeper timeline is correct?
     options:
-      - "ZooKeeper is still mandatory as of Kafka 4.0"
-      - "KRaft was removed in Kafka 4.0 in favor of ZooKeeper"
-      - "KRaft only works for single-broker clusters"
+      - "ZooKeeper is still mandatory as of Kafka 4.0, with KRaft offered only as an experimental opt-in"
+      - "KRaft was deprecated and then removed in Kafka 4.0, which reverted the project fully back to ZooKeeper"
+      - "KRaft is supported only for single-broker development clusters and cannot run a multi-broker quorum"
       - "KRaft went GA for new clusters in Kafka 3.3 (2022), and ZooKeeper was removed in Kafka 4.0 (2025), which runs KRaft only"
     answer: 3
     explanation: |
@@ -919,10 +919,10 @@ questions:
       Beyond removing an external dependency, why does KRaft improve scalability compared
       to the ZooKeeper-based design?
     options:
-      - "It compresses all topic data automatically"
+      - "It automatically compresses all topic data, shrinking the metadata each broker must track"
       - "Metadata propagation no longer bottlenecks on ZooKeeper, enabling much faster controller failover and support for far more partitions"
-      - "It eliminates the need for replication"
-      - "It stores metadata on each consumer instead of the brokers"
+      - "It eliminates the need for partition replication, so the controller manages far less state"
+      - "It stores cluster metadata on each consumer instance instead of on the brokers, offloading the controller"
     answer: 1
     explanation: |
       With KRaft, metadata is an internal event log applied by the controller quorum, so
@@ -936,10 +936,10 @@ questions:
     question: |
       Which statement best contrasts Kafka with a traditional message queue like RabbitMQ?
     options:
-      - "Both delete messages after acknowledgement"
-      - "A traditional queue supports replay natively; Kafka does not"
+      - "Both delete each message immediately after it has been acknowledged by a consumer"
+      - "A traditional queue supports offset-based replay natively, whereas Kafka discards messages on read"
       - "Kafka retains an append-only log and consumers track offsets; a traditional queue removes a message once it is acknowledged (destructive read)"
-      - "Kafka provides per-message priority; traditional queues do not"
+      - "Kafka offers rich per-message priority ordering, while traditional queues deliver strictly first-in-first-out"
     answer: 2
     explanation: |
       Kafka is a retained append-only log where consumers track offsets and can replay; a
@@ -956,9 +956,9 @@ questions:
       better fit than Kafka?
     options:
       - "Rich per-message routing, priorities, TTLs, dead-letter queues, and delayed delivery in a task/work-queue"
-      - "Durable event streams with replay and multiple independent consumers of the same data"
-      - "Very high throughput event streaming with stream processing"
-      - "Event sourcing where you replay history to rebuild state"
+      - "Durable long-retention event streams that support replay by many independent consumer groups of the same data"
+      - "Sustained very high throughput event streaming feeding continuous stream-processing topologies downstream"
+      - "Event-sourcing workloads where the full history is replayed from the log to rebuild application state"
     answer: 0
     explanation: |
       Traditional queues excel at per-message acknowledgement, routing (exchanges),
@@ -976,8 +976,8 @@ questions:
       why?
     options:
       - "A single shared queue, because competing consumers naturally fan out to all three apps"
-      - "A traditional queue, because destructive reads make replay trivial"
-      - "Neither; this requires a relational database"
+      - "A traditional queue, because its destructive reads let each of the three apps re-consume the same messages on demand"
+      - "Neither model works here; a relational database polled by all three apps is the only way to share this event data"
       - "Kafka, because multiple consumer groups can each read a full copy of the log independently and seek to old offsets"
     answer: 3
     explanation: |
@@ -994,10 +994,10 @@ questions:
       An interviewer asks how to guarantee total ordering of all events in a Kafka topic.
       What is the correct trade-off to state?
     options:
-      - "Increase the replication factor to enforce global ordering"
+      - "Increase the replication factor to 5, which makes every follower enforce a shared global order across partitions"
       - "Use a single partition, which gives total order but caps throughput to that one partition's capacity"
-      - "Enable exactly-once semantics, which orders across partitions"
-      - "Use round-robin partitioning to spread and reorder records evenly"
+      - "Enable exactly-once semantics with transactions, which serializes and orders records across all of a topic's partitions"
+      - "Use round-robin partitioning so the default partitioner spreads records evenly and then re-sorts them by timestamp on read"
     answer: 1
     explanation: |
       Total ordering requires a single partition, since ordering is only guaranteed within
