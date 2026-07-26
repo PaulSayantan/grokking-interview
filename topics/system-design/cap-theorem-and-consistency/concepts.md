@@ -15,6 +15,20 @@ trips, more nodes that must agree) buys stronger guarantees and costs latency
 and availability. Less coordination is fast and available but lets replicas
 diverge.**
 
+> [!KEY-TAKEAWAY]
+> The five sentences to have ready in an interview:
+> 1. **Partitions are unavoidable, so CAP's real choice is C-vs-A *during a
+>    partition*** — and CA is not a valid pick for a multi-node store.
+> 2. **PACELC is the better lens**: even with no partition you trade
+>    **latency vs consistency** (the everyday cost), so name that too.
+> 3. **Consistency is a spectrum**, not a bit: linearizable → sequential →
+>    causal → session guarantees (read-your-writes, monotonic) → eventual.
+> 4. **`R + W > N` is "strong-ish," not linearizable** — mid-flight writes,
+>    sloppy quorums, and concurrent writes still leak stale/conflicting reads.
+> 5. **Never label the whole system CP or AP.** Decompose by data class: keep
+>    the small critical core strongly consistent, make the tolerant surface
+>    eventual with session guarantees, and merge with CRDTs where you can.
+
 ---
 
 ## CAP theorem fundamentals
@@ -204,8 +218,9 @@ jarring anomalies users notice.
 subsequent reads reflect it. Without it, a user updates their profile, reloads,
 and sees the old value — a classic bug when reads go to async replicas.
 *How:* route a user's reads to the primary (or to a replica known to have
-their write) for a window; or track the write's version/LSN in a cookie and
-require replicas to be at least that up to date.
+their write) for a window; or track the write's version / LSN (Log Sequence
+Number — the monotonically increasing position of the write in the replication
+log) in a cookie and require replicas to be at least that up to date.
 
 **Monotonic reads.** A client never sees time go backwards: once you've read a
 value, you won't later read an older one. Violated when successive reads hit
@@ -246,11 +261,22 @@ ordered; everyone must see the question before its answer. Two unrelated
 questions posted concurrently can appear in either order to different viewers
 without harm.
 
-**How it works.** Track causal dependencies with **logical clocks** — Lamport
-timestamps or vector clocks — attached to each write. A replica delays making a
-write visible until all writes it *depends on* have been applied locally.
-There is no global total order and no consensus, so it doesn't require a leader
-or blocking quorum.
+**How it works.** Track causal dependencies with metadata attached to each
+write. A replica delays making a write visible until all writes it *depends on*
+have been applied locally. There is no global total order and no consensus, so
+it doesn't require a leader or blocking quorum.
+
+*Which clock, and why it matters.* You need **vector clocks / version vectors**
+(dependency metadata) here — **not plain Lamport timestamps**. A Lamport
+timestamp gives a single scalar per event and imposes a *consistent total
+order*, but it **cannot tell causally-related events apart from concurrent
+ones**: `L(a) < L(b)` does **not** imply `a → b` (a happened-before b) — b might
+simply have a larger counter while being concurrent. Enforcing causal
+consistency requires *detecting* the happens-before relation, which needs the
+element-wise comparison a vector clock provides (see the worked example under
+*Conflict resolution*). Lamport timestamps are still useful — for
+tie-breaking / choosing one total order — but they are insufficient to *capture*
+causality on their own.
 
 **Real-world usage.** COPS and Bayou were research systems that popularized it;
 MongoDB's causal-consistency sessions provide read-your-writes + monotonic
@@ -309,6 +335,32 @@ happened earlier, as long as it is consistent with each poster's own order.
 Linearizability forbids this; sequential allows it. This is exactly why
 sequential consistency is composable within a process but "feels" laggy across
 processes.
+
+**Worked example — concrete events and wall-clock times.** Two posters, one
+shared feed, two readers R1 and R2:
+- `t=1`: **Alice posts P1** — and this write *completes* (ack returned) at `t=1`.
+- `t=2`: **Bob posts P2**, strictly *after* P1 has completed.
+
+Alice's program order is just `[P1]`; Bob's is just `[P2]` — neither poster
+issues two posts, so there is **no per-process order to violate** either way.
+Now compare what each model permits every reader to observe:
+
+| Reader observation | Linearizable? | Sequential? |
+|---|---|---|
+| R1 sees `P1, P2` **and** R2 sees `P1, P2` | ✓ (only allowed order) | ✓ |
+| R1 sees `P2, P1` **and** R2 sees `P2, P1` | ✗ (P1 completed before P2 began → real time forces P1 first) | ✓ (one agreed total order, respects each poster's own order) |
+| R1 sees `P1, P2` **but** R2 sees `P2, P1` | ✗ | ✗ (readers disagree → **no single** total order) |
+
+The key contrasts, made concrete:
+- **Linearizability** anchors to wall-clock: because P1 *finished* at `t=1`
+  before P2 *started* at `t=2`, every reader is forced to see `P1` then `P2`.
+  Row 2 is forbidden.
+- **Sequential** drops the wall-clock anchor but keeps "one order for
+  everyone": row 2 (**everybody** sees `P2, P1`) is perfectly legal — the whole
+  system agrees on that single order, and neither poster's own order is broken.
+- **What even sequential forbids** is row 3: two readers seeing *different*
+  orders. That would mean no single total order exists at all — that is only
+  allowed under causal/eventual.
 
 **Why it is rarely a design target.** Sequential consistency is (a) still not
 available under partition — it needs a global total order, so it is a CP-class
@@ -448,6 +500,30 @@ datacenter to avoid cross-region latency.
   linearizability**: concurrent writes, sloppy quorums, and read-repair races
   can still expose anomalies. Interview nuance: strict quorum ≈ "strong-ish,"
   not a substitute for consensus.
+
+  **Worked example — a stale read that still satisfies the quorum (N=3, W=2,
+  R=2).** The overlap argument assumes writes are *atomic*: either all W
+  replicas have the new value or the write hasn't "happened." Real writes are
+  applied one replica at a time, and a read can interleave mid-flight. Label the
+  three replicas r1, r2, r3, all holding value `v0`.
+  1. A client issues `write v1` (W=2). The coordinator sends it to all three;
+     `v1` lands on **r1** first. r2 and r3 have not applied it yet — the write
+     has **not** yet collected its 2 acks, so it is still *in progress* (not
+     acknowledged to the writer).
+  2. Concurrently, a reader issues a read (R=2) and its two responses come back
+     from **r2 and r3** — the two replicas that still hold `v0`.
+  3. `R + W = 4 > N = 3`, so the read set `{r2,r3}` and the write's *intended*
+     set `{r1,r2,r3}` do overlap on paper — but the reader touched exactly the
+     two replicas the write hadn't reached yet. The read returns **`v0`, stale**,
+     even though every quorum count is satisfied.
+
+  Two more ways the same setup breaks linearizability: (a) if the `write v1`
+  **fails after updating only r1** (never reaching its 2nd ack), some later
+  reads see `v1` and some see `v0` with no defined winner; (b) two *concurrent*
+  writes `v1` and `v2` each reach a different pair of replicas — both "succeed"
+  by quorum, and nothing defines which is newer without extra ordering
+  (timestamps/vector clocks). This is why `R+W>N` is "strong-ish," and why a
+  true compare-and-set needs consensus (e.g., Cassandra LWT / Paxos).
 - Larger W: more durable, more consistent, **higher write latency and lower
   write availability** (more nodes must be up). Larger R: fresher reads,
   higher read latency. You are literally dialing the CAP/PACELC knob per
@@ -500,17 +576,21 @@ differ, they recurse only into the subtrees whose hashes differ, transferring
 
 ```mermaid
 flowchart TD
-    Root{"Merkle tree diff (log N comparison): replica A root == replica B root ?"}
+    Root{"Merkle diff: replica A root hash == replica B root hash ?"}
     Done["equal: DONE, 0 data shipped"]
-    Children{"differ: compare children h(L) vs h(R)"}
-    Left["h(L) equal?"]
-    Right["h(R) differ? -> recurse only into R"]
-    Ship["ship only the mismatched leaf ranges"]
+    LeftChild{"left subtree: h(L_A) == h(L_B) ?"}
+    RightChild{"right subtree: h(R_A) == h(R_B) ?"}
+    LeftStop["equal: skip left subtree"]
+    RightStop["equal: skip right subtree"]
+    LeftRecurse["differ: recurse into left, ship its mismatched leaves"]
+    RightRecurse["differ: recurse into right, ship its mismatched leaves"]
     Root -->|equal| Done
-    Root -->|differ| Children
-    Children --> Left
-    Children --> Right
-    Right --> Ship
+    Root -->|differ| LeftChild
+    Root -->|differ| RightChild
+    LeftChild -->|equal| LeftStop
+    LeftChild -->|differ| LeftRecurse
+    RightChild -->|equal| RightStop
+    RightChild -->|differ| RightRecurse
 ```
 
 - **Cost/benefit:** comparison is **O(log N)** hash exchanges to *locate*
@@ -557,6 +637,29 @@ function) to reconcile.
   version vectors). Riak and Dynamo use them. Pick when you can't afford to
   lose concurrent writes and can write merge logic.
 
+**Worked example — comparing two vector clocks.** The comparison rule: vector
+clock **X dominates Y** (`X ≥ Y`, meaning "Y happened-before X, so X is newer")
+iff **every** entry of X is ≥ the matching entry of Y, and at least one is
+strictly greater. If neither dominates the other, the writes are **concurrent**
+→ a real conflict → surface siblings.
+
+*Concurrent case (two entries, replicas A and B).* Start from a value with clock
+`[A:0, B:0]`.
+- Replica A takes a write, increments its own entry → `[A:1, B:0]`.
+- Replica B, without having seen A's write, takes a concurrent write →
+  `[A:0, B:1]`.
+- Compare `[A:1, B:0]` vs `[A:0, B:1]`: for A's entry `1 > 0` (first vector
+  ahead), for B's entry `0 < 1` (second vector ahead). Neither is ≥ the other on
+  every entry → **concurrent** → the store keeps **both as siblings** for the
+  app (or a CRDT merge) to reconcile. LWW here would silently drop one.
+
+*Causal case (no conflict).* Now compare `[A:2, B:1]` vs `[A:1, B:1]`:
+- A's entry: `2 ≥ 1` ✓, B's entry: `1 ≥ 1` ✓, and A's entry is strictly greater.
+- So `[A:2, B:1]` **dominates** `[A:1, B:1]` → the second write *happened-before*
+  the first → **no conflict**, just keep the newer `[A:2, B:1]`. This is exactly
+  the happens-before that a single Lamport scalar could not have distinguished
+  from the concurrent case above (both could have `L=3`).
+
 **CRDTs (Conflict-free Replicated Data Types).** Data structures whose merge
 operation is commutative, associative, and idempotent, so replicas
 **automatically converge** regardless of order or duplication — no coordination,
@@ -586,8 +689,11 @@ will push on, because each type has a *specific* convergence trick and a
 
 **State-based (CvRDT) vs operation-based (CmRDT).** Two families:
 - **State-based (convergent):** replicas periodically ship their **whole
-  state**; merge is a **join** on a semilattice (a function that is
-  commutative, associative, idempotent). Robust to duplicate/reordered/lost
+  state**; merge is a **join** on a **semilattice** (a partial order in which
+  any two elements have a least-upper-bound, so the merge/join is commutative,
+  associative, and idempotent — and therefore **order-independent**: you get the
+  same result no matter what sequence the states arrive in). Robust to
+  duplicate/reordered/lost
   messages (idempotent merge tolerates re-delivery) but heavier on bandwidth.
 - **Operation-based (commutative):** replicas ship **operations**, which must
   be **commutative** and delivered **exactly once in causal order** (needs a
@@ -857,7 +963,10 @@ uses ReadIndex) to get a linearizable read. Small, critical, CP control-plane
 state.
 
 **Riak.** Closest production heir to the Dynamo paper: leaderless, N/R/W,
-**vector clocks (dotted version vectors) surfacing siblings**, and native
+**vector clocks (dotted version vectors) surfacing siblings** — *dotted version
+vectors* are a refinement that attaches a per-write "dot" so causality is
+tracked accurately per key without the vector growing unboundedly with every
+client, the classic plain-vector-clock problem — and native
 **CRDT data types** (counters, sets, maps, registers, flags) for automatic
 convergence. AP by default.
 

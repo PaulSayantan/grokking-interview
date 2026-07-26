@@ -45,6 +45,61 @@ free. Keep that asymmetry front of mind.
 
 ---
 
+## Why scaling is sublinear, Amdahl and the Universal Scalability Law
+
+**Intuition.** People say "just add more servers" as if throughput scales linearly with
+node count. It doesn't — and knowing *why* is what separates a good answer from a
+staff-level one. Two laws explain the shape of the curve.
+
+**Amdahl's Law — the serial fraction caps you.** Any workload has a part that *must*
+run serially (a lock, a single shared counter, a coordinator, a not-parallelizable
+data dependency). If a fraction **s** of the work is serial and (1−s) can be
+parallelized across **N** workers, the best speedup you can ever get is:
+
+```
+speedup(N) = 1 / ( s + (1 - s)/N )
+as N -> infinity, speedup -> 1/s   (hard ceiling)
+```
+
+*Worked example.* Suppose 5% of a request's work is serial (s = 0.05):
+- N = 1 → speedup = 1 / (0.05 + 0.95/1) = 1 / 1.00 = **1.0×** (baseline).
+- N = 10 → speedup = 1 / (0.05 + 0.95/10) = 1 / (0.05 + 0.095) = 1 / 0.145 = **6.9×**
+  (not 10× — you already lost 31% of the ideal).
+- N = 100 → speedup = 1 / (0.05 + 0.0095) = 1 / 0.0595 = **16.8×** (not 100×).
+- N = ∞ → speedup → 1 / 0.05 = **20×**, a hard ceiling. Buying the 1000th node past
+  this point buys essentially nothing.
+
+So a mere 5% serial fraction caps you at 20× *no matter how many nodes you add*. That
+is exactly why "consistency, durability, and coordination don't parallelize for free"
+and why "the data tier is the hard part" — the data tier is where the serial fraction
+concentrates (a single primary's write path, a lock, a transaction coordinator).
+
+**Universal Scalability Law (USL) — it can go *negative*.** Amdahl assumes extra nodes
+never make things slower. Real distributed systems have a second penalty: **coherency /
+crosstalk** — the cost of nodes coordinating *with each other* (cache-coherency traffic,
+lock contention, gossip, cross-shard chatter). This term grows like N², so beyond some
+peak N the system gets *slower* as you add nodes:
+
+```
+capacity(N) = N / ( 1 + α(N-1) + β·N(N-1) )
+   α = contention (serial sharing, ~ Amdahl's s)
+   β = coherency/crosstalk (pairwise coordination, the N^2 killer)
+```
+
+The curve has three regions: a near-linear region at low N → a flattening region as
+contention (α) bites → an actual *decline* once coherency cost (β·N²) dominates. This
+is why you sometimes see throughput *drop* after adding replicas or DB nodes: the extra
+coordination outweighs the extra capacity.
+
+> [!KEY-TAKEAWAY]
+> Adding nodes has diminishing (Amdahl) and eventually *negative* (USL) returns. The
+> engineering goal of every technique in this doc — statelessness, sharding, caching,
+> cells — is to **shrink the serial fraction (α) and the coordination cost (β)** so the
+> linear region extends further. You scale by *removing coordination*, not just by
+> adding hardware.
+
+---
+
 ## Horizontal versus vertical scaling
 
 **Intuition.** Vertical scaling (scale up) = make one machine bigger: more vCPU, more
@@ -102,6 +157,13 @@ that would be lost if that node vanished and no other node could reconstruct.
 - Session/auth state → signed tokens (JWT — JSON Web Tokens, self-contained
   signed credentials the client carries) held by the client, or a shared session
   store (Redis/Memcached/DynamoDB).
+  - *The JWT catch:* a signed bearer token avoids a session-store lookup on every
+    request, but you give up **instant revocation** — the token stays valid until it
+    expires, so logout, password change, or a stolen token can't be cheaply cancelled.
+    Mitigate with **short TTLs + refresh tokens** (a fresh access token every few
+    minutes so a leak has a small window) or a **revocation denylist** of still-valid
+    token IDs. Both reintroduce some shared state — so "stateless auth" is rarely
+    fully stateless once you need real logout/compromise handling.
 - File uploads / working data → object storage (S3) not local disk.
 - In-flight work → a queue (SQS/Kafka), so any worker can pick it up.
 
@@ -200,20 +262,41 @@ backend. The choice trades off simplicity, evenness of load, and connection stab
 
 **Consistent hashing detail (very common interview target).**
 
-```
-   naive hash: backend = hash(key) % N
-   -> change N (add/remove node) and ~ALL keys remap -> cache stampede
+The problem with naive `hash(key) % N`: change N (add or remove a node) and the modulus
+changes for *almost every* key, so nearly all keys remap to a different node at once →
+a cache-tier stampede where every miss hits the origin simultaneously.
 
-   consistent hash ring (with virtual nodes for balance):
-        0 ─────────────────────── 2^32
-        A•   •B     •A   •C   •B    •A     ...  (each node placed at many points)
-   key -> walk clockwise to next node
-   remove B -> only B's arcs move to the next node; A/C keys untouched
+Consistent hashing fixes this by mapping both nodes and keys onto a fixed ring (say
+`0 .. 2^32`) and routing each key to the **first node clockwise** from it. Removing a
+node only re-homes the keys in *its own arc*; every other key stays put.
+
+```mermaid
+flowchart LR
+    subgraph Ring["hash ring 0..2^32 (clockwise)"]
+        direction LR
+        A["node A @ 100"] --> B["node B @ 200"] --> C["node C @ 300"] --> A
+    end
 ```
 
-Virtual nodes (vnodes) — placing each physical node at many ring positions — smooth out
-imbalance and make removal spread evenly. Bounded-load consistent hashing (Google, 2017)
-adds a cap so no node exceeds (1+ε)·average.
+*Numeric walkthrough (why only ~1/N moves).* Place three nodes on the ring by hashing
+their names: **A @ 100, B @ 200, C @ 300** (positions wrap 300 → 100).
+- A key `k` hashes to **150**. Walk clockwise from 150 → the next node is **B @ 200**.
+  So `k` lives on B.
+- A key hashing to **250** → walks to **C @ 300**. A key hashing to **350** → wraps
+  past 300 → lands on **A @ 100**.
+- Now **remove B**. Only keys in the arc `(100, 200]` — the arc B used to own — move;
+  they now walk clockwise to the *next* node, **C @ 300**. Key `k` (150) → now C. But
+  the 250 key still → C, and the 350 key still → A: **untouched.** Just B's ~1/3 of the
+  keyspace remapped, not all of it.
+- **Add a node D @ 250** (starting again from the original A/B/C ring). Only keys in
+  `(200, 250]` — previously owned by C — move to D. Everything else is unchanged. Again
+  ~1/N of keys move.
+
+Virtual nodes (vnodes) — placing each physical node at *many* ring positions (e.g. 100
+points per node instead of one) — smooth out imbalance (one big arc becomes many small
+ones) and make a removal spread its load evenly across *all* survivors instead of
+dumping it on a single unlucky neighbor. Bounded-load consistent hashing (Google, 2017)
+adds a cap so no node exceeds (1+ε)·average, bounding hot-shard skew.
 
 **Trade-offs.**
 
@@ -238,6 +321,20 @@ consistently land on the same node (sharded cache, stateful session, per-tenant 
 idle. Hash-based routing creates **hot keys/hot shards** when key distribution is
 skewed (one celebrity user, one giant tenant) — mitigate with vnodes, key salting, or
 splitting hot keys.
+
+> [!INTERVIEW]
+> **The long-lived-connection trap (a favorite senior gotcha).** L4 and most L7 LBs
+> balance *connections*, not *requests*. That's fine for HTTP/1.1 (short connections,
+> constantly re-balanced), but **HTTP/2, gRPC, and WebSockets multiplex many requests
+> over one long-lived connection that pins to a single backend for its whole life.**
+> Concretely: 100 clients open persistent gRPC connections, spread evenly over 4
+> backends (25 each). You autoscale to 8 backends to shed load — but the *existing* 100
+> connections don't move, so the 4 new backends sit **idle** while the old 4 stay hot.
+> Balancing broke exactly when you needed it. Fixes: use **request-level (L7 / gRPC-aware)
+> balancing** that load-balances per stream; set a **max-connection-age** so clients
+> periodically reconnect and get rebalanced onto new backends; or use **client-side load
+> balancing** (the client, often via a service mesh, knows the full backend set and
+> picks per request).
 
 ---
 
@@ -445,6 +542,55 @@ oscillation.
 
 ---
 
+## Backpressure and load shedding
+
+**Intuition.** Autoscaling always *lags* — there's a boot-time window (seconds for
+containers, minutes for VMs) where load has already arrived but capacity hasn't. And
+sometimes you simply *can't* scale fast enough, or the bottleneck is a downstream you
+don't control. The question then is: **what does a well-designed system do when it cannot
+keep up?** The wrong answer is "accept everything and fall over" (from Little's Law, an
+overloaded system's queues grow, latency climbs, and it collapses into serving *nothing*).
+The senior answer is **degrade deliberately**: serve a healthy subset well rather than
+serving everyone terribly. These are first-class survival tools, not an afterthought.
+
+**The levers.**
+- **Admission control / rate limiting at the edge.** Cap the request rate you accept
+  (token bucket / leaky bucket per client or per API key) so the fleet never takes on
+  more than it can serve. Excess is rejected fast with `429 Too Many Requests` — cheap to
+  reject, and it protects everyone behind it.
+- **Load shedding (prioritized).** When near capacity, *drop the least valuable traffic
+  first*: shed anonymous/low-tier before paying/critical, background before interactive,
+  retries before first-tries. Dropping 10% of low-value load to keep 90% of high-value
+  load fast is a deliberate win.
+- **Backpressure.** Push the "slow down" signal *upstream* instead of silently buffering.
+  A bounded queue that rejects when full, TCP flow control, or a gRPC/reactive-streams
+  credit signal all tell producers to ease off. Queue-based load leveling (put writes on
+  a bounded queue) smooths a spike into a steady drain rate — but the queue **must be
+  bounded**, or you've just moved the overload into unbounded memory growth and a crash.
+- **Circuit breakers.** When a downstream is failing/slow, *stop calling it* for a cooldown
+  (trip "open"), fail fast with a fallback, then probe with a few requests ("half-open")
+  before restoring. This prevents one slow dependency from consuming all your threads (the
+  Little's-Law spiral) and cascading the failure back up.
+
+**Worked tie-in to the autoscaling window.** Recall λ = 2000 RPS, W = 50 ms → L = 100
+in-flight. A flash sale spikes arrivals to **6000 RPS**. Your fleet is sized for 100
+concurrent; at 6000 RPS you'd need 300 in-flight — but new instances take ~90 s to boot.
+For that 90 s window you have three choices: (1) accept all 6000 RPS → queues triple,
+latency blows past SLO, possibly a full collapse; (2) shed to your safe ~2000 RPS
+capacity, returning 429 to the excess and keeping the admitted traffic *fast*; (3) queue
+the excess with backpressure and drain it as capacity boots. Options (2) and (3) keep the
+system alive and predictable; option (1) is how a spike becomes an outage.
+
+**Trade-offs.** Shedding/rate-limiting means you *intentionally* reject some real users —
+you trade completeness for survival and predictable latency for the majority. Set limits
+too low and you leave capacity unused and reject needlessly; too high and they don't
+protect you. Circuit breakers add a failure mode of their own (a breaker stuck open, or a
+too-sensitive threshold, denies a recovered dependency). The principle to state in an
+interview: **a system should degrade gracefully, not collapse — and it should shed the
+cheapest, least valuable work first.**
+
+---
+
 ## DNS load balancing and GSLB (geo and global)
 
 **Intuition.** Before a client even reaches your L4/L7 LBs, DNS decides *which*
@@ -553,6 +699,38 @@ failover that doesn't actually work when needed (test with game days).
 **Intuition.** Provision enough capacity that you can lose a unit (server, AZ) and still
 serve peak load. **N+1**: N units carry the load, +1 spare. **N+2**: survive two
 simultaneous losses. **2N**: full duplication.
+
+**First, size N with Little's Law.** Before you can add "+1" you need to know *how big
+N is* — how many servers/threads/connections the load actually requires. The single most
+useful capacity tool is **Little's Law**, which relates the three quantities you always
+have or want:
+
+```
+L = λ × W
+   L = average number of requests in the system concurrently (in-flight)
+   λ = arrival rate (requests per second)
+   W = average time each request spends in the system (latency, in seconds)
+```
+
+*Worked example.* Your service takes **λ = 2000 RPS** at an average latency of
+**W = 50 ms = 0.05 s**. Then the average number of requests in flight at any instant is:
+
+```
+L = 2000 × 0.05 = 100 concurrent requests
+```
+
+So you need capacity for **100 simultaneous in-flight requests**. If each thread handles
+one request and you target ~40 busy threads per instance, that's `100 / 40 ≈ 3` instances
+of headroom for the *steady* state — before redundancy. This is how you turn "2000 RPS"
+into a concrete thread-pool size, connection-pool size, and instance count.
+
+The law also explains **why latency spikes force more capacity**: L = λ × W, so if a
+downstream dependency slows and W jumps from 50 ms to 200 ms while λ holds at 2000 RPS,
+in-flight requests balloon from 100 to **400**. Your thread/connection pools fill,
+new requests queue, queueing pushes W even higher — a feedback loop. That is precisely
+the overload spiral that backpressure and load shedding (next section) exist to break.
+Sizing to *average* latency is a trap; size to a high percentile (p99) so a tail-latency
+event doesn't exhaust the pool.
 
 **How it works / the math.** If peak load needs N units running at target utilization,
 N+1 means you run N+1 so that losing one still leaves N. The subtlety: after losing a
@@ -793,6 +971,18 @@ A one-glance decision guide for the interview:
 12. What's the difference between scaling for throughput vs scaling for latency, and can
     one hurt the other? *(Batching/queueing raises throughput but adds latency; over-
     aggressive autoscaling hurts cost, etc.)*
+13. You add nodes but throughput barely improves past a point — even drops. Explain why.
+    *(Amdahl: serial fraction caps speedup at 1/s; USL: N² coherency/crosstalk cost makes
+    it go negative. Fix by removing coordination, not adding hardware.)*
+14. Given 3000 RPS and 40 ms average latency, how many concurrent requests are in flight,
+    and how do you size the thread pool? *(Little's Law: L = 3000 × 0.04 = 120 in-flight;
+    size pools/instances to that, using a high percentile not the average.)*
+15. Traffic spikes 3× and instances take 90s to boot — what do you do in that window
+    instead of falling over? *(Admission control / prioritized load shedding to safe
+    capacity, bounded-queue backpressure, circuit breakers; degrade, don't collapse.)*
+16. Your HTTP/2 or gRPC service scaled out but the new backends stay idle — why?
+    *(Long-lived multiplexed connections pin to old backends; fix with request-level
+    balancing, max-connection-age, or client-side/mesh LB.)*
 
 ## References
 

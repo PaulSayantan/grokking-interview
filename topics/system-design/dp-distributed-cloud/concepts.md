@@ -24,6 +24,34 @@ own the scenario tuning.
 
 ---
 
+## Pattern families at a glance
+
+Before the wall of 40 patterns, here is the map — which family each one belongs to and
+what job the family does. Skim this first; it's the scaffold that makes the rest stick.
+
+- **Resilience (survive a failing dependency):** Circuit Breaker, Retry with backoff and
+  jitter, Timeout, Bulkhead, Rate Limiting and Throttling, Fallback and graceful degradation.
+- **Edge and gateway (the front door):** API Gateway, Gateway Routing, Gateway Aggregation,
+  Gateway Offloading, Backends for Frontends, Gatekeeper, Valet Key, Federated Identity,
+  Static Content Hosting.
+- **Cross-cutting proxies (platform features beside the app):** Sidecar, Ambassador,
+  Anti-Corruption Layer, Adapter, Messaging Bridge.
+- **Data and storage (partition, cache, project):** Cache-Aside, Materialized View,
+  Index Table, Sharding, Consistent Hashing, Database-per-Service, Command-side Replica.
+- **Messaging (move work asynchronously):** Queue-Based Load Leveling, Competing Consumers,
+  Publish-Subscribe, Claim-Check, Priority Queue, Pipes and Filters, Scatter-Gather,
+  Sequential Convoy, Asynchronous Request-Reply.
+- **Consistency and coordination (agree without a global lock):** Saga, Compensating
+  Transaction, CQRS, Event Sourcing, Transactional Outbox, Polling Publisher and Transaction
+  Log Tailing, Idempotent Consumer, Event-Carried State Transfer, API Composition,
+  Choreography, Process Manager, Scheduler Agent Supervisor, Leader Election,
+  Service Registry and Discovery.
+- **Deployment and scale (grow and isolate the whole stack):** Deployment Stamps, Geodes,
+  Compute Resource Consolidation, External Configuration Store, Health Endpoint Monitoring,
+  Strangler Fig.
+
+---
+
 ## Why these patterns exist — the fallacies of distributed computing
 
 **Problem it solves:** engineers keep baking false assumptions about the network into
@@ -103,7 +131,11 @@ stateDiagram-v2
 
 **Trade-offs.** *Pros:* prevents cascading failure, sheds load off a struggling dependency,
 speeds recovery. *Cons:* a stuck-open breaker denies service even after partial recovery;
-thresholds/windows are genuinely hard to tune; hides real errors if misconfigured.
+thresholds/windows are genuinely hard to tune; hides real errors if misconfigured. A raw
+percentage threshold needs a **minimum request volume** guard, or a low-traffic service
+false-trips on a couple of unlucky failures: with only 3 calls in the window, 2 failures is
+66% > 50% and the breaker opens even though nothing is systemically wrong. Require, say, ≥20
+calls in the window before the percentage is allowed to trip.
 *Use when* calls to a remote resource can fail transiently and you want to protect callers.
 *Avoid* for local, in-process, or non-idempotent one-shot operations where failing fast adds
 nothing. **Vs. Retry:** Retry *keeps trying* the same call (good for transient blips); a
@@ -241,12 +273,40 @@ protect the system and enforce fairness/quotas.
 
 **Intent.** Limit the rate of operations a client/tenant/service may perform in a window,
 rejecting (429) or delaying excess. *Rate limiting* and *throttling* are two lenses on the
-same idea — Azure lists them as near-duplicates; treat them as one pattern. Common
-algorithms: token bucket, leaky bucket, sliding window.
+same idea — Azure lists them as near-duplicates; treat them as one pattern.
 
-**Example.** An API allows 100 req/min per API key via a token bucket. The 101st request in
-a minute gets `429 Too Many Requests` with a `Retry-After` header. In a fleet, the counter
-lives in Redis so all nodes share one limit.
+**The three common algorithms** — the standard senior follow-up is "which one and why":
+
+- **Token bucket** — a bucket holds up to **B** tokens and refills at rate **R** tokens/sec.
+  Each request spends one token; if the bucket is empty, reject. Because tokens accumulate up
+  to the cap, an idle client can spend a **burst of up to B** at once, then is limited to the
+  steady rate R. *Allows bursts.*
+- **Leaky bucket** — requests enter a queue that drains ("leaks") at a **constant** rate R;
+  if the queue is full, reject. Output is perfectly smooth regardless of how bursty the input
+  was. *Smooths, no bursts* — the opposite temperament from token bucket.
+- **Sliding window** (log or counter) — count requests within the trailing window (e.g. last
+  60 s), rejecting once the count hits the limit. A *sliding log* stores every request
+  timestamp (most accurate boundary counting, highest memory); a *sliding-window counter*
+  approximates it with weighted fixed buckets (cheaper, slightly less exact). *Most accurate
+  at the window boundary, higher memory/cost.*
+
+The trade-off is **burst tolerance (token) vs smoothing (leaky) vs boundary accuracy and cost
+(sliding window)**. Pick token bucket when short bursts are legitimate; leaky bucket when the
+downstream needs a steady feed; sliding window when you must count precisely at the edge.
+
+**Example (token bucket, numbers in → out).** Config: `B = 10` tokens, `R = 1 token/sec`. The
+bucket starts full at 10. A client that has been idle fires **12 requests in the same second**:
+requests 1–10 each spend a token (bucket 10 → 0, all allowed), requests 11 and 12 find an empty
+bucket and get `429 Too Many Requests` with `Retry-After: 1`. The client now sends **1 req/sec**:
+each second refills 1 token which that request immediately spends, so all succeed — steady rate
+sustained. Idle for 4 s → bucket refills to 4 (capped at B), so a fresh burst of 4 is allowed
+again. That accumulate-then-burst behavior is exactly what a leaky bucket would *not* permit: it
+would have drained those 12 requests out at 1/sec no matter how they arrived.
+
+**Example (fleet-wide).** An API allows 100 req/min per API key. On a single node a local
+counter suffices, but across a 10-node fleet each node seeing 10 req/min would wrongly allow
+1000; so the bucket/counter lives in **Redis** (`INCR` + TTL, or a Lua token-bucket script) and
+all nodes share one limit — at the cost of a network round-trip per request.
 
 ```mermaid
 sequenceDiagram
@@ -1648,12 +1708,28 @@ as data grows; you can't scale one node forever (vertical scaling hits a ceiling
 
 **Intent.** **Horizontally partition** the data across multiple nodes (shards) by a **shard
 key**. Each shard holds a disjoint subset of the data and handles its own reads/writes, so
-capacity and throughput scale with the number of shards. Strategies: range, hash, or lookup
-(directory) based.
+capacity and throughput scale with the number of shards.
 
-**Example.** A `users` table is sharded by `hash(userId) % N`. User 42 lives on shard 2; user
-99 on shard 0. Each shard is an independent database; the app (or a router) computes the shard
-from the key.
+**Three shard strategies, and when each wins:**
+
+- **Hash sharding** — place the row on `hash(key) % N`. Spreads load **evenly** and avoids
+  hotspots, but destroys ordering, so **range scans are impossible** (adjacent keys land on
+  different shards). Use when access is point-lookup by key and you want uniform spread.
+- **Range sharding** — assign contiguous key ranges to shards (`A–F` → shard 0, `G–M` → shard
+  1, …). Enables **range queries and ordered scans**, but risks **hot ranges** (if today's
+  timestamps or `Z*` users all fall in one range, that shard bakes). Use when you need ordered
+  or range access and can pick a key that spreads evenly.
+- **Directory / lookup sharding** — a lookup service maps `key → shard` explicitly. Maximally
+  **flexible and rebalanceable** (move a key by editing the map), at the cost of a lookup
+  **layer that is itself a dependency and potential bottleneck**. Use when placement must be
+  dynamic or non-uniform (e.g. pin a whale tenant to dedicated capacity).
+
+**Example.** A `users` table is hash-sharded across `N = 3` nodes on `hash(userId) % 3`. Say
+`hash(42) = 4700` → `4700 % 3 = 2`, so user 42 lives on shard 2; `hash(99) = 8103` →
+`8103 % 3 = 0`, so user 99 lives on shard 0. Each shard is an independent database; the app (or
+a router) computes the shard from the key. Now grow to `N = 4`: user 42 recomputes to
+`4700 % 4 = 0` — it must **move** from shard 2 to shard 0. That "modulo reshuffles almost
+everything on resize" pain is exactly what Consistent Hashing (next) fixes.
 
 ```mermaid
 classDiagram
@@ -2278,10 +2354,22 @@ stateDiagram-v2
     end note
 ```
 
+**Fencing tokens (how you defeat split-brain).** A **fencing token** is a monotonically
+increasing number the lease store hands out with each successful election: leader #1 gets
+token 33, and when it dies and #2 wins, #2 gets 34. The protected resource **records the
+highest token it has seen and rejects any write carrying a lower one**. So a paused or
+"zombie" old leader that wakes up and tries to write is safely fenced out.
+
+**Worked interleaving.** Leader A holds token 33 and starts a slow write, but stalls (long GC
+pause) before it lands. The lease expires; B wins with token 34 and writes — the resource now
+records `seen = 34`. A wakes up and finally sends its write stamped 33. The resource sees
+`33 < 34` and **rejects** it. Without fencing, A's stale write would silently overwrite B's
+newer data — the classic split-brain corruption.
+
 **Trade-offs.** *Pros:* guarantees single-owner work; clean failover; avoids duplicate
-processing. *Cons:* **split-brain** risk if two nodes both think they're leader (needs fencing
-tokens); **failover latency** during re-election; depends on a consensus/lease store (a
-dependency that can fail). *Use* for singleton tasks and partition ownership. *Avoid* when work
+processing. *Cons:* **split-brain** risk if two nodes both think they're leader (mitigated by
+fencing tokens, above); **failover latency** during re-election; depends on a consensus/lease
+store (a dependency that can fail). *Use* for singleton tasks and partition ownership. *Avoid* when work
 is naturally partitionable without a single owner. **Vs. Distributed Lock:** a lock provides
 *single mutual-exclusion for one operation*; leader election establishes *ongoing leadership
 over time* (renewed). **Vs. consensus (Raft/Paxos):** leader election is a *use* of consensus,

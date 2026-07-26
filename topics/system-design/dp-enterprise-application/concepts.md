@@ -26,6 +26,28 @@ you can anchor them in interviews.
 > Adapter, Strategy, Observer) live in the GoF `dp-*` topics — referenced here only
 > where an enterprise pattern is *built on* one (e.g. Lazy Load via Proxy).
 
+## How to study this (tiering)
+
+This is a *catalog* of ~50 patterns, but interviewers do **not** ask about them equally.
+Spend your time by tier:
+
+- **Tier 1 — must know cold (asked constantly).** The "vs." pairs are the real probes:
+  **Active Record vs Data Mapper**, **Repository vs DAO**, **DTO vs Value Object vs
+  Entity**, **Aggregate / Aggregate Root**, **Unit of Work** + **Identity Map**, and
+  **MVC vs MVP vs MVVM**. If you can only prepare a handful, prepare these — each has a
+  worked contrast below and a row in the disambiguation tables at the end.
+- **Tier 2 — know the shape and trade-off (asked occasionally).** Transaction Script vs
+  Domain Model vs Table Module, Service Layer vs Domain Service, Lazy Load / N+1,
+  Specification, Optimistic vs Pessimistic Offline Lock, Session State, Gateway, Separated
+  Interface / Hexagonal, Front vs Page Controller.
+- **Tier 3 — "know it exists," recognize the name (rarely probed).** The O/R structural
+  mapping mechanics (Group D: Identity Field, Foreign Key Mapping, Association Table,
+  Dependent Mapping, Embedded Value, Serialized LOB, the inheritance mappers), plus
+  Two-Step View, Transform View, Record Set. Read these once; don't memorize them.
+
+A senior answer names the *tier-1 distinction* precisely and reaches for tier-3 names only
+when the interviewer drills into mapping mechanics.
+
 ---
 
 <!-- ===================================================================== -->
@@ -119,8 +141,13 @@ classDiagram
 ```
 
 **Trade-offs.** *Pros:* handles complex logic elegantly, high reuse, testable in
-isolation, aligns code with the ubiquitous language. *Cons:* steep learning curve;
-needs O/R mapping (impedance mismatch); overkill for simple CRUD. *Use when* logic is
+isolation, aligns code with the **ubiquitous language** — *the single shared domain
+vocabulary used identically in code, conversation, and models* (an "Order" class means
+exactly what the business analyst means by "order"). *Cons:* steep learning curve; needs
+O/R (object-relational) mapping, which forces you to bridge the **object-relational
+impedance mismatch** — *the structural gap between OO object graphs (references,
+inheritance, object identity) and flat relational tables (rows, foreign keys, joins)*;
+overkill for simple CRUD. *Use when* logic is
 rich and changes often. *Avoid when* the app is essentially table maintenance.
 *Misuse — the **Anemic Domain Model** anti-pattern:* objects that are just getters/
 setters with all behaviour pushed into a "service" layer — you pay the mapping cost of
@@ -425,6 +452,18 @@ practice teams blur them, but the interview answer is: Repository speaks *domain
 speaks *data source*. *vs. Data Mapper:* Repository is the domain-facing collection;
 Data Mapper is the underlying object↔row translator it may use.
 
+**Senior follow-up — "is a Repository still worth it over the ORM?"** A modern ORM's
+persistence context (JPA/Hibernate `EntityManager`, EF Core `DbContext`) *already* bundles
+three of the patterns on this page: it **is** a Data Mapper (object↔row), a **Unit of
+Work** (tracks changes, one flush), and an **Identity Map** (one instance per id per
+context). So a Repository today rarely adds persistence capability — it adds a thin
+**domain-intent facade** (`findActiveOrdersOver(amount)` instead of a raw JPQL string) plus
+a swap-point/test seam and one-per-aggregate-root discipline. Spring Data JPA repositories
+and generic `CrudRepository<T,ID>` are the mainstream realization; the live debate is
+whether that facade earns its keep or is just ceremony over the `EntityManager`. Good
+answer: keep it when it expresses aggregate-level domain queries and hides the ORM; drop it
+when it degenerates into pass-through `save`/`findById`.
+
 ## DAO (Data Access Object)
 
 **Problem it solves:** Application code should not be littered with data-source specifics
@@ -482,6 +521,10 @@ wrong ordering, and no single commit point. Unit of Work removes this by **track
 object you read/change and coordinating one atomic write** at the end, in the right
 order, with concurrency checks.
 
+*Mental model:* a **shopping cart you check out once**. You add, remove, and change items
+as you browse, but nothing is charged until you hit "check out" — then the store settles
+everything in one atomic transaction. The Unit of Work is that cart for your objects.
+
 **Intent / how it works.** A `UnitOfWork` keeps *new*, *dirty*, and *removed* sets. As
 you work, objects register with it (or it snapshots them). On `commit()` it computes the
 minimal, correctly-ordered set of INSERT/UPDATE/DELETE statements inside one DB
@@ -490,6 +533,33 @@ transaction, applying optimistic-lock version checks.
 **Concrete example.** Add an order line, change the order status, delete an obsolete
 line; one `unitOfWork.commit()` flushes all three changes atomically. (JPA/Hibernate's
 `EntityManager`/`Session` is a Unit of Work.)
+
+**Worked trace — watch the three sets fill, then one flush.** Say Order #42 is loaded at
+`version=5`. You then, in one business transaction:
+
+```text
+Step 1  order.addLine(sku=A, qty=2)     -> new={LineItem#L9}      dirty={}          removed={}
+Step 2  order.setStatus("CONFIRMED")    -> new={L9}               dirty={Order#42}  removed={}
+Step 3  order.removeLine(L3)            -> new={L9}               dirty={Order#42}  removed={LineItem#L3}
+Step 4  unitOfWork.commit()
+```
+
+At `commit()` the Unit of Work emits exactly **one** ordered DB transaction — inserts
+before the update that references them, deletes last, with the optimistic-lock guard on
+the update:
+
+```text
+BEGIN
+INSERT INTO line_item (id, order_id, sku, qty) VALUES (L9, 42, 'A', 2)
+UPDATE orders SET status='CONFIRMED', version=6 WHERE id=42 AND version=5   -- 1 row
+DELETE FROM line_item WHERE id=L3
+COMMIT
+```
+
+Three in-memory mutations collapse into **one** round-trip-batched, correctly-ordered,
+atomic write. If someone else had already bumped Order #42 to `version=6`, the guarded
+`UPDATE` matches **0 rows** → the commit aborts with a concurrency error instead of a lost
+update (this is the Optimistic Offline Lock check firing inside the Unit of Work).
 
 ```mermaid
 sequenceDiagram
@@ -522,6 +592,10 @@ different in-memory objects for one entity** — edits to one are invisible to t
 and you can double-load and lose updates. Identity Map removes this by **guaranteeing
 each object is loaded only once**, keeping a map of already-loaded objects keyed by
 identity.
+
+*Mental model:* a **coat-check ticket**. The first time you hand in your coat you get a
+ticket; every later time you present that ticket (the id) you get *the exact same coat
+back*, never a copy. The map is the coat-check counter keyed by ticket number.
 
 **Intent / how it works.** Within a session/Unit of Work, a map keyed by (type, id)
 caches loaded objects. A load first checks the map; a hit returns the *same* instance, so
@@ -563,6 +637,11 @@ all orders → all line items → all products) into memory when you may never t
 Lazy Load removes this by giving you **an object that doesn't hold all its data yet but
 knows how to fetch the missing parts on first access.**
 
+*Mental model:* a **restaurant menu**. You get the menu (the object) instantly, but the
+kitchen doesn't start cooking every dish up front — a plate is prepared only when you
+actually order it. The Virtual Proxy is the waiter who looks like the dish until you ask
+for it, then fetches the real thing.
+
 **Intent / how it works.** Four common flavours: **Lazy Initialization** (check-and-load
 in a getter), **Virtual Proxy** (a stand-in that loads the real object on first use),
 **Value Holder** (a wrapper you ask for the value), and **Ghost** (a real object loaded
@@ -584,6 +663,23 @@ sequenceDiagram
     DB-->>Proxy: rows
     Proxy-->>App: real order list (now loaded)
 ```
+
+**Worked trace — the N+1 select problem in numbers.** You load 100 customers and print
+each one's order count:
+
+```text
+SELECT * FROM customer                              -- query #1  -> 100 rows
+for each customer (100 of them):
+    customer.getOrders()   -> proxy fires:
+        SELECT * FROM orders WHERE customer_id = ?  -- queries #2 .. #101
+```
+
+That is **1 + 100 = 101 queries** ("N+1", here N=100) — one to get the list, then one *per*
+row. At even 1 ms of round-trip each that is ~101 ms of pure latency, and it silently
+scales with the result set. The fix is to fetch eagerly in **one** query
+(`SELECT ... FROM customer c LEFT JOIN orders o ON o.customer_id = c.id`, or JPA
+`JOIN FETCH` / a batch-size hint), turning 101 queries into **1**. The interview point:
+lazy loading is a *default* that quietly turns into an N+1 the moment you iterate.
 
 **Trade-offs.** *Pros:* faster/leaner initial loads; only fetch what you use.
 *Cons:* the infamous **N+1 select problem** (looping over N customers each lazily loading
@@ -929,7 +1025,9 @@ Evans' DDD Value Object — same concept.)
 **Intent / how it works.** A Value Object is **immutable** and implements **value
 equality** (`equals`/`hashCode` over all attributes). "Changing" it returns a *new*
 instance (`money.add(x)` yields a new `Money`). Being immutable, it's freely shared and
-side-effect-free. Money is the canonical exemplar.
+side-effect-free. Money is the canonical exemplar — see the dedicated **Money** section in
+Group I (base patterns) below for the fully worked-out example (safe arithmetic, currency
+guarding, penny-safe allocation); it is deliberately treated there as a base pattern.
 
 **Concrete example.** `Money(10, "USD").add(Money(5, "USD"))` returns a new
 `Money(15, "USD")`; two `Money(10,"USD")` are `equals`.
@@ -995,6 +1093,11 @@ transactional/consistency boundary?* Letting any code mutate any object breaks i
 this by defining **a cluster of entities/value objects treated as one consistency unit,
 accessed only through a single root**.
 
+*Mental model:* a **company reception desk**. Outsiders don't wander in and talk to any
+employee directly — they go through the receptionist (the root), who enforces the rules
+and routes work internally. You hold the company's *name/number* (the root's identity),
+not a direct line to each employee (the internal objects).
+
 **Intent / how it works.** One entity is the **Aggregate Root**; outside code holds
 references only to the root and calls its methods, which enforce all invariants across the
 internal objects. The aggregate is the unit of **transactional consistency** and usually
@@ -1026,8 +1129,22 @@ classDiagram
 tames graph complexity; maps to Coarse-Grained Lock and one-repository-per-root.
 *Cons:* **boundary sizing is hard** — too big = lock contention and large loads; too
 small = invariants split across aggregates and can't be enforced atomically; cross-
-aggregate consistency becomes *eventual* (needs domain events/sagas). *Use* to protect
-true invariants. *Avoid* forcing unrelated objects into one aggregate.
+aggregate consistency becomes *eventual* (needs domain events or **sagas** — a saga is a
+sequence of local transactions with compensating actions, covered in
+`event-driven-cqrs-saga-cdc`). *Use* to protect true invariants. *Avoid* forcing unrelated
+objects into one aggregate.
+
+**Sizing heuristic (the senior probe: "how big should an aggregate be?").** Vaughn
+Vernon's rules of thumb (*Implementing Domain-Driven Design*): **(1) design *small*
+aggregates** — cluster only what must be transactionally consistent *together* (an order
+and its lines, because the total must always match the lines); **(2) reference other
+aggregates by identity, not by object pointer** (`order.customerId`, never
+`order.customer`), which keeps the loaded/locked graph small; **(3) one aggregate modified
+per transaction** — if a use case must change two aggregates, update the second one
+*eventually* via a domain event rather than in the same transaction. Tie this back to
+**Coarse-Grained Lock**: the aggregate is your lock scope, so a bloated aggregate directly
+becomes lock contention. When in doubt, start small and merge only when a real invariant
+forces it.
 *vs. a plain object graph:* an aggregate adds an *invariant + transactional boundary* and
 a single entry point; a plain graph has neither.
 
@@ -1117,8 +1234,10 @@ be recorded, published, and reacted to.
 
 **Intent / how it works.** An immutable event object (`OrderPlaced{orderId, at, total}`)
 names a past fact in domain language. The aggregate raises it; handlers (in the same or
-other bounded contexts) react — updating read models, triggering workflows, integrating.
-It decouples the *cause* from the *consequences*.
+other **bounded contexts** — a *bounded context* is an explicit boundary within which a
+domain model and its terms have one consistent meaning; "Customer" in Sales may differ
+from "Customer" in Billing) react — updating read models, triggering workflows,
+integrating. It decouples the *cause* from the *consequences*.
 
 **Concrete example.** Placing an order raises `OrderPlaced`; a handler sends a
 confirmation email and another updates a reporting read model — the `Order` code knows
@@ -1152,12 +1271,34 @@ event-driven *infrastructure* (brokers, delivery, outbox) — not covered here.
 report) and drifts. Specification removes this by **encapsulating a predicate as a
 reusable, combinable object** you can `and`/`or`/`not` together.
 
+*Mental model:* a **reusable sieve** you can snap together. Each spec is one mesh
+("overdue", "over $1000"); you clip them into a compound sieve (`overdue AND over-$1000`)
+and pour candidates through it — the same sieve works whether you're filtering an in-memory
+list or generating a SQL `WHERE` clause.
+
 **Intent / how it works.** A `Specification` has `isSatisfiedBy(candidate) -> bool` and
 combinators (`and`, `or`, `not`). You compose specs to express complex rules once and use
 them for in-memory checks *and* (via translation) as query criteria in a Repository.
 
 **Concrete example.** `overdue = new OverdueSpec(); big = new AmountOver(1000);
 repo.matching(overdue.and(big))` — one rule, reused for filtering and querying.
+
+**Worked trace — one composite spec, four orders in.** `OverdueSpec.isSatisfiedBy` returns
+true when `dueDate < today`; `AmountOver(1000)` returns true when `total > 1000`. Compose
+`spec = overdue.and(big)` and evaluate against four orders (today = day 100):
+
+```text
+Order   dueDate   total   overdue?  over-$1000?  AND
+O1      day 090   1500    true      true         true    <- kept
+O2      day 090    800    true      false        false
+O3      day 120   2000    false     true         false
+O4      day 130    500    false     false        false
+```
+
+`AndSpecification.isSatisfiedBy(o)` just returns `overdue.isSatisfiedBy(o) &&
+big.isSatisfiedBy(o)`, so only **O1** passes. The *same* object, when handed to
+`repo.matching(spec)`, is translated to `WHERE due_date < :today AND total > 1000` — one
+rule definition, used identically for the in-memory check above and for the DB query.
 
 ```mermaid
 classDiagram
@@ -1801,6 +1942,14 @@ hexagonal architecture. *Cons:* more packages/indirection; you need a wiring mec
 *Avoid* when both sides are in the same layer with no dependency concern.
 *Underpins* Dependency Inversion / Hexagonal (cross-ref); pairs with **Plugin**.
 
+**Hexagonal / Ports-and-Adapters mapping** (a frequent follow-up). In Hexagonal
+Architecture the vocabulary maps directly onto patterns here: a **Separated Interface is a
+*port*** (the hole in the hexagon the domain defines), and its **concrete implementation is
+an *adapter*** (Gateway, Repository impl, DAO, `StripePaymentGateway`). The domain owns the
+ports; infrastructure supplies the adapters; **Plugin/DI** wires an adapter into a port at
+runtime. "Port = Separated Interface, Adapter = its concrete impl" is the one-liner
+interviewers want.
+
 ## Registry
 
 **Problem it solves:** Some objects/services (a configuration, a connection pool, a cache)
@@ -2103,6 +2252,18 @@ classDiagram
 convenience; Database when durability across failures matters. *Ties to* stateless-service
 scaling and horizontal scale-out.
 
+**Modern default (say this in a cloud interview).** The dominant pattern today is
+**stateless servers + a shared session store (Redis or Memcached)** — a middle ground that
+gets the failover/scaling win of stateless app tiers without pushing all state to the
+client, and avoids the anti-pattern of **sticky sessions** (pinning a user to one server;
+that server dying loses the session and unbalances load). For **JWT** (JSON Web Token) as
+client state, name the two trade-offs interviewers probe: **(1) revocation** — a JWT is
+valid until it expires, so you cannot easily invalidate one early (a logged-out or
+compromised token still works); mitigations are short TTLs plus a small server-side
+denylist of revoked token ids, which reintroduces some server state. **(2) size** — the
+token rides on *every* request, so keep the payload small (ids and claims, not blobs) or
+you pay bandwidth on each call.
+
 ## Optimistic Offline Lock
 
 **Problem it solves:** A "business transaction" spans multiple requests (a user opens a
@@ -2271,6 +2432,47 @@ behaviour into a service layer — worst of both worlds.
 
 Data Mapper vs Active Record is the canonical trade-off (decoupling vs simplicity).
 Repository is a *higher-level domain abstraction*, not an alternative to Data Mapper.
+
+**Side-by-side — the same "raise a customer's credit limit" operation.** Watch where the
+persistence knowledge lives:
+
+```text
+# ---- ACTIVE RECORD: the object persists ITSELF (knows the DB) ----
+class Customer:                 # extends a base that carries save()/find()
+    id; name; creditLimit
+    def raiseLimit(self, delta):        # domain logic ...
+        self.creditLimit += delta
+    def save(self): db.execute(         # ... AND SQL, in the same class
+        "UPDATE customer SET credit_limit=? WHERE id=?",
+        self.creditLimit, self.id)
+
+c = Customer.find(42)   # static finder lives on the class
+c.raiseLimit(500)
+c.save()                # object writes its own row  -> coupled to schema
+
+# ---- DATA MAPPER: the object knows NOTHING about the DB ----
+class Customer:                 # pure domain — zero persistence code
+    id; name; creditLimit
+    def raiseLimit(self, delta):
+        self.creditLimit += delta
+
+class CustomerMapper:           # separate object owns all the SQL
+    def find(self, id) -> Customer: ...
+    def update(self, c: Customer): db.execute(
+        "UPDATE customer SET credit_limit=? WHERE id=?",
+        c.creditLimit, c.id)
+
+c = mapper.find(42)
+c.raiseLimit(500)
+mapper.update(c)        # the MAPPER writes the row  -> Customer stays pure
+```
+
+The visible difference: in Active Record the `Customer` class contains `save()` and a SQL
+string, so changing the `credit_limit` column forces a code change to the domain class and
+you cannot unit-test `raiseLimit` without a database. In Data Mapper the `Customer` class
+has no `save()` and no SQL — it is *persistence-ignorant*, testable in memory, and the
+schema can change behind the `CustomerMapper` without touching the domain. That is the
+whole "self-persisting vs persistence-ignorant" trade-off made concrete.
 
 ## Repository vs DAO
 

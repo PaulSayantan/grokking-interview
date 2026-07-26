@@ -15,20 +15,24 @@ below is layered: intuition → how the AWS services work → real-world usage �
 and when to use what**. Memorize the numbers (limits, latency, throughput) because
 interviewers probe them, and let the trade-offs drive the narrative.
 
-A note on defaults worth stating up front (interviewers test these): **S3 has been strongly
-read-after-write consistent for all operations since December 2020** (no more eventual-read
-caveat). **Lambda** runs up to **15 minutes**, up to **10 GB memory**, **10 GB ephemeral
-`/tmp`**, 6 MB sync / 256 KB async payload, 1000 default concurrent executions (soft).
-**API Gateway** REST/HTTP have a **29-second integration timeout** (raised beyond 29 s only
-by quota increase on REST regional as of 2024). **DynamoDB** items are ≤ **400 KB**; a single
-partition sustains ~**3000 RCU / 1000 WCU** before you need write sharding. (An **RCU** =
-Read Capacity Unit = one **strongly** consistent read of up to **4 KB/s**, or two
-**eventually** consistent reads of 4 KB/s — so eventual reads are half price and strong reads
-cost 2× RCU. A **WCU** = Write Capacity Unit = one write of up to **1 KB/s**; a 3 KB write
-costs 3 WCU.) **Kinesis Data
-Streams** shard = **1 MB/s or 1000 records/s ingest, 2 MB/s egress**. **SQS Standard** is
-effectively unlimited TPS and at-least-once; **SQS FIFO** is **300 TPS (3000 with batching
-of 10)** and exactly-once-processing within a dedup window.
+A few defaults are worth committing to memory up front because they *force* architectural
+decisions — the moment a request could breach one, the shape of the design changes. The three
+that come up in almost every prompt:
+
+- **S3 is strongly read-after-write consistent for all operations** (since December 2020 — no
+  more eventual-read caveat). You can PUT then immediately GET and see your write.
+- **Lambda runs up to 15 minutes** (and up to 10 GB memory). Anything longer *must* move to
+  Fargate/MediaConvert/Step Functions — this single number decides "sync Lambda vs async job."
+- **API Gateway has a 29-second integration timeout.** Any operation that might take longer
+  *must* go async (return `202` + a job id, process off a queue/state machine, notify later).
+
+Everything else — DynamoDB item/partition limits, Kinesis shard throughput, SQS FIFO TPS,
+capacity-unit math — is tabulated in the **[Service limits and quotas](#service-limits-and-quotas-that-shape-designs)**
+section and reused in each pattern below. Learn those in context (what breaks, and the fix)
+rather than as a flashcard wall up front. One piece of vocabulary the consistency discussion
+leans on: a DynamoDB **RCU** (Read Capacity Unit) = one **strongly** consistent read of up to
+4 KB/s, or two **eventually** consistent reads — so eventual reads are half price and strong
+reads cost 2×; a **WCU** (Write Capacity Unit) = one write of up to 1 KB/s (a 3 KB write = 3 WCU).
 
 ---
 
@@ -172,10 +176,11 @@ and egress cost.
 ```mermaid
 flowchart LR
     Ingest["Ingest/mezzanine"] --> S3src["S3 (source)"] --> MC[MediaConvert] --> Rend["HLS+DASH renditions (240p…4K)"] --> S3out[S3]
-    Player --> CF["CloudFront (huge cache)"] --> S3origin["S3 origin (OAC) [+ signed URLs/cookies]"]
-    Encoder --> ML[MediaLive] --> MP[MediaPackage] --> CF2[CloudFront]
-    CP["Control plane: API Gateway/AppSync + Lambda + DynamoDB (catalog, watch history, entitlements)"]
-    Kinesis --> S3an[S3] --> Analytics["EMR/Athena/Redshift; Personalize for recs"]
+    S3out --> S3origin
+    Player --> CF["CloudFront (huge cache)"] --> S3origin["S3 origin (OAC) + signed URLs/cookies"]
+    Encoder --> ML[MediaLive] --> MP[MediaPackage] --> CF
+    Player --> CP["Control plane (API Gateway/AppSync + Lambda + DynamoDB)"]
+    CP --> Kinesis --> S3an[S3] --> Analytics["EMR/Athena/Redshift + Personalize (recs)"]
 ```
 
 **How it works:**
@@ -285,14 +290,17 @@ flash sales; audit trail.
 
 ```mermaid
 flowchart LR
-    Client --> CF[CloudFront] --> ALB --> Micro["ECS/EKS microservices (catalog, cart, order, payment, inventory)"]
-    Catalog["Catalog: DynamoDB (+ OpenSearch for search)"]
-    Cart["Cart: DynamoDB/ElastiCache"]
-    Checkout --> SF["Step Functions (SAGA orchestration)"]
+    Client --> CF[CloudFront] --> ALB --> Micro["ECS/EKS microservices"]
+    Micro --> Catalog["Catalog (DynamoDB + OpenSearch)"]
+    Micro --> Cart["Cart (DynamoDB/ElastiCache)"]
+    Micro --> Checkout["Checkout"]
+    Checkout --> SF["Step Functions (saga orchestration)"]
     SF --> Reserve["reserve inventory"] --> Charge["charge payment"] --> CreateOrder["create order"] --> Notify[notify]
-    SF -.->|"any step fails → run compensating actions: release inventory, refund"| Compensate["compensating actions"]
-    AsyncEvents["Async events"] --> EB["EventBridge (order.placed, payment.failed)"] --> SQS --> Fulfill["fulfillment workers"]
-    Ledger["Order/ledger: Aurora (relational, ACID) or DynamoDB (transactions)"] --> Kinesis --> S3["analytics via Kinesis→S3"]
+    SF -.->|"any step fails: run compensations"| Compensate["compensating actions (release inventory, refund)"]
+    CreateOrder --> Ledger["Order ledger (Aurora ACID or DynamoDB txns)"]
+    CreateOrder --> EB["EventBridge (order.placed, payment.failed)"]
+    EB --> SQS --> Fulfill["fulfillment workers"]
+    Ledger --> Kinesis --> S3["analytics (Kinesis to S3)"]
 ```
 
 **How it works:**
@@ -331,6 +339,16 @@ Note compensations are *semantic* undos, not a transactional rollback — a refu
 payment event, not "un-capturing" the charge. Each compensating action must itself be
 idempotent and retriable, because the orchestrator may retry it.
 
+**Gotcha the interviewer will push on: what if the compensation itself fails?** Suppose
+`Compensate 2 (refund)` times out. You cannot just give up — the customer has been charged
+with no order. The saga must treat compensations as first-class steps: retry with backoff,
+and if it exhausts retries, route the failure to a **DLQ / manual-intervention state** (Step
+Functions catch → a "needs human" branch or an alarm) rather than silently dropping it. This
+is why compensations are built to be idempotent (a retried refund with the same idempotency
+key must not double-refund) and why real ledgers reconcile asynchronously: the money movement
+is eventually consistent, and a stuck compensation becomes an operational ticket, never a lost
+charge.
+
 **Worked example — an idempotency key stopping a double charge.** The client sends
 `Idempotency-Key: chk-2026-07-25-u77-o13` (deterministic per checkout attempt). The payment
 Lambda does a **conditional PutItem** *before* calling the payment gateway:
@@ -364,8 +382,16 @@ at-least-once, so how do you guarantee exactly-once payment effects?"
   EKS = Kubernetes ecosystem, multi-cloud portability, fine control — more ops. Pick Fargate
   unless the org standard is k8s or you need its ecosystem.
 - **SQS Standard vs FIFO for order processing:** Standard = massive throughput, at-least-once,
-  possible reordering/dupes; FIFO = ordering + dedup but **300 TPS (3000 batched)** ceiling.
-  Use FIFO only where per-entity ordering truly matters (e.g. per-account ledger).
+  possible reordering/dupes; FIFO = ordering + dedup. The old "FIFO caps at 300 TPS (3000
+  batched)" is the *default* per-API-action limit — but **high-throughput mode** (GA since
+  2021) raises this dramatically because throughput scales with the number of distinct
+  **message group IDs** (thousands of groups, tens of thousands of messages/sec per region;
+  verify current regional quotas in the docs). Ordering in FIFO is guaranteed *per message
+  group*, so if your ordering requirement is per-entity (per account, per order) you already
+  have many groups and high-throughput mode is a natural fit. So the real trade-off is "FIFO
+  scales fine when your ordering key naturally shards into many message groups; it only
+  bottlenecks when everything shares one group." Use FIFO where per-entity ordering truly
+  matters (e.g. per-account ledger).
 
 ---
 
@@ -409,6 +435,24 @@ flowchart LR
 > **high-fan-out accounts to pull**: store the celeb post **once**, and merge it in at read
 > time. The break-even is roughly "followers × post-rate ≫ your follower's read-rate" —
 > above ~a few hundred thousand followers, pull wins.
+
+**What the read-time merge actually does.** Say user U follows 200 normal accounts (pushed)
+and 3 celebrities (pull). When U opens the app:
+
+```
+1. Read pushed timeline:  DynamoDB query PK=timeline#U, newest 50 postIds
+                          -> [p998 @10:04, p995 @10:01, p990 @09:58, ...]   (all from the 200 normals)
+2. Read celeb posts:      for each of the 3 celebs U follows, query their recent posts
+                          -> celebA: [c77 @10:03], celebB: [c40 @09:59], celebC: []   (cheap: 3 small reads)
+3. Merge + sort by time:  [p998@10:04, c77@10:03, p995@10:01, c40@09:59, p990@09:58, ...]
+4. Trim to page size 50, hydrate post bodies, return.
+```
+
+The pushed side cost 1 query; the pull side cost 3 small queries (one per followed celeb),
+*not* 50 M writes. Steps 3–4 are cheap in-memory work. Cache the merged result in ElastiCache
+with a short TTL so repeat scrolls don't re-merge. This is the whole payoff of the hybrid: the
+expensive write is avoided for exactly the accounts that would make it explode, and the extra
+read cost is bounded by "how many celebrities does one user follow" (a small number).
 
 **Trade-offs.**
 - **Write-heavy fan-out vs read-heavy merge:** push optimizes the (dominant) read at the cost
@@ -482,7 +526,7 @@ Interviewers love "which limit does this hit first?" Know these cold:
 | **Lambda** | 15 min max, 10 GB mem, 10 GB `/tmp`, 6 MB sync / 256 KB async payload, 1000 default concurrency (soft) | Long/large jobs → Fargate/MediaConvert; big payloads → S3 + presigned; guard concurrency with reserved/provisioned |
 | **API Gateway** | 29 s integration timeout; 10 MB REST payload; 10k rps default (soft) | Long ops → async (202 + poll/WebSocket/Step Functions); big uploads → S3 presigned |
 | **DynamoDB** | 400 KB item; ~3000 RCU / 1000 WCU per partition; GSI eventual by default | Big blobs → S3; hot key → write-sharding/DAX/cache; design keys for even distribution |
-| **SQS** | Standard: ~unlimited TPS, at-least-once, no order; FIFO: 300 TPS (3000 batched), exactly-once in dedup window; 256 KB msg; 14-day retention; 12-hour max visibility | Big payloads → S3 + claim-check; need order → FIFO but mind the TPS ceiling |
+| **SQS** | Standard: ~unlimited TPS, at-least-once, no order; FIFO: 300 TPS default per API action but **high-throughput mode** scales with message-group count (tens of thousands/sec/region — verify current quotas), exactly-once in dedup window; 256 KB msg; 14-day retention; 12-hour max visibility | Big payloads → S3 + claim-check; need order → FIFO, and use many message groups + high-throughput mode to scale |
 | **Kinesis Data Streams** | shard = 1 MB/s or 1000 rec/s in, 2 MB/s out; 1 MB record; up to 365-day retention | Throughput = shard count; hot shard → better partition key; many consumers → enhanced fan-out (2 MB/s each) |
 | **S3** | 5 TB object, 5 GB single PUT (multipart above), 3500 PUT / 5500 GET per prefix per sec (auto-scales) | Huge files → multipart; high TPS → spread key prefixes; strong read-after-write since 2020 |
 | **CloudFront** | edge caching; 30 s+ origin timeouts; Lambda@Edge/CF Functions limits | Cache-friendly content → high hit ratio; dynamic → cache policies/Origin Shield |
@@ -530,6 +574,67 @@ sub-ms, shared) → DAX (DynamoDB-specific) → in-process. Each cuts latency/or
 cost of consistency (staleness) and invalidation complexity.
 
 ---
+
+## Auth, security, and cross-cutting concerns
+
+**Intuition.** Every one of the patterns above has the same unspoken first question from a
+senior interviewer: *"who is allowed to call this, and how do you know?"* "Design a URL
+shortener" implies "who can `POST /shorten`, and can they only edit their own links?"; the
+chat `$connect` route implies "how is that WebSocket authenticated before I hand out a
+`connectionId`?"; the upload flow implies "who is allowed to mint that presigned URL?". An
+answer that never names an auth mechanism reads as junior no matter how good the data model
+is. This section is the cross-cut that plugs into all of them.
+
+**The shared-responsibility model (name it explicitly).** AWS secures *the cloud* (hardware,
+the hypervisor, managed-service internals); **you** secure what you put *in* the cloud (IAM
+policies, who can call your APIs, encryption config, data classification, patching your own
+code). "Is this secure?" is never AWS's job alone — the line is the shared-responsibility
+model, and saying its name signals you know where your obligations start.
+
+**Authenticating callers — the menu:**
+- **Amazon Cognito user pools** — a managed user directory (sign-up/sign-in, MFA, social/SAML
+  federation) that issues **JWTs** (JSON Web Tokens — signed tokens carrying the user's
+  identity and claims). This is the default "user login" answer for app end-users.
+- **API Gateway authorizers** sit in front of your API and decide *allow/deny before your
+  Lambda runs*: a **JWT authorizer** (validates a Cognito/OIDC token), a **Lambda (custom)
+  authorizer** (your own code — e.g. validate an opaque token or API key), or **IAM auth**
+  (the caller signs the request with SigV4 — best for service-to-service and internal
+  callers). **AppSync** has the parallel notion of *auth modes* (Cognito user pools, IAM,
+  OIDC, API key, Lambda) applied per-field/per-type.
+- **WebSocket `$connect` auth:** attach an authorizer (Lambda or JWT/IAM) to the `$connect`
+  route so the token is validated *once at connect time*; the resulting identity is
+  associated with the `connectionId` and reused for the life of the socket.
+
+**Where auth sits in the flows (make it concrete):**
+- *URL shortener:* `POST /shorten` goes through a Cognito JWT authorizer → the Lambda stamps
+  `ownerId = token.sub` on the item, and edit/delete check `ownerId` matches the caller.
+  Redirects (`GET /abc`) are public and unauthenticated.
+- *Upload:* the request for a presigned URL is authenticated (JWT authorizer) *before* the URL
+  is minted — the presigned URL then carries S3 permission for that one object/prefix, scoped
+  and time-limited, so an unauthenticated client can never get one.
+- *Streaming:* the control plane checks **entitlements** (does this account own this title?)
+  and only then issues **CloudFront signed cookies/URLs**; without a valid signature the edge
+  refuses to serve the segments.
+
+**Rate-limiting and abuse protection.** "How do you stop someone hammering `POST /shorten`?"
+Two layers: **API Gateway usage plans + throttling** (per-API-key rate and burst limits, and
+quota caps like N requests/day) give you per-client budgets; **AWS WAF rate-based rules** sit
+even earlier (at CloudFront/API GW) and block an IP that exceeds, say, 2000 requests / 5 min,
+plus managed rule groups for common attacks. Use WAF for hostile traffic, usage plans for
+fair-use tiering of legitimate clients.
+
+**Observability.** "A request is slow across Lambda → DynamoDB — how do you debug it?" Name
+three things: **AWS X-Ray** for distributed tracing (a trace stitches the API GW → Lambda →
+DynamoDB spans so you see *which hop* ate the latency); **CloudWatch** structured/JSON logs +
+metrics + dashboards + alarms; and a **correlation ID** propagated through every hop (generate
+at the edge, put it on every log line and every downstream call) so one request's journey is
+greppable across services. This is what turns "it's slow somewhere" into "the DynamoDB query
+on the GSI is the p99."
+
+**Encryption and secrets (the quick baseline):** **SSE-KMS** for data at rest (S3, DynamoDB,
+Aurora), TLS in transit everywhere, **Secrets Manager / SSM Parameter Store** for credentials
+(never in env vars or code), and **IAM least-privilege** roles per function/service so a
+compromised component can't reach beyond its job.
 
 ## Failure modes and resilience
 
@@ -620,6 +725,14 @@ path (edge cache) is where the design and money go.
 - "DynamoDB vs Aurora for the order table — defend your choice."
 - "Cost: where does the money go in this system and what's the biggest lever?"
 - "How would you make this multi-region, and which consistency/conflict issues appear?"
+- "How do you secure this endpoint — who can call it, and how is the caller authenticated
+  (Cognito/JWT authorizer vs IAM vs Lambda authorizer)?"
+- "How do you stop `POST /shorten` (or the presigned-URL endpoint) from being abused — usage
+  plans vs WAF rate rules?"
+- "A request is slow across Lambda → DynamoDB — how do you find the bad hop (X-Ray,
+  correlation IDs, CloudWatch)?"
+- "Whose job is security here — walk me through the shared-responsibility line for a managed
+  service like DynamoDB or S3."
 
 ## References
 

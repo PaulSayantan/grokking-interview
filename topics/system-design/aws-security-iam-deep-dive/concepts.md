@@ -47,7 +47,12 @@ frequent screening question.
 **Why roles beat users for workloads.** A role's credentials are short-lived and
 auto-rotated, so a leaked credential is useful only until it expires; there is no
 secret sitting in an environment variable or a checked-in `.env` waiting to be
-exfiltrated. This is the single most-repeated IAM best practice: **prefer roles and
+exfiltrated. *What "auto-rotated" actually means:* the AWS SDK's credential-provider
+chain transparently re-fetches a fresh token shortly **before** the current one
+expires — from IMDS on EC2, the container credentials endpoint on ECS, the injected
+env vars on Lambda, or by re-calling `AssumeRole` for a directly-assumed role — so a
+long-running app always holds a valid credential without any code change or restart.
+There is no rotation daemon you write; the SDK does it under the hood. This is the single most-repeated IAM best practice: **prefer roles and
 STS over IAM users with access keys.** The modern guidance goes further — use **IAM
 Identity Center** for human access and **roles** for workloads, and treat IAM users
 as a legacy escape hatch (e.g. an on-prem system that genuinely cannot federate).
@@ -296,6 +301,26 @@ conditions actually needed. IAM gives you three axes to tighten:
 - `aws:SecureTransport` — force TLS.
 - `aws:CurrentTime`, `s3:prefix`, `dynamodb:LeadingKeys` (row-level security).
 
+**Condition operators and the null-key gotcha.** A `Condition` pairs an *operator*
+with a key and value. The ones worth naming: `StringEquals` (exact match) vs
+`StringLike` (wildcard `*`/`?` match), `ArnEquals` / `ArnLike` (ARN-aware, so
+`ArnLike` treats `:` and `/` correctly), `Bool` (`aws:SecureTransport`,
+`aws:MultiFactorAuthPresent`), `IpAddress` / `NotIpAddress` (CIDR matching for
+`aws:SourceIp`), `DateGreaterThan` / `DateLessThan` (`aws:CurrentTime`,
+`aws:TokenIssueTime`), and `NumericLessThan` (e.g. `aws:MultiFactorAuthAge`).
+
+The classic accidental-bypass: **if the condition key isn't present on the request,
+the condition evaluates as if it weren't there.** A `Deny` guarded by
+`StringEquals: { "aws:PrincipalTag/team": "x" }` simply doesn't match — and so
+doesn't fire — for a caller that carries *no* `team` tag, quietly letting the request
+through. Two fixes: append `IfExists` (`StringEqualsIfExists`) when you *want* the
+condition skipped only when the key is genuinely absent, or add a `Null` check
+(`"Null": { "aws:PrincipalTag/team": "true" }`) to explicitly catch the
+missing-key case. Related, for **multi-valued** keys use the set qualifiers:
+`ForAllValues:StringEquals` (every value in the request must be in your list) vs
+`ForAnyValue:StringEquals` (at least one matches) — mixing these up is another
+silent source of over-permissive policies.
+
 **ABAC in one concrete policy.** The "tag on principal matches tag on resource"
 idea is worth seeing as an actual `Condition`. This single statement lets *any*
 principal act on *any* table whose `team` tag equals the caller's own `team` tag:
@@ -457,7 +482,24 @@ Two properties make them special:
    policies do **not** grant access to a key unless the key policy also delegates to
    IAM (the standard `"Enable IAM policies"` statement with the account root as
    principal). Forget that statement and you can lock everyone (including yourself)
-   out of the key. This is a frequent gotcha.
+   out of the key. This is a frequent gotcha. That one delegating statement is
+   literally:
+
+   ```jsonc
+   {
+     "Sid": "Enable IAM policies",
+     "Effect": "Allow",
+     "Principal": { "AWS": "arn:aws:iam::111122223333:root" }, // THIS account's root
+     "Action": "kms:*",
+     "Resource": "*"       // "*" here means "this key" — key policies are single-key scoped
+   }
+   ```
+
+   Read it as: *"let normal IAM identity policies in account `111122223333` govern
+   this key."* `Principal: root` does **not** mean the root user only — it means "any
+   principal in this account, subject to their IAM policy." Without this statement,
+   an identity policy granting `kms:*` grants nothing, because the key policy never
+   handed authority to IAM.
 
 **What an org-fenced bucket policy looks like.** The single most useful resource
 policy pattern — allow the whole org, deny everyone else — is one `Condition` key:
@@ -611,7 +653,14 @@ Identity Center beats IAM users.
 ## IAM Access Analyzer
 
 **Access Analyzer** uses **automated reasoning** (provable security, based on the
-Zelkova engine) to answer "who can access this?" It has three main capabilities:
+Zelkova engine) to answer "who can access this?" *What automated reasoning actually
+does:* rather than pattern-matching for known-bad strings like `Principal: "*"`, it
+translates the policy into logical/mathematical constraints and hands them to an
+**SMT solver** (a constraint solver that decides whether a set of logical formulas
+can all be true at once). It then asks the solver to *prove* whether **any** request
+from a principal outside your zone of trust could satisfy the policy — so it catches
+externally-reachable access even through convoluted condition logic a regex would
+miss. It has three main capabilities:
 
 - **External access findings** — continuously scans resource-based policies (S3,
   IAM roles, KMS, Lambda, SQS, Secrets Manager, etc.) and flags any resource
@@ -693,7 +742,25 @@ The mistakes interviewers love to hear you avoid:
   role, a principal needs `iam:PassRole` for that role. If you grant `iam:PassRole`
   on `Resource: "*"`, a user who can launch compute can pass **any** role — including
   admin — to a service they control and escalate to full admin. Always scope
-  `PassRole` to specific role ARNs and use the `iam:PassedToService` condition.
+  `PassRole` to specific role ARNs and use the `iam:PassedToService` condition:
+
+  ```jsonc
+  {
+    "Effect": "Allow",
+    "Action": "iam:PassRole",
+    "Resource": "arn:aws:iam::111122223333:role/app-lambda-exec-role", // this ONE role, not "*"
+    "Condition": {
+      "StringEquals": {
+        "iam:PassedToService": "lambda.amazonaws.com"  // and only to Lambda, not any service
+      }
+    }
+  }
+  ```
+
+  Now the principal can hand *only* `app-lambda-exec-role` to *only* Lambda —
+  they can't pass an admin role, and can't pass this role to EC2/ECS to sidestep
+  the intent. Scoping both the `Resource` and `iam:PassedToService` closes the
+  escalation path.
 - **Overly broad `AssumeRole` trust** (trusting a whole account, or `Principal:
   {"AWS": "*"}`) — combine with `sts:ExternalId` / `aws:PrincipalOrgID`.
 - **Long-lived access keys** in code, CI, laptops, or AMIs; not rotating them; not
@@ -702,9 +769,12 @@ The mistakes interviewers love to hear you avoid:
 - **Confusing trust policy with permissions policy.**
 - **Relying on SCPs to grant** (they only cap) or forgetting SCPs don't restrict the
   management account the same way.
-- **Assuming IAM changes are instant** — IAM is eventually consistent; a new
-  policy/role/key can take seconds to propagate globally, so retry `AccessDenied`
-  right after creation.
+- **Assuming IAM changes are instant** — IAM is eventually consistent *because its
+  data is replicated across a global fleet of endpoints*: a write hits one place and
+  fans out, so a just-created role/policy/key may not be visible everywhere for a few
+  seconds. Practical consequence: after creating an identity or granting a permission,
+  build in a short retry/back-off on `AccessDenied` rather than treating the first
+  failure as authoritative.
 - **Privilege-escalation actions** beyond PassRole: `iam:CreatePolicyVersion`,
   `iam:AttachUserPolicy`, `iam:PutUserPolicy`, `iam:UpdateAssumeRolePolicy`,
   `sts:AssumeRole` chains — a principal with these can grant itself more.

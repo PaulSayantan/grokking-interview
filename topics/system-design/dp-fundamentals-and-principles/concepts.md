@@ -73,6 +73,18 @@ reach a goal (deterministic recipe). A pattern is a higher-level description of 
 arranged and collaborate* to solve a design problem — it says nothing about the exact steps and
 is realized differently each time. Confusing the two ("Singleton is an algorithm") is a red flag.
 
+**Pattern vs library vs framework** (a common senior follow-up — *"is Spring a design pattern?"*).
+These are three different things:
+
+- A **design pattern** is a *described solution you re-implement yourself* in your own classes —
+  it ships as knowledge, not code. You write the code.
+- A **library** is *reusable code you call*: you're in charge, you invoke its functions when you
+  want (e.g. `Collections.sort(list)`). You call it.
+- A **framework** *inverts control*: it owns the main loop and **calls your code** at the
+  extension points it defines (the "Hollywood principle" — "don't call us, we'll call you"). Spring,
+  a web framework, or JUnit are frameworks, not patterns. This is exactly the **Inversion of
+  Control (IoC)** idea discussed under DIP; a framework is IoC delivered as a product.
+
 ---
 
 ## History & origins
@@ -247,9 +259,11 @@ runs.
 Most GoF patterns are object-scoped, reflecting the principle "favor composition over
 inheritance."
 
-**Concrete example.** *Class Adapter* uses multiple inheritance to adapt (Adapter *is-a* Adaptee
-and Target) — fixed at compile time, can't re-target at runtime. *Object Adapter* holds a
-reference to the Adaptee (Adapter *has-a* Adaptee) — you can swap the adaptee object at runtime.
+**Concrete example.** *Class Adapter* subclasses the Adaptee (multiple inheritance in C++ — the
+adapter *is-a* Adaptee *and* Target; in Java/C#, which have no multiple *class* inheritance, you
+`extend` the Adaptee class and `implement` the Target interface). Either way the relationship is
+fixed at compile time — you can't re-target at runtime. *Object Adapter* holds a reference to the
+Adaptee (Adapter *has-a* Adaptee) — you can swap the adaptee object at runtime.
 
 ```mermaid
 classDiagram
@@ -421,8 +435,9 @@ Strategy, Template Method, and abstract interfaces are the usual vehicles.
 ```java
 // BEFORE: adding a shape means editing this method (not closed for modification)
 double area(Shape s) {
-    if (s instanceof Circle)    return 3.14 * r*r;
-    if (s instanceof Rectangle) return w*h;      // add Triangle? edit here again
+    if (s instanceof Circle c)    return 3.14 * c.r * c.r;   // cast to reach the field
+    if (s instanceof Rectangle r) return r.w * r.h;          // add Triangle? edit here again
+    throw new IllegalArgumentException("unknown shape");
 }
 ```
 ```java
@@ -928,9 +943,32 @@ one place breaks distant code, and modules can't be understood, tested, or reuse
 
 **Intent / how it works.** **Coupling** = the degree of interdependence *between* modules (aim:
 **loose**). **Cohesion** = how strongly the elements *within* a module belong together (aim:
-**high**). Good design = **loose coupling + high cohesion**. Coupling has degrees (best→worst):
-data → stamp → control → common → content coupling. Cohesion has degrees (best→worst): functional
-→ sequential → communicational → … → logical → coincidental.
+**high**). Good design = **loose coupling + high cohesion**. Both live on a spectrum — memorizing
+the ladder is useless unless you know what each rung *means*, so here is the gloss.
+
+**Coupling ladder (loosest/best → tightest/worst):**
+
+| Rung | What it means | Quick tell |
+|---|---|---|
+| **Data** (best) | modules communicate by passing only the *primitive values* actually needed | `charge(amount, currency)` |
+| **Stamp** | you pass a whole record/struct but the callee uses only a field or two | `charge(wholeOrder)` when only `total` is read |
+| **Control** | caller passes a *flag* that dictates *which branch* the callee runs | `render(doc, /*isPdf=*/true)` |
+| **Common** | modules share **mutable global state** and step on each other through it | two modules read/write the same global `config` |
+| **Content** (worst) | one module reaches into another's **internals** (private fields, guts) | `b.internalCache.buffer[3] = x` |
+
+**Cohesion ladder (highest/best → lowest/worst):**
+
+| Rung | What it means |
+|---|---|
+| **Functional** (best) | every element contributes to **one well-defined task** |
+| **Sequential** | elements form a pipeline: one's output is the next's input |
+| **Communicational** | elements operate on the **same data** but do different things to it |
+| **Procedural / temporal** | grouped only because they run in sequence or at the same time (e.g. "init()") |
+| **Logical** | grouped because they're the *same kind* of thing, switched by a flag (e.g. one `handle(type)` doing all I/O) — the flag proves they don't belong together |
+| **Coincidental** (worst) | elements are lumped together for **no real reason** (a "Utils" grab-bag) |
+
+The takeaway: aim for **data coupling + functional cohesion**; treat control/common/content coupling
+and logical/coincidental cohesion as refactoring signals.
 
 **Concrete example.** A `PricingService` that reaches into `Order`'s private fields and also sends
 emails is tightly coupled (touches Order internals) and low-cohesion (pricing + email). Splitting
@@ -1104,6 +1142,13 @@ flowchart TD
 choose a pattern"** (start from the problem) and to the *cost of patterns* — indirection you pay
 regardless of benefit. Antidote: a broad toolkit and problem-first discipline.
 
+**How this differs from the two sibling smells below.** Golden Hammer is about the **wrong tool
+chosen from habit** — the failure is *tool selection* (you reach for what you know). *Premature
+abstraction* is a **right idea applied too early** — the tool may be correct, but the *timing* is
+wrong. *Patternitis* is patterns applied **for their own sake** — the failure is *motive* (status
+/ box-ticking, not solving a problem). Same family, three distinct root causes: habit, timing,
+motive.
+
 ---
 
 ## Premature abstraction / over-engineering
@@ -1137,7 +1182,9 @@ classDiagram
 **Trade-offs / fix.** This **is** the pattern-overuse warning at the design-time end. *Cost:* every
 speculative seam is code to read, test, and maintain forever. Balance against genuine, *imminent*
 extensibility. **vs OCP:** OCP is good when the variation axis is real and present; premature
-abstraction is OCP applied to imaginary axes.
+abstraction is OCP applied to imaginary axes. **Its unique angle:** unlike Golden Hammer (wrong
+tool) or patternitis (patterns for status), the tool here can be *exactly right* — the sin is
+*timing*: you built the seam before any second case proved the variation is real.
 
 ---
 
@@ -1170,6 +1217,9 @@ flowchart LR
 **Trade-offs / fix.** No upside. The honest interview point: **patterns always cost indirection**;
 you introduce one only when the flexibility it buys is worth that cost *now*. Fewer, well-chosen
 patterns beat many decorative ones. Refactor *out* patterns that no longer earn their keep.
+**Its unique angle:** where Golden Hammer picks *one* familiar tool for everything and premature
+abstraction gets the *timing* wrong, patternitis is about **motive** — patterns applied as an end
+in themselves ("look how many I used"), not to remove any concrete pain.
 
 ---
 

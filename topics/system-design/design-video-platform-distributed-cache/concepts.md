@@ -42,11 +42,19 @@ massive read:write skew.
 
 **Back-of-envelope (typical interview scale):**
 
-- Assume 1B total users, 100M daily active. Reads dominate massively:
-  ~100M video views/day is a common target, ~5M uploads/day.
-- Views/sec: 100M / 86,400 s ~= **1,150 reads/sec average**, ~5-10x peak =>
-  **~10k reads/sec**. But each "view" pulls many segments over minutes, so
-  segment GETs are far higher and are absorbed by the CDN, not origin.
+- Assume 1B total users, 100M daily active. Reads dominate massively. Be careful
+  what "view" means: a *daily active user* watches many videos per session, so
+  100M DAU x ~10 video-starts/day = **~1B video-starts/day** (a session start is
+  when the player loads a manifest and begins a stream). Uploads: ~5M/day.
+- Video-starts/sec: 1B / 86,400 s ~= **~11.5k starts/sec average**, ~5-10x peak
+  => **~60-115k starts/sec**. (If you want a deliberately conservative floor,
+  quote 100M starts/day ~= 1,150/sec — but say out loud it's a floor; real
+  YouTube is *billions* of views/day.) Each start then pulls **many segments**
+  over minutes — a 10-minute video at 4-second segments is ~150 segment GETs — so
+  segment GETs run 100x+ higher than starts and are **absorbed by the CDN, not
+  the origin**. That gap (a handful of origin/metadata reads per start vs. ~150
+  CDN-served segment GETs) is exactly why the CDN, not your origin, is the read
+  path.
 - Uploads/sec: 5M / 86,400 ~= **58 uploads/sec average**.
 - Storage: 5M uploads/day * 300 MB avg raw = **1.5 PB/day of raw**. After
   transcoding to ~5 renditions (240p..4K) you multiply the *stored* footprint
@@ -248,6 +256,40 @@ flowchart LR
 titles overnight during off-peak (predictive caching). YouTube uses Google's
 edge + Google Global Cache in ISPs. Cloudflare/Akamai/Fastly for third parties.
 
+### Request routing to the nearest PoP
+
+**Intuition:** the CDN has hundreds of PoPs (points of presence) worldwide, but
+the player only knows one URL like `cdn.example.com/videoId/1080p/seg42.ts`. Some
+layer has to turn that one name into "connect to *this* edge, the one that is
+close, healthy, and not overloaded." That layer is **request routing**, and it's
+the follow-up an interviewer reaches for the moment you say "the CDN serves it."
+Two mechanisms dominate:
+
+- **Anycast (routing-layer steering):** the same IP address is announced from
+  many PoPs via **BGP** (Border Gateway Protocol, the internet's inter-network
+  routing protocol). The network itself delivers the packet to the
+  topologically-nearest PoP. **Gain:** dead simple for the client (one IP), and
+  failover is near-instant — if a PoP withdraws its BGP route, traffic
+  automatically re-routes to the next-nearest without any client change. **Give
+  up:** granularity — "nearest by BGP hops" is not the same as "lowest latency"
+  or "least loaded," and long-lived TCP connections can break if BGP re-converges
+  mid-flow. Cloudflare and Fastly lean heavily on anycast.
+- **DNS-based steering (resolution-layer):** the authoritative DNS server for the
+  CDN hostname returns *different* PoP IPs depending on the resolver's
+  geolocation, measured latency, and current PoP health/load. **Gain:** rich,
+  policy-driven decisions — steer by geography, real-time latency maps, and drain
+  a PoP by simply stopping handing out its IP. **Give up:** staleness bounded by
+  **DNS TTL** — clients cache the answer for the TTL, so after a PoP fails you
+  keep sending users there until their cached record expires (short TTLs fix
+  freshness but raise DNS query load), and you only see the *resolver's* location,
+  not the end user's (mitigated by EDNS Client Subnet). Akamai's classic design
+  and most commercial CDNs use DNS steering, often layered on top of anycast.
+
+Either way, **health and load feed the decision**: a PoP that fails health checks
+or crosses a load threshold is pulled from the anycast announcement or stopped
+being returned by DNS, so new requests steer to the next-best PoP. This is how a
+CDN "routes around" an overloaded or failed edge.
+
 **Trade-offs:**
 - Own CDN (Open Connect) vs commercial CDN: **gain** — at Netflix scale, huge
   egress cost savings, control, ISP embedding; **give up** — enormous capital
@@ -448,6 +490,27 @@ is the "design Redis/Memcached" question.
 - **TTL/expiry** handling (lazy expiry on access + periodic active sweeps).
 - Optional persistence (snapshots/AOF) for warm restart.
 
+**Threading model — the classic Redis vs Memcached follow-up.** How the node uses
+CPU cores is the single most common concrete probe in "build a cache":
+
+- **Redis is single-threaded** for command execution: one event loop processes
+  commands one at a time. **Gain:** no locks, no lock contention, and atomic
+  commands come for free (a command can't interleave with another). **Give up:**
+  one instance uses essentially *one CPU core*, and a single slow O(n) command
+  (`KEYS *`, a giant `SMEMBERS`, a big `LRANGE`) **blocks every other client**
+  until it finishes — the whole node stalls. That's why you (a) avoid O(n)
+  commands on hot instances (use `SCAN` instead of `KEYS`) and (b) scale Redis by
+  **sharding across many instances** (each pinned to a core) rather than by
+  adding threads. (Modern Redis does offload some I/O and lazy-freeing to helper
+  threads, but command execution stays single-threaded.)
+- **Memcached is multi-threaded:** it scales a simple key-value workload across
+  all cores of one box. **Gain:** more throughput per node for plain GET/SET.
+  **Give up:** internal locking, and it lacks Redis's rich data structures.
+
+Rule of thumb: reach for Redis when you want data structures, persistence, and
+atomic operations; reach for Memcached (or many sharded Redis instances) when you
+just need the most raw KV throughput per core.
+
 **Distributed layer — the four questions you must answer:** (1) how are keys
 **partitioned** across nodes, (2) how is data **replicated** for HA, (3) what
 **consistency** do reads see, (4) how do you handle **eviction** and **hot
@@ -490,13 +553,29 @@ not all of them. **Virtual nodes** (each physical node placed at many ring
 positions) smooth out load imbalance and make rebalancing on failure spread
 across all remaining nodes instead of dumping onto one neighbor.
 
+The ring runs 0 -> 2^32 clockwise and wraps around. Each key walks **clockwise**
+until it hits a node — that node owns it. Adding a node only re-homes the keys in
+the one arc that now ends at the newcomer:
+
+```mermaid
+flowchart TB
+    subgraph ring["Hash ring (clockwise ownership)"]
+        N1["N1 @ pos 90"]
+        N2["N2 @ pos 180"]
+        N3["N3 @ pos 300"]
+        K["key1 hashes to pos 200"]
+    end
+    K -->|"walks clockwise to next node"| N3
+    N4["add N4 @ pos 250"] -.->|"now the next node after 200"| K
+    N4 -.->|"steals ONLY the arc 180->250 from N3; N1 and N2 untouched"| N3
 ```
-        key1
-         |
-   [N3]--*----[N1]         each node owns the arc clockwise to itself;
-    |          |           adding N4 only steals keys from its arc.
-   [N2]--------+
-```
+
+Before N4: key1 (pos 200) walked clockwise past 180 to the next node, N3 (pos
+300). After inserting N4 at pos 250, key1 (pos 200) now stops at N4 instead — but
+*only* keys landing in the arc (180, 250] move; every other key keeps its home,
+so those nodes' caches stay warm. **Virtual nodes** place each physical node at
+many ring positions, so this "arc that moves" is chopped into many small arcs
+scattered around the ring — that's what spreads both load and rebalancing evenly.
 
 **Worked example — why only K/N keys move.** Say you have **1000 keys** spread
 over **N = 4** nodes, ~**250 keys each**. Now add a 5th node:
@@ -605,7 +684,13 @@ always accept **eventual consistency** because the source of truth is the DB.
   **short TTLs on suspect/derived data** to bound blast radius, and
   **validation on write** so malformed values never enter the cache.
 
-**Trade-offs (CAP/PACELC applied to caches):**
+**Trade-offs (CAP and PACELC applied to caches):** PACELC extends CAP with the
+part CAP ignores — the normal, no-failure case. Read it as: **if P**artitioned,
+trade **A**vailability vs **C**onsistency (that's plain CAP); **E**lse (no
+partition, the common case), you *still* trade **L**atency vs **C**onsistency.
+The "Else" clause is the one that bites caches: even when nothing is broken,
+waiting for replicas to sync (strong consistency) costs latency on every write,
+so the sync-vs-async choice below is fundamentally an L-vs-C decision.
 - Replicate vs not: replication gives HA + read scaling but doubles memory cost
   and introduces staleness/conflict handling. For a pure read cache in front of
   a durable DB, many teams **skip replication** and accept refill-on-miss —

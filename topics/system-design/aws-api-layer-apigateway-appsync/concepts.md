@@ -30,7 +30,8 @@ transformations. It is the most expensive of the two HTTP-style APIs.
 
 **HTTP API ("v2"):** a leaner, cheaper, lower-latency rewrite. It costs roughly
 **~70% less** than REST API per request and adds a few milliseconds less overhead. It
-supports JWT authorizers natively (great with Cognito or any OIDC provider), Lambda
+supports JWT authorizers natively (great with Cognito or any **OIDC (OpenID Connect)**
+provider — the identity layer built on top of OAuth 2.0), Lambda
 authorizers, automatic deployments, and CORS config. But it **drops** several REST
 features: no request/response mapping templates (only basic parameter mapping), no
 API keys/usage plans, no per-method caching, no request validation via models, **no
@@ -63,14 +64,12 @@ subscribers:
    it and **deletes that row** so the next broadcast doesn't waste a call on a dead
    socket. This stale-connection pruning is the gotcha AppSync handles for you.
 
-```
-        REST API          HTTP API         WebSocket API
-        --------          --------         -------------
-Client → TLS/route → VTL mapping     JWT authorizer   $connect/$default
-         throttle    caching          param mapping    routes; @connections
-         authorizer  usage plans      (leaner)         push; stateful conn
-         → Lambda / HTTP / AWS service integration     → Lambda + DynamoDB
-```
+| | REST API | HTTP API | WebSocket API |
+|---|---|---|---|
+| Shape | HTTP request/response | HTTP request/response | Persistent bidirectional socket |
+| Distinctive features | VTL mapping, per-method cache, API keys/usage plans, WAF-on-API, edge/private endpoints | Lean: JWT authorizer, basic param mapping, auto-deploy, CORS | `$connect`/`$disconnect`/`$default` routes, `@connections` push, stateful conn |
+| Backend | Lambda / HTTP / direct AWS-service integration | Lambda / HTTP proxy | Lambda (+ DynamoDB to store conn IDs) |
+| Relative cost | Highest | ~70% cheaper than REST | Per message + connection-minutes |
 
 **Trade-off summary:** REST = max features (mapping, caching, API keys, WAF, private,
 edge) at higher cost/latency; HTTP = ~70% cheaper + lower latency but fewer features;
@@ -99,18 +98,18 @@ Design implications:
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant G as API Gateway
-    participant W as Worker (Step Fn / SQS+Lambda)
-    participant S as Job store (DynamoDB)
-    C->>G: POST /reports (Idempotency-Key: k1)
-    G->>S: write job k1 = PENDING
-    G-->>C: 202 Accepted {jobId}
-    G->>W: start async work
-    Note over W,S: work runs > 29s, safely off the request path
-    W->>S: job k1 = DONE {resultUrl}
-    C->>G: GET /reports/{jobId} (poll)  -- or WebSocket/AppSync push
-    G-->>C: 200 {status: DONE, resultUrl}
+    participant C as Client;
+    participant G as API Gateway;
+    participant W as Worker (Step Fn / SQS+Lambda);
+    participant S as Job store (DynamoDB);
+    C->>G: POST /reports (Idempotency-Key: k1);
+    G->>S: write job k1 = PENDING;
+    G-->>C: 202 Accepted {jobId};
+    G->>W: start async work;
+    Note over W,S: work runs > 29s, safely off the request path;
+    W->>S: job k1 = DONE {resultUrl};
+    C->>G: GET /reports/{jobId} (poll) or WebSocket/AppSync push;
+    G-->>C: 200 {status: DONE, resultUrl};
 ```
 
 The **idempotency key** (`k1`) is what prevents a client retry (or a gateway 504 on a
@@ -217,8 +216,10 @@ becomes a maintenance liability, and many teams prefer a thin Lambda for readabi
 ## Authorizers: IAM, Cognito, and Lambda
 
 Think of authorizers as **four different bouncers at the door**, ranked by cost and
-latency. IAM checks a badge you already carry (SigV4 — no extra server, cheapest inside
-AWS); JWT/Cognito checks a signed wristband against a known issuer (fast, no code); the
+latency. IAM checks a badge you already carry (**SigV4** — AWS Signature Version 4, the
+request-signing scheme where the caller signs the request with its AWS credentials; no
+extra server, cheapest inside AWS); JWT/Cognito checks a signed wristband against a known
+issuer (fast, no code); the
 Lambda authorizer is a human bouncer who runs your custom rulebook on every guest
 (most flexible, but you pay for the extra person on every entry). Reach for the cheapest
 one that can express your rule.
@@ -244,6 +245,15 @@ Four ways to control who calls an API Gateway endpoint:
 Trade-off: prefer **built-in JWT/Cognito/IAM** authorizers over Lambda authorizers
 when they fit — they are cheaper and lower-latency (no extra invoke). Reach for a
 Lambda authorizer only when your auth logic can't be expressed as JWT/IAM.
+
+**mTLS (mutual TLS) for client-certificate auth:** API Gateway (REST API, on a custom
+domain) can require **mutual TLS** — the client presents an X.509 certificate that the
+gateway validates against a trust store (a CA bundle you upload to S3) *before* any
+authorizer runs. Ordinary TLS only authenticates the server to the client; mTLS also
+authenticates the client to the server. Reach for it in **partner/B2B** APIs, IoT device
+fleets, and regulated or zero-trust environments where "who is the caller's machine?" must
+be proven at the transport layer, not just via a bearer token. You can layer mTLS *and* an
+authorizer (certificate proves the device, token proves the user).
 
 ## Edge-optimized, regional, and private endpoints
 
@@ -301,6 +311,36 @@ When REST/HTTP API beats GraphQL:
 - Query-cost/complexity attacks (deeply nested GraphQL queries) are a real GraphQL-
   specific DoS risk you must guard against (depth/complexity limits).
 
+**The N+1 resolver problem (GraphQL's flexibility can hide a fan-out cost you must design
+against):** GraphQL resolvers run per field, so a list field can quietly explode into one
+downstream call *per item*. Trace it: a query asks for `posts { author { name } }` and
+returns **50 posts**. AppSync runs the `posts` resolver **once** (1 query → 50 rows), then
+runs the `author` resolver **once per post** to resolve each `author` field → **50 more
+calls**. Total = **1 + 50 = 51** downstream calls to render one screen; add a nested
+`comments` field and it multiplies again. That is the "N+1" (one parent query + N child
+queries). Mitigations:
+- **Batching / DataLoader pattern:** collect all the author IDs needed for the 50 posts
+  and fetch them in **one** batched request (e.g. DynamoDB `BatchGetItem` for 50 keys, or
+  one SQL `WHERE id IN (...)`), turning 1 + 50 into **1 + 1 = 2** calls.
+- **AppSync `BatchInvoke`** for Lambda data sources: AppSync hands the resolver a single
+  invocation with the *array* of 50 parent items instead of 50 separate invocations, so
+  your Lambda does one batched backend fetch.
+- **Pipeline resolvers** to fetch the related set in one function rather than field-by-field.
+The senior point: GraphQL's "ask for exactly what you want" convenience shifts the fan-out
+cost server-side, so you must design resolvers to **batch**, or a harmless-looking nested
+query becomes an N+1 storm on your database.
+
+**AppSync server-side caching:** like API Gateway's stage cache, AppSync offers an
+in-memory cache you provision by size, but at finer granularity. **Full-request caching**
+keys the whole query/response and serves repeat identical queries without running any
+resolver. **Per-resolver caching** caches individual resolver results, with the **cache
+key built from chosen arguments / identity / source fields** (e.g. cache the `author`
+resolver keyed by `authorId` so the N+1 fan-out above hits cache after the first miss) and
+a configurable **TTL** (seconds up to ~1 hour). Trade-off mirrors API Gateway's: you pay a
+fixed hourly cost for the cache instance and serve data up to TTL stale, so it pays off for
+read-heavy, repeat-query fields — and per-resolver caching pairs especially well with the
+N+1 mitigation, since a cached `author` result short-circuits the repeated child calls.
+
 AppSync limits that matter: **request execution time 30 s**, **response size 5 MB**,
 **subscription payload 240 KB**, **subscriptions per WebSocket connection 200**,
 **10 functions per pipeline resolver**, **max query length 15,000 tokens**, **10,000
@@ -325,7 +365,7 @@ it. Great for chat, collaborative editing, live scores, price tickers, presence.
 | Protocol | GraphQL over WS | Arbitrary JSON, route by selection expression |
 | Best for | Data sync, "when X changes tell subscribers" | Custom protocols, game state, non-GraphQL push |
 | Ops burden | Lowest | You build fan-out logic |
-| Payload cap | 240 KB per message | 128 KB per message frame |
+| Payload cap | 240 KB per message | 32 KB per frame (larger messages are split into multiple 32 KB frames) |
 
 Pick AppSync subscriptions when the real-time need is "notify clients when server data
 changes." Pick API Gateway WebSocket when you need a **custom bidirectional protocol**

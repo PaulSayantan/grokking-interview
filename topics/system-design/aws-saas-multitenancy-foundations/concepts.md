@@ -273,6 +273,41 @@ all three layers the tenant value lands in a place the request *cannot* rewrite 
 session tag, a resolved principal tag, a session variable), not in hand-written
 query text.
 
+> [!WARNING]
+> **RLS is silently bypassed by the table owner and by superusers** — this is the
+> #1 real-world RLS cross-tenant leak. `CREATE POLICY` only takes effect for roles
+> that are *not* the table owner and lack the `BYPASSRLS` attribute. If your
+> application connects as the same role that owns the tables (very common), the
+> policy is **not applied** and every query sees every tenant's rows. Two fixes,
+> use both: (1) run the app as a **dedicated non-owner role** with only DML grants;
+> (2) belt-and-suspenders, mark the table `ALTER TABLE orders FORCE ROW LEVEL
+> SECURITY` so the policy applies **even to the owner**. Without one of these, the
+> `CREATE POLICY` above is decorative.
+
+**Connection-pooling interaction.** `SET app.tenant_id = 'T42'` is *session
+state*, and a pooler (PgBouncer, RDS Proxy) hands the same physical connection to
+different tenants over time. If you set the variable but never reset it, tenant
+`T99`'s request can inherit a connection still carrying `app.tenant_id = 'T42'` and
+read T42's data. The fix: set the variable **per checkout inside the transaction**
+using the transaction-scoped form `SET LOCAL app.tenant_id = 'T42'` (auto-cleared
+at `COMMIT`/`ROLLBACK`), and use **transaction-level pooling** so a connection is
+only borrowed for the life of one transaction. Treat "who resets the session
+variable" as a required design answer whenever RLS meets a connection pool.
+
+**Gotcha — do not call `AssumeRole` on every request.** The obvious naive
+implementation ("resolve tenant, `AssumeRole`, then query") puts an STS network
+call on the hot path of *every* request: it adds latency (tens of milliseconds
+round-trip) and STS itself is rate-limited per account/Region, so at high RPS you
+will start getting throttled by the very mechanism meant to protect you. The
+standard mitigation is the **Token Vending Machine (TVM)** pattern: a small
+component (often a Lambda or a shared library) that calls `AssumeRole` **once per
+tenant** and **caches the returned scoped credentials for their validity window**
+(STS session credentials last up to 1 hour; you refresh a few minutes before
+expiry). So you vend *per tenant, per hour*, not *per request*. Worked count: at
+1,000 RPS spread over 200 active tenants, naive per-request assumption is ~1,000
+STS calls/sec; TVM with a 1-hour cache is ~200 calls/hour ≈ 0.06 calls/sec — a
+~18,000× reduction that also removes STS latency from the request path.
+
 See [`aws-security-iam-deep-dive`](../aws-security-iam-deep-dive/concepts.md) for
 the ABAC/STS mechanics in depth.
 
@@ -357,7 +392,13 @@ bottlenecks."
   harder.
 - **Siloed identity** — a **user pool per tenant**. Supports per-tenant SAML/OIDC
   federation, custom domains, and isolation; but you burn user-pool quota and add
-  management overhead.
+  management overhead. It also creates a **login-routing problem the pooled model
+  doesn't have**: with N pools, a user arriving at the login screen must first be
+  routed to the *correct* pool before you can authenticate them. That requires a
+  **tenant-resolution / home-realm-discovery** step — infer the tenant from the
+  email domain (`@acme.com → Acme's pool`), the subdomain (`acme.app.com`), or an
+  explicit tenant field — which is an extra moving part and a lookup that must
+  itself be fast and correct.
 - **Bridge identity** — pooled pool for Basic tier; dedicated pools only for
   enterprise tenants that require their own IdP federation.
 
@@ -416,7 +457,10 @@ container escape and cross-namespace traffic are real risks. Harden with **IRSA*
 premium tiers.
 
 **Serverless SaaS** — Lambda + API Gateway; tenant context resolved in the
-authorizer; STS `AssumeRole` per invocation for data-layer scoping. Watch the
+authorizer; STS `AssumeRole` for data-layer scoping — but **cache the scoped
+credentials per tenant across invocations** (Token Vending Machine pattern; see
+"Isolation enforcement mechanisms"), not a fresh `AssumeRole` on every invoke,
+which adds latency and hits STS rate limits. Watch the
 **account-level Lambda concurrency limit** (shared across all tenants) — a runaway
 tenant can starve others; mitigate with **reserved concurrency** per tenant/tier.
 
@@ -560,7 +604,10 @@ spent per request.
 
 **Metering.** Capture tenant-level usage/load ("Tenant Activity and
 Consumption") to feed scaling decisions *and* billing. Emit tenant-tagged metrics
-(**CloudWatch EMF** with a `TenantId` dimension, or Kinesis/Firehose aggregation
+(**CloudWatch EMF — Embedded Metric Format**, a JSON log convention that lets you
+write structured logs which CloudWatch auto-extracts into metrics, so you get a
+per-`TenantId` metric dimension without a separate PutMetricData call; or
+Kinesis/Firehose aggregation
 into DynamoDB/Timestream) → billing system. Enables consumption / pay-as-you-go
 pricing alongside subscription.
 
@@ -585,6 +632,18 @@ pricing alongside subscription.
   by those fractions: A = 0.60 × $1,000 = **$600**, B = 0.30 × $1,000 = **$300**,
   C = 0.10 × $1,000 = **$100** (sums to $1,000). The metering data — not a cost
   tag — is what makes chargeback possible in the pool model.
+
+  *The remainder trap:* that clean split assumes **100% of the bill is
+  tenant-attributable**, which is rarely true. Say the $1,000 is really **$800** of
+  consumed capacity you metered per tenant (A drove 3M RCU, B 1M RCU of 4M metered
+  total) plus **$200 of base/idle capacity** — provisioned-but-unused throughput,
+  minimum table cost, reserved headroom — that *no* tenant consumed. Metering
+  attributes only the $800: A = (3M/4M)×$800 = **$600**, B = (1M/4M)×$800 =
+  **$200**. The remaining **$200 is unattributable** and needs an explicit
+  **allocation policy**: split it evenly, pro-rata by usage (same 3:1 → A $150 /
+  B $50), or absorb it as platform cost of goods sold. An interviewer probes exactly
+  this — "what about the capacity nobody used?" — so naming the unattributable
+  remainder and picking a policy for it is the senior signal, not just the split.
 
 Limits: 50 user-defined tags per resource; tag keys are case-sensitive in the CUR
 (enforce `TenantId` consistently); enforce with **Organizations tag policies /
@@ -684,8 +743,29 @@ breach can affect.
 - **Lambda reserved / provisioned concurrency** per tenant or tier.
 - DynamoDB good partition-key design + **on-demand mode** + adaptive capacity.
 - **RDS Proxy** for connection pooling.
-- **Shuffle-sharding / pod (cell) isolation** to bound blast radius.
+- **Shuffle-sharding / pod (cell) isolation** to bound blast radius (explained
+  below).
 - Move noisy or premium tenants to a **silo**.
+
+**Shuffle-sharding, intuitively.** Plain sharding splits N workers into fixed
+groups and pins each tenant to one group; if a poison tenant (a retry storm, a
+query-of-death) takes down its group, *every* tenant sharing that group goes down
+with it. Shuffle-sharding instead gives each tenant a **random combination** of a
+few workers drawn from the whole fleet. Because two tenants rarely draw the *same*
+full combination, a single bad tenant only *fully* overlaps the tiny fraction of
+tenants who happen to share **all** of its workers — everyone else keeps at least
+one healthy worker and stays up. Blast radius shrinks **combinatorially** instead
+of linearly.
+
+*Worked number:* take **8 workers**, and give each tenant a shard of **2**. Plain
+sharding makes 8/2 = **4 groups**, so a bad tenant knocks out **1 of 4 = 25%** of
+tenants (everyone in its group). Shuffle-sharding draws 2-of-8 = **C(8,2) = 28**
+possible combinations. A victim tenant is fully taken down only if it drew the
+**same 2 workers** as the bad tenant — probability **1/28 ≈ 3.6%** — versus 25%
+with plain sharding. Widen shards to 4-of-8 and there are C(8,4) = 70
+combinations, and full overlap requires drawing the identical 4, so isolation
+improves further (at the cost of each tenant touching more workers). This is the
+math behind AWS's "cell" and Route 53 shuffle-sharding designs.
 
 **Blast radius by model:** account-per-tenant → a failure/compromise is contained
 to one tenant; full pool → one bug or breach can hit **all** tenants; pods/cells

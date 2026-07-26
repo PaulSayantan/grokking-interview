@@ -50,10 +50,14 @@ Assume **100 M new URLs/day** (Bit.ly-scale is order-of-magnitude here).
 - Records over 5 years: 100 M/day × 365 × 5 ≈ **182 B records** → 182 B × 500 B ≈
   **~91 TB** (order ~100 TB). Definitely needs sharding; too big for one node's RAM,
   fits comfortably on disk across a modest cluster.
-- Cache sizing (80/20 rule): 20% of daily reads are hot. Daily reads ≈ 116k × 86,400 ≈
-  **10 B reads/day**; 20% hot × ~500 B ≈ ... practically, cache the hottest few % of
-  *distinct* keys. Even caching 100 M hot mappings × ~500 B ≈ **~50 GB** → a few Redis
-  nodes. The point: the working set of hot links is tiny relative to total storage.
+- Cache sizing: the number that matters is **distinct hot keys**, not request volume.
+  Redirect traffic is Zipfian — a small set of links soaks up most clicks (the "80/20"
+  or "20% of *reads* are hot" figure describes *request skew*, not a byte count, so you
+  can't multiply it by 500 B). The right drill is: estimate how many *distinct* mappings
+  are hot enough to keep resident, then size their footprint. Say ~100 M distinct hot
+  mappings (a generous slice of the corpus): 100 M × ~500 B ≈ **~50 GB** → a handful of
+  Redis nodes (or one large one) covers the working set. The point: hot links are a tiny
+  fraction of the ~91 TB total, so a modest cache yields a 95–99% hit rate.
 - Key space: with Base62 and length 7 → 62^7 ≈ **3.5 trillion** combinations; length 6 →
   62^6 ≈ 56.8 B. At 182 B records over 5 years you need length **7** to have headroom.
 
@@ -82,6 +86,13 @@ flowchart TD
 - **Write path**: validate URL → obtain unique key → persist `{key, longURL, meta}` →
   (optionally warm cache) → return short URL. Writes are cheap and rare; correctness and
   uniqueness matter more than latency here.
+- **Create-side idempotency**: `POST /shorten` is not naturally idempotent — if the client
+  times out and retries, a naive design mints a *second* key for the same intended link.
+  Have the client send an **idempotency key** (a client-generated request UUID, e.g. in an
+  `Idempotency-Key` header). The write service records `idempotency_key → short_key` on
+  first success; a retry with the same idempotency key returns the *already-minted* short
+  key instead of allocating a new one. (This is orthogonal to hash-based dedup, which keys
+  off the *URL*; idempotency keys off the *request*.)
 - **Read path**: `GET /{key}` → check CDN/edge → Redis → DB → issue HTTP redirect. This
   path must be blisteringly fast and highly available; it is 99%+ of traffic.
 - **Analytics**: click events are emitted asynchronously (fire-and-forget to a queue like
@@ -107,9 +118,12 @@ discussed part of the interview. Overview first; each has its own section below.
 | Pre-generated keys (KGS) | Perfect (dedup at gen) | Batch/offline | No (random) | Fixed, short | Best read/write latency; prettiest keys |
 
 **Key encoding note.** Base62 (`[0-9a-zA-Z]`) is the standard alphabet: URL-safe, dense,
-readable. Base64 adds `+ / =` which are not URL-safe (need escaping) and is case-sensitive
-in ways that hurt. Some systems drop ambiguous chars (`0/O`, `1/l/I`) for human-typed
-codes → "Base58" (Bitcoin, Flickr). Base62 length 7 = 62^7 ≈ 3.5 T combinations.
+readable. Base64 adds `+ / =`, which are **not URL-safe** — `+` and `/` must be
+percent-encoded inside a path and `=` is padding — so a raw Base64 key can't sit cleanly
+in a URL. (The `base64url` variant swaps in `-` and `_` to fix this, but you still carry
+`=` padding; Base62 sidesteps all of it.) Some systems also drop visually ambiguous chars
+(`0`/`O`, `1`/`l`/`I`) for human-typed codes → "Base58" (Bitcoin, Flickr). Base62 length
+7 = 62^7 ≈ 3.5 T combinations.
 
 ---
 
@@ -127,8 +141,12 @@ pigeonhole principle once you have enough URLs.
 
 1. **Check-and-retry**: before inserting, look up the candidate key. If it exists and
    maps to a *different* URL, append a salt / re-hash / add random chars and retry. Costs
-   an extra read per write, and read cost rises as the table fills (birthday paradox: at
-   62^7 space, collision probability becomes non-trivial around tens of millions of keys).
+   an extra read per write, and read cost rises as the table fills. **Birthday-bound
+   sketch:** for random draws from a space of size `N`, the *first* collision becomes
+   likely (≈50%) at roughly `√N` draws, not `N`. Here `N = 62^7 ≈ 2^41.7 ≈ 3.5 T`, so
+   `√N ≈ 1.9 M` — meaning your *first* accidental clash shows up in the low millions of
+   keys, and clashes become routine (an extra retry on many inserts) from tens of millions
+   onward. This is why "just hash and hope" degrades as the table fills.
 2. **Insert with unique constraint**, catch the DB uniqueness violation, retry with a new
    candidate. Cleaner than read-before-write under concurrency (no race window).
 
@@ -157,10 +175,23 @@ with its own analytics).
 new URL gets the next integer; Base62-encode it to get the short key. No collisions ever,
 because integers are unique by construction.
 
-**How it works.** `id = counter++; key = base62(id)`. Worked example with the standard
-`[0-9a-zA-Z]` alphabet (index 0–9 → `0`–`9`, 10 → `a`, …, 61 → `Z`): `125 = 2×62 + 1`, so
-the digits are `[2, 1]` → chars `2` then `1` → `base62(125) = "21"`. (The bigger the counter,
-the longer the key: it grows one char every time you cross a power of 62.) A single
+**How it works.** `id = counter++; key = base62(id)`. Base62 is just positional notation
+in base 62: repeatedly divide by 62, and the remainders — read from last to first — are
+the digits. Map each digit index to a char with `0–9 → '0'–'9'`, `10 → 'a'`, …, `35 → 'z'`,
+`36 → 'A'`, …, `61 → 'Z'`.
+
+Worked example, `base62(125)` under this `[0-9a-zA-Z]` alphabet:
+
+```
+125 ÷ 62 = 2  remainder 1   → least-significant digit = 1
+  2 ÷ 62 = 0  remainder 2   → next digit             = 2
+stop (quotient is 0). Remainders bottom-to-top: [2, 1]
+digit 2 → char '2';  digit 1 → char '1'   ⇒  base62(125) = "21"
+```
+
+(Sanity check: `2×62 + 1 = 125`. ✓) A larger id like `base62(1_000_000)` runs the same
+loop four times → `"4c92"`. The bigger the counter, the longer the key: it grows one char
+every time the id crosses a power of 62 (62 → 2 chars, 3,844 → 3 chars, …). A single
 counter is a bottleneck and SPOF, so you distribute it:
 
 - **Ranged/segmented counters**: each app server requests a *block* of IDs (e.g. 1,000 at

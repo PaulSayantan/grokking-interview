@@ -50,6 +50,45 @@ over many narrow pre-aggregated metrics.
 
 ---
 
+## White-box versus black-box monitoring, synthetic monitoring and RUM
+
+**Intuition.** There are two vantage points to watch a system from. **White-box** monitoring
+looks *from inside the process* — signals the code emits about its own guts (queue depth, GC
+pauses, cache hit rate, connection-pool waiters). **Black-box** monitoring looks *from the
+outside as a user would* — you fire a request at the front door and see what comes back,
+with zero knowledge of internals. The Google SRE dichotomy: white-box tells you *why* it is
+sick; black-box tells you *whether users can actually reach it right now*. You need both,
+and they catch different failures.
+
+**Why you can't skip black-box.** Every white-box signal comes from *your* process. If DNS
+is misconfigured, the CDN is down, a load balancer certificate expired, or a whole region is
+unroutable, your process may be perfectly healthy and reporting green — while every real user
+gets an error. A white-box dashboard literally cannot see a failure that happens *before the
+request reaches your code*. Black-box probes sit outside that boundary and catch exactly
+those third-party, network, DNS, TLS, and edge failures.
+
+**Two flavors of black-box telemetry:**
+- **Synthetic monitoring (active probing).** Scripted robots hit your endpoints on a schedule
+  (uptime pings, a full scripted login-and-checkout journey) from multiple geographic
+  vantage points. It answers "is the critical path up *right now*, from Frankfurt, over the
+  real internet?" — and it works even at 3 a.m. with zero real traffic, so it detects an
+  outage before the first customer does. Downside: it is a fixed script — it only tests the
+  journeys you thought to script and gives no visibility into the actual population of users.
+- **Real User Monitoring (RUM, passive).** Telemetry captured *from real browsers/apps* —
+  actual page-load times, Core Web Vitals, JS errors, per-device/geo/browser breakdowns. It
+  reflects the true user population (that one slow Android build in one region) but only
+  reports on paths users actually exercised, and goes quiet exactly when traffic dies —
+  which is when you most need a signal.
+
+**Trade-off.** White-box + RUM give root cause and real-population truth but are blind to
+"the door is locked before anyone reaches my code." Synthetic/black-box catches
+up-or-down and external-dependency failures with a constant heartbeat but tells you nothing
+about *why* and can't see the long tail of real-user diversity. The senior answer is: page
+on black-box/synthetic "is the user journey up" as the outermost safety net, use white-box
++ RUM to diagnose and to understand the real population, and never rely on only one.
+
+---
+
 ## The three pillars: metrics, logs, and traces
 
 **Intuition.** The three pillars are three *complementary* views of the same system:
@@ -114,9 +153,13 @@ tell you *where*; logs tell you *why*.** Correlation IDs stitch all three togeth
   aggregate across replicas.
 
 **Percentiles matter more than averages.** A mean latency of 50ms can hide that 1% of
-requests take 2s. Always alert and SLO on percentiles (p99, p99.9) and understand that in
-a page composed of 100 backend calls, a p99 backend latency is hit on nearly *every* page
-render (tail amplification). This is why Google measures the "long tail."
+requests take 2s. Always alert and SLO on percentiles (p99, p99.9) and understand **tail
+amplification**: in a page composed of 100 *independent* backend calls, the chance that at
+least one call lands in the slow p99 tail is `1 - 0.99^100 ≈ 0.63` — so **roughly 2 in 3
+(63%) page renders** hit a p99-latency call, not "nearly every" one but far more than the
+1% intuition suggests. Push to 250 calls and it is `1 - 0.99^250 ≈ 92%`. This is the
+classic Dean and Barroso result ("The Tail at Scale"), and it is why Google measures — and
+optimizes — the "long tail" rather than the average.
 
 **Cardinality — the number one metrics footgun.** Cardinality = the number of unique
 label-value combinations = number of distinct time series. Each unique combination is a
@@ -263,8 +306,13 @@ decision (you buffer until the trace ends).
 
 Common production pattern: **head-sample aggressively to protect the pipeline, then
 tail-sample** in the Collector to guarantee all error/slow traces survive. Also emit
-**exemplars** — links from a metric bucket (e.g., the p99 histogram bucket) to a concrete
-trace id — so alerts can jump straight to a representative slow trace even under sampling.
+**exemplars**. An exemplar is a first-class Prometheus/OpenTelemetry feature: a concrete
+`trace_id` attached to a *specific sample inside a histogram bucket* (e.g. one of the
+requests that landed in the p99 latency bucket). So when you see the p99 spike on a
+dashboard, clicking it jumps straight to an *actual slow trace* for that spike — it is the
+fix for "I have the metric showing something is slow, but head-sampling already dropped the
+trace I need." Exemplars survive sampling because the kept trace is the one the metric links
+to.
 
 ---
 
@@ -358,6 +406,29 @@ flowchart LR
   penalties) for missing an SLO. The litmus test: *"what happens if we miss it?"* If money
   changes hands, it's an SLA. Your internal SLO should be **stricter** than your SLA (keep
   a safety margin).
+
+**Worked example — computing an availability SLI and its budget burn.** Say you define the
+SLI in PromQL as the fraction of non-5xx requests over the 28-day window:
+
+```promql
+sum(rate(http_requests_total{status!~"5.."}[28d]))
+  /
+sum(rate(http_requests_total[28d]))
+```
+
+Plug in numbers. Over 28 days the service saw **1,000,000,000** requests and **700,000** of
+them returned 5xx. Good = 1,000,000,000 − 700,000 = 999,300,000.
+
+- SLI = 999,300,000 / 1,000,000,000 = **0.99930 = 99.93%**.
+- SLO = **99.9%**, so the allowed failures = 0.1% × 1,000,000,000 = **1,000,000** (the total
+  error budget for the window).
+- Failures used = 700,000. Budget consumed = 700,000 / 1,000,000 = **70% of the 28-day
+  budget** — you are *meeting* the SLO (99.93% ≥ 99.9%) but have already burned 70% of your
+  budget with a week still to go.
+
+That last number is precisely what the burn-rate alerting section acts on: 70% consumed with
+time left is a "slow burn" you'd want a ticket for, not a page. This is how an abstract
+good/total ratio turns into a concrete reliability-vs-velocity decision.
 
 **Error budget.** `error_budget = 1 - SLO`. A 99.9% SLO permits 0.1% failures = the
 budget. Over 30 days that's ~43m 12s of allowed downtime; 99.99% -> ~4m 19s; 99.999% ->
@@ -467,6 +538,80 @@ total outage — a **correlated-failure / cascading** trap.
   dependency fail all instances at once (e.g., fail-open, or use load-shedding instead).
 - **Probe frequency/timeout:** aggressive probes detect failures fast but add load and
   cause flapping; lax probes are stable but slow to react.
+
+---
+
+## Graceful degradation and resilience patterns
+
+**Intuition.** The intro promised systems that *degrade gracefully*. That does not happen by
+accident — it is a small toolbox of patterns that keep one sick dependency from taking down
+the whole system. The mental model: a failure is a fire, and each pattern is a firebreak
+that stops the fire from spreading up the call graph. (These are covered in more depth in
+the dedicated resilience/fault-tolerance system-design topics; here is the compact version
+you must be able to reason about when an interviewer says "how do you make this resilient?")
+
+**The core patterns.**
+- **Timeouts.** Never wait forever on a downstream call. A caller with no timeout, talking to
+  a hung dependency, ties up a thread/connection per request until its own pool is exhausted —
+  the outage propagates *upward*. Every network call needs a bounded timeout.
+- **Timeout budgets.** In a call chain A -> B -> C, the timeout must *shrink* as you go
+  deeper. If the user-facing budget is 1000ms and A already spent 200ms before calling B,
+  B should be given at most ~800ms, and C less again. A common bug is a leaf service with a
+  longer timeout than its caller — the caller gives up while the leaf keeps working,
+  wasting the very capacity you're trying to protect.
+- **Retries with exponential backoff and jitter.** Retrying a failed call helps with a
+  transient blip — but naive immediate retries cause a **retry storm**: the downstream is
+  already struggling, and every caller piles on 3x the load at the worst moment,
+  guaranteeing it stays down. Fix: wait an exponentially growing delay between attempts
+  (e.g. 100ms, 200ms, 400ms) *plus random jitter* so retries from thousands of clients don't
+  synchronize into a thundering herd. Also cap total attempts and never retry
+  non-idempotent writes blindly.
+- **Circuit breaker.** Wraps a downstream call in a state machine. **Closed** = calls pass
+  through normally. If failures cross a threshold, it trips to **Open** = calls fail
+  *immediately* (fail-fast) without even trying the sick dependency, giving it room to
+  recover and freeing the caller's threads. After a cool-down it goes **Half-Open** = lets a
+  few trial calls through; success closes it, failure re-opens it. This is what stops a slow
+  dependency from consuming all of the caller's threads.
+- **Bulkhead.** Named after a ship's watertight compartments: isolate resources per
+  dependency so one flooding compartment can't sink the ship. Give each downstream its own
+  bounded thread pool / connection pool. Then a hang in `recommendations-svc` exhausts only
+  its own small pool, and calls to `payment-svc` keep flowing — instead of one slow
+  dependency draining a single shared pool and stalling *every* endpoint.
+- **Load shedding.** When you are over capacity, deliberately reject a fraction of requests
+  fast (HTTP 429/503) to protect the rest — serving 80% of traffic well beats melting down
+  and serving 0%. Prefer to shed low-priority work first (drop a recommendations widget,
+  keep checkout).
+- **Backpressure.** Instead of accepting unbounded work and drowning, signal *upstream* to
+  slow down (bounded queues that block/reject when full, gRPC/reactive flow control). It
+  pushes the "too much load" problem to the edge where it can be shed cheaply rather than
+  letting queues grow without bound deep inside the system.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Open: failures over threshold
+    Open --> HalfOpen: after cool-down
+    HalfOpen --> Closed: trial calls succeed
+    HalfOpen --> Open: trial call fails
+```
+
+**Trade-offs.**
+- **Retries: availability vs amplification.** Retries mask transient faults and raise success
+  rate, but every retry multiplies load — the exact wrong thing during an overload. Combine
+  with circuit breakers and backoff+jitter, and only retry idempotent operations. The
+  condition that flips it: if the downstream is *saturated* (not blipping), retries make it
+  strictly worse — shed instead.
+- **Circuit breaker sensitivity.** A tight threshold trips early and protects the caller but
+  causes false trips on a brief blip (you fail requests that would have succeeded); a loose
+  threshold rarely false-trips but lets the caller bleed threads longer before protecting
+  itself. Tune per dependency criticality.
+- **Load shedding vs autoscaling.** Shedding is instant (protects you *now*) but drops user
+  requests; autoscaling preserves all requests but takes minutes to warm — useless against a
+  sudden spike. Real systems shed to survive the seconds while autoscaling catches up.
+- **Fail-open vs fail-closed.** When a dependency fails, decide per feature: a
+  fraud-check might **fail-closed** (block the risky action) while a recommendations widget
+  **fails-open** (render the page without it). The right default depends on whether the
+  dependency is a safety gate or an enhancement.
 
 ---
 
@@ -611,10 +756,16 @@ Vendors bill on active time series, ingested GB, and events; a single careless l
 10x a bill overnight.
 
 **Techniques to control cost.**
-- **Bound labels:** only low-cardinality dimensions as labels; templatize URLs
-  (`/users/{id}`). Put high-cardinality IDs in traces/logs (indexed differently).
+- **Bound labels** (defined in the metrics section): keep only low-cardinality dimensions as
+  labels, templatize URLs, move high-cardinality IDs to traces/logs. The economic point the
+  metrics section doesn't make: because managed vendors bill **per active time series**, a
+  single unbounded label doesn't just OOM Prometheus — it linearly multiplies your monthly
+  invoice by that label's distinct-value count (add `user_id` with 10M values and you are
+  now billed for ~10M series where you had one).
 - **Sampling:** head + tail for traces; dynamic log sampling (keep all errors, 1% of
-  successes).
+  successes). Note the billing units differ by signal — metrics bill per series, logs and
+  events bill per **ingested GB**, so the cheapest lever depends on which signal dominates
+  your bill.
 - **Aggregation / pre-aggregation at the edge** (OTel Collector, recording rules) to
   reduce series before storage.
 - **Tiered retention & downsampling:** raw for days, downsampled (5m/1h rollups) for

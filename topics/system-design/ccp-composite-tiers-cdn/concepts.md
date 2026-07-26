@@ -52,10 +52,12 @@ everything into one deployable, the whole thing inherits the *hardest-to-scale* 
 **Solution (abstract mechanism).** Split the application into **two tiers**:
 
 1. **Application tier** — presentation **and** business logic bundled into a single
-   **stateless** tier, fronted by an Elastic Load Balancer and grown/shrunk by an
-   Elastic Load Balancer + **Elasticity Manager** control loop (*the autoscaling controller
-   that watches load metrics and adds/removes instances — think AWS Auto Scaling groups or a
-   Kubernetes Horizontal Pod Autoscaler*). Because it holds no session
+   **stateless** tier. It is *fronted by an Elastic Load Balancer for traffic distribution*
+   (spreading requests across instances) and *grown/shrunk by an **Elasticity Manager***
+   (*the autoscaling control loop that watches load metrics and adds or removes instances —
+   AWS Auto Scaling group scaling policies, a Kubernetes Horizontal Pod Autoscaler, or KEDA in
+   modern terms*). These are two distinct roles: the load balancer routes traffic, the
+   Elasticity Manager changes how many instances exist. Because the tier holds no session
    state, instances are interchangeable and scale out cheaply.
 2. **Data tier** — all persistent state, handled by **one or several Storage Offerings**
    (*a provider-managed persistence service — a managed database, blob store, or key-value
@@ -86,11 +88,25 @@ Balancing, talking to a managed store (RDS/Aurora, DynamoDB, Azure SQL / Cosmos 
 Firestore). A serverless variant is Lambda/Azure Functions/Cloud Functions (application tier) +
 managed DB (data tier).
 
+**Worked example — the over-provisioning two-tier accepts for simplicity.** Put numbers on the
+"scale the tier as a unit" cost. Say a UI spike demands 10 application instances, but each of
+those instances *also* carries heavy business logic that only some requests exercise. In the
+two-tier shape you have one fleet, so you run **10 "fat" instances** — every box ships both the
+UI code and the full logic code, and all 10 are sized for the heavier of the two jobs. Now split
+the same load into three tiers: the light UI work needs **10 thin presentation instances**, but
+the heavy logic (hit far less often) needs only **3 (fat) logic instances**. Cost it out with a
+fat box ≈ 2× a thin box: two-tier is `10 fat × 2 = 20` cost units; three-tier is
+`10 thin × 1 + 3 fat × 2 = 10 + 6 = 16` cost units — roughly **20% cheaper**, and the UI tier can
+now scale down at night without dragging the logic capacity with it. That gap *is* the
+over-provisioning two-tier trades away for having one deployable, one pipeline, and one fewer
+network hop. (The three-tier section below computes the split rigorously.)
+
 **Trade-offs / when to use.** Use the two-tier shape when presentation and business logic have
 **similar workloads** and there is no benefit to scaling them separately — it is simpler
 (one deployable, one build/deploy pipeline for the logic) and has fewer network hops. The cost:
 UI-bound spikes and compute-bound spikes are coupled, so you over-provision the whole tier for
-whichever dimension peaks. Graduate to three tiers when those workloads diverge.
+whichever dimension peaks (the numbers above). Graduate to three tiers when those workloads
+diverge.
 
 **Related patterns.** Three-Tier Cloud Application (the next refinement), Content Distribution
 Network (offload static content out of the application tier), Stateless Component, Elastic Load
@@ -189,6 +205,15 @@ SQS/EventBridge → worker service → Aurora/DynamoDB; or Azure Front Door → 
 Bus → Functions → Azure SQL/Cosmos; or Cloud LB → Cloud Run → Pub/Sub → GKE workers → Cloud
 SQL/Spanner. Microservices generalize this into *many* independently scaled tiers.
 
+*Why still teach rigid tiers if we have microservices?* Because the two decompositions cut along
+**orthogonal axes** and coexist. Tiers partition by **technical scaling profile** — stateless
+compute vs stateful data, "which parts scale by cloning vs which parts are hard to scale." Micro­
+services partition by **business domain** — orders vs payments vs inventory. A single microservice
+is itself typically built as tiers internally (a stateless service instance in front of its own
+data store), and a fleet of microservices is still fronted by an edge/CDN and backed by data
+tiers. So tiers are not "outdated by" microservices; they answer a different question (*how do I
+scale this component?*) than microservices do (*where are my domain boundaries?*).
+
 **Trade-offs / when to use.** Use three tiers when presentation and processing have **divergent
 workloads** (different peaks, different resource profiles) and you want to scale/deploy them
 separately. Cost: an extra network hop and more moving parts (two control loops, inter-tier
@@ -270,7 +295,18 @@ assets.
 
 **What a CDN is (and isn't) in the composite.** A CDN sits **in front of** a two- or three-tier
 application, absorbing static/streamed traffic at the edge so the application and data tiers only
-handle dynamic requests. It is a *composition choice*, not a replacement for the tiers.
+handle dynamic requests. It is a *composition choice*, not a replacement for the tiers. Here the
+two diagrams above join up: static/cacheable requests are served at the edge, while cache misses
+and dynamic requests **fall through** the edge to the origin — which is the tiered app itself:
+
+```mermaid
+flowchart TD
+  U["Users"] --> E["CDN edge PoP (nearest replica)"]
+  E -->|"cache hit: static asset served locally"| U
+  E -->|"cache miss or dynamic request falls through"| LB["Elastic Load Balancer (origin = app tier)"]
+  LB --> APP["Application / presentation + logic tier(s)"]
+  APP --> D["Data tier (Storage Offerings)"]
+```
 
 **Modern equivalent.** CloudFront, Akamai, Fastly, Cloudflare, Azure Front Door / Azure CDN,
 Google Cloud CDN. Edge-compute extensions (Lambda@Edge / CloudFront Functions, Cloudflare

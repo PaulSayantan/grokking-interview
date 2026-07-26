@@ -151,7 +151,8 @@ just triggers another randomized round — safety holds; only liveness is delaye
 by a few timeouts.
 
 **Trade-offs / tuning:** election timeout must satisfy
-`broadcastTime << electionTimeout << MTBF`. Too short → spurious elections under
+`broadcastTime << electionTimeout << MTBF` (**MTBF** = Mean Time Between
+Failures — the average time a node runs before crashing). Too short → spurious elections under
 transient slowness (leader flapping, availability loss). Too long → slow failover
 (higher unavailability window on real crashes). Typical: heartbeat ~50 ms,
 election timeout 150–300 ms → ~sub-second failover.
@@ -314,9 +315,10 @@ hints, hand back later. Boosts availability but **breaks the R+W>N guarantee** �
 a subsequent read of the home nodes may miss the write. This is an availability
 lever, not a consistency guarantee.
 
-**BFT quorums** need `N = 3f + 1` and quorums of `2f + 1` (PBFT) to tolerate
-`f` **Byzantine** (arbitrary/malicious) nodes, because two `2f+1` quorums
-intersect in `≥ f+1` nodes, guaranteeing ≥1 honest node in the overlap.
+**BFT quorums** need `N = 3f + 1` and quorums of `2f + 1` (**PBFT** = Practical
+Byzantine Fault Tolerance, Castro–Liskov 1999) to tolerate `f` **Byzantine**
+(arbitrary/malicious) nodes, because two `2f+1` quorums intersect in `≥ f+1`
+nodes, guaranteeing ≥1 honest node in the overlap.
 
 ---
 
@@ -621,7 +623,13 @@ and they must crash a node whose clock drifts past the offset.
 ## Consistency models, linearizability to eventual
 
 A hierarchy from strongest to weakest (stronger = fewer allowed behaviors =
-easier to program against, harder/slower to provide):
+easier to program against, harder/slower to provide).
+
+> [!KEY-TAKEAWAY]
+> **CAP in one line:** during a network **P**artition you can keep either
+> **C**onsistency (linearizability) *or* **A**vailability, not both — a **CP**
+> system refuses/blocks the minority side to stay consistent; an **AP** system
+> keeps serving but may return stale/divergent data.
 
 **Linearizability (strong / atomic / "the C in CAP"):** there exists a single
 total order of operations consistent with **real-time** — once a write completes,
@@ -635,6 +643,24 @@ but go non-linearizable).
 **Sequential consistency (Lamport):** a single total order consistent with each
 process's **program order**, but **not** tied to real-time — so a read may return
 a stale value as long as everyone agrees on *an* order. Weaker than linearizable.
+
+**Worked example (sequential but NOT linearizable).** One register `x`, starts 0.
+
+1. Client **A** issues `write(x=1)` at real time `t=10 ms`; it **completes** (A
+   gets the ack) at `t=20 ms`.
+2. Client **B** issues `read(x)` at real time `t=30 ms` — *after* A's write
+   already finished — and gets back `0`.
+
+Under **linearizability** this is **illegal**: A's write completed in real time
+before B's read began, so B is forbidden from seeing the old value — recency is
+mandatory. Under **sequential consistency** it is **allowed**: the system may
+place B's read *before* A's write in the single agreed order (`read→0`, then
+`write=1`), because sequential only demands *some* total order respecting each
+client's own program order — it is not pinned to the wall-clock timing of when
+operations completed. That freedom to ignore real-time completion is the *entire*
+gap between the two models, and it maps directly onto the "linearizable vs
+serializable" follow-up below (linearizable adds the real-time constraint;
+serializable does not).
 
 **Causal consistency:** operations related by happens-before are seen in that
 order by all nodes; concurrent ops may be seen in different orders. This is the

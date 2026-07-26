@@ -44,14 +44,21 @@ flowchart TD
 
 **Consequences you must design around:**
 - **No cross-service JOINs.** A query that needs Orders + Customer data is now an
-  API composition (call both, join in code) or a CQRS read model built from events.
+  API composition (call both, join in code) or a **CQRS** read model built from events.
+  *CQRS (Command Query Responsibility Segregation)* means you separate the **write
+  model** (the source-of-truth tables each service owns) from a **read model**: a
+  denormalized, purpose-built *materialized view* that a consumer keeps up to date by
+  listening to the services' events. Cross-service reads then hit that pre-joined
+  projection instead of doing runtime JOINs — at the cost of **eventual consistency**
+  (the read model lags the writes by the event-propagation delay).
 - **No distributed ACID transaction.** "Place order + reserve inventory + charge
   card" spans three stores → you need a **saga** (see below), not a 2-phase commit.
 - **Referential integrity is your job.** No FK across services; you get eventual
   consistency and must handle dangling references.
 
 **Trade-offs.**
-- *Gain:* independent scaling (scale Cart's DynamoDB WCU without touching Orders),
+- *Gain:* independent scaling (scale Cart's DynamoDB WCU — write capacity units —
+  without touching Orders),
   independent deploys, right-tool-per-job, fault isolation (one DB's hot partition
   doesn't stall others), and team autonomy.
 - *Give up:* transactional simplicity, easy reporting/analytics (now needs a data
@@ -81,9 +88,9 @@ with backoff and jitter, circuit breakers, and bulkheads.
 |---|---|---|---|
 | **API Gateway (REST)** | L7 | Public APIs, per-method auth, usage plans, API keys, WAF | **29 s** integration timeout (default; raisable via quota on regional REST), 10 MB payload, 10k RPS default account throttle (burst 5k) |
 | **API Gateway (HTTP API)** | L7 | Lower-cost/lower-latency proxy to Lambda/HTTP, JWT auth | ~70% cheaper, lower latency than REST APIs, fewer features (no per-key usage plans historically) |
-| **ALB** | L7 | HTTP/HTTPS/gRPC to containers, path/host routing, sticky sessions | supports **gRPC** targets and HTTP/2; no hard request-rate cap; connection-based pricing (LCU) |
+| **ALB** | L7 | HTTP/HTTPS/gRPC to containers, path/host routing, sticky sessions | supports **gRPC** targets and HTTP/2; no hard request-rate cap; usage-based pricing (LCU — load balancer capacity units) |
 | **NLB** | L4 | Ultra-low latency TCP/UDP/TLS, static IP / PrivateLink source | millions of req/s, preserves source IP, ~microsecond overhead |
-| **App Mesh / VPC Lattice / Service Connect** | service-to-service | East-west traffic, mTLS, retries | see service-mesh section |
+| **App Mesh, VPC Lattice, Service Connect** | service-to-service | East-west traffic, mTLS (mutual TLS — both sides present certs), retries | see service-mesh section |
 
 **REST vs gRPC for inter-service calls.** gRPC (HTTP/2, protobuf, binary) gives you
 smaller payloads, lower latency, streaming, and a strict contract — great for
@@ -131,6 +138,43 @@ roughly **5× the downtime of a single hop**, just from stacking dependencies. A
 breaks the multiplication: if Inventory is down, the queue buffers the event and the
 caller still gets its 200, so a downstream outage no longer subtracts from the
 caller's availability.
+
+### Resilience patterns for synchronous calls
+
+Because a sync caller couples its fate to the callee, four patterns are the standard
+toolkit — know all four by name and by mental model, because interviewers probe them
+directly ("how do you stop a slow downstream from exhausting your threads?" wants
+*bulkhead*; "how do you stop hammering a dead dependency?" wants *circuit breaker*).
+
+- **Timeout — fail fast.** Never wait indefinitely. Cap each call (e.g. 1–2 s) so a
+  hung downstream returns an error instead of pinning your thread forever. A missing
+  timeout is the number-one cause of cascading outages: one slow dependency and every
+  caller's request thread parks on it.
+- **Retry with backoff and jitter — recover from transient blips, don't amplify them.**
+  Retry a failed call, but wait longer between attempts (*exponential backoff*: 100 ms,
+  200 ms, 400 ms…) and add **jitter** (randomize the delay). *Why jitter:* if 10,000
+  clients all fail at once and retry on the same fixed schedule, they resynchronize into
+  a **thundering herd** and hammer the recovering service in lockstep waves; randomizing
+  the wait spreads the retries out. Only retry **idempotent** operations, and cap the
+  attempts. The AWS SDKs retry throttling/5xx errors automatically (a few attempts with
+  exponential backoff and jitter by default) — know that so you don't accidentally stack
+  your own retries on top and multiply the load.
+- **Circuit breaker — stop calling a dependency that's already down.** Wrap the call in
+  a breaker with three states: **closed** (calls flow normally; count failures),
+  **open** (once failures cross a threshold, *stop calling* — fail instantly for a
+  cooldown so you don't pile load on a struggling service or block on doomed calls), and
+  **half-open** (after the cooldown, let a few trial calls through; if they succeed,
+  close the breaker; if not, re-open). It trades a brief window of "fail fast even
+  though it might have worked" for not drowning a recovering dependency.
+- **Bulkhead — isolate resource pools so one slow dependency can't drown the service.**
+  Named after a ship's watertight compartments: give each downstream dependency its own
+  bounded pool of threads/connections. If Pricing goes slow and its pool saturates,
+  calls to Inventory still have their own free pool, so one sick dependency can't
+  consume every thread and take the whole service down with it.
+
+These live in **application code** (Resilience4j, Polly, or hand-rolled) or are pushed
+out into a **service mesh** sidecar (see the mesh section), which applies timeouts,
+retries, and circuit breaking centrally without app changes.
 
 ---
 
@@ -304,9 +348,21 @@ flowchart LR
 
 **Isolation anomalies to name in interviews:** because sagas lack isolation, you can
 get *dirty reads* (someone reads the pending order), *lost updates*, and *fuzzy
-reads*. Countermeasures: **semantic locks** (a "pending" status flag), **commutative
-updates**, **reread/version checks**, and **pessimistic ordering** of steps (do the
-step hardest to compensate last).
+reads*. Countermeasures — each with the intuition, not just the label:
+- **Semantic lock** — a `PENDING`/`RESERVED` status flag on the record that tells
+  other actors "this is in-flight, don't act on it as final." It's an application-level
+  lock (the DB isn't holding one), so readers can choose to ignore or wait on in-flight
+  rows. The order sitting at `PENDING` in the worked example below *is* a semantic lock.
+- **Commutative updates** — design operations so order doesn't matter (e.g. `increment
+  balance by +50` / `−50` instead of `set balance = 150`). Then a compensation that
+  arrives late, or a step that re-applies, still lands on the right total — re-ordering
+  or replaying is safe.
+- **Reread / version checks** — before you act, re-read the record and check a version
+  attribute (optimistic locking); if it changed under you, abort or retry, avoiding a
+  lost update.
+- **Pessimistic ordering** of steps — sequence the saga so the step **hardest to
+  compensate** runs **last** (do the irreversible ship after the easily-refundable
+  charge), shrinking the window where you'd have to undo something you can't.
 
 **Trade-offs (orchestration vs choreography) — see the next two sections.**
 
@@ -420,6 +476,18 @@ publishes, marking rows sent. The event and the state change commit together, so
 event is guaranteed to eventually publish (at-least-once → consumers must be
 idempotent).
 
+**Why the relay is at-least-once (and why that ties straight back to idempotency).**
+A poll-based relay does "SELECT unsent rows → publish → UPDATE them to sent." That is
+*itself* two steps with no shared transaction: if the relay publishes successfully but
+crashes **before** the `UPDATE sent` commits, the next poll re-selects those same rows
+and **publishes them again**. So the relay is at-least-once *by design* — you cannot
+close this race, only tolerate it. That is exactly why the idempotency section is
+non-negotiable: the **same downstream idempotency key** (the outbox row id / event id)
+lets the consumer dedupe the re-published event. Outbox guarantees *at-least-once*
+publication; idempotent consumers turn that into *effectively-once* processing. (Mark
+sent *after* publish, never before — marking first risks losing an event if the publish
+then fails, which is worse.)
+
 **AWS realizations:**
 - **DynamoDB + DynamoDB Streams (outbox via CDC).** Write the business item; enable
   **DynamoDB Streams** (change log, **24 h** retention, ordered per partition key).
@@ -452,7 +520,9 @@ flowchart TD
   latency. Pick Streams when you're on DynamoDB; pick DMS/Debezium CDC or a polling
   relay on relational stores.
 - *Gotcha:* DynamoDB Streams retention is **24 h** — if the relay Lambda is broken for
-  longer, you lose records; use a DLQ on the Lambda and alarms on iterator age.
+  longer, you lose records; use a **DLQ (dead-letter queue — a side queue that captures
+  messages a consumer repeatedly fails to process)** on the Lambda and alarms on
+  iterator age.
 - *Gotcha (schema coupling):* a pure DynamoDB-Streams "outbox" publishes the **raw item
   change**, not a curated domain event — so your event contract leaks your storage
   model, and every consumer couples to your table's attribute shape. Rename a column or

@@ -271,6 +271,20 @@ flowchart TB
 > **SaaS = you get the finished app**. The higher you go, the less you operate and the less you
 > control.
 
+**Where do containers and serverless sit on this line?** The IaaS → PaaS → SaaS ladder has rungs
+between the named ones, and interviewers probe them:
+
+- **Containers-as-a-Service (CaaS)** — managed Kubernetes/ECS/Cloud Run — is a *fuzzy middle rung
+  between IaaS and PaaS*. The provider runs the control plane and (in the "serverless container"
+  flavor) the nodes, so you no longer patch OS hosts, but you still own the container image, its
+  base OS packages, and often the scaling policy. More managed than a raw VM, less opinionated than
+  classic PaaS.
+- **Function-as-a-Service (FaaS)** is the *finest-grained PaaS*: you deploy a single function, the
+  platform is **event-driven** (it invokes your code per request/event), **scales to zero** (nothing
+  runs, and you pay nothing, when idle), and bills **per invocation** rather than per running hour.
+  That granularity — no server, no idle cost, per-request billing — is exactly why it's "PaaS taken
+  to its limit," not a separate model.
+
 ### Responsibility matrix (who owns each layer)
 
 Reading the stack bottom-up, the boundary between "provider" and "you" slides upward as you move
@@ -304,6 +318,9 @@ Notice the last row never flips: **your data and its access configuration are al
 **Intent.** *How can different customers share a physical hosting environment so that it can be used
 on-demand with a pay-per-use pricing model?*
 
+*In plain terms:* you rent raw compute, storage, and network and manage everything above the bare
+hardware yourself — you pick the OS, patch it, install the runtime, and run the app.
+
 **Problem / context.** Applications with **Periodic** or **Once-in-a-lifetime** (and other variable)
 workloads need IT resources provisioned *flexibly* — but buying and racking hardware for each
 customer is slow and wasteful.
@@ -331,6 +348,10 @@ patterns. *Deep dive:* provider-specific compute/storage/networking depth in
 
 **Intent.** *How can custom applications of the same or different customers share an execution
 environment so that it can be used on-demand with a pay-per-use pricing model?*
+
+*In plain terms:* the provider hands you a ready-run platform (OS + middleware + scaling +
+resiliency) and you just push **your** application code into it — no servers to patch, no autoscaler
+to wire up.
 
 **Problem / context.** If every customer provisions their own IaaS VMs and installs the same OS +
 middleware stack, you get **many redundant installations** and inefficient use of the cloud, plus
@@ -384,6 +405,9 @@ cheap to move; business logic tangled with provider-specific APIs is not.
 **Intent.** *How can customers share a provider-supplied software application so that it can be used
 on-demand with a pay-per-use pricing model?*
 
+*In plain terms:* you don't run any code at all — you log into a finished app someone else built and
+operates, and the only things you own are your settings and your data.
+
 **Problem / context.** Smaller enterprises often **lack the resources or expertise to build custom
 software**, and many applications have become **commodities** used across companies — office suites,
 email, CRM, collaboration, communications. Everyone re-building or self-hosting these is wasteful.
@@ -409,9 +433,12 @@ Multi-tenant SaaS raises tenant-isolation questions — *deep dive:*
 ## Deployment models overview
 
 The **cloud deployment models** answer: *who is allowed to share this cloud, and where does it live?*
-They are NIST-aligned and trade **control/privacy** against **cost/economies-of-scale**. All four aim
-to deliver the five essential cloud properties — *on-demand self-service, broad network access,
-resource pooling, rapid elasticity, and measured (pay-per-use) service* — but to different audiences.
+They are NIST-aligned and trade **control and privacy** against **cost and economies-of-scale**. All
+four aim to deliver the five essential cloud properties defined by NIST (SP 800-145) — briefly:
+*on-demand self-service* (you provision resources yourself, no human ticket), *broad network access*
+(reachable over the network from standard clients), *resource pooling* (many tenants share one
+dynamically-assigned pool), *rapid elasticity* (scale out and in quickly, seemingly limitless), and
+*measured service* (usage is metered so you pay per use) — but to different audiences.
 
 ```mermaid
 flowchart LR
@@ -450,7 +477,8 @@ demand is smoother and resources are used more efficiently — which lowers per-
 credit card can self-serve.
 
 **Trade-offs / when to use.** **Lowest cost, highest elasticity, no capex** — but you share
-multi-tenant infrastructure, with the associated data-residency, compliance, and "noisy neighbor"
+multi-tenant infrastructure, with the associated data-residency, compliance, and **"noisy neighbor"**
+(a co-tenant on the same shared hardware hogging CPU/IO/network and degrading *your* performance)
 considerations. Default choice unless privacy/regulatory constraints push you elsewhere.
 
 **Related patterns.** Contrast **Private Cloud** (single org) and **Community Cloud** (trust group);

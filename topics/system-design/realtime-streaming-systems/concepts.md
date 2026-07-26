@@ -36,7 +36,10 @@ key and runs operator instances in parallel across a cluster. Two families:
 - **Micro-batch:** Spark Structured Streaming (classic mode). The stream is cut
   into tiny batches (e.g., 200ms–1s) and each is processed as a mini batch job.
   Higher latency floor (hundreds of ms) but reuses the batch engine and gives
-  high throughput. (Spark's newer *Continuous Processing* mode targets ~1ms.)
+  high throughput. (Spark's *Continuous Processing* mode targets ~1ms latency, but
+  it has been experimental since Spark 2.3, is at-least-once, and supports only
+  map-like stateless operations — rarely used in production, so don't cite it as a
+  true peer of Flink's record-at-a-time engine in an interview.)
 
 ```mermaid
 flowchart LR
@@ -79,6 +82,39 @@ because it is just a library, not a cluster.
   throughput, simpler exactly-once via idempotent batch writes) but you can never
   beat its batch interval on latency. Record-at-a-time gets you ms latency but
   per-record checkpointing and state management are harder to operate.
+
+### Backpressure: how a slow operator throttles the whole pipeline
+
+**Intuition.** Picture a bucket brigade passing water: if the person at the well end
+(the sink) slows down, buckets pile up in the hands of the person before them, who
+then stops taking new buckets from *their* upstream, and the stall ripples all the
+way back to the source. **Backpressure** is exactly this: when one operator can't
+keep up, its slowness propagates *upstream* until the source itself slows down.
+
+**How it works.** Every operator reads from a **bounded input buffer**. If a slow
+operator (say a sink writing to an overloaded DB) drains its buffer slower than data
+arrives, the buffer fills. A full buffer means the *upstream* operator can no longer
+hand off records, so it blocks; its own buffer then fills, and so on back to the
+Kafka source — which stops polling. The visible symptom is **growing consumer lag**
+(unread offsets pile up in Kafka) and **stalled watermarks** (the source stops
+advancing event time, so windows stop firing). Flink implements this with
+**credit-based flow control**: a downstream task advertises how many buffer
+"credits" (free slots) it has, and an upstream task only sends as many records as
+there are credits — so a backed-up consumer naturally throttles its producer without
+dropping data.
+
+**Why it matters for the follow-ups.** This is *the* reason lag / watermark-stall is
+the primary streaming symptom to diagnose: almost every "my job fell behind" incident
+traces to one backpressured operator (a skewed key, a slow sink, GC pauses). You find
+the bottleneck operator (Flink's UI shows a backpressure indicator), then scale it,
+fix key skew, or shed load.
+
+**Trade-off.** Backpressure keeps the pipeline *correct* (no dropped data, bounded
+memory) but converts a throughput problem into a *latency* problem — the whole job
+slows to the speed of its slowest stage. The alternative, **load shedding** (dropping
+data when overloaded), keeps latency low but sacrifices completeness. Pick shedding
+only when stale-but-fast beats correct-but-late (live ops graphs); keep backpressure
+for anything where every event must count (billing, fraud).
 
 ---
 
@@ -171,7 +207,8 @@ that flows through the DAG as a special record. When the watermark passes the en
 of a window, the window fires and emits its result.
 
 **How it works.** The source generates watermarks, often as `maxEventTimeSeen -
-allowedLateness` (a bounded-out-of-orderness heuristic). Because there is no way
+boundedOutOfOrderness` (the **out-of-orderness bound** — how far behind the newest
+timestamp you assume a straggler could still be). Because there is no way
 to *know* the future, the watermark is a **guess about how out-of-order the stream
 is**. Two failure directions:
 
@@ -181,12 +218,40 @@ is**. Two failure directions:
   (completeness) but every window emits later (latency) and holds state longer
   (memory).
 
+> [!WARNING]
+> **Two different knobs, easily conflated.** The **out-of-orderness bound**
+> (`boundedOutOfOrderness`) sets **when a window *fires*** — the watermark must
+> reach the window's end before it emits. **Allowed lateness** is a *separate*,
+> window-level setting that decides **how long *after* firing** the window stays in
+> state so it can accept still-later events and re-emit. One controls the firing
+> deadline; the other controls the post-firing grace period. In Flink they are set
+> independently (`WatermarkStrategy.forBoundedOutOfOrderness(...)` vs
+> `.allowedLateness(...)`).
+
 Handling late data (Flink/Beam options):
 1. **Drop** late events (simplest; acceptable for approximate dashboards).
-2. **Allowed lateness:** keep the window in state for an extra grace period and
-   **re-emit an updated (retraction/update) result** when a late event arrives.
+2. **Allowed lateness:** keep the window in state for an extra grace period *after
+   it has already fired* and **re-emit an updated (retraction/update) result** when
+   a late event arrives.
 3. **Side output** late events to a dead-letter/repair stream for a slow reconcile
    path (this is essentially the cold path of a lambda architecture).
+
+**Worked example (numbers in → numbers out).** Window `[10:00:00, 10:00:05)`
+(5-second tumbling), `boundedOutOfOrderness = 3s`, `allowedLateness = 10s`. Watch
+the two knobs act at different moments:
+
+| Wall step | Event (event-time, value) | `maxEventTimeSeen` | Watermark = max − 3s | Effect on window [00,05) |
+|---|---|---|---|---|
+| 1 | (10:00:01, +1) | 10:00:01 | 09:59:58 | buffered; count=1 |
+| 2 | (10:00:04, +1) | 10:00:04 | 10:00:01 | buffered; count=2 |
+| 3 | (10:00:08, +1) | 10:00:08 | 10:00:05 | **watermark ≥ 05 ⇒ window FIRES, emits count=2** |
+| 4 | (10:00:03, +1) | 10:00:08 | 10:00:05 | late, but watermark < windowEnd(05)+10s grace ⇒ window still in state ⇒ **re-emits count=3** |
+| 5 | (10:00:02, +1) at wall 10:00:20 | 10:00:20 | 10:00:17 | now past 05+10s grace ⇒ **dropped / side-output** |
+
+So the out-of-orderness bound is what made step 3 fire (it took an event 3s past the
+window end to push the watermark to `05`); allowed lateness is what let step 4
+*correct* the already-emitted `2` up to `3`; and step 5 shows the grace period
+finally closing. The final committed value is **3**.
 
 ```
  event time →  ...  8   9  10  11  12  13
@@ -196,9 +261,15 @@ Handling late data (Flink/Beam options):
 
 **Real-world usage.** Uber's ad-event system sidesteps watermarks by keying events
 to a truncated 1-minute bucket and using a tumbling window, so late arrivals still
-land in the right bucket regardless of delay — a common pragmatic pattern. Most
-Flink SQL analytics jobs configure a bounded-out-of-orderness watermark (e.g., 5s)
-plus allowed lateness.
+land in the right bucket regardless of delay — a common pragmatic pattern. Why it
+works: the bucket key is computed from the event's *own* timestamp
+(`floor(eventTime, 1min)`), so an event that lands 20 minutes late still maps to and
+increments its *correct* bucket rather than a wrong "now" bucket. The price is that
+a bucket is never definitively **final** — you rely on **upsert / re-aggregation**
+in the sink (Pinot upsert) to keep updating the count instead of trusting a
+watermark deadline to declare the bucket closed. You trade a hard "done" signal for
+correctness under arbitrary lateness. Most Flink SQL analytics jobs instead configure
+a bounded-out-of-orderness watermark (e.g., 5s) plus allowed lateness.
 
 **Trade-offs.**
 - The watermark delay is the **direct dial between latency and completeness**.
@@ -206,6 +277,68 @@ plus allowed lateness.
   result is slower and costs more memory. In an interview, quantify it: "a 5s
   watermark drops the ~0.1% of events later than 5s but emits windows within ~5s;
   we side-output the tail to a nightly reconcile for billing accuracy."
+
+---
+
+## Stream joins: stream-stream and stream-table
+
+**Intuition.** Joining two *bounded* tables is easy — everything is already there.
+Joining two *unbounded* streams is hard for the same reason windowing is: a matching
+record for the row you have now might arrive seconds later, or might never arrive. So
+you can't "wait for the whole other side"; you must buffer one or both sides in state
+and decide *how long to wait for a match*. That deadline is, once again, driven by
+the **watermark**.
+
+**How it works — two flavors:**
+
+- **Stream-stream join (both sides are live streams).** You correlate events from
+  two streams that happen "near each other" in event time — e.g., join `ad_impression`
+  with `ad_click` to attribute clicks. Because a click can lag its impression, you
+  can't join instantaneously; you buffer both sides in state and bound the match with
+  a window:
+  - **Windowed join:** only rows whose event times fall in the *same* window can
+    match.
+  - **Interval join:** row `L` matches row `R` if `R.time ∈ [L.time − a, L.time + b]`
+    (e.g., "a click within 30 min *after* an impression"). Both sides are kept in
+    state, and the **watermark lets the engine evict** rows whose match interval has
+    fully passed — that eviction is what bounds state growth.
+- **Stream-table join (enrichment).** One side is a stream of events; the other is a
+  slowly-changing "table" (a dimension/lookup — user profile, product catalog),
+  usually materialized from a **changelog stream** (CDC / compacted Kafka topic). Each
+  event is enriched against the *current* table value. A **temporal join** pins the
+  lookup to the version of the row that was valid *at the event's event time* (so a
+  price change last week doesn't rewrite last month's orders).
+
+**Worked example (interval join, numbers in → numbers out).** Attribute clicks to
+impressions with interval `[impression.time, impression.time + 30min]`, watermark
+lag 1 min.
+
+| Event | Kept in state? | Match |
+|---|---|---|
+| impression `imp1` @ 10:00 | buffered until watermark > 10:30 | — |
+| click `clk1` @ 10:05 | probe imp-state | 10:05 ∈ [10:00, 10:30] ⇒ **emit (imp1, clk1)** |
+| click `clk2` @ 10:50 | probe imp-state | 10:50 ∉ [10:00, 10:30] ⇒ no match, drop |
+| watermark reaches 10:31 | — | `imp1` interval fully past ⇒ **evict imp1 from state** |
+
+So `imp1` occupies state for ~30 min + the 1-min watermark slack, then is reclaimed —
+the interval plus watermark is precisely what keeps join state from growing forever.
+
+**Trade-offs.**
+- **State growth is the whole game.** A stream-stream join buffers events for the full
+  join window; a wide window or high event rate means large state (use RocksDB, and
+  keep the window as tight as the business allows). An *unbounded* join (no window,
+  join on a key that can match at any time) will grow state forever — you **must**
+  attach a **state TTL** to evict stale keys, accepting that a very-late match is
+  missed.
+- **Late data cuts both ways.** With a tight watermark you evict one side before a
+  straggler on the other side arrives, silently missing joins (under-counting
+  attributions); a looser watermark catches more matches but holds more state longer
+  and emits later. Same latency-vs-completeness dial as windowing.
+- **Stream-table freshness vs correctness.** A plain lookup against the *latest* table
+  value is simple and cheap but can mis-attribute historical events after the
+  dimension changes; a temporal join is correct-by-event-time but needs versioned
+  (changelog) state and more memory. Pick temporal joins when the dimension changes
+  meaningfully over the data's lifetime (prices, exchange rates).
 
 ---
 
@@ -248,6 +381,24 @@ flowchart LR
 
 Flink barrier alignment (exactly-once). On failure: restore all snapshots +
 rewind Kafka offsets + abort uncommitted txn.
+
+**Operational depth (a senior is expected to know these).**
+- **State backend.** State lives either on the JVM **heap** (fast, but bounded by
+  memory and GC pressure) or in **RocksDB** (an embedded on-disk key-value store).
+  RocksDB holds state far larger than RAM and, crucially, enables **incremental
+  checkpoints** — each checkpoint uploads only the changed data files rather than the
+  whole state, which is what makes multi-terabyte state checkpoint cheaply.
+- **Checkpoint vs savepoint.** A **checkpoint** is automatic, periodic, and owned by
+  the framework for *failure recovery* (often cleaned up on success). A **savepoint**
+  is a manual, portable, self-contained snapshot you trigger for *planned* operations
+  — upgrading job code, changing parallelism (rescaling), or migrating clusters —
+  and it survives job restarts.
+- **Aligned vs unaligned checkpoints.** By default a barrier waits at each operator
+  for *all* input channels to reach it (**alignment**) — under backpressure a slow
+  channel stalls the whole checkpoint. **Unaligned checkpoints** let the barrier
+  overtake buffered in-flight data (snapshotting that data too), so checkpoints still
+  complete quickly under heavy backpressure, trading a larger snapshot for not
+  stalling.
 
 **Real-world usage.** Uber's ad platform layers all three: Flink checkpoints (2-min
 interval) + Kafka read_committed 2PC + per-record UUID for Pinot upsert and

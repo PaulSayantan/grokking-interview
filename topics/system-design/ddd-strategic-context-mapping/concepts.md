@@ -586,6 +586,54 @@ power**. A quick decision guide:
 
 ---
 
+## How each pattern is wired in practice
+
+The context-map patterns are *relationship* descriptions, but a senior
+interviewer will push you one level down: "OK, it's an ACL — so what does that
+actually look like in the running system? Sync or async? Who owns the data?"
+Each pattern has a typical *mechanical* realization. The relationship decides
+**who has power**; the mechanics decide **how bytes move and who is the system
+of record**.
+
+The key axes:
+
+- **Sync vs async.** *Synchronous* request/response (REST, gRPC) means the
+  downstream calls the upstream and waits — simple, but it couples the two on
+  **availability** (upstream down → your call fails) and **latency** (their p99
+  is in your p99). *Asynchronous* messaging (the upstream publishes events; the
+  downstream subscribes and keeps its own read model) decouples availability and
+  cadence, at the cost of **eventual consistency** — your copy lags the source.
+- **Data ownership.** Exactly one context is the **system of record** for a
+  given fact. Everyone else holds a *reference* (an ID they resolve on demand)
+  or a *replicated read model* (a local, eventually-consistent copy). Two
+  contexts claiming to own the same fact is the boundary error that produces
+  data-integrity bugs.
+
+| Pattern | Typical mechanics | Sync or async | Data ownership |
+|---|---|---|---|
+| **Partnership** | Jointly-designed API and/or shared event stream; whichever fits the interaction, co-evolved | Either (often both) | Each owns its half; the reserve/release handshake is negotiated |
+| **Shared Kernel** | A shared library / schema module compiled into both sides (same code, same types) | In-process (no network hop) | Co-owned model; no translation, so a kernel change ships to both |
+| **Customer/Supplier** | Upstream exposes a versioned REST/gRPC API or event stream; contract/consumer-driven tests guard it | Either | Upstream is system of record; downstream references or replicates |
+| **Conformist** | Downstream consumes the upstream API or events **using the upstream's own types** — no mapping layer | Either | Upstream owns the data *and* the vocabulary; downstream just borrows both |
+| **Anti-Corruption Layer** | An adapter that calls the upstream API (or subscribes to its events) and **re-emits clean domain objects/events** into your context | Either — wraps whatever the upstream offers | Upstream still owns the source data; your context owns its *translated* model |
+| **Open Host Service + Published Language** | A published, versioned REST/gRPC API or a documented public event stream, spoken in a designed schema (Protobuf/Avro/OpenAPI, or a standard like ISO 20022) | Either | Upstream owns the data; the Published Language is the only shape consumers may depend on |
+| **Separate Ways** | No integration — each context keeps its own data, reconciled manually if ever | N/A | Each owns a full, independent copy; duplication accepted |
+
+Reading the table: notice **ACL and Conformist can use the exact same transport**
+(both might subscribe to the same event stream). The difference is *not* sync vs
+async — it's whether a **translation step** sits at the boundary. Conformist lets
+the upstream's `STAT_CD` into your code; an ACL converts it to `CONFIRMED` first.
+
+> [!INTERVIEW]
+> A frequent follow-up: "You said Recommendations reads Orders via events — isn't
+> that just eventual consistency risk?" Yes: the async event stream buys
+> availability/cadence decoupling but Recs' read model **lags** the Orders source
+> of record, so never let Recs make a decision that requires an authoritative,
+> up-to-the-millisecond order state (e.g., fraud holds) off its replica — route
+> those back to the owning context synchronously.
+
+---
+
 ## Worked example: a full e-commerce context map
 
 Patterns learned in isolation don't stick; interviewers ask you to *compose*

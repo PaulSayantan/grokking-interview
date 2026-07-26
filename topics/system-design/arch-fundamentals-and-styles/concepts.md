@@ -12,11 +12,14 @@ handful of classes collaborate (Strategy, Observer, Adapter…). Keep that disti
 is itself a graded interview question.
 
 > [!INTERVIEW]
-> Every style section below leads with a bolded **Problem it solves** line, then how it works, a
-> diagram, the **trade-offs / -ilities**, and how it **differs from** adjacent styles. The
-> single most important framing (Richards & Ford's *First Law*): **everything in architecture is
-> a trade-off** — there is no "best" style, only the least-bad fit for *these* drivers. Reciting
-> a topology without naming what you sacrifice to get it is the classic junior mistake.
+> The single framing to carry into the room (Richards & Ford's *First Law*): **everything in
+> architecture is a trade-off** — there is no "best" style, only the least-bad fit for *these*
+> drivers. Reciting a topology without naming what you sacrifice to get it is the classic junior
+> mistake.
+
+Each style section below follows a fixed shape so they're easy to compare: a bolded **Problem it
+solves** line, then how it works, a diagram, the **trade-offs / -ilities**, and how it **differs
+from** adjacent styles.
 
 Several styles here have full **deep-dive topics** elsewhere in this library. This overview gives
 each a 1–2 line architectural treatment and an explicit **Deep dive: see …** pointer rather than
@@ -84,7 +87,13 @@ attributes you cannot compare two candidate styles objectively or know when the 
 "done enough." The `-ilities` give you the **axes** on which every style trade-off is scored.
 
 **How it works / the main axes** (ISO/IEC 25010; *FoSA* ch. 4–6). A characteristic is
-*operational*, *structural*, or *cross-cutting*:
+*operational*, *structural*, or *cross-cutting*. The split is by *where the property is observed*:
+**operational** = behavior at *runtime* (how the running system copes with load and failure);
+**structural** = properties of the *codebase and deploy artifact* (how easily you can change and
+ship it); **cross-cutting** = properties that span both runtime and structure and don't sit
+cleanly in either bucket. That definition is what lets you *derive* the placement rather than
+memorize it — availability is a runtime behavior (operational), modifiability is a code property
+(structural), and security shows up everywhere from code to runtime to ops (cross-cutting):
 
 - **Scalability** — handle growing load (often via horizontal scale-out). *Elasticity* is the
   sub-attribute of scaling *fast* with spikes.
@@ -252,6 +261,38 @@ scalability dominate and we have 4 teams,"* not "microservices because they're m
 output is **several styles composed**, which is the norm: real systems layer styles (microservices
 + EDA + cell-based here) rather than picking exactly one.
 
+**Second worked example — a flash-sale ticketing platform (watch a ranking eliminate a style):**
+The point here is to *see the ranking do the elimination*, not just to name a winner.
+
+1. **Rank characteristics:** the whole product is a 10:00 AM on-sale where 500k people hit *buy*
+   in the same 60 seconds, so **elasticity** (absorb a 100× spike in seconds) > **availability**
+   (a failed sale is a lost sale and a PR incident) > **performance** (sub-second seat holds).
+   Modifiability and simplicity rank *low* — this is a narrow, stable domain.
+2. **Let the ranking eliminate candidates:** **Layered / modular monolith** optimizes simplicity
+   and testability — the *bottom* of our list — and scales as one quantum against a single DB,
+   which is exactly the wall a flash sale hits, so **it's eliminated** (the ranking's top three
+   are the ones it's worst at). Plain **microservices** help team autonomy and per-service scale,
+   but our dominant problem is *one* hot path (seat inventory) melting *one* database under
+   burst — decomposing by capability doesn't remove that shared write bottleneck.
+3. **Land on the style whose strengths ARE the top three:** the characteristic that survives is
+   "serve extreme, spiky concurrency with the DB off the request path" → **Space-Based** (in-memory
+   grid holds the seat map, async data pumps drain to the DB). Its native optimizations —
+   elasticity, availability, memory-speed performance — line up 1-for-1 with the ranking.
+4. **Constraint check (this can still veto the winner):** Space-Based needs strong IMDG/ops
+   maturity. A 3-engineer team with no in-memory-grid experience *cannot* run it safely, so the
+   honest answer would fall back to "modular monolith + aggressive read caching + a queue in
+   front of the DB" and revisit — the constraint overrides the characteristic ranking. Assume here
+   we *do* have a platform team that operates a grid.
+5. **One-line ADR justification:** *"Space-Based for the on-sale path because elasticity and
+   availability under a 100× burst dominate and the DB is the proven bottleneck; accepted the
+   data-loss-window trade-off because a dropped analytics event is tolerable and seat holds are
+   reconciled against the grid."*
+
+Contrast the two walkthroughs: **same procedure, different rankings, different winners** —
+ride-hailing's availability-plus-team-autonomy ranking landed on microservices + EDA; the flash
+sale's elasticity-first ranking landed on Space-Based. That is the whole discipline: the ranking,
+not fashion, picks the style, and a constraint can still veto it.
+
 **Trade-offs.** A procedure adds up-front effort but prevents expensive re-platforming.
 *Optimizes:* decision quality and defensibility. *When to avoid:* trivial CRUD apps — just pick
 a modular monolith and move on.
@@ -296,6 +337,7 @@ skeleton). If an interviewer says "walk me through an ADR," produce something li
 > ops/on-call maturity yet. Microservices would give per-service scaling we do not need at
 > current load (~200 req/s).
 > **Decision:** Build a single deployable modular monolith with per-module schemas and ArchUnit
+> (a Java test library that asserts architecture rules — e.g. "module X must not import module Y")
 > fitness functions enforcing module boundaries, structured so modules can be extracted into
 > services later.
 > **Consequences:**
@@ -359,10 +401,9 @@ technical, and ignoring it dooms the architecture.
 **How it works.** **Conway's Law** (1968): *"Any organization that designs a system will produce
 a design whose structure is a copy of the organization's communication structure."* So the
 system's boundaries mirror the org chart's communication paths. The **Inverse Conway Maneuver**
-(term coined by Jonny LeRoy & Matt Simons at ThoughtWorks; popularized by Skelton & Pais,
-*Team Topologies* — Fowler is the go-to commentator on Conway's Law itself, not the origin of this
-term): deliberately *shape the teams* to match the architecture you want — e.g. give each
-microservice a single long-lived team so the boundaries hold.
+(term coined at ThoughtWorks; popularized by Skelton & Pais, *Team Topologies*): deliberately
+*shape the teams* to match the architecture you want — e.g. give each microservice a single
+long-lived team so the boundaries hold.
 
 ```mermaid
 graph LR
@@ -584,7 +625,8 @@ graph LR
 
 **Trade-offs.** *Pros:* superb **modifiability** and **reuse** (swap/insert filters), clear
 composition, natural for batch/stream transforms. *Cons:* not for low-latency request/response;
-end-to-end error handling and **back-pressure** are awkward; can serialize a slow filter into a
+end-to-end error handling and **back-pressure** (a downstream consumer signalling upstream
+producers to slow down when it can't keep up) are awkward; can serialize a slow filter into a
 bottleneck. *Optimizes:* modifiability, reusability. *When to use:* data transformation, ingestion,
 compilers, event enrichment. *When to avoid:* interactive, low-latency, transactional workloads.
 
@@ -881,7 +923,8 @@ redeploy, teams block each other, and you can't scale just the hot part. Microse
 **How it works.** The system is decomposed into small services aligned to **bounded contexts**,
 each independently deployable, each **owning its own database** (no shared schema), communicating
 over the network (sync REST/gRPC and/or async events). Cross-cutting concerns handled by an **API
-gateway**, service discovery, and (optionally) a **service mesh** (sidecars for mTLS, retries,
+gateway**, service discovery, and (optionally) a **service mesh** (sidecars for mTLS — *mutual
+TLS, where both client and server authenticate each other, not just the server* — plus retries and
 observability). *Smart endpoints, dumb pipes.*
 
 ```mermaid
@@ -971,7 +1014,19 @@ Deep dive: see `aws-serverless-lambda-stepfunctions` (and `aws-compute-ec2-farga
 trading, betting) the *database* becomes the scalability bottleneck no amount of app-tier scaling
 can fix. Space-Based removes the central database from the request path.
 
-**How it works** (Richards; from **Tuple Space** / JavaSpaces): replicated in-memory
+**Intuition first.** Think of every server holding a *full replicated copy of the hot working set
+in RAM*, gossiping updates to its peers so the copies converge, while a background writer lazily
+drains those changes down to the database. There is no central DB in the request path at all —
+each server is self-sufficient for reads and writes, so adding a server adds capacity without
+adding contention. A single request trace makes it concrete: **a write updates the local grid and
+returns immediately** (memory speed, no DB round-trip); **peers converge via replication** a
+moment later; **the DB is caught up asynchronously** by the data pump — which is exactly where the
+**data-loss window** comes from (if a server dies after the fast return but before the pump
+flushes, that write is gone). This is why it is *not* "just add a cache": a cache still points at
+an authoritative DB on the write path; here the grid *is* the authority for live requests.
+
+**How it works** (Richards; from **Tuple Space** / JavaSpaces — a shared, network-accessible
+associative memory that processes read/write tuples from): replicated in-memory
 **processing units** each hold the application plus an **in-memory data grid** (IMDG) with the
 working data set; requests are served entirely from memory, so units scale near-linearly with no
 DB contention. **Data pumps** asynchronously persist changes to a backing database in the
@@ -1280,8 +1335,8 @@ act as both client and server (file sharing, blockchain, gossip-based clusters, 
 
 **How it works.** All **peers are equal**: each can request (client role) and serve (server role).
 Peers discover each other (bootstrap nodes, DHT, gossip) and exchange data directly. Structured
-overlays (e.g. **DHT** / consistent hashing) give efficient lookup; unstructured overlays flood/
-gossip. There is no central coordinator; consistency and membership are managed by protocols
+overlays (e.g. a **DHT** — Distributed Hash Table, a key→node lookup spread across all peers,
+usually via consistent hashing) give efficient lookup; unstructured overlays flood/gossip. There is no central coordinator; consistency and membership are managed by protocols
 (gossip, consensus, blockchain).
 
 ```mermaid
@@ -1319,7 +1374,10 @@ patterns, *not* whole-system architectural styles — call this out in an interv
 (state) ↔ View (render) ↔ Controller (handles input, updates model). **MVP**: the Presenter holds
 all view logic and the View is passive (better testability). **MVVM**: a ViewModel exposes
 bindable state; the View **data-binds** to it (common in reactive/declarative UIs). They pair with
-**Repository**, **DTO**, and **Unit of Work** for the data side.
+data-side patterns: a **Repository** (a collection-like interface that hides how entities are
+persisted), a **DTO** (Data Transfer Object — a flat, behavior-free object used to carry data
+across a boundary, e.g. between server and UI), and a **Unit of Work** (tracks the objects changed
+during a request and commits them as one transaction).
 
 ```mermaid
 classDiagram

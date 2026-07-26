@@ -29,6 +29,13 @@ A useful mnemonic for the loop is **DRIVEN**:
 - **E**xamine the hard part deeply (the one thing that makes this problem non-trivial).
 - **N**egotiate bottlenecks, failure modes, and trade-offs (scale iteratively).
 
+DRIVEN and the 8-step timed loop below are the *same thing* at two zoom levels — the
+mnemonic is what you say out loud, the loop is how you spend the clock. The mapping is
+**D = step 1, R = step 2, I = steps 3-4 (API then data model), V = step 5, E = step 6,
+N = steps 7-8** (bottlenecks/scale, then failure modes/wrap). If you remember DRIVEN, you
+can always reconstruct the loop; if you're mid-interview and lost, ask yourself which
+letter you're on.
+
 The single most important habit: **narrate trade-offs proactively.** Saying "I'll use a
 CDN — I gain low read latency and origin offload, I give up strong freshness, which is
 fine because thumbnails tolerate staleness" is a staff-level sentence. Saying "I'll use a
@@ -76,6 +83,142 @@ box shallowly.
 
 ---
 
+## Full worked interview, URL shortener start to finish
+
+Everything above is ingredients. This section is the meal: one problem driven through all
+8 loop steps as *first-person narration*, so you can hear what ~40 minutes of good
+narration actually sounds like — including time-boxing and following a mid-interview steer.
+Read the italic *[step / clock]* markers as the loop; read the rest as what you'd literally
+say out loud.
+
+*[Step 1 — Scope, ~0:00-0:05]*
+> **Interviewer:** "Design a URL shortener like TinyURL."
+> **Me:** "Let me pin scope first. Core functional requirements: (1) `POST /urls` takes a
+> long URL, returns a short code; (2) `GET /{code}` redirects to the long URL. I'll treat
+> custom aliases as a nice-to-have, and analytics as async and out of the critical path.
+> Out of scope unless you want them: user accounts, link expiry, abuse/malware scanning.
+> Sound right?"
+> **Interviewer:** "Good. Keep custom aliases in."
+> **Me:** "Done — I'll come back to alias collisions in the deep dive. Non-functionally,
+> the thing that will actually drive this design: reads massively outnumber writes,
+> redirects need to be fast — I'll target ~10ms p99 on the redirect — and redirects need
+> high availability, since a dead redirect breaks every link already printed on a billboard.
+> Creates can be a bit slower and slightly less available. Let me get numbers."
+
+*[Step 2 — Back-of-envelope, ~0:05-0:08]*
+> **Me:** "Say 100M new URLs/day. Using 1 day ≈ 10^5 s, that's 100M ÷ 10^5 = **1,000 write
+> QPS** average; with a 3x peak factor, ~3K write QPS. If reads are 100:1 — typical for a
+> shortener — that's **~100K read QPS average, ~300K peak.** Storage: 100M/day × ~500 bytes
+> ≈ 50 GB/day, so ~18 TB/year. Retention 5 years ≈ 90 TB. Two conclusions I'll write down:
+> the *storage* is modest and fits a sharded KV cluster easily, so the write side is not the
+> hard part; the **read side at 300K peak QPS with a 10ms p99 is the whole game** — that's a
+> caching problem, not a database problem."
+
+*[Step 3 — API contract, ~0:08-0:11]*
+> **Me:** "`POST /urls {long_url, custom_alias?}` → `201 {code, short_url}`. I'll make this
+> **idempotent** with a client-supplied `Idempotency-Key` header so a retried create returns
+> the same code instead of minting a second one. `GET /{code}` → `302` redirect to the long
+> URL. I'll use **302, not 301**: 301 is cached by browsers forever, which is faster but
+> kills per-click analytics and removes my ability to change or disable a link — I'd rather
+> keep control."
+
+*[Step 4 — Data model, ~0:11-0:14]*
+> **Me:** "One entity: `{code (PK), long_url, created_at, owner?}`. The only hot access
+> pattern is point-lookup by `code`. No joins, no range scans, 100:1 read-heavy → this is a
+> textbook **wide-column / KV** fit (DynamoDB or Cassandra), fronted by a cache. I give up
+> ad-hoc query flexibility, which I don't need. I'd pick a relational DB only if you told me
+> you needed rich analytics queries on the primary store, which we said is async and
+> out-of-path."
+
+*[Step 5 — Vertical slice, ~0:14-0:20]*
+> **Me:** "Happy path, one slice end to end. **Create:** client → API gateway → write
+> service → allocate a code → write `{code, long_url}` to the KV store → return.
+> **Redirect:** client → API gateway → read service → check cache → on hit, return 302; on
+> miss, read KV, populate cache, return 302. Analytics: the read service drops a click event
+> onto a queue *after* responding — never on the hot path."
+>
+> ```mermaid
+> sequenceDiagram
+>     participant C as Client;
+>     participant GW as API Gateway;
+>     participant R as Read Service;
+>     participant Cache as Redis;
+>     participant KV as KV Store;
+>     participant Q as Analytics Queue;
+>     C->>GW: GET /{code};
+>     GW->>R: resolve(code);
+>     R->>Cache: get(code);
+>     alt cache hit
+>         Cache-->>R: long_url;
+>     else cache miss
+>         R->>KV: get(code);
+>         KV-->>R: long_url;
+>         R->>Cache: set(code, long_url);
+>     end
+>     R-->>C: 302 Location: long_url;
+>     R->>Q: click event (async, off critical path);
+> ```
+
+*[Step 6 — Deep dive, ~0:20-0:32] — and here the interviewer steers:*
+> **Interviewer:** "How do you generate the code, and how do you handle those custom
+> aliases you kept in scope?"
+> **Me:** "That's the pivotal fork, so let me go deep. Two families. **(A) Counter +
+> base62** of a monotonic ID: dense and short, but a single global counter is a bottleneck
+> and it leaks how many URLs exist. **(B) Random / hash + collision check:** no coordination,
+> but you must read-before-write to detect collisions. I'll take a hybrid of (A) that removes
+> the bottleneck: a **range-allocator** — each write host grabs a block of, say, 1,000 IDs
+> from a central allocator (or ZooKeeper), then hands them out locally with zero
+> per-write coordination; it only talks to the allocator once per 1,000 creates.
+>
+> Let me size the code length: base62 (0-9, a-z, A-Z) gives 62 symbols per character.
+> **62^7 ≈ 3.5 × 10^12** ≈ 3.5 trillion codes. At 100M/day that's ~35,000 days ≈ 95 years of
+> headroom, so **7 characters** is my choice. Quick trace of encoding ID = 125 to base62:
+> 125 ÷ 62 = 2 remainder **1**, then 2 ÷ 62 = 0 remainder **2**. Remainders come out
+> least-significant first (1, then 2), so reading most-significant first the value is `21`;
+> base62 symbols for 2 and 1 are `'2'` and `'1'`, giving `'21'`, left-padded to 7 chars →
+> the code is `0000021`.
+>
+> **Custom aliases** ride a different path: they're user-chosen, so I *must* do a
+> conditional write — `PutItem` with `attribute_not_exists(code)` — which atomically fails
+> if the alias is taken, and I return `409 Conflict`. To keep user aliases from ever
+> colliding with generated ones, I reserve a namespace: generated codes are exactly 7 chars
+> from the allocator; custom aliases must be a different length or carry a prefix, so the two
+> spaces never overlap."
+
+*[Step 7 — Bottlenecks and scale, ~0:32-0:37]*
+> **Me:** "First thing that breaks as we grow is the read path, and I already made it
+> cache-first, so let me stress it. At 300K peak read QPS, suppose a 90% cache hit rate →
+> 30K QPS still reach the KV store; that's fine for a sharded KV cluster. But **hot keys** —
+> one viral link — can concentrate on a single cache node. Fix: replicate hot keys across
+> cache replicas and/or use request coalescing so 10,000 simultaneous misses for the same
+> code collapse into *one* KV read. Next bottleneck at higher scale is geography: a redirect
+> from Europe hitting a US region eats ~150ms RTT and blows my 10ms budget, so I
+> geo-replicate the KV store and cache read-only copies per region and route to nearest —
+> the data is immutable once written, so cross-region *eventual* consistency is completely
+> fine here. That's the ladder: cache → hot-key handling → geo-replication, each removing the
+> current bottleneck."
+
+*[Step 8 — Failure modes and wrap, ~0:37-0:42]*
+> **Me:** "What breaks and blast radius. If **cache dies**, we fail *open to the KV store* —
+> slower but correct, and we pre-provision KV headroom (static stability) so a cache-wide
+> flush doesn't stampede a cold DB; I'd also add request coalescing to survive the stampede.
+> If the **write path dies**, redirects still work — creates are the less-available side by
+> design, which matches the requirement. The **analytics queue** backing up never affects
+> redirects because it's off the critical path. Idempotency keys make create retries safe.
+> To recap the load-bearing trade-offs: KV+cache over relational (gave up ad-hoc queries,
+> bought read scale and predictable latency); 302 over 301 (gave up browser-cache speed,
+> bought control and analytics); range-allocator over global counter (gave up perfectly
+> dense IDs, bought no write bottleneck); eventual cross-region consistency (safe because
+> the mapping is immutable). If you'd told me links were mutable or needed instant global
+> revocation, I'd revisit that last one."
+
+Notice what made this senior-grade: every choice came with *gain / give-up / when-I'd-flip*,
+numbers drove each decision, the steer to key-generation was followed immediately and gone
+deep on, and the clock was respected — no rabbit-holing on estimation, real time spent on
+the pivotal component and the failure story.
+
+---
+
 ## Scoping requirements, functional versus non-functional
 
 **Functional requirements (FRs)** = what the system does (verbs): "post a tweet", "read
@@ -96,8 +239,25 @@ Key NFR dimensions and what each *forces*:
 | Latency | p99/p999 target? | caching, precomputation, colocation, tail-tolerance |
 | Availability | 99.9 vs 99.99 vs 99.999? | replication, multi-AZ/region, failover |
 | Consistency | read-your-writes? strong? | quorum, single-leader, or eventual + conflict resolution |
-| Durability | can we ever lose data? | replication factor, WAL, sync vs async replication |
+| Durability | can we ever lose data? | replication factor, WAL (write-ahead log — append the change to a durable log *before* applying it, so a crash can replay it), sync vs async replication |
 | Read:write ratio | which dominates? | read-optimized (cache, read replicas) vs write-optimized (LSM, log) |
+
+**Translate nines into a downtime budget** — this is exactly what an interviewer probes
+when they ask "what does another nine cost you?" A year has ~525,600 minutes, so:
+
+| Availability | Downtime budget/year | Roughly |
+|---|---|---|
+| 99% ("two nines") | ~5,256 min | ~3.65 days |
+| 99.9% ("three nines") | ~526 min | ~8.8 hours |
+| 99.99% ("four nines") | ~53 min | under an hour |
+| 99.999% ("five nines") | ~5.3 min | a coffee break |
+
+Each added nine typically forces the *next tier of redundancy* — single-AZ → multi-AZ →
+multi-region → active-active — and roughly multiplies infra and operational cost. So when
+a candidate proposes multi-region active-active, the fair pushback is "your SLO is 99.9%,
+which is 8.8 hours/year — a single well-run region with fast failover already clears that;
+what are you buying with the second region?" Naming the budget lets you justify (or reject)
+the complexity you're about to add.
 
 **Consistency is the most abused word.** Pin it precisely: do we need *linearizability*
 (single up-to-date copy, real-time ordering), *causal* consistency, *read-your-writes*,
@@ -249,6 +409,12 @@ flowchart TD
     D -->|"break at hot keys"| E["replicate hot keys / dedicated cache / request coalescing"]
     E -->|"break at cross-region"| F["geo-replicate, route to nearest, accept weaker consistency"]
 ```
+
+This is the **abstract** ladder — each edge is "the next thing that breaks." The
+[Scaling from 1K to 100M users](#scaling-from-1k-to-100m-users) section below is the *same
+ladder* with each rung pinned to a concrete user count and QPS, so you can rehearse the
+narration. Use this diagram to reason about *order of failure*; use that section to
+rehearse *what you say in the room*. They are one framework, not two.
 
 **Little's Law** — `L = λ × W` (concurrency = arrival rate × latency) — is the single
 most useful capacity tool. If λ = 10,000 req/s and each holds a resource for W = 20 ms,
@@ -416,7 +582,15 @@ The behaviors that visibly lower your signal:
   (server can't read → changes fanout and search).
 - **Estimation:** billions of msgs/day; connection count (100M concurrent sockets) drives
   gateway sizing, not msg storage.
-- **Gotcha:** ordering across devices; presence at scale is a fanout problem itself.
+- **Gotcha:** ordering across devices; presence at scale is a fanout problem itself. And
+  the one senior interviewers push on — the **reconnect storm**: if a gateway holding, say,
+  1M sockets restarts (deploy or crash), all 1M clients try to reconnect *at once*, and each
+  reconnect triggers auth + session-resume + presence re-subscribe + missed-message sync —
+  a synchronized thundering herd that can topple the neighbouring gateways and cascade. Fix:
+  clients reconnect with **randomized jittered backoff** (never a fixed retry delay, which
+  just re-synchronizes everyone), the fleet spreads sockets so no single gateway holds a
+  catastrophic share, and you drain/shift connections gradually on deploy rather than
+  dropping them all in one instant.
 
 ## Playbook, rate limiter
 
@@ -431,7 +605,22 @@ The behaviors that visibly lower your signal:
 - **Deep dive:** atomicity (Lua/`INCR` + TTL), clock/skew, fail-open vs fail-closed when
   the limiter store is down (usually **fail-open** to protect availability), and returning
   `429` + `Retry-After`.
+- **Sliding-window-counter, how it approximates:** keep only two counters — the current
+  window's count and the previous window's count — and *weight the previous window by how
+  much of it still overlaps the rolling window.* Estimate =
+  `curr + prev × (overlap fraction)`. Worked: limit = 100/min, previous minute saw 80,
+  current minute (only 12s elapsed) saw 30. With 12s into the current window, the trailing
+  60s still reaches back over the last 48s of the *previous* minute, so the overlap
+  fraction = 48/60 = 0.8 and estimate = 30 + 80 × 0.8 = **94 < 100 → allow.** It
+  costs two integers instead of the full timestamp log yet smooths the fixed-window edge
+  burst — the price is a slight over/under-count when traffic is bursty within a window.
 - **Gotcha:** the limiter itself must not become the bottleneck or single point of failure.
+  Also, **local + periodic global sync drifts:** each node enforces a local budget and
+  syncs counts every, say, 1s, so during that second N nodes can *each* independently admit
+  up to their local share — total admitted briefly exceeds the global limit, and clock skew
+  between nodes widens the window boundaries so the drift compounds. Tighten the sync
+  interval to reduce overshoot (at the cost of more coordination traffic), or centralize in
+  Redis when the limit must be hard.
 
 ## Playbook, payment and idempotent charge
 
@@ -441,9 +630,14 @@ The behaviors that visibly lower your signal:
   and durable, auditable state. Use a client-supplied **idempotency key** persisted with
   the first result, so retries return the original outcome instead of charging again.
 - **Deep dive:** the **Saga** pattern for multi-step flows (reserve → charge → fulfill)
-  with compensating actions, because a distributed **2PC** blocks on the coordinator and
-  holds locks (poor availability); the **outbox pattern** + CDC for reliable
-  event publishing without dual-write inconsistency; ledger/double-entry bookkeeping;
+  with compensating actions, because a distributed **2PC** (two-phase commit) blocks on the
+  coordinator and holds locks (poor availability); the **outbox pattern** (write the event
+  into an `outbox` table *in the same DB transaction* as the state change, then a relay
+  publishes from that table) + **CDC** (Change Data Capture — tail the DB's write-ahead log
+  and turn committed row changes into a reliable event stream) for reliable event publishing
+  without a **dual-write** (writing to the DB and the message broker as two separate,
+  non-atomic steps — either can fail and leave them inconsistent); ledger/double-entry
+  bookkeeping;
   reconciliation. State machine per payment.
 - **Gotcha:** 2PC's coordinator is a SPOF and participants block holding locks if it
   crashes mid-commit — that's why high-scale payments prefer sagas + idempotency +
@@ -506,12 +700,16 @@ The behaviors that visibly lower your signal:
   atomic claim + visibility timeout, simple and durable). At-least-once + idempotent jobs is
   the practical target.
 - **Deep dive:** the store (time-indexed for "due now" scans), **lease/heartbeat** so a
-  crashed worker's job is reclaimed (visibility timeout), avoiding duplicate execution
-  (fencing tokens), backpressure, and time-wheel vs sorted-set (Redis ZSET by run-at) for
-  scheduling.
+  crashed worker's job is reclaimed (visibility timeout), avoiding duplicate execution with
+  **fencing tokens** (a monotonically increasing number handed out with each lease; the
+  worker stamps every write with it, and the downstream store rejects any write carrying a
+  token older than the highest it has seen — so a stale worker that "woke up late" can't
+  clobber the new owner's work), backpressure, and time-wheel vs sorted-set (Redis ZSET by
+  run-at) for scheduling.
 - **Gotcha:** a job runs twice if a worker is presumed dead but is actually alive
-  (GC pause) — need **fencing tokens** to make the stale worker's writes fail. Clock skew
-  affects "due" decisions.
+  (a long GC pause froze it past its lease, another worker took over, then the first
+  wakes up and finishes) — the **fencing token** above is what makes the zombie worker's
+  late writes fail. Clock skew affects "due" decisions.
 
 ## Scaling from 1K to 100M users
 

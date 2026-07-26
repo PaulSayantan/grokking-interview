@@ -274,7 +274,8 @@ Model* plus platform data-binding.
 
 **How it works / key components.**
 - **View** — declarative markup (XAML/HTML template) that **binds** to the ViewModel;
-  contains little or no code-behind.
+  contains little or no code-behind (*code-behind* = the imperative `.cs`/`.js` file
+  paired with the markup, where you'd otherwise hand-wire event callbacks).
 - **ViewModel** — an observable abstraction of the View's *state and behavior*: exposes
   bindable properties (raising change notifications) and **commands** (a *command* is a
   bindable, invokable action object — e.g. WPF's `ICommand` — that the View triggers on a
@@ -344,6 +345,15 @@ a hand-written View interface; the ViewModel doesn't hold a View reference. vs
 > Deep dive: see **`dp-enterprise-application`** (MVVM / Presentation Model).
 
 ---
+
+**Read the next four as one idea.** MVU, Flux, Redux, and MVI are all the *same*
+unidirectional, immutable-state loop — an action/message flows in, a pure function
+computes the next state, and the View re-renders from it. They differ only in
+**store count** (one immutable model vs one store vs many stores), **framework**
+(pure-FP Elm vs JS libraries vs Rx streams), and **framing** (functional `update` vs
+reactive stream). Don't file them as four unrelated patterns; they're four incarnations
+of one principle, and the "Unidirectional data flow" synthesis at the end ties them
+together.
 
 ## MVU and The Elm Architecture
 
@@ -425,7 +435,8 @@ dispatch** so data always flows one way and you can reason about *what* changed 
 **How it works / key components.**
 - **Action** — a plain object describing "what happened" (`type` + payload).
 - **Dispatcher** — a single hub that broadcasts every action to all stores (registers
-  callbacks; supports ordering via `waitFor`).
+  callbacks; supports ordering via `waitFor` — a call that forces one store to finish
+  updating *before* another runs, so store B can read store A's fresh state).
 - **Store** — holds state + logic for a domain; updates itself in response to actions,
   then emits a change event.
 - **View** — reads from stores, renders, and creates new Actions from user input.
@@ -550,7 +561,9 @@ flowchart LR
 - **Pros:** fully deterministic and reactive; immutable single view-state per render;
   stream operators compose cleanly; easy to test state transformations.
 - **Cons:** steep **reactive-programming** learning curve (RxJS/RxJava mindset); verbose
-  state classes; stream lifecycle/back-pressure bugs are subtle.
+  state classes; stream lifecycle and **back-pressure** bugs (*back-pressure* = the
+  consumer can't keep up with how fast the event stream produces, so events queue up,
+  get dropped, or overflow memory) are subtle.
 - **When to use:** reactive-first stacks (Cycle.js; Android with Rx/Coroutines) wanting
   strict one-state-per-render.
 - **When to avoid:** teams unfamiliar with reactive streams; simple screens.
@@ -967,12 +980,40 @@ time-travel debugging, and pure-function testability. This is why React's ecosys
 Flux/Redux over two-way binding, why Elm formalized MVU, and why modern declarative UI
 toolkits (SwiftUI, Jetpack Compose) render as a function of state. The cost is more
 ceremony and, for immutable full-state models, some performance overhead — which
-frameworks mitigate with diffing/virtual-DOM and structural sharing.
+frameworks mitigate with diffing/virtual-DOM and **structural sharing** (a new state
+object reuses the unchanged sub-trees of the old one by reference instead of deep-copying
+them, so producing "new immutable state" is cheap — only the changed path is rebuilt).
 
 > [!KEY-TAKEAWAY]
 > MVVM optimizes *developer velocity* via binding; MVU/Redux optimize *debuggability &
 > predictability* via one-way immutable state. Choosing between them is largely a
 > velocity-vs-traceability trade-off.
+
+### The 2024-2026 correction: signals and shrinking the global store
+
+The pendulum has partly swung back, so a current interviewer will probe two shifts.
+
+**Signals / fine-grained reactivity.** Solid, Angular (signals), Vue 3, Svelte 5 (runes),
+and Preact all now expose **signals** — observable values that automatically track which
+parts of the View read them and re-run *only those* on change. Read this as a return to
+MVVM's "bind to an observable property" idea, but with two upgrades: dependency tracking
+is **automatic** (you never hand-declare what depends on what, unlike explicit binding
+declarations), and updates are **surgical** (only the reading node re-renders, avoiding
+both Redux/MVU's re-run-and-diff-the-tree cost *and* AngularJS's whole-digest-cycle cost).
+Signals are still fundamentally unidirectional on read (View reads state) — the write is
+an explicit `set`, not two-way mutation — so they keep the predictability of one-way flow
+while regaining fine-grained performance.
+
+**"Redux everywhere" is now considered an anti-pattern.** Putting *all* state in one
+global store made simple features ceremony-heavy and conflated two very different things:
+**server state** (data fetched from an API — it's a cache with staleness, retries, and
+invalidation) and **client state** (local UI concerns — modal open, form draft, selected
+tab). The modern split: use a **server-cache library** (TanStack Query, RTK Query, SWR)
+for server state, a **lightweight store** (Zustand, Jotai, or React context) for the small
+slice of *shared* client state, and plain component-local state for everything ephemeral.
+Redux itself moved this way — **Redux Toolkit (RTK)** cuts the boilerplate and RTK Query
+folds in caching. The principle survives ("changes flow one way through pure updates");
+what's rejected is *one giant store as the default home for every value*.
 
 ---
 
@@ -998,6 +1039,15 @@ frameworks mitigate with diffing/virtual-DOM and structural sharing.
   / MVVM (mockable View / testable ViewModel) ≫ classic MVC (View-coupled).
 - **"Where does the Humble Object fit?"** It's the underlying testability principle:
   Passive View is Humble Object applied to the View; MVP/MVVM/MVU all rely on it.
+- **"Isn't Redux-everywhere an anti-pattern now?"** Yes, as a *default*. Splitting a giant
+  global store into server-state caching (TanStack/RTK Query), a small shared-client-state
+  store (Zustand/Jotai), and component-local state is the current guidance. The one-way
+  pure-update principle stays; the single-dumping-ground store is what's rejected.
+- **"How do signals relate to two-way binding vs unidirectional flow?"** Signals are
+  observable properties like MVVM binding, but with *automatic* dependency tracking and
+  *surgical* re-render (only the reading node updates). Reads flow one way (View reads
+  state) and writes are an explicit `set` — so you keep unidirectional predictability while
+  avoiding both whole-tree diffing (Redux/MVU) and digest-cycle cost (AngularJS).
 - **"MVC vs PAC?"** MVC is one triad with a possible View↔Model link; PAC is a hierarchy
   of agents whose Presentation and Abstraction are fully decoupled through Control.
 

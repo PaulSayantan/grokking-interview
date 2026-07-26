@@ -129,7 +129,13 @@ sequenceDiagram
 > [!WARNING]
 > Do **not** call Cognito on every request to check the user — you will hit the
 > per-category RPS throttles (e.g. 120 RPS `UserRead`). **Validate the JWT locally
-> at the edge and cache it.** Also, do not store frequently-changing attributes in
+> at the edge and cache it.** *Local validation* = verify the token's RS256 signature
+> against the pool's **JWKS** (JSON Web Key Set — Cognito's rotating public signing
+> keys, fetched once from the pool's well-known JWKS URL and cached in-process, re-fetched
+> only on key rotation), then check the `iss` (issuer = your pool), `aud` (audience =
+> your app client), and `exp` (not expired) claims. All of this is in-process with **no
+> network call to Cognito per request** — which is exactly why it dodges the RPS quotas.
+> Also, do not store frequently-changing attributes in
 > Cognito custom attributes; keep them in an external store (DynamoDB) and look
 > them up, because custom-attribute changes are rate-limited and attributes are
 > baked into tokens at mint time.
@@ -204,7 +210,8 @@ and provision **tier-appropriate infrastructure**.
 **Trade-off.** Automating siloed onboarding well is significant engineering, but
 without it premium onboarding becomes manual and slow. The onboarding cost itself
 is a tiering consideration: you can afford slow, expensive provisioning for a few
-high-ARPU enterprise tenants; you cannot for thousands of basic-tier ones — which
+high-**ARPU** (average revenue per user/tenant) enterprise tenants; you cannot for
+thousands of basic-tier ones — which
 is exactly why basic tier must be pooled.
 
 ---
@@ -218,7 +225,7 @@ which SLA, and which routing target.
 
 | Tier | Isolation model (per layer) | Capacity / throttle | Cost attribution ease |
 |---|---|---|---|
-| **Basic** | Pool everywhere (shared compute + shared DB, `tenantId` column + RLS / LeadingKeys) | Low usage-plan limits; aggressive load-shedding | Hard (proxy metrics) |
+| **Basic** | Pool everywhere (shared compute + shared DB, `tenantId` column + RLS — *row-level security*, the DB filters every query to the tenant's own rows — or DynamoDB LeadingKeys) | Low usage-plan limits; aggressive load-shedding | Hard (proxy metrics) |
 | **Standard** | Pool compute; pool DB with RLS or separate schema | Moderate limits | Hard / medium |
 | **Premium** | **Bridge**: pooled compute, **siloed data** (DB/table per tenant), maybe dedicated node pool | High limits, reserved capacity | Easier (siloed resources taggable) |
 | **Enterprise** | **Silo**: dedicated stack / VPC / account | Dedicated capacity, near-unmetered | Easy (account/VPC = clean cost boundary) |
@@ -294,8 +301,10 @@ money at low utilization but guarantees SLA.
 
 **Amazon API Gateway** is the primary AWS mechanism for per-tenant / per-tier rate
 limiting. It throttles with a **token bucket**: `rate` = tokens added per second
-(steady-state), `burst` = bucket capacity (max concurrent). Exceeding the bucket
-returns **HTTP 429 Too Many Requests**.
+(steady-state), `burst` = **bucket depth** = the largest instantaneous spike of
+requests it will absorb before returning 429 (it is the token count available for a
+sudden burst — *not* a cap on concurrent requests or open connections). Exceeding the
+bucket returns **HTTP 429 Too Many Requests**.
 
 **Four setting layers, applied in this precedence:**
 1. Per-client (per-API-key) / per-method limits **in a usage plan**
@@ -786,7 +795,9 @@ ceiling); category RPS quotas (see identity section).
 - **AWS APN blog — "Calculating Tenant Costs in SaaS Environments"** (Tod Golding) —
   silo vs pool attribution, proxy metrics, "good enough," basic-tier-costs-most.
 - **AWS APN blog — "Building a Multi-Tenant SaaS Solution Using Amazon EKS"** —
-  namespace-per-tenant, IRSA, Calico network policies, NGINX + ExternalDNS + Route 53,
+  namespace-per-tenant, IRSA (IAM Roles for Service Accounts — binds a Kubernetes
+  service account to a scoped IAM role so pods get per-tenant AWS credentials),
+  Calico network policies, NGINX + ExternalDNS + Route 53,
   CodePipeline onboarding.
 - **AWS docs** — API Gateway throttling & usage plans/API keys; DynamoDB service quotas
   & partition-key best practices; Cognito quotas; VPC quotas; Organizations quotas; RDS

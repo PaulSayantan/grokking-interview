@@ -59,6 +59,32 @@ init/static code) → **INVOKE** (run handler) → environment is frozen and reu
 subsequent invocations → eventually torn down. A **cold start** is any invocation that
 must first pay INIT; a **warm** invocation reuses a frozen environment.
 
+**The single most practical rule — init-scope code runs once per environment, handler runs
+every invoke.** Everything at module scope (outside the handler function) executes exactly
+once during INIT and then survives, frozen, across every warm invocation on that environment.
+Everything inside the handler runs on *every* call. So expensive one-time work — SDK/DB client
+construction, config fetch, model load — belongs above the handler, where a cold start pays for
+it once and thousands of warm invokes reuse it for free.
+
+```python
+import boto3
+# INIT scope: runs ONCE per environment. Reused across all warm invokes.
+ddb = boto3.resource("dynamodb")          # connection pool built once
+table = ddb.Table("Orders")
+CONFIG = load_config_from_ssm()            # fetched once, cached in memory
+
+def handler(event, context):
+    # Handler scope: runs on EVERY invoke.
+    return table.get_item(Key={"id": event["id"]})  # reuses the pooled client
+```
+
+The anti-pattern — `ddb = boto3.resource(...)` *inside* the handler — reconstructs the client
+and its TCP/TLS connections on every single call. Trace it: 1 cold + 999 warm invokes.
+Correct placement pays the client build once (say ~80 ms) at INIT, so total client-setup cost
+≈ **80 ms**. The anti-pattern pays ~80 ms on all 1,000 calls → ~**80,000 ms** of wasted
+per-invoke setup *and* opens 1,000 short-lived DB connections instead of reusing a warm pool.
+Same lesson powers connection reuse: hoist the client so warm invokes share one connection.
+
 **Key facts and limits (current):**
 - Max timeout: **15 minutes** (900 s). Memory: **128 MB to 10,240 MB (10 GB)**, and CPU
   scales linearly with memory (~1 vCPU at 1,769 MB, up to ~6 vCPUs at 10 GB).
@@ -101,8 +127,10 @@ service's **event source mapping (ESM)** polls on your behalf.
 **Three invocation types:**
 - **Synchronous (request/response):** API Gateway, ALB, Cognito, direct `Invoke`. Caller
   waits; *no automatic retries by Lambda* — the caller owns retry. API Gateway has a
-  **29-second integration timeout** (recently raised beyond 29 s as a configurable option
-  for REST APIs, but 29 s is the classic default to design around).
+  **29-second integration timeout** as the default; for REST APIs this can now be increased
+  above 29 s via a quota-increase request (it is not unlimited, and the exact ceiling is worth
+  verifying against current AWS docs). **Design around 29 s unless you have confirmed the raise
+  for your account** — for anything longer, return a job id and poll, or use async/Step Functions.
 - **Asynchronous (event):** S3, SNS, EventBridge, SES. Lambda queues the event internally
   and returns immediately (202). Lambda **retries twice** (3 attempts total) on function
   error with delays, then sends to a **DLQ or on-failure destination.** You configure
@@ -239,7 +267,7 @@ is cheap on Standard and impossible on Express (5-min cap, at-least-once).
 
 **Worked example — 50M short executions/day, 6 states each.**
 
-- *Standard* bills per transition at ~$0.000025 (first 1,000 free). Transitions/day =
+- *Standard* bills per transition at ~$0.000025 (a small monthly free tier aside). Transitions/day =
   50M × 6 = 300M. Cost = 300M × $0.000025 = **~$7,500/day ≈ $225,000/month**. The
   per-transition model turns "6 tiny states" into 300M billable events — the cost is
   driven by *step count × volume*, not by how little each step does.
@@ -267,35 +295,57 @@ retry, and no "orchestrator Lambda that runs 14 min then times out," but you pay
 transition, learn ASL, and add a service. Express loses per-execution history (harder to
 debug; rely on CloudWatch Logs) and exactly-once (needs idempotent steps).
 
+**Why Express debugging is genuinely harder — feel the difference.** When a *Standard*
+execution fails you open its execution in the console, see the **visual state graph**, click
+the exact failed state, and read its literal input/output JSON and the error — the full
+durable history is retained (up to 90 days). When an *async Express* execution fails there is
+**no visual state history and no built-in retry-to-a-destination**: you get only what was
+emitted to CloudWatch Logs, so you must `grep` the log group by a **correlation id** (an id
+you deliberately inject and log on every step) to reconstruct what ran and where it broke.
+Standard = "click the red box"; Express = "reconstruct the story from log lines." That is the
+concrete cost of the cheaper, higher-throughput tier — plan your logging up front.
+
 ---
 
 ## Choreography versus orchestration and the saga pattern
 
-**Intuition.** In distributed transactions without 2-phase commit you use a **saga**: a
-sequence of local transactions, each with a **compensating action** to undo prior work on
-failure. Two coordination styles:
+**Intuition.** **2-phase commit (2PC)** is the classic distributed-transaction protocol: a
+coordinator asks every participant to *prepare* (phase 1), then tells them all to *commit* or
+*abort* (phase 2) — it gives atomicity but holds locks across services and blocks if the
+coordinator dies, so it does not fit loosely-coupled, high-availability serverless systems.
+Instead you use a **saga**: a sequence of local transactions, each with a **compensating
+action** to semantically undo prior work on failure (there is no global rollback — you *undo*,
+you don't *roll back*). Two coordination styles:
 - **Choreography (event-driven):** services react to each other's events (via
   EventBridge/SNS/SQS). No central brain. Loose coupling, easy to add consumers.
 - **Orchestration:** a central coordinator (Step Functions) tells each service what to do
   and drives compensation on failure.
 
-**ASCII — order saga, orchestrated (Step Functions):**
+*Legend for the diagram below:* **solid arrows = forward (happy) path**; **dashed arrows =
+compensating path** that fires on failure and unwinds prior successful steps in reverse order.
+
+**Diagram — order saga, orchestrated (Step Functions):**
 ```mermaid
 flowchart LR
     Start --> ReserveInventory
-    subgraph SF["Step Functions (saga)"]
+    subgraph FWD["Forward path (happy)"]
         ReserveInventory --> ChargePayment
         ChargePayment --> CreateShipment
-        ReserveInventory -->|catch| ReleaseInv
-        ChargePayment -->|catch| RefundPayment
-        CreateShipment -->|catch| CancelShipment
-        CancelShipment -->|compensations| RefundPayment
-        RefundPayment --> ReleaseInv
+        CreateShipment --> Success
     end
-    CreateShipment --> Success
+    subgraph COMP["Compensating path (on failure, runs in reverse)"]
+        CancelShipment -.-> RefundPayment
+        RefundPayment -.-> ReleaseInventory
+    end
+    CreateShipment -.->|catch| CancelShipment
+    ChargePayment -.->|catch| RefundPayment
+    ReserveInventory -.->|catch| ReleaseInventory
 ```
+Reading it: if `CreateShipment` fails, its catch fires `CancelShipment` → `RefundPayment` →
+`ReleaseInventory` — each already-completed step is undone in the reverse order it ran. If a
+step never ran (e.g. payment was never charged), its compensation is simply skipped.
 
-**Choreography (events):**
+**Diagram — choreography (events):**
 ```mermaid
 flowchart LR
     OrderCreated --> EventBridge["[EventBridge]"]
@@ -392,15 +442,26 @@ connection.
   cardinality in the partition key, not high table capacity, is what removes the hot spot.
 - **On-demand vs provisioned:** on-demand scales instantly, pay per request (great for
   spiky/unknown); provisioned + auto scaling is cheaper for steady, predictable load.
-- **Consistency:** eventually consistent reads by default (~1 RCU/4 KB); strongly consistent
-  reads cost 2× and can't be served from all replicas. Global tables = multi-Region,
-  **last-writer-wins**, eventual across Regions.
-- **DynamoDB Streams** → Lambda for CDC/materialized views; **single-table design** for
-  access-pattern-driven modeling.
-- **DAX** for microsecond cached reads. **Latency:** single-digit ms typical.
+- **Consistency (get the RCU base right — a classic interview trap):** 1 RCU buys **one
+  strongly-consistent read of up to 4 KB**, or **two eventually-consistent reads of 4 KB**.
+  So the base rates are: **eventually consistent = 0.5 RCU per 4 KB**, **strongly consistent
+  = 1 RCU per 4 KB (2× the eventual cost)**, and a **transactional read = 2 RCU per 4 KB**.
+  Strongly consistent reads also can't be served from all replicas (must hit the leader).
+  *Worked example:* reading **8 KB** eventually consistent = ⌈8/4⌉ × 0.5 = 2 × 0.5 = **1 RCU**;
+  the same 8 KB strongly consistent = 2 × 1 = **2 RCU**; transactional = 2 × 2 = **4 RCU**.
+  A student who memorizes "~1 RCU/4 KB for eventual" will *double* their real read-capacity
+  math. Global tables = multi-Region, **last-writer-wins (LWW)** — on a conflicting concurrent
+  write, the write with the latest timestamp wins and the other is silently dropped — eventual
+  across Regions.
+- **DynamoDB Streams** → Lambda for **CDC (change data capture** — streaming every
+  insert/modify/remove as an event so downstreams can react)/materialized views;
+  **single-table design** for access-pattern-driven modeling.
+- **DAX (DynamoDB Accelerator** — a managed, in-front-of-the-table write-through cache**)**
+  for microsecond cached reads. **Latency:** single-digit ms typical.
 
 **Aurora Serverless v2:**
-- Scales in fine-grained **ACUs** (0.5 ACU increments) up and down with load, can be
+- Scales in fine-grained **ACUs (Aurora Capacity Units** — each ACU is roughly 2 GB of RAM
+  plus associated CPU and network**)** in 0.5 ACU increments up and down with load, can be
   configured to scale to zero (auto-pause) — but scaling and resume aren't instantaneous,
   so cold-ish latency on wake.
 - Relational (Postgres/MySQL compatible), ACID, joins — when you truly need relational.
@@ -422,6 +483,54 @@ connection.
 **Trade-off:** DynamoDB forces you to model for access patterns up front (rigid but scales
 limitlessly and pairs perfectly with Lambda); Aurora gives query flexibility and ACID but
 reintroduces connection management and vertical scaling limits.
+
+---
+
+## Security and IAM in serverless
+
+**Intuition.** In serverless there is no host to harden, so **identity *is* your security
+perimeter**. Two distinct IAM questions govern every function: (1) *what may this function
+do?* — the **execution role** the function assumes, and (2) *who is allowed to invoke this
+function?* — the **resource-based policy** attached to the function. This maps directly onto
+the AWS **shared-responsibility model**: AWS secures the runtime, the microVM isolation, and
+the patching *of* the cloud; you secure your configuration, IAM policies, and data *in* the
+cloud. Getting the two IAM directions straight is the standard senior probe.
+
+**Execution role vs resource-based invoke policy — don't conflate them:**
+- **Execution role (outbound / "what I can do"):** an IAM role Lambda assumes at runtime;
+  its policy is what your handler code can call (read this DynamoDB table, write this S3
+  prefix, decrypt with this KMS key). Least privilege here = scope each function's role to
+  *only* the specific ARNs and actions it needs.
+- **Resource-based policy (inbound / "who can call me"):** a policy on the function itself
+  that says which principals/services may invoke it. When you wire API Gateway or S3 to a
+  Lambda, the console adds a resource policy statement granting *that source* `lambda:InvokeFunction`.
+
+**Least-privilege per function, and the blast-radius argument.** Prefer many small,
+single-purpose functions each with a narrow role over one fat function with a broad role.
+If a single-purpose "resize-thumbnail" function is compromised, its role grants only
+`s3:PutObject` on the thumbnails prefix — the blast radius is that prefix. A monolithic
+function whose role can touch every table, queue, and bucket turns one code bug or dependency
+compromise into account-wide exposure. Small functions + tight roles = small blast radius.
+
+**Secrets — never plaintext env vars.** Lambda environment variables are **not** a secrets
+store: they are visible to anyone with `lambda:GetFunctionConfiguration`, appear in the
+console, and (unless you add KMS encryption helpers) sit in plaintext. Store secrets in
+**AWS Secrets Manager** (supports rotation) or **SSM Parameter Store SecureString**, and
+fetch them in **init scope** so the value is cached across warm invokes rather than re-fetched
+every call — use the Lambda extension/Powertools cache with a sensible TTL so rotation still
+propagates. At minimum, encrypt env vars with a customer-managed KMS key.
+
+**Network isolation.** A Lambda only needs to run in a VPC when it must reach private
+resources (an RDS instance, an internal service). Putting it in a VPC is a *network*
+control, not a substitute for IAM, and it adds NAT Gateway cost for outbound internet — so
+attach it to VPC subnets only when you actually need private connectivity, and still scope
+the execution role tightly.
+
+> [!INTERVIEW] When asked "how do you secure this serverless design?", answer in the model's
+> own vocabulary: name the **shared-responsibility model**, separate the **execution role**
+> (what the function can do) from the **resource-based policy** (who can invoke it), assert
+> **least privilege per single-purpose function** for a small **blast radius**, and put
+> secrets in **Secrets Manager/SSM**, never plaintext env vars.
 
 ---
 

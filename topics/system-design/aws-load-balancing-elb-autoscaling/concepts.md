@@ -24,6 +24,28 @@ Elastic Load Balancing is one product family with four load balancer types:
 | **Gateway (GWLB)** | L3/L4 (gateway) | IP (GENEVE encapsulation) | Transparent insertion of virtual appliances | Firewalls, IDS/IPS, deep packet inspection |
 | **Classic (CLB)** | L4 + L7 | HTTP, HTTPS, TCP, SSL | Legacy only | Pre-2016 apps not yet migrated |
 
+**What "OSI layer" means here (ground the jargon once).** The **OSI model** is the
+standard 7-layer networking stack; the only distinction you need is *how much of the
+traffic the LB looks at*:
+- **L7 (application layer)** — the LB parses the actual **HTTP request** (URL path,
+  headers, method), so it can route and rewrite based on contents.
+- **L4 (transport layer)** — the LB sees only **TCP/UDP connections** (IPs and ports),
+  never their contents; it just picks a backend for each connection.
+- **L3 (network layer)** — the LB operates on **raw IP packets** and forwards them
+  transparently (a "bump-in-the-wire": inserted into the path without the endpoints
+  noticing).
+
+**How ELB actually works under the hood (one model that explains everything).** An
+ELB is not a single box — it is a **DNS name** (e.g. `my-alb-123.elb.amazonaws.com`)
+that resolves to a set of **load balancer nodes**, one (that scales horizontally) per
+enabled AZ, each with its own IP. Clients resolve the name and connect to a node IP.
+This single picture explains three things that otherwise look like unrelated rules:
+(1) why an **ALB has no static IP** — the node IPs are AWS-managed and change as nodes
+scale; (2) why **an AZ failure "just works"** — ELB pulls that AZ's node IPs out of
+DNS and clients stop reaching it; and (3) what **cross-zone load balancing** actually
+toggles — whether a node may forward to targets in *other* AZs or only its own. Keep
+this "DNS name → per-AZ nodes → targets" model in your head for the rest of the note.
+
 **Mental model:** the choice is driven first by *what you route on*.
 - Route on URL path, host header, HTTP method, cookies, query string → **ALB** (L7).
 - Route a raw TCP/UDP stream with lowest latency, or you need a fixed IP the
@@ -48,6 +70,13 @@ above is the interview-usable subset.
 ---
 
 ## Application Load Balancer (L7) deep dive
+
+**Mental model first:** think of an ALB as a **smart HTTP reverse proxy**. It opens
+the envelope — it reads the actual HTTP request (the URL path, the `Host` header, the
+method, cookies) and *decides* where to send it based on the contents. Because it
+opens and re-seals the envelope, it terminates the client's connection and starts a
+fresh one to the backend (so the backend sees the ALB's IP, not the client's, unless
+it reads `X-Forwarded-For`).
 
 An ALB operates at the application layer. Its object model is:
 **Listener** (protocol+port, e.g. HTTPS:443) → **Rules** (conditions + actions,
@@ -79,14 +108,20 @@ Key capabilities:
 - Billed per hour + **LCU** (Load Balancer Capacity Units) measuring new
   connections, active connections, processed bytes, and rule evaluations.
 
-**Trade-offs.** ALB is the default for HTTP microservices because one LB fans out
-to many services, integrates WAF/auth, and supports containers with dynamic ports.
-The costs: it terminates the connection (source IP only via `X-Forwarded-For`
-header, which non-HTTP or IP-allowlisting downstreams can't use), it cannot give
-you a static IP (DNS name only — front it with NLB or Global Accelerator if a
-fixed IP is mandatory), its per-request LCU model can be pricier than NLB at very
-high connection churn, and it adds L7 processing latency. Choose ALB when routing
-intelligence, HTTP features, and WAF matter more than raw latency or static IP.
+**Trade-offs.** ALB is the default for HTTP microservices: one LB fans out to many
+services, integrates WAF/auth, and supports containers with dynamic ports. What you
+give up, and why:
+- **No real client source IP** — it terminates the connection, so the backend sees
+  the ALB and gets the client only via the `X-Forwarded-For` header. Non-HTTP or
+  IP-allowlisting downstreams can't read that header, so they can't recover the client.
+- **No static IP** — you get a DNS name only. If a fixed IP is mandatory (partner
+  allowlist), front the ALB with an **NLB** or **Global Accelerator**.
+- **Cost at high connection churn** — the per-request LCU model can be pricier than
+  NLB when connections churn fast (see the LCU worked example below).
+- **Added latency** — L7 parsing costs a few milliseconds vs NLB's near-passthrough.
+
+Pick ALB when routing intelligence, HTTP features, and WAF matter more than raw
+latency or a static IP; reach for NLB the moment one of those four costs is a dealbreaker.
 
 **Worked example — reading an LCU bill.** An LCU is billed as the **max** of four
 dimensions each hour — you pay for the single dimension you stress most, *not* their
@@ -112,6 +147,14 @@ on NLB (which ends up bytes-bound instead).
 
 ## Network Load Balancer (L4) deep dive
 
+**Mental model first:** where an ALB opens the envelope, an NLB is a **wire-speed
+packet router that never opens it**. It sees only the connection's addressing —
+source/destination IP and port — picks a backend for that flow, and gets out of the
+way. It doesn't know or care whether the bytes inside are HTTP, MySQL, a game
+protocol, or noise. That "don't look inside, just forward" design is exactly why it
+adds almost no latency, preserves the client's real source IP, and scales to millions
+of connections.
+
 An NLB operates at the transport layer (L4) and is effectively a highly available,
 horizontally scaled flow router built on AWS Hyperplane.
 
@@ -120,7 +163,12 @@ How it routes:
   dst port, TCP sequence number}. A connection sticks to one target for its life.
 - **UDP**: flow hash over the 5-tuple (no sequence number); a flow sticks to one
   target.
-- Supports **TCP, UDP, TCP_UDP, TLS** listeners (and newer QUIC/TCP_QUIC).
+- Supports **TCP, UDP, TCP_UDP, TLS** listeners — those are the *only* NLB listener
+  protocols. There is **no QUIC/HTTP3 listener** on ELB: native HTTP/3 termination is
+  a **CloudFront** feature, not an NLB one. QUIC does ride on top of UDP, so if you
+  simply need to *pass QUIC packets through* to your own servers, a plain **UDP
+  listener** carries them transparently (the NLB never parses them) — but the NLB
+  itself does not "speak" QUIC.
 
 **Worked example — why one client hits two targets.** The hash is over the *tuple*,
 not the client. Say client `203.0.113.7` opens two TCP connections to the NLB on
@@ -148,8 +196,19 @@ Distinctive properties:
   Watch the **hairpin/loopback** limitation: when client-IP preservation is on, a
   target cannot reach *itself* through the NLB (a request that flow-hashes back to the
   originating instance breaks, because the packet's src and dst resolve to the same
-  host). And because the client IP is preserved, target **security groups must allow
-  the client CIDRs, not the NLB** — see the failure-modes section.
+  host). And when client-IP preservation is on, the target's inbound packets carry the
+  **client's** IP, so target **security groups must allow the client CIDRs** for that
+  traffic (not the NLB) — the classic "I allowed the LB but traffic is still blocked"
+  gotcha. See the failure-modes section.
+- **NLB security groups (modern capability)**: for a long time NLBs — unlike ALBs —
+  **could not have a security group of their own** (a favorite old interview gotcha).
+  Since Aug 2023 an NLB created with a security group attached *can* filter traffic at
+  the LB itself. This also introduces a setting for whether the **target's** security
+  group is evaluated against the **client IP** (the client-IP-preservation case above)
+  or against the NLB — the `enforce-security-group-inbound-rules-on-private-link-traffic`
+  option — so "which IP must the target SG allow?" now depends on both client-IP
+  preservation and this flag. Note the SG attachment is fixed at creation time on
+  existing NLBs, so this is something to plan up front.
 - **Ultra-low latency** (single-digit added latency, often sub-millisecond vs
   ALB's higher processing) and **millions of connections/requests per second**.
 - **TLS offload** on NLB (terminate TLS at L4 with ACM) if you want cert management
@@ -159,14 +218,30 @@ Distinctive properties:
 - Works as the entry point for **AWS PrivateLink** (VPC endpoint services).
 
 **Limits/defaults worth knowing:**
-- **Idle timeout**: TCP flows historically fixed at **350 s** (now configurable);
-  UDP has no connection concept. Enable TCP keep-alive on clients for long-lived idle.
+- **Idle timeout**: NLB TCP flows have long been **fixed at 350 s** and — unlike the
+  ALB idle timeout — are generally **not tunable**; UDP has no connection concept. The
+  standard fix for long-lived-but-idle flows is therefore **client-side TCP keep-alive**
+  (keep packets flowing so the flow never goes idle for 350 s), *not* raising a timeout.
+  (Verify against current NLB docs before quoting a hard number in an interview.)
 - **Cross-zone load balancing is OFF by default** and, when enabled, incurs
   **inter-AZ data transfer charges** (this is the opposite of ALB, and a classic
   gotcha). See the cross-zone section.
 - No native WAF (WAF is L7); no content routing; no HTTP header manipulation.
-- Because NLB preserves source IP, targets in the same VPC can see client IPs but
-  security group rules on targets must allow the client CIDRs, not the LB.
+- When client-IP preservation is on, targets see the client's IP, so target security
+  group rules must allow the **client CIDRs** for that traffic (not the LB). If
+  preservation is off, or with the newer NLB-SG PrivateLink enforcement option, the
+  target instead sees the NLB — so decide which one the target SG must trust based on
+  those two settings.
+
+> [!INTERVIEW]
+> Three NLB "modernity" facts interviewers use to separate stale from current
+> answers: (1) an NLB **can now have its own security group** (since Aug 2023) — the
+> old "NLBs can't have security groups" line is no longer true; (2) there is **no QUIC
+> or HTTP/3 listener** on any ELB — HTTP/3 termination lives at **CloudFront**, and an
+> NLB only carries QUIC as opaque UDP; (3) the NLB TCP **idle timeout is 350 s and
+> effectively fixed** — the fix for long idle flows is **client TCP keep-alive**, not
+> a bigger timeout. Repeating "NLB has no SG / NLB supports QUIC / raise the NLB idle
+> timeout" all read as out-of-date.
 
 **Trade-offs.** Pick NLB for: non-HTTP protocols, latency-critical paths, static/
 Elastic IP requirements, source-IP-dependent apps, extreme connection scale, and
@@ -477,10 +552,11 @@ hangs (instance sits in Wait until timeout), so keep hook actions fast and idemp
   messages**, each takes **200 ms** to process, and you want to drain within **60 s**.
   One instance does 1 / 0.2 = **5 msgs/sec**, so in 60 s it clears 5 × 60 = **300
   messages**. Instances needed = 10,000 / 300 ≈ 33.3 → **34 instances**. So set the
-  target `backlog-per-instance` = messages ÷ (throughput_per_instance × budget) =
-  10,000 / 34 ≈ **294 messages/instance**: whenever `ApproximateNumberOfMessages /
-  running-instances` exceeds ~294, target tracking scales out to hold the 60 s drain
-  SLO. Tighten the budget to 30 s and the target halves (~147), doubling the fleet.
+  target `backlog-per-instance` = throughput_per_instance × budget = 5 × 60 = **300
+  messages/instance** (equivalently messages ÷ instances = 10,000 / 34 ≈ 294): whenever
+  `ApproximateNumberOfMessages / running-instances` exceeds ~300, target tracking scales
+  out to hold the 60 s drain SLO. Tighten the budget to 30 s and the target halves (5 ×
+  30 = **150**), roughly doubling the fleet.
 - Connection-heavy (NLB): active flow count / bandwidth per target.
 
 **Back-of-envelope.** If each instance safely serves 1,000 RPS and peak is 250,000
@@ -588,8 +664,9 @@ exposed to the full request volume and to L7 attacks at the region.
   turning a dependency blip into a fleet-wide "all unhealthy" event.
 - **Sticky sessions + scale-in**: draining a pinned target disrupts its users;
   stateless design avoids this.
-- **NLB source-IP + security groups**: forgetting that targets see client IPs (not
-  the LB's) leads to blocked traffic when SG rules only allow the LB.
+- **NLB source-IP + security groups**: with client-IP preservation on, targets see
+  the **client's** IP, so SG rules that only allow the LB block the traffic — allow the
+  client CIDRs instead. (And remember the NLB itself can now carry its own SG.)
 
 ---
 

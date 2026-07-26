@@ -161,7 +161,12 @@ of truth. It streams its changes (its write-ahead log / change stream) to one or
 **Replicas**, which apply them to stay in sync. Clients route **writes to the primary** and
 **reads to the replicas** (read fan-out). Replication can be **synchronous** (primary waits
 for replica ack — stronger durability, higher write latency), **asynchronous** (fire and
-forget — lowest latency, risk of losing recent writes on failover), or **semi-synchronous**.
+forget — lowest latency, risk of losing recent writes on failover), or **semi-synchronous**
+(the primary waits for *at least one* — or a quorum of — replicas to acknowledge **receipt**
+of the change before it commits, but not for *all* replicas and not for them to fully apply
+it). Semi-sync bounds how much data you can lose on failover (at least one other node already
+has the write) while capping the latency penalty of full sync; it is the pragmatic middle
+ground most production HA setups (MySQL, PostgreSQL) actually run.
 On primary failure, a **failover** promotes a replica to primary (via leader election or an
 orchestrator).
 
@@ -263,8 +268,22 @@ clients and servers. Servers **register** their capabilities and endpoints with 
 A **client-side proxy (stub)** marshals a client request into a transport-neutral message;
 the broker **routes** it to the right server (looking up the registration), a **server-side
 proxy (skeleton)** unmarshals and invokes the server, and results/exceptions are routed back
-the same way. Neither side knows the other's physical address. This is the lineage of
-**CORBA, Java RMI, DCOM, and modern gRPC/service registries**.
+the same way. Neither side knows the other's physical address.
+
+Two distinct lineages hide behind "Broker" — keep them apart:
+
+- **Stub/skeleton + IDL marshalling** (the calling convention): **CORBA, Java RMI, DCOM**,
+  and modern **gRPC/Thrift** all share this. You define an interface, a compiler generates a
+  client stub and server skeleton, and calls look local while marshalling happens under the
+  hood. **gRPC/Thrift stop here — they are point-to-point RPC with no central hub.** A gRPC
+  client that already knows a server's address just calls it directly. So "gRPC is a Broker
+  architecture" is *wrong* — gRPC inherits the stub/skeleton lineage, not the central-mediator
+  one.
+- **The central broker itself** (location transparency / routing): the *mediator* role —
+  "give me *a* sales desk, wherever it is" — only appears when you add a **service registry**
+  (Consul, Eureka, etcd) or a **service-mesh control plane** on top. That layer holds the
+  registrations, resolves names to live endpoints, and does the routing/load-balancing.
+  CORBA bundled this mediator into the ORB; modern stacks split it out into the registry/mesh.
 
 Two recognized forms:
 
@@ -306,8 +325,11 @@ sequenceDiagram
   **performance + operational simplicity**.
 
 **Differs from adjacent styles.** Versus **Publish-Subscribe / Event-Driven bus**: Broker
-(RPC form) is **request/response** "many-to-one-to-many" routing with a reply path;
-pub-sub is **fire-and-forget** "many-to-many" event fan-out with no reply. Versus **API
+(RPC form) is **request/response** routing — many clients send *through the one broker* to
+many servers, and a synchronous reply flows **back the same path** to the specific caller
+that asked (that's the "many-to-one-to-many with a reply path"). Pub-sub is
+**fire-and-forget** fan-out: a published event goes to *many* subscribers at once, there is
+**no reply**, and the producer neither knows nor cares who (if anyone) consumed it. Versus **API
 Gateway**: a gateway sits at the *edge* routing north-south client traffic; a broker
 mediates *internal* service-to-service calls. Versus **Service Mesh / Sidecar**: the mesh
 distributes brokering into per-instance sidecars (no central hub). Versus the GoF
@@ -366,6 +388,29 @@ graph TD
   operations; small systems where a server is cheaper.
 - **Key -ilities:** optimizes **scalability + availability (no SPOF)**; trades off
   **consistency + manageability**.
+
+**The CAP / PACELC lens (why these three styles are really one debate).** Primary-Replica,
+multi-primary, and leaderless P2P are three answers to the *same* question: when a network
+partition splits your nodes, do you keep serving (**A**vailability) or refuse to risk
+divergence (**C**onsistency)? That's **CAP**. **PACELC** adds the everyday case: *even when
+there's no **P**artition, **E**lse* you still trade **L**atency vs **C**onsistency on every
+read/write. Read the family through this lens:
+
+- **Primary-Replica** leans **CP-ish**: one writer means no write conflicts, but a partition
+  that isolates the primary stalls writes until failover. Reads off replicas relax to
+  *eventual* consistency (the async-lag anomaly above); *read-your-writes* / *monotonic
+  reads* are the session-level guarantees you bolt on.
+- **Leaderless / P2P (Dynamo-style)** chooses **AP**: any replica takes a write, so you stay
+  up during partitions, and you get **tunable quorums** — with N replicas, require W acks on
+  write and R on read; set **R + W > N** to force read and write sets to overlap so a read
+  sees the latest committed write (stronger reads), or lower them for speed. Divergent writes
+  are reconciled by **last-write-wins (LWW)** timestamps or **CRDTs** (conflict-free
+  replicated data types — structures that merge deterministically).
+
+**Interview signal.** Whenever you compare replication topologies, say the words **CAP** and
+**PACELC** out loud and name the *specific* consistency level (eventual, read-your-writes,
+monotonic-reads, quorum with R+W>N). Interviewers read "single writer vs. quorum" as your
+signal that you understand the trade-off, not just the diagram.
 
 **Differs from adjacent styles.** Versus **Primary-Replica / Client-Server**: those have a
 privileged authoritative node; P2P has **none** — every peer is equal. Versus

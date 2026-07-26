@@ -176,9 +176,21 @@ achievable end-to-end:
 - **At-least-once:** process, then ack. The default. No loss, possible
   duplicates. Requires idempotency.
 - **Exactly-once *delivery*:** impossible across a network in the presence of
-  crashes (the two-generals / FLP intuition). What systems actually offer is
-  **exactly-once *processing/effects*** — dedup + idempotent side effects that
-  make duplicates observationally harmless.
+  crashes. What systems actually offer is **exactly-once *processing/effects***
+  — dedup + idempotent side effects that make duplicates observationally
+  harmless.
+
+  Two classic results say *why* it's impossible. **Two-generals problem:** over a
+  lossy channel you can never be *certain* a message arrived, because the
+  acknowledgement confirming it can itself be lost — and no finite number of
+  acks-of-acks ever closes the gap. **FLP (Fischer-Lynch-Paterson, 1985):** in an
+  asynchronous network, no deterministic protocol can *guarantee* the participants
+  reach agreement (consensus) if even one of them may fail, because you can't
+  distinguish "crashed" from "just slow." Both land on the same concrete gap
+  described just below: after the worker does the side effect, the ack can be lost
+  or the worker can crash, and the broker cannot tell "done, ack lost" apart from
+  "never done" — so it must redeliver, and true exactly-once *delivery* is off the
+  table.
 
 **Why "exactly once" keeps failing.** The unavoidable gap: a worker performs the
 side effect (charge card), then crashes *before* the ack reaches the broker. The
@@ -225,6 +237,15 @@ important reliability primitive in this whole domain.
   horizon.
 - **Fencing tokens:** monotonic tokens so a resurrected zombie worker's late write
   is rejected (guards against a lease that expired while the worker was paused).
+  The mechanism only works if the *protected resource enforces it*: each time a
+  lease is granted the coordinator hands out a strictly increasing token, and the
+  downstream store **persists the highest token it has ever accepted and rejects
+  any write carrying a lower one.** **Worked trace:** worker A gets the lease with
+  token 33 and writes — the store records `max_token = 33`. A then GC-pauses; its
+  lease expires and worker B acquires token 34. A wakes up (unaware it lost the
+  lease) and tries to write with its stale token 33; the store sees `33 < 34` and
+  rejects it. Without the store's compare-and-reject step, the token is just a
+  number and the zombie's write would land.
 
 **The atomicity gap.** "Do the side effect AND record the key" must be atomic, or
 you've just moved the race. Options: put both in one DB transaction (if the side
@@ -320,7 +341,32 @@ efficiently find "everything due now" without scanning all jobs.
   FOR UPDATE SKIP LOCKED`. Transactional and durable.
 - **Hierarchical timing wheel:** O(1) insert/expire buckets by time granularity;
   used by Kafka (purgatory) and high-throughput timer systems. Efficient for
-  millions of timers but bounded horizon per wheel level.
+  millions of timers but bounded horizon per wheel level. *(How it works —
+  clock-hand analogy below.)*
+
+**How a timing wheel works (intuition).** Picture a clock face as an array of
+buckets, each covering one *tick* (say 1 second). A timer for "fire in 5 s" is
+dropped into the bucket 5 slots ahead of the current hand — that's an O(1) array
+write, no sorted-set comparisons. A single "hand" advances one bucket per tick;
+when it lands on a bucket it fires *every* timer in that bucket's list — again
+O(1) amortized (you touch only timers that are actually due), versus a Redis
+sorted set's O(log n) insert and O(log n) pop-min. **Worked trace:** a wheel of
+60 one-second buckets, hand at bucket 0. Insert "fire at +5 s" → bucket 5. Insert
+"+5 s" again → appended to bucket 5's list. Insert "+40 s" → bucket 40. The hand
+ticks 0→1→2→3→4→5; at bucket 5 it fires both +5 s timers in one shot, then keeps
+advancing. No timer was ever compared against another — each insert and each fire
+was a constant-time list operation.
+
+  - **Why "hierarchical"?** A single wheel only spans `buckets × tick` (60 s
+    above). To cover an hour you'd need 3,600 buckets; a day, 86,400; a month,
+    millions — most sitting empty. Instead you *cascade* coarser wheels like the
+    second/minute/hour hands of a clock: a seconds wheel (60 buckets), a minutes
+    wheel (60), an hours wheel (24). A "fire in 2 h 5 min" timer lives in the
+    hours wheel; when the hours hand reaches it, that timer *cascades down* into
+    the minutes wheel, then into the seconds wheel as its moment approaches. This
+    is what "bounded horizon per wheel level" means — each level covers a fixed
+    span, and levels chain to reach far-future times with a handful of buckets
+    instead of one bucket per possible instant.
 - **Delayed-delivery broker features:** SQS delay queues (max 15 min),
   message timers; beyond that you need your own store.
 
@@ -336,6 +382,65 @@ polling load. Timing wheels scale to millions of timers with O(1) ops but are mo
 code and have a bounded time horizon per level. Pick Redis for millions of
 short-horizon delays where a rare loss is tolerable; pick the DB when durability
 and transactional dedup dominate.
+
+---
+
+## Cancelling, updating and pausing jobs
+
+**Intuition.** `DELETE /jobs/{id}` sounds trivial, but "cancel" means two very
+different things depending on *where the job is in its lifecycle*, and conflating
+them is a classic senior tell. You can always stop a job that hasn't started; you
+can almost never *safely* yank a job mid-side-effect. Frame it as: cancel a
+**not-yet-due schedule** vs cancel an **in-flight execution**.
+
+**(a) Cancelling a not-yet-due job (easy).** The job is still sitting in the
+schedule store / delayed set, not yet leased by a worker. Cancellation is just a
+state transition on the row: mark it `CANCELLED` (a tombstone) or delete it, so
+the scheduler skips it when its `run_at` arrives. If it lives in a Redis sorted
+set, `ZREM` it; in a DB, flip the state under the same transaction discipline as
+everything else. Nothing is running, so there is nothing to unwind.
+
+**(b) Cancelling an in-flight execution (hard).** The job has been leased and a
+worker is executing the body — possibly already halfway through a side effect
+(row inserted, card partially charged, email sent). You **cannot hard-preempt**
+it: killing the worker's thread or the process leaves the side effect in an
+unknown, partially-applied state, and any redelivery would compound the mess.
+Instead use **cooperative cancellation**:
+
+1. Set a `cancel_requested` flag on the job row (the cancel API writes this).
+2. The running worker **periodically checks the flag** at safe checkpoints
+   (between steps, before the next side effect) and, if set, stops voluntarily
+   and transitions the job to `CANCELLED`.
+3. Pair it with a **fencing token** (see *Idempotency and deduplication*) so that
+   if the worker already lost its lease, its late writes are rejected by the
+   downstream store anyway — cancellation and lease-expiry use the same guard.
+
+**Cleaning up partial work.** Because the side effect may be half-done when the
+worker notices the flag, cancellation of a mutating job needs **idempotent or
+compensating cleanup**: either the steps are individually idempotent (re-running
+or rolling back each is safe), or you fire a **compensating action** (a
+saga-style undo — e.g. issue a refund for a partial charge). "Just stop" is only
+safe for jobs with no external side effects.
+
+**Update / pause.** *Update* (change payload, cron expression, priority) is a
+guarded write to the schedule row — reject or version it if the job is already
+running to avoid a torn read. *Pause* is a schedule-level flag the scheduler
+honors at evaluation time: due ticks are skipped (not queued) while paused, which
+then folds into your **missed-run policy** on resume — skip the paused ticks, or
+catch up the most recent one.
+
+> [!INTERVIEW] "How do you cancel a job that's already running?" The answer that
+> scores: distinguish schedule-cancel (tombstone the row) from execution-cancel
+> (cooperative flag + fencing token, because you can't safely preempt a running
+> side effect), and name idempotent/compensating cleanup for partial work.
+
+**Trade-offs.** Cooperative cancellation is the only *safe* option for mutating
+jobs, but it's best-effort: a job that never reaches a checkpoint (tight loop, one
+long blocking call) won't observe the flag until it finishes, so cancellation
+latency is bounded by your checkpoint frequency. Hard-kill is immediate but
+unsafe unless the job is provably side-effect-free. Frequent flag checks add
+read load and code complexity; infrequent checks make cancel sluggish — tune the
+interval to how urgently jobs must abort.
 
 ---
 
@@ -472,6 +577,20 @@ way to use a relational DB as a queue (Postgres, MySQL 8+). Avoids the old
 `floor(run_at / window)`) and/or hash-shard by job id. Beware **hot partitions**:
 if everyone schedules jobs at `00:00`, that bucket melts — add a hash suffix /
 jitter the scheduled time to spread load.
+
+**Large payloads — the claim-check pattern.** Keep queue messages *small*.
+Brokers cap message size (SQS is 256 KB; most brokers are in the same
+low-hundreds-of-KB range), and even where they don't, fat messages bloat the
+store, slow every poll, and blow memory on in-flight counts. When a job body is
+large — a 5 MB image, a big report input — use the **claim-check pattern**:
+persist the payload to an object store (S3 / blob storage), and enqueue only a
+small message holding a *reference* (the object key) plus the idempotency key and
+metadata. The worker receives the pointer, fetches the body from the object store,
+and processes it. **Worked example:** a 5 MB payload can't ride an SQS message
+(256 KB cap) — write the 5 MB to `s3://jobs/{id}` and enqueue a ~1 KB message
+`{s3_key, idempotency_key, type}`; the queue stays tiny and fast, the object store
+carries the bulk. (Garbage-collect the object when the job reaches a terminal
+state so orphaned blobs don't accumulate.)
 
 **Trade-offs.** A relational DB gives you transactional dedup and the simplest
 correct queue via `SKIP LOCKED`, but tops out in the thousands/sec and the polling

@@ -298,6 +298,15 @@ Key decisions:
 candidate drivers, pick one considering ETA, direction, driver acceptance rate,
 and global efficiency (batching requests to reduce total wait). Uber's
 "DISCO/dispatch" does this. It reads the location index but is its own service.
+Rather than greedily assigning each rider to their nearest driver the instant
+the request arrives, mature dispatch **batches requests over a short window**
+(a couple of seconds) and solves a **global bipartite assignment** — matching
+the *set* of waiting riders to the *set* of nearby drivers to minimize total
+wait — because greedy-nearest can strand a rider whose only candidate just got
+taken by someone slightly closer. And because two riders can be considering the
+same driver at once, dispatch must **atomically reserve (lock) a candidate
+driver** before offering the trip — the same reservation/hold theme as inventory
+below — so one driver is never dispatched to two riders concurrently.
 
 **Failure modes.**
 - **Stale locations** if a shard lags → mitigate with TTLs (expire a driver
@@ -333,6 +342,30 @@ Rider pays $20 for a trip:
   (sum = 0; the transaction is atomic — all lines commit or none)
 ```
 
+**Represent money as integer minor units, never floats.** The `$20` above is
+stored as `2000` (cents / minor units), not `20.00` as a floating-point number.
+Floats can't represent `0.10` exactly, so a sum of many entries drifts by
+fractions of a cent and your "sum to zero" invariant silently breaks. Use an
+integer count of the smallest currency unit (cents, or for JPY the yen itself,
+which has no minor unit) or an exact decimal type — never IEEE-754 float.
+
+**Every entry carries a currency, and the invariant holds *per currency*.** A
+ledger holding USD and EUR does not sum USD and EUR entries together; each
+currency balances to zero independently. Moving money *across* currencies is not
+one transfer — it's a debit in one currency and a credit in another, routed
+through an **FX (foreign-exchange) conversion account** that absorbs the rate:
+
+```
+Rider pays €10 (rate 1.08 USD/EUR); driver is paid in USD:
+  DEBIT  rider_cash (EUR)      -€10.00      (-1000 EUR minor units)
+  CREDIT fx_conversion (EUR)   +€10.00      (+1000 EUR minor units)   EUR sums to 0
+  DEBIT  fx_conversion (USD)   -$10.80      (-1080 USD minor units)
+  CREDIT driver_payable (USD)  +$10.80      (+1080 USD minor units)   USD sums to 0
+```
+
+The FX account is where any rounding residue and rate spread live, so each
+currency's books still balance exactly.
+
 **Why double-entry (vs just updating balances)?**
 - **Auditability**: you can reconstruct any balance at any point in time by
   replaying entries — invaluable for regulators and disputes.
@@ -365,6 +398,66 @@ balance maintenance). The alternative — mutable balance rows — is simpler an
 faster to write but loses the audit trail and makes reconciliation and dispute
 handling nearly impossible. For anything touching real money, always choose the
 ledger.
+
+---
+
+## Authorization, capture and refund lifecycle
+
+**Intuition.** Charging a card is not one action — it's two. First you *ask the
+bank to set aside the money* (an **authorization**, or "auth": a hold that
+reserves funds on the card without actually moving them). Later you *collect it*
+(a **capture**: the money actually settles from the cardholder to you). Think of
+an auth like a restaurant putting a hold on your card when you open a tab, and
+the capture as the final bill when you leave — the tip and total aren't known
+until the end. Splitting the two lets you commit to a charge before you know the
+exact final amount.
+
+**Why this matters (the Uber example the interviewer wants).** When a trip
+*starts*, Uber doesn't know the final fare — traffic, route, and wait time
+aren't settled yet. So it **authorizes an estimated fare** (say $25) at trip
+start to confirm the card is valid and the funds exist. When the trip *ends* and
+the real fare is known (say $18), it **captures $18** against that $25 auth — a
+**partial capture**. The remaining $7 of the hold is released. If the rider
+cancels before the trip, Uber **voids** the auth (releases it entirely, no money
+moves).
+
+**The lifecycle:**
+
+```mermaid
+stateDiagram-v2
+    AUTHORIZED: AUTHORIZED (hold placed, funds reserved)
+    [*] --> AUTHORIZED: authorize(est. amount)
+    AUTHORIZED --> CAPTURED: capture(final ≤ auth)
+    AUTHORIZED --> VOIDED: void (cancel before capture)
+    AUTHORIZED --> EXPIRED: auth expires (~7 days, unused)
+    CAPTURED --> REFUNDED: refund (after settlement)
+```
+
+- **Authorize**: bank checks the card and reserves the amount. No money has
+  moved yet; the cardholder sees a "pending" hold that lowers their available
+  balance.
+- **Capture**: you tell the processor to actually pull the (possibly smaller)
+  amount. **Partial capture** captures less than the auth (Uber's final < est.);
+  the unused remainder is released. You can typically capture only *up to* the
+  authorized amount — a higher final needs a re-auth.
+- **Void / auth reversal**: cancel an *uncaptured* auth and release the hold
+  immediately. Cheaper and faster than refunding, and it happens before any
+  settlement.
+- **Auth expiry**: an uncaptured hold does not last forever. Card-network rules
+  expire holds after a window (commonly around a week for card-not-present, but
+  it varies by card type and issuer — verify current network rules). After
+  expiry the reserved funds are freed even if you never captured; if you still
+  need the money you must re-authorize.
+- **Refund**: reverses money *after* capture/settlement — a distinct, slower
+  path (funds have already moved to you, so they must be sent back). Prefer a
+  void over a refund whenever the charge hasn't settled yet.
+
+**Ledger tie-in.** These states map cleanly onto the double-entry ledger via
+*pending* (semantic-lock) entries: an auth writes a pending/held entry, capture
+converts it to a settled entry, void/expiry writes a compensating release, and
+refund writes a reversing entry. This is exactly the "correction is a new entry,
+never a mutation" rule from the ledger section, and it dovetails with the saga
+compensations below (T1 reserve/authorize ↔ C1 void).
 
 ---
 
@@ -405,6 +498,16 @@ Critical details:
   processing → return "409/processing, retry later" or block, so you don't run
   two concurrently. Keys typically have a **state** (started → succeeded/failed)
   and a **TTL** (e.g., 24h).
+- **Handle the crash-in-the-middle case** (the hard one interviewers push on):
+  the first attempt called the processor, the charge *succeeded downstream*, but
+  the server crashed before it wrote the outcome against the key — so the key is
+  stuck in `started` with an unknown result. A blind retry must **not** re-charge
+  (double charge) and must **not** assume failure (lost money). Recovery: when a
+  retry finds a `started` key older than a threshold, the server **reconciles
+  with the downstream processor** — query the processor *by the same idempotency
+  key* to learn the true outcome — then finalizes the stored result accordingly
+  before responding. This is why the key must be threaded all the way to the
+  processor: it's both the dedupe guard *and* the recovery lookup handle.
 - **Idempotency must span the whole side-effecting flow**, including the call
   to the external processor. Downstream processors *also* accept idempotency
   keys so a retry there is safe too.
@@ -463,6 +566,41 @@ design for this: use **semantic locks** (a "pending" status), **commutative
 updates**, and idempotent steps. Compensations must be idempotent and must
 handle "the thing I'm undoing partly happened."
 
+**The dual-write problem (and the transactional outbox fix).** A choreography
+step must do two things: update its own DB *and* publish an event for the next
+service. But there is **no transaction spanning a database and a message
+broker** — so what if the DB commit succeeds and the broker publish fails (event
+lost → saga stalls), or the publish succeeds and then the DB rolls back (ghost
+event → downstream acts on a state that never happened)? Writing to two systems
+that can't commit together is the **dual-write problem**, and it silently
+corrupts event-driven sagas.
+
+The standard fix is the **transactional outbox**: instead of publishing directly,
+write the event as a row into an **outbox table in the *same* local DB
+transaction** as your business change. Now the state change and the "intent to
+publish" commit atomically — one transaction, one storage engine, no dual write.
+A separate **relay** then ships outbox rows to the broker:
+
+```
+BEGIN;
+  UPDATE payments SET status='captured' WHERE id=42;      -- business change
+  INSERT INTO outbox(event, payload) VALUES('PaymentCaptured', {...});  -- event
+COMMIT;                     -- both or neither
+
+-- Relay (async): read new outbox rows -> publish to Kafka -> mark sent.
+```
+
+The relay is typically driven by **CDC (Change Data Capture)** tailing the DB's
+commit log (e.g., Debezium on the outbox/table) — the *same* CDC mechanism the
+reconciliation section uses — or by a simple polling publisher. The relay
+delivers **at-least-once** (it may re-publish an outbox row it already sent if it
+crashes before marking it sent), so consumers must **dedupe by event id** and be
+idempotent — exactly the webhook rule below. An alternative that avoids a
+separate outbox is **event sourcing / listen-to-yourself**: the event log *is*
+the source of truth (the ledger already is one), so appending the event and
+projecting state are the same write. Either way, outbox is *how a choreography
+saga avoids lost and ghost events*.
+
 **Trade-offs.** 2PC gains strict atomicity/isolation, gives up availability
 (blocking, locks, coordinator SPOF) — acceptable only within a single trust
 domain / tightly coupled DBs, low volume. Saga gains availability, loose
@@ -502,6 +640,10 @@ flowchart LR
 
 **Consistency spectrum in payments:**
 - **Ledger + balances: strong / linearizable.** Non-negotiable.
+  (**Linearizable** = every read returns the *most recent completed write*, as if
+  there were a single copy of the data updated instantly at one point in time —
+  no reader ever sees a stale balance. This is CAP's "C"; see the CAP/PACELC
+  section for how it differs from ACID's "C.")
 - **Notifications, receipts, analytics, fraud scoring: eventual.** These read
   from CDC streams or replicas; a few seconds of lag is fine.
 - **Idempotency store: strong** (must serialize retries).
@@ -681,6 +823,17 @@ Everything above is an instance of the same dial. **CAP:** during a network
 **partition**, you must choose **Consistency** or **Availability**. **PACELC**
 extends it: **E**lse (no partition), you still trade **L**atency vs
 **C**onsistency.
+
+> [!WARNING]
+> CAP's "C" and ACID's "C" are *different letters that happen to share a name*.
+> CAP's **C is linearizability** — a read sees the latest completed write, as if
+> there were a single copy, with one real-time order across all nodes. ACID's
+> **C is invariant preservation** — a transaction moves the DB from one valid
+> state to another (constraints, foreign keys, the ledger's sum-to-zero hold).
+> A single-node ACID database is trivially linearizable, but in a distributed
+> system you can have ACID transactions per node without global linearizability.
+> When an interviewer says "the ledger needs strong consistency," they mean CAP's
+> linearizability *plus* ACID's invariants — don't conflate the two.
 
 **Where each subsystem sits:**
 

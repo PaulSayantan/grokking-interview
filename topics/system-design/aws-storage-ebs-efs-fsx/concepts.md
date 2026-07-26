@@ -84,7 +84,7 @@ flowchart LR
         B["/dev/nvme1n1"]
     end
     subgraph FLEET["EBS storage fleet (AZ-a)"]
-        C["primary block replica + in-AZ replica"]
+        C["block store, replicated within AZ (internal)"]
     end
     B -->|"Nitro / EBS-optimized network path"| C
     N["single writer, single AZ — snapshot to cross AZ/Region"]
@@ -127,6 +127,15 @@ sequential streaming (logs, big-data scans) cheaply.
 2,000 MiB/s max at 8,000+ provisioned IOPS. The io2 Block Express 256,000 IOPS
 ceiling requires a Nitro-based instance; other instance types cap at 32,000
 IOPS. As of April 30, 2025, all io2 volumes are io2 Block Express.)
+
+> [!WARNING]
+> The st1/sc1 "Max IOPS" figures (500/250) are **not comparable to SSD IOPS**.
+> AWS measures HDD I/O against a **1 MiB I/O unit** (it counts sequential 1 MiB
+> reads/writes), whereas SSD IOPS are measured at small 4/8/16 KiB block sizes.
+> So sc1's "250 IOPS" is really "250 × 1 MiB/s of sequential streaming," not 250
+> small random operations — HDD is throughput-provisioned, and lining its IOPS
+> number up next to gp3's 80,000 small-random IOPS is a category error a sharp
+> interviewer will catch.
 
 **Trade-offs.**
 - **gp3 vs gp2:** gp3 is the modern default. With gp2 you bought IOPS *by
@@ -195,8 +204,23 @@ reservations** for proper fencing.
   supported, and **you own the concurrency correctness** — this is not EFS.
 - *When to use vs EFS/FSx:* only when the app demands raw shared block with its
   own clustering. If you want a shared *filesystem* the answer is almost always
-  EFS (Linux/NFS) or FSx (Windows/SMB, ONTAP, Lustre), which handle
-  concurrency for you across AZs.
+  EFS (Linux/NFS) or FSx (Windows/SMB, ONTAP, Lustre), which mediate concurrent
+  *file* access across AZs (though even they don't serialize byte-level writes —
+  see the EFS section).
+
+**Kubernetes access-mode vocabulary (say this in a container interview).** The
+primitives map directly onto the PersistentVolume **access modes** k8s and the
+CSI drivers use:
+- **EBS CSI → `ReadWriteOnce` (RWO)**: the volume mounts read/write on **one
+  node** at a time (Multi-Attach can widen this to `ReadWriteMany` on a few Nitro
+  nodes in one AZ, but you still own concurrency). A pod using an EBS PVC can't be
+  rescheduled to another AZ, and two nodes can't share it in the normal case.
+- **EFS CSI → `ReadWriteMany` (RWX)**: **many nodes** across AZs mount the same
+  volume read/write — this is why "shared dataset across many pods" points to EFS.
+- **FSx** varies by flavor (Lustre and the SMB/NFS FSx drivers can offer RWX).
+
+The interviewer is listening for "EBS is RWO, EFS is RWX" — it's the exact
+language the k8s docs and platform teams use.
 
 ---
 
@@ -213,6 +237,21 @@ volume has a latency hit until warmed — **Fast Snapshot Restore (FSR)**
 pre-warms it for a fee. The **EBS direct APIs** let you read snapshot blocks
 without restoring (for backup tools); **Recycle Bin** protects against
 accidental deletion.
+
+**Crash-consistent vs application-consistent (the classic gotcha).** A snapshot
+of a **live, mounted** volume is only **crash-consistent** by default — it
+captures the on-disk bytes at that instant exactly as if the machine had lost
+power, *including* writes still buffered in the OS page cache or the database's
+in-memory buffers that had not yet been flushed to the block device. Restoring
+such a snapshot is like booting after a power cut: the filesystem journal
+replays, but a database may find a **torn/inconsistent** state (half-written
+pages, uncommitted transactions). For an **application-consistent** backup you
+must quiesce first: flush and freeze the filesystem (`fsfreeze`, or `xfs_freeze`)
+and/or tell the DB to flush and briefly hold writes (e.g. MySQL
+`FLUSH TABLES WITH READ LOCK`, or a Postgres checkpoint) before triggering the
+snapshot, then release. **AWS Backup** with pre/post scripts (or its Windows VSS
+integration) automates this, and its **multi-volume consistent snapshot** groups
+a RAID/striped set so all member volumes are captured at the same instant.
 
 **Encryption.** EBS encryption uses **KMS** (AES-256). Encrypting is per-volume
 at creation; you can't encrypt an existing unencrypted volume in place — you
@@ -271,6 +310,40 @@ POSIX user/root directory per application.
 **Latency:** first-byte ~**1 ms reads**, ~**2.7 ms writes** on the Standard
 (SSD) class — slower than local/EBS block because it is a network filesystem,
 but consistent and shared.
+
+**"Shared mount" is not "safe concurrent writes" (the #1 EFS interview trap).**
+A very common follow-up is *"what happens when two pods write the same file on
+EFS?"* The wrong answer is "it just works like a database." NFS gives you
+**close-to-open consistency**: a client's writes are only *guaranteed* visible
+to another client after the writer **closes** the file and the reader
+subsequently **opens** it. Between open and close, each client works partly
+against its own local cache, so a reader can see **stale** data and two writers
+can silently **clobber** each other. NFS does offer **byte-range locks** (via the
+NLM/`lockd` protocol, `fcntl`/`flock`), but they are **advisory** — they only
+serialize processes that *voluntarily* take the lock; a process that just writes
+without locking ignores them entirely. There is **no automatic byte-level write
+serialization** the way an RDBMS serializes concurrent transactions.
+
+> [!INTERVIEW]
+> Worked trace — two EKS pods appending to the same 100-byte file on EFS with
+> **no locking**:
+> - t0: file on the server = 100 bytes. Pod A opens it, seeks to end (offset
+>   100). Pod B opens it, also computes end = offset 100 (both cached size = 100).
+> - t1: Pod A writes 20 bytes at offset 100 → its local view: 120 bytes.
+> - t2: Pod B writes 30 bytes at offset 100 (its stale idea of "end") → this
+>   covers bytes 100–129, overwriting the 100–119 region A just wrote.
+> - t3: both close. Server file = 130 bytes (original 100 + B's 30). A's 20 bytes
+>   are **completely lost** — a classic lost-update / clobbered-append, and
+>   neither pod gets an error.
+>
+> Fix in the answer: use `O_APPEND` (append is atomic per write only up to the
+> pipe/PIPE_BUF-style guarantees, still racy across NFS for large writes), or
+> take an explicit advisory **byte-range lock** before each write, or — the
+> senior answer — **don't use a shared file as a coordination primitive**: give
+> each writer its own file (one file per pod, e.g. `log.<podname>`) and merge
+> later, or put the mutable shared state in a database/queue built for
+> concurrent writers. Contrast with **EBS Multi-Attach**, which is raw block with
+> **zero** coordination — even worse, so it demands a cluster-aware filesystem.
 
 **Trade-offs.**
 - *Gain:* shared POSIX filesystem across AZs with zero capacity planning; ideal
@@ -547,6 +620,18 @@ not a one-shot move. Snow = *offline* for huge datasets or poor connectivity.
 Pick by (data size ÷ bandwidth) vs deadline, and whether on-prem needs
 continued local access during/after the move.
 
+**Presenting S3 as files — and why it's not a POSIX filesystem.** You can mount
+S3-like paths through **Mountpoint for Amazon S3** (a file client over S3) or
+**File Gateway** (NFS/SMB → S3), and **Amazon File Cache** provides a fast,
+transient high-throughput cache in front of S3/on-prem NFS. But underneath you
+still have **object semantics**: there are **no efficient in-place partial
+writes** (changing one byte rewrites the whole object), no true **POSIX byte-range
+locking**, and metadata operations (rename, list) behave like object operations,
+not directory operations. So treat these as a **read-heavy / write-whole-file /
+append convenience** layer — great for serving a model or dataset out of S3 as
+files — **not** a drop-in POSIX filesystem for databases or file-locking apps.
+That's the honest rebuttal to "why not just mount S3?" beyond latency.
+
 ---
 
 ## Failure modes and how designs degrade
@@ -599,11 +684,11 @@ A decision cheat-sheet you can recite:
 - **Shared block for legacy clustered app** → **io1/io2 Multi-Attach** + cluster
   filesystem (last resort; prefer a managed file service).
 
-The meta-trade-off: **pick the lowest-level primitive that satisfies the access
-pattern, scope durability to the required blast radius (AZ vs Region), and tier
-storage classes to control cost.** State the access pattern, then justify the
-primitive, then the specific service/mode, then the HA and cost tiering — in
-that order.
+The meta-trade-off is just the opening spine applied end-to-end: **pick the
+lowest-level primitive the access pattern allows, scope durability to the
+required blast radius (AZ vs Region), then tier storage classes for cost.**
+Delivery order in the interview: access pattern → primitive → specific
+service/mode → HA and cost tiering.
 
 ---
 

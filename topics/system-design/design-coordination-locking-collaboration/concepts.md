@@ -63,6 +63,29 @@ unconditionally and sacrifices liveness during partitions. A poorly designed
 one (e.g., a lock whose *safety* depends on timing) can do the wrong thing when
 timing misbehaves — which is far more dangerous.
 
+**Two words you need before we go further: CAP and linearizability.**
+
+- **CAP theorem.** Of **C**onsistency (every read sees the latest write),
+  **A**vailability (every request gets a non-error response), and
+  **P**artition-tolerance (the system keeps working when the network splits),
+  you can guarantee only two *at once* — and since network partitions are a fact
+  of life, not a choice, **P is mandatory**. So the real choice under a partition
+  is C **or** A: when nodes can't talk to each other, you either refuse to serve
+  (stay **CP** — consistent but not available) or serve possibly-stale/divergent
+  data (stay **AP** — available but not consistent). "Favor safety = CP,"
+  "favor liveness = AP" is just this choice in coordination clothing.
+- **Linearizability** (the strong "C" the coordination services aim for). A write
+  appears to take effect **atomically at a single instant** between when the
+  client sends it and when it gets the response, and once a write completes,
+  **every later read sees that value or a newer one** — the whole cluster behaves
+  as if there were one single copy updated in real time. Concretely: client A
+  writes `x=1` and gets an ack at 10:00:00.000; client B reads `x` at 10:00:00.050
+  — under linearizability B **must** see `x=1` (or newer), never the old value.
+  Contrast with **eventual consistency**, where B might still read the stale value
+  for a while and all replicas only agree "eventually." Linearizability is what
+  makes a lock or leader claim *trustworthy*; it is also what costs a quorum round
+  trip (see [Consensus as the foundation](#consensus-as-the-foundation)).
+
 ---
 
 ## Distributed locks and their failure modes
@@ -71,6 +94,18 @@ timing misbehaves — which is far more dangerous.
 hold a named resource at a time — a cluster-wide mutex. The naive
 implementation is a single row/key: "SET lock:resource = owner IF NOT EXISTS,
 with a TTL."
+
+> [!KEY-TAKEAWAY]
+> **First, split locks into two grades (Kleppmann's dividing line) — it decides
+> everything else.** An **efficiency lock** exists only to avoid *wasted work*
+> (e.g. "don't let two workers render the same thumbnail"); a rare double-run is
+> a minor, tolerable cost, so a cheap single-Redis lock is fine. A **correctness
+> lock** exists because a *double action corrupts data or loses money* (e.g.
+> "charge this card once," "decrement inventory once"); here a double-run is
+> unacceptable, so the lock must be consensus-backed **and** fenced (later
+> sections). Every trade-off below reads differently depending on which grade you
+> are building; the terms "efficiency-grade" and "correctness-grade" recur
+> throughout.
 
 **How it works (the common recipe).**
 
@@ -355,7 +390,7 @@ safety without sacrificing the liveness the TTL bought.
 |---|---|---|---|
 | Central coordinator | 3 (req, grant, release) | Yes (coordinator) | Simple, fast; coordinator failure halts all |
 | Token ring | 1..∞ (token circulates) | Token loss | No starvation; latency = ring traversal |
-| Ricart-Agrawala (quorum of all) | 2(N-1) | No | Fully distributed; expensive, N-sensitive |
+| Ricart-Agrawala (permission from all N-1) | 2(N-1) | No | Fully distributed but needs *unanimous* replies — a single unreachable node blocks it, so it tolerates zero failures without extra machinery |
 | Consensus-backed (ZK/etcd) | quorum RTT | No (quorum) | What people actually use |
 
 **Trade-offs.**
@@ -467,7 +502,16 @@ join-semilattice). Two families:
 - **State-based (CvRDT):** replicas exchange full state and `merge()` via a
   least-upper-bound. Simple math, heavy to ship.
 - **Operation-based (CmRDT):** replicas broadcast operations that commute;
-  needs reliable causal delivery but is lighter on the wire.
+  needs reliable causal delivery but is lighter on the wire. **Causal delivery**
+  means an op is applied on a replica **only after every op it causally depends
+  on has already been applied** (e.g. don't apply "delete character C" before the
+  "insert character C" it references). The standard mechanism is a **vector clock
+  / version vector** — a per-replica counter vector tagged onto each op, so a
+  receiver can tell "am I missing any op that came before this one?" and buffer
+  until it isn't. This is why CmRDT is lighter on the wire (ship only the op, not
+  full state) but demands a **reliable causal broadcast channel** underneath;
+  CvRDT needs no such channel because merging full state is order-independent by
+  construction.
 
 For text, sequence CRDTs (RGA, Logoot, LSEQ, Yjs's YATA, Automerge) give each
 character a **unique, immutable, globally-orderable identifier** so inserts never
@@ -558,12 +602,24 @@ last-write-wins** semantics. Yjs ships a dedicated "awareness" protocol distinct
 from the document CRDT for exactly this reason. Servers track live sessions
 (heartbeats, ephemeral entries) and fan out deltas.
 
-**Capacity / back-of-envelope.** A doc with 50 active editors, cursor updates at
-~10 Hz, ~50 bytes each: 50 × 10 × 50 B = 25 KB/s per doc egress *per subscriber*,
-so fan-out (N² within a room) dominates. Rooms of thousands (e.g., large live
-docs, Figma files) need throttling/coalescing (send at 20–30 Hz max, drop
-intermediate frames) and regional edge fan-out. Presence QPS usually **dwarfs**
-document-edit QPS, which is why it rides a separate, cheaper, lossy path.
+**Capacity / back-of-envelope.** Take a doc with N = 50 active editors, each
+emitting cursor updates at ~10 Hz, ~50 bytes each. Work it in two steps:
+
+1. **Per-subscriber receive rate.** Each editor must be *told* about the other
+   ~49 editors' cursors: 49 × 10 updates/s × 50 B ≈ **~25 KB/s inbound to one
+   subscriber**. That is comfortable for a single client — this is *not* the
+   scary number.
+2. **Total server fan-out egress for the doc.** The server sends that stream to
+   **all** N subscribers, so it multiplies by N: ~25 KB/s × 50 ≈ **~1.25 MB/s of
+   egress for this one document**. The messages sent scale as **N × (N-1) ≈ N²**
+   within a room, so egress grows *quadratically* in room size.
+
+The N-multiplier in step 2 is the whole problem: double the room to 100 editors
+and per-doc egress roughly quadruples to ~5 MB/s. Rooms of thousands (large live
+docs, Figma files) therefore need throttling/coalescing (cap sends at ~20–30 Hz,
+drop intermediate frames) and regional edge fan-out to collapse the N². Presence
+QPS usually **dwarfs** document-edit QPS, which is why it rides a separate,
+cheaper, lossy path.
 
 **Trade-offs.**
 - **Separate presence from document state:** presence must be fast and can be

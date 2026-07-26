@@ -100,8 +100,10 @@ critical path, it doesn't make each hop cheaper.
 
 ## Event notification versus event-carried state transfer
 
-**Intuition.** Not all "events" are equal. Martin Fowler distinguishes several
-styles, and the choice drives coupling and payload size.
+**Intuition.** Not all "events" are equal. Martin Fowler names *four* styles of
+event usage; the two below drive the payload/coupling choice, and the other two —
+**event sourcing** and **CQRS** — are covered in their own sections. The choice
+drives coupling and payload size.
 
 - **Event notification** — a thin event ("OrderPlaced {orderId: 123}"). The
   consumer must call back to the producer to fetch details. Small payload, but
@@ -111,6 +113,7 @@ styles, and the choice drives coupling and payload size.
   fully decoupled and can maintain their own local read copies, at the cost of
   larger events, data duplication, and staleness.
 - **Event sourcing** — events are the source of truth (see below).
+- **CQRS** — separate read and write models (its own section below).
 
 **Trade-off.** Notification keeps payloads small and events stable but couples
 consumers to the producer's API and can create a "read storm" back on the
@@ -119,6 +122,17 @@ local copy) but duplicates data, bloats events, and forces you to reason about
 stale local copies and schema evolution. Interview heuristic: prefer ECST for
 decoupling and to avoid callback storms; keep notification thin only when
 payloads are huge or privacy-sensitive.
+
+**Concrete read-storm picture.** Say `OrderPlaced{orderId: 123}` (a thin
+notification) fans out to **5 consumers** — payment, inventory, analytics, search
+index, and email. Each consumer needs the order details it *didn't* receive, so
+each immediately calls back `GET /orders/123` on the producer. One logical event
+just became **5 synchronous read calls** back on the very Order service you were
+trying to decouple from. Now scale it: a burst of 1,000 orders/s fans out to
+5,000 reads/s hitting the producer — a fan-out spike has been converted into a
+read spike on the producer, and if that service is slow or down, every consumer
+stalls. ECST avoids this entirely by putting `{items, total, address}` in the
+event so no callback is needed.
 
 ---
 
@@ -150,7 +164,11 @@ flowchart LR
 then publish events. Projectors consume those events and update read models
 tailored to specific queries (e.g., a search index, a "user dashboard" table, a
 Redis cache). Reads hit the read models directly — no joins across services, no
-contention with writes.
+contention with writes. (Note the `WM → RM` "emits events" arrow above: mutating
+the write DB *and* reliably publishing the projection event are two separate
+writes, which is itself the **dual-write problem** — solved by the transactional
+outbox pattern covered below. Keep that forward dependency in mind; the diagram's
+arrow is not free.)
 
 **Real-world usage.** High read/write asymmetry systems: e-commerce product pages,
 social feeds, dashboards, analytics. Often paired with event sourcing but does
@@ -340,17 +358,17 @@ failure.
 
 ```mermaid
 sequenceDiagram
-    participant O as Saga Orchestrator (state machine)
-    participant P as Payment
-    participant I as Inventory
-    participant S as Shipping
-    O->>P: 1. cmd Charge
-    P-->>O: reply
-    O->>I: 2. cmd Reserve
-    I-->>O: reply
-    O->>S: 3. cmd Ship
-    S-->>O: reply
-    Note over O: on failure at step k: send compensating cmds k-1..1
+    participant O as Saga Orchestrator (state machine);
+    participant P as Payment;
+    participant I as Inventory;
+    participant S as Shipping;
+    O->>P: 1. cmd Charge;
+    P-->>O: reply;
+    O->>I: 2. cmd Reserve;
+    I-->>O: reply;
+    O->>S: 3. cmd Ship;
+    S-->>O: reply;
+    Note over O: on failure at step k: send compensating cmds k-1..1;
 ```
 
 **Choreography — trade-offs**
@@ -387,8 +405,26 @@ sequenceDiagram
   "issue refund"). Design commands so compensation is possible.
 - **Compensations are semantic, not physical undo.** A refund is not the inverse
   of a charge; it's a new fact.
-- Some steps are **pivot/retryable** — after the pivot point the saga must go
-  forward (retry) and cannot compensate.
+- **Three kinds of saga step** (Chris Richardson's taxonomy). Every step is one of:
+  - **Compensatable** — can be semantically undone by a compensation later (e.g.,
+    *reserve inventory* → compensate with *release inventory*; *create order* →
+    *cancel order*).
+  - **Pivot** — the point of no return: the last step that can still abort. Once it
+    commits, the saga can no longer be aborted backward; it must roll *forward* to
+    completion. The pivot is the first step whose effect is *not* practically
+    reversible — often the first physical, irreversible action, e.g. handing the
+    parcel to the carrier (you cannot un-ship it). A step is only *compensatable* if
+    a semantic undo exists: charging a card is compensatable *if* refunds are
+    available (the compensation is a refund fact), but if refunds aren't practical
+    then the charge itself becomes the pivot. So which step is the pivot is a
+    *modeling choice* driven by what can be undone.
+  - **Retryable** — steps *after* the pivot that are guaranteed (by design) to
+    eventually succeed if retried, so they never force a rollback (e.g., *send
+    confirmation email*, *allocate a shipment slot*). You make them idempotent and
+    retry until they stick.
+  - Why this matters: identify the pivot early. Before it, a failure compensates
+    backward; at or after it, a failure rolls *forward* (retry the retryable steps),
+    because there is nothing left to safely undo.
 
 **Worked trace — an order saga that fails at inventory.** Orchestrated saga over
 Order → Payment → Inventory → Shipping. Watch the money and each entity's status;
@@ -675,10 +711,22 @@ retry's delay (e.g., pick uniformly in `[0, backoff]`) so the 10,000 retries
 spread out over the window instead of hitting in lockstep, letting the recovering
 downstream drain load gradually.
 
+**The ordering hazard of retry topics.** Non-blocking retry topics keep the main
+partition moving, but they *break per-key order*. Concrete case: `OrderCreated`
+and `OrderUpdated` for the same `orderId: 42` are produced in that order.
+`OrderCreated` hits a transient downstream error and gets parked on `retry-1m`,
+while `OrderUpdated` sails through the main topic immediately. Now the projector
+sees **`OrderUpdated` before `OrderCreated`** — an update for a row that doesn't
+exist yet, or worse, `OrderCreated` lands a minute later and *overwrites* the
+newer update, resurrecting stale state. The mitigation is the **monotonic-version
+guard** from the idempotent-consumer section: tag each event with a per-entity
+version and *apply iff `version > lastApplied`*, so the late-arriving lower-version
+`OrderCreated` is simply dropped instead of clobbering the newer state.
+
 **Trade-offs.**
 - Blocking retries preserve ordering but stall the whole partition on one bad
   message (head-of-line blocking). Parking to a DLQ/retry topic keeps the main
-  flow moving but can reorder and requires a reprocessing story.
+  flow moving but can reorder (see above) and requires a reprocessing story.
 - DLQs need monitoring and an owner — an unwatched DLQ is silent data loss.
 
 ---

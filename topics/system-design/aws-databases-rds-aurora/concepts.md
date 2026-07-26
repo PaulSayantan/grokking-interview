@@ -24,7 +24,8 @@ orchestration, and replica setup. You still get a normal SQL endpoint; you give 
 access to the host and some superuser privileges.
 
 **How it works.** You choose a DB *instance class* (compute + RAM, e.g. `db.r6g.2xlarge`),
-a storage type (gp3 general-purpose SSD, io1/io2 provisioned IOPS, or magnetic), and an
+a storage type (gp3 general-purpose SSD, io1/io2 provisioned IOPS, or magnetic — *legacy
+"standard" storage, not a choice for new workloads*), and an
 engine. RDS attaches EBS volumes, installs the engine, and exposes a DNS endpoint. Config
 is controlled through **parameter groups** (engine settings like `max_connections`,
 `work_mem`) and **option groups** (engine add-on features like Oracle TDE, SQL Server
@@ -179,6 +180,15 @@ of the famous line: *"the log is the database."*
 - The writer sends **only redo log records** over the network (not full 8/16 KB pages),
   dramatically cutting write amplification and network I/O vs traditional replication.
   Storage nodes apply the log to produce pages on demand and self-heal via peer gossip.
+  *Why this matters (the write-amplification win, made concrete):* a traditional Multi-AZ
+  MySQL commit writes the **same logical change several times** over the network — the data
+  page(s), the double-write buffer (crash-safety), the binlog (replication), plus the redo
+  (WAL) log — and then ships full pages to the standby. Aurora ships **only the redo stream**
+  to the 6 storage nodes, which lazily materialize pages themselves. In the SIGMOD-paper
+  benchmarks this cut the number of write **I/Os per transaction by roughly an order of
+  magnitude** versus a synchronously-mirrored MySQL doing the full page/binlog/double-write
+  shipping — which is the real reason the "log is the database" design outruns page-shipping
+  replication and lets Aurora sustain far higher write throughput on the same hardware.
 - Up to **15 Aurora Replicas** share the *same* storage volume as the writer — so replicas
   don't re-do writes; they just read from shared storage, keeping replica lag typically in
   the **~10–20 ms** range (single-digit to low tens of ms).
@@ -246,6 +256,39 @@ scale reads *are* the failover targets. There is no separate passive standby to 
   Multi-AZ instance mode: every replica does useful read work *and* is a failover target.
   The trade: a failover briefly reduces your read fleet by one while it's promoted.
 
+### Implementing read-after-write consistency (concretely)
+
+**Intuition.** "Route read-your-writes to the writer" is the *policy*; the interview follow-up
+is *how do you actually do that in application code* when your default is to spread reads over
+the reader endpoint? You need a rule that says "for this user, for a short window after their
+write, don't trust a possibly-lagging replica." Here are the mechanisms, cheapest first:
+
+1. **Write-then-read-from-writer for a short TTL window.** After a mutation, stamp the user's
+   session with `readFromWriterUntil = now + T`. While `now < readFromWriterUntil`, that
+   user's reads go to the **writer endpoint**; afterward they fall back to the reader endpoint.
+   `T` is sized to cover typical replica lag with margin.
+2. **Sticky/session routing keyed by user.** Pin a user (or session) to the writer for their
+   whole session, or to one specific replica, so they never bounce between replicas at
+   different lag points. Simplest to reason about; costs you some writer-read load.
+3. **Lag-aware routing via `AuroraReplicaLag`.** Aurora publishes a per-replica
+   `AuroraReplicaLag` CloudWatch metric (ms). Route a read to a replica only if its current
+   lag is below a threshold (e.g. < 20 ms); otherwise send it to the writer. This lets most
+   reads still scale out and only bounces the risky ones.
+4. **Read-your-writes within a single session on the writer.** If a request does its write and
+   its immediately-following read on the **same connection to the writer endpoint**, it always
+   sees its own write — no lag possible. Keep the read+write on one writer connection for the
+   consistency-critical path.
+
+**Worked example — "post a comment, then see it."** A user POSTs a comment (write to the
+writer). Suppose measured replica lag is usually **~15 ms** but spikes to **~500 ms** under
+write bursts. If you immediately render the thread from the **reader endpoint**, a replica
+that's 500 ms behind returns the thread *without* the new comment → the user thinks their post
+vanished. Fix with technique (1): on the write, set `readFromWriterUntil = now + 2 s` (a
+window comfortably above the ~500 ms worst case). For the next **2 seconds** this user's
+thread reads hit the **writer** (guaranteed to include the comment); after that the window
+expires and their reads rejoin the replica fleet. Only *this* user's reads for 2 s pay the
+writer-load cost — everyone else keeps scaling on replicas.
+
 ---
 
 ## Aurora Serverless v2: on-demand ACU autoscaling
@@ -254,12 +297,17 @@ scale reads *are* the failover targets. There is no separate passive standby to 
 Capacity Units (ACUs)** and Aurora scales compute/memory up and down in fine increments,
 in-place, without dropping connections — matching spend to load.
 
-**How it works.** **1 ACU ≈ 2 GiB of RAM** plus associated CPU and networking. You configure
-a **min and max ACU**; v2 scales in steps as small as **0.5 ACU**, seamlessly, while queries
-and transactions are running (no connection drops, unlike v1's abrupt pauses). Max is
-**256 ACUs** (≈512 GiB). With **scale-to-zero** (automatic pause/resume), the min can go to
-**0 ACU** so an idle cluster costs (near) nothing for compute; the first connection after
-a pause incurs a resume latency (seconds). Billing is **per-second on ACU consumed.**
+**How it works.** **1 ACU ≈ 2 GiB of RAM** plus a *proportional* slice of CPU and networking
+— so an ACU scales CPU with the RAM, not RAM alone; doubling ACUs roughly doubles both cores
+and memory. You configure a **min and max ACU**; v2 scales in steps as small as **0.5 ACU**,
+seamlessly, while queries and transactions are running (no connection drops, unlike v1's
+abrupt pauses). Max is **256 ACUs** (≈512 GiB). **Scale-to-zero** (automatic pause/resume)
+lets the min go to **0 ACU** so an idle cluster costs (near) nothing for compute — but this
+is a **recent, engine-version-gated** capability with caveats: it's best for dev/test and
+intermittent workloads because the first connection after a pause pays a **resume penalty on
+the order of ~15 seconds**, and the exact behavior differs by engine version (confirm your
+version supports it before relying on it in production). Billing is **per-second on ACU
+consumed.**
 
 **Worked example — when "spiky wins on serverless" is actually true.** Consider a cluster
 that idles at **2 ACU for 20 h/day** and bursts to **30 ACU for 4 h/day** (a daily reporting
@@ -299,11 +347,12 @@ Database replicates a cluster to other Regions at the **storage layer** with **t
 sub-second lag**, using dedicated replication infrastructure that barely touches the
 primary's compute.
 
-**How it works.** One **primary Region** (read/write) plus up to **5 secondary Regions**
-(read-only) — the docs now cite **up to 10 secondaries** on current engine versions. A
-secondary cluster can have **up to 16 read replicas** (vs 15 normally) and can use
-Serverless v2 readers. Replication uses dedicated infra, so it adds little load on the
-primary and achieves latency **typically under 1 second**.
+**How it works.** One **primary Region** (read/write) plus **multiple secondary Regions**
+(read-only) — historically up to 5, and current engine versions raise this further (verify
+the exact ceiling in current AWS docs, as these limits rise over time). Each secondary is a
+full Aurora cluster with its own reader fleet and can use Serverless v2 readers. Replication
+uses dedicated infra, so it adds little load on the primary and achieves latency **typically
+under 1 second**.
 - **RPO:** for a *managed planned* **switchover**, zero data loss. For an *unplanned*
   cross-Region **failover** after a Region outage, RPO is typically **≤ 1 second** (the
   replication lag). Aurora PostgreSQL offers a configurable RPO knob.
@@ -585,7 +634,7 @@ Instances / Savings Plans cut steady-state compute cost; Serverless v2 wins on s
   segments, quorum, 128 TiB): https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.StorageReliability.html
 - AWS Aurora User Guide — "Using Aurora Serverless v2" (ACU = 2 GiB, 0.5-ACU steps, min 0 /
   max 256, scale-to-zero): https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.html
-- AWS Aurora User Guide — "Using Amazon Aurora Global Database" (up to 10 secondary Regions,
+- AWS Aurora User Guide — "Using Amazon Aurora Global Database" (multiple secondary Regions,
   <1s lag, write forwarding, switchover vs failover): https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-global-database.html
 - AWS RDS User Guide — "Multi-AZ deployments" (instance vs cluster, sync standby, failover):
   https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html

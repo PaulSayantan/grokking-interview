@@ -15,11 +15,20 @@ and down in minutes (pay-per-use, but you pay egress to pull data out and you ce
 some control). Every hybrid pattern below is just deciding *which half each component
 belongs in*.
 
+**The egress-asymmetry rule that drives placement.** Cloud data-transfer pricing is
+asymmetric: **ingress (data flowing *into* the cloud) is typically free; egress (data
+flowing *out* to the internet or across the boundary) is metered per GB.** It is *cheap* to
+push data into an elastic environment and *expensive* to keep pulling it back out — so the
+design rule is **move compute to the data, not data to compute** whenever the same large
+dataset is read repeatedly. This is the exact economics behind choosing Hybrid Backend over
+Hybrid Processing (worked out in numbers below).
+
 Every hybrid pattern answers the same shaped question: given components with
-different **forces** — workload shape (steady vs. spiky/bursty), data-volume
-volatility, compliance/data-residency, cost, latency, and lifecycle stage — where
-should each component be deployed, and how do the two halves stay **loosely
-coupled** across the environment boundary? The recurring mechanism is:
+different **forces** — where "force" is patterns-catalogue vocabulary for a *competing
+pressure or constraint that pulls the design in a direction*: workload shape (steady
+vs. spiky/bursty), data-volume volatility, compliance/data-residency, cost, latency,
+and lifecycle stage — where should each component be deployed, and how do the two
+halves stay **loosely coupled** across the environment boundary? The recurring mechanism is:
 place the variable/burst/regulated part in the environment that fits it, and
 connect the halves with **asynchronous messaging** so demand or failure on one
 side does not destabilize the other.
@@ -45,6 +54,21 @@ the mechanisms these patterns *rely on*. Keep this topic at the **pattern altitu
 - Tenant isolation → `system-design/multi-tenancy-and-saas-isolation`
 - Provider-specific hybrid depth (Outposts, DX/VPN, migration) → `system-design/aws-migration-modernization`
 
+**Companion-pattern vocabulary.** A few capitalized names below are *sibling patterns* from
+the same Fehling catalogue, not concepts you're expected to already know. Quick glosses so
+they don't read as jargon:
+- **Elastic Queue** — a message queue whose consumers auto-scale with queue depth (backlog
+  grows → add workers; drains → remove them). It's the thing that lets the elastic side
+  "scale with the queue."
+- **Compliant Data Replication** — replicating data while *respecting residency/regulatory
+  rules* (e.g. copy only non-sensitive fields, or only to approved regions).
+- **Stateful Component** — a component that holds persistent state (a database / store),
+  as opposed to a stateless processor; it's the thing Hybrid Backup pulls copies *from*.
+- **Data Access Component** — (explained inline under Hybrid Backend) a component that
+  stages the required data into cloud storage and tells the elastic side where to find it.
+- **Loose Coupling**, **Two-Tier / Three-Tier Cloud Application**, **Environment-based
+  Availability** — companion structural patterns defined elsewhere in the catalogue.
+
 ```mermaid
 flowchart LR
   subgraph STATIC["Static environment (private DC / on-prem)"]
@@ -62,6 +86,44 @@ flowchart LR
   S2 <-.->|"replicate / archive"| E2
   E1 --> E2
 ```
+
+---
+
+## Running example: one e-commerce app, decomposed
+
+To make the framework concrete, thread one realistic application through several patterns.
+Imagine an online retailer whose **order/inventory system-of-record (SoR) runs on-prem**
+(a regulated Oracle cluster that legal will not let leave the data center) and handles a
+**steady ~500 requests/second (rps)** on a normal day. Two things break that calm:
+
+- **A Black-Friday promo** drives the *public storefront UI* to ~**5,000 rps** (10×) for a
+  few hours, then it drops back. The checkout/inventory core stays near 500 rps because
+  most of the spike is browsing.
+- A **nightly fraud-and-analytics batch** re-reads the last 30 days of orders — a large,
+  growing dataset — but only runs once a night.
+
+Here is how the same app decomposes, and *which force* decides each split:
+
+| Component | Force in play | Pattern | Lives where |
+|---|---|---|---|
+| Storefront UI (10× promo spike) | bursty, hard-to-forecast workload | **Hybrid User Interface** | elastic cloud, auto-scaled |
+| Order/inventory SoR | data residency / compliance | (stays put — the static half) | on-prem |
+| Fraud/analytics batch over 30-day orders | bursty *and* data-heavy | **Hybrid Backend** | compute + staged data in cloud |
+| Nightly off-site archive of orders | DR + regulatory retention | **Hybrid Backup** | cloud object storage |
+
+**Where the queue sits.** The elastic storefront never calls the on-prem SoR synchronously
+during the 10× spike — that would drag the spike straight into the fixed-capacity core. It
+enqueues "place order" messages onto a durable queue that the on-prem side drains at its own
+~500 rps pace. At 5,000 rps in / 500 rps drained, the queue *absorbs the difference*: over a
+3-hour promo that is `(5000 − 500) × 3600 × 3 ≈ 48.6M` buffered messages if nothing shed —
+which is exactly why "the queue buffers it" has limits (see *Failure modes across the
+boundary* below). In practice you also shed/deprioritize non-critical work so the backlog
+stays bounded.
+
+**What stays on-prem and why.** The SoR stays static because a *force* (compliance) pins it
+there, not because of workload. The analytics batch, by contrast, is pulled into the cloud
+because a *different* force (data gravity + burst) dominates — the same app, two opposite
+placement decisions, each driven by naming the force first.
 
 ---
 
@@ -370,6 +432,45 @@ provider hybrid → `system-design/aws-migration-modernization`.
 
 ---
 
+## Failure modes across the boundary
+
+Every pattern above leans on the reassuring phrase "async messaging keeps the halves loosely
+coupled so a spike or failure on one side doesn't destabilize the other." A senior interviewer
+will immediately probe the elephant: **what happens when the boundary itself fails?** "Buffer
+it in a queue" is a *finite* answer, not a magic one.
+
+- **The cross-environment link partitions (Direct Connect / VPN / ExpressRoute goes down).**
+  The two halves can no longer exchange messages at all. Buffering only helps for as long as
+  the buffer holds. In the running example, the elastic storefront can keep *accepting* orders
+  into its queue during a link outage, but nothing drains to the on-prem SoR — so you must
+  decide: does the elastic side keep taking orders (optimistic, reconcile later) or start
+  rejecting/degrading? There is no free lunch; you pick which side degrades.
+
+- **The buffering queue fills (backpressure).** A queue is bounded by storage and by SLA on
+  staleness. Recall the promo math: 5,000 rps in, 500 rps drained. The backlog grows at
+  4,500 messages/second. Even a very deep queue crosses from "buffering" to "unacceptably
+  stale" — an order confirmed 40 minutes late is effectively a failure. Real systems apply
+  **backpressure** (slow/refuse producers), **load-shedding** (drop low-priority work), or
+  **TTL/expiry** on messages so the backlog can't grow without bound.
+
+- **Poison messages and redelivery loops.** If the on-prem consumer keeps failing on one bad
+  message, naive retry re-delivers it forever and starves good traffic. The standard guard is
+  a **max-receive count → dead-letter queue (DLQ)**: after N failed deliveries the message is
+  moved aside for inspection instead of blocking the pipe.
+
+- **The static side (SoR) is unreachable but the elastic side is fine.** The elastic half must
+  **tolerate the SoR being down** — cache last-known inventory, accept-and-reconcile, or serve
+  read-only — rather than hard-failing. Symmetrically, the static side must **degrade
+  gracefully** when the elastic half disappears (e.g. fall back to a smaller on-prem worker
+  pool for the batch). "Degrade, don't collapse" is the whole point of loose coupling; the
+  queue is a shock absorber with a stroke length, not a bottomless pit.
+
+> [!WARNING]
+> "The queue absorbs the spike" is only true within the queue's depth and staleness budget.
+> If an interviewer hears you claim async messaging makes the halves *independent*, expect the
+> follow-up: *for how long, and what breaks first — the disk, the SLA, or the on-call?* Always
+> pair the buffer with backpressure, shedding, a DLQ, and an explicit "who degrades" answer.
+
 ## Common Interview Follow-ups
 
 - **"The burst is in compute but it needs terabytes of local data — Hybrid Processing or
@@ -387,9 +488,15 @@ provider hybrid → `system-design/aws-migration-modernization`.
   static assets (`system-design/caching-and-cdn`). Hybrid Multimedia Web Application
   additionally offloads *non-cacheable streaming* media to an elastic delivery-optimized
   environment, with the static pages referencing it.
-- **"Why is async messaging the recurring glue in every hybrid pattern?"** It preserves
+- **"Why is async messaging the recurring glue in the hybrid patterns?"** It preserves
   **Loose Coupling** across the environment boundary — spikes/failures on one side are
-  buffered, not propagated synchronously. Deep dive: `system-design/message-queues-and-async`.
+  buffered, not propagated synchronously. Be precise, though: async messaging is the glue in
+  the **workload/data-splitting patterns** (UI, Processing, Data, Backend, Application
+  Functions). It is **not** universal — **Hybrid Multimedia Web Application** glues the halves
+  by a *direct browser reference* to the media origin (no queue), and **Hybrid Development
+  Environment** is glued by *environment parity / Infrastructure-as-Code*, not messaging.
+  Claiming "every pattern" would contradict those two. Deep dive:
+  `system-design/message-queues-and-async`.
 - **"When would you reach for Hybrid Application Functions over a specific pattern?"** When the
   split is genuinely function-by-function (mixed workload *and* compliance drivers across all
   layers) rather than dominated by a single force. The specialized patterns are special cases

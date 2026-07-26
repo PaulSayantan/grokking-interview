@@ -23,7 +23,10 @@ Two mental anchors used throughout:
 
 ## The migration journey: mobilize, migrate, modernize
 
-AWS frames large migrations in three phases (the "migration acceleration" model):
+AWS frames large migrations under the **Migration Acceleration Program (MAP)**, whose
+canonical phases are **Assess → Mobilize → Migrate and Modernize** (the section title
+abbreviates the last two; **Assess is the true first phase** and is the one candidates
+most often forget to name):
 
 1. **Assess** — business case / TCO, readiness, discovery of the estate.
 2. **Mobilize** — build a landing zone (multi-account via Control Tower/Organizations),
@@ -97,6 +100,17 @@ serverless). The trap: a naive "same instance size 24/7" lift-and-shift can be *
 expensive than on-prem until you right-size, buy Savings Plans/Reserved Instances,
 and adopt auto scaling. So "the cloud is cheaper" is only true *after* modernization
 and FinOps discipline; a raw rehost often needs a follow-up optimization phase.
+
+*Illustrative right-sizing math (order-of-magnitude, not a price quote):* take one
+general-purpose instance running 24/7 on-demand and call its cost **1.0×**. Commit that
+same instance to a 3-year Savings Plan / Reserved Instance and you land around **~0.4×**
+(~60% off) — that alone. Now notice a dev/test box only needs to run ~50 of the 168 hours
+in a week (business hours, 5 days): schedule it off nights and weekends and you pay for
+~30% of the wall-clock, i.e. another **~0.3×** multiplier. Right-size a two-sizes-too-big
+prod box down one size and you roughly halve it again. Stack these and a naive
+"lift-and-shift, leave it on, on-demand" footprint can be **2–3× (or more)** the cost of
+the same workload after FinOps — which is exactly why a raw rehost bill frequently lands
+*above* on-prem until the optimization pass happens.
 
 **Wave planning trade-off:** sequence low-risk, low-dependency apps first (build
 confidence and factory muscle), keep tightly-coupled apps in the *same* wave (so you
@@ -224,6 +238,16 @@ downtime:
   validated in production. The riskiest moment is the point of no return; design so you
   can reverse until confidence is high (e.g. bi-directional DMS, or keep source read-only
   and re-openable).
+- **Be honest that DB rollback after *write* cutover is genuinely hard.** As long as the
+  new DB is read-only or write-free, rolling back is trivial (route back to source). But
+  once real writes land on the target, "rollback" means *reverse-replicating those new
+  writes back to the old DB* — and if you kept bi-directional CDC running to make that
+  possible, you now risk **write conflicts and replication loops** (a row written on both
+  sides, or a change echoing back and forth). The common mitigation is to define a
+  **point of no return**: keep the *source read-only* during a post-cutover validation
+  window so no new writes exist to reverse (making rollback = re-open the source), and
+  once the window passes with clean validation, accept a **no-rollback** state and roll
+  *forward* (fix issues on the target) rather than trying to unwind writes.
 - **Data reconciliation:** validate row counts / checksums (DMS data validation) before
   declaring success.
 
@@ -265,6 +289,44 @@ switch over one weekend."
 - **Dual maintenance** during the (often long) transition — you run and secure both.
 - **When NOT to use it:** small apps, or apps you plan to retire soon — the overhead
   isn't worth it; just rehost or retire.
+
+**Worked example — carving an Orders service off a shared database.** Say the monolith
+owns one relational DB with `orders`, `customers`, and `inventory` tables, and there is a
+foreign key `orders.customer_id → customers.id`. You want `orders` to become an
+independent service with its own datastore. Step by step:
+
+1. **Stand up the new store, backfill + keep it live with CDC.** Create the Orders
+   service's own database and point a DMS (or Kinesis) **CDC** task at the monolith DB:
+   full-load the existing `orders` rows, then let CDC stream every subsequent insert/update
+   so the new store stays within seconds of the monolith. At this stage the monolith is
+   still the source of truth — the new store is a warm, read-only shadow.
+2. **Switch *reads* first.** Flip the facade so read traffic for order endpoints hits the
+   new Orders service (served from its own store, kept fresh by CDC). Writes still go to
+   the monolith. Reads are safe to move first because a few seconds of replication lag on a
+   read is tolerable, and if anything looks wrong you just route reads back to the monolith
+   — fully reversible.
+3. **Switch *writes* (the risky step) and stop the CDC feed.** Now the Orders service
+   accepts writes directly to its own store and becomes the source of truth for orders.
+   The moment you do this you must **stop the monolith→new CDC** or you get two writers
+   racing on the same rows. If the monolith still needs to see order data, reverse the flow
+   — the Orders service emits an `OrderPlaced`/`OrderUpdated` **event** (or a reverse CDC
+   feed) that the monolith consumes. This is the **dual-write pitfall**: never let two
+   systems both write the same record over the transition — pick one writer at a time and
+   propagate via events, or you get lost updates and divergence.
+4. **Break the cross-service foreign key.** The DB can no longer enforce
+   `orders.customer_id → customers.id` because `customers` lives in a different service.
+   Replace it with either a synchronous **API call** to the Customers service at
+   write-time (validate the customer exists) or, better for coupling/latency, store a
+   denormalized `customer_id` (+ a snapshot of the fields orders actually needs) and keep
+   it fresh via a `CustomerUpdated` event. You have traded a DB-enforced invariant for
+   **eventual consistency** — a brief window where a just-created customer isn't yet
+   visible to orders — so add reconciliation (a periodic job comparing counts/keys across
+   the two stores) to catch drift.
+
+The takeaway the phrase "data decomposition is the hard part" is really pointing at:
+splitting *code* is a routing change at the facade; splitting *data* forces you to
+sequence reads-then-writes, avoid dual-write races, demote a foreign key to an API/event,
+and accept + reconcile eventual consistency.
 
 ---
 
@@ -367,6 +429,54 @@ parallel) is faster and doesn't starve production."*
 
 ---
 
+## Security and compliance during migration
+
+Intuition first: a migration temporarily **widens your attack surface and your audit
+scope**. For weeks or months you are running two copies of the data, streaming it over
+network links, and installing agents with disk-level access on *every* source server —
+all things a security-conscious interviewer will probe. The mental model: treat the
+migration pipeline itself as a production system that must be encrypted, least-privileged,
+and auditable end to end, not as a throwaway one-off. Remember the **shared-responsibility
+model** — AWS secures the cloud *of* the migration services (the managed replication
+infrastructure); *you* remain responsible for security *in* them: your IAM policies, your
+encryption keys, your endpoint configuration, and the data itself.
+
+**Encryption in transit.** Every hop that carries your data should be TLS-encrypted:
+DataSync encrypts agent-to-service traffic with TLS; DMS uses SSL/TLS on its source and
+target endpoints (enable it explicitly — a plaintext endpoint is a common miss). For bulk
+private transfer, **Direct Connect is not encrypted by itself** — it's a private link, not
+a secure one — so for sensitive data run a **VPN or MACsec over DX**, or rely on the
+application-layer TLS above. Snow devices encrypt data at rest on the device with keys you
+manage.
+
+**Encryption at rest.** The staging and target stores must be encrypted with **KMS**:
+EBS volumes in the MGN staging area and on the launched instances, the target RDS/Aurora
+DB, and any S3 buckets used as landing zones. Decide up front whether AWS-managed keys are
+acceptable or the compliance regime demands **customer-managed keys (CMKs)** with your own
+rotation and key policies — retrofitting encryption after data has landed is painful.
+
+**Least-privilege IAM for the replication path.** The MGN/DMS service roles and the
+staging area should have only the permissions they need — scoped to the specific buckets,
+KMS keys, and target resources — not broad admin. The **replication agent installed on
+each source server** is itself blast-radius: it has deep disk access, so treat its
+credentials as sensitive, scope them tightly, and de-provision agents immediately after a
+server's cutover instead of leaving a fleet of privileged agents running.
+
+**Secrets at cutover.** Source DB passwords, API keys, and connection strings must not be
+hand-copied into the new environment. Move them into **Secrets Manager / SSM Parameter
+Store** (encrypted with KMS), rotate them *as part of* cutover so any credential that was
+exposed in runbooks or agent configs is invalidated, and repoint the migrated app at the
+secret rather than a baked-in value.
+
+**Data residency and compliance drive the R and the Region.** Regulatory constraints feed
+directly back into the earlier frameworks: a dataset under a data-residency or legal-hold
+requirement may force **Retain** (leave it on-prem) or **Outposts / a specific in-country
+Region** rather than a free choice of Region. Audit requirements mean you must be able to
+*prove* what happened — turn on **CloudTrail** across the migration accounts, log DMS/MGN
+actions, and keep DMS **data-validation** reports as evidence that the migrated data
+matches the source. Where a compliance boundary can't be crossed at all, that application
+simply doesn't migrate in this wave — and naming that constraint is the senior answer.
+
 ## Trade-offs and when to use what
 
 A consolidated decision cheat-sheet:
@@ -426,6 +536,11 @@ the post-arrival sync itself is a mini-migration.
   dev/test, commit to Savings Plans, then replatform.)
 - "Which workloads stay on-prem and what AWS tech supports that?" (Latency/residency →
   Outposts/Local Zones; hybrid storage → Storage Gateway; connectivity → Direct Connect.)
+- "How do you keep the migration itself secure and compliant?" (TLS on every hop incl.
+  VPN/MACsec over the un-encrypted DX; KMS at rest on staging/target/S3; least-privilege
+  IAM for MGN/DMS roles and de-provision source agents post-cutover; move secrets into
+  Secrets Manager and rotate at cutover; CloudTrail + DMS data-validation for audit;
+  residency/legal-hold can force Retain or a specific Region/Outposts.)
 
 ## References
 

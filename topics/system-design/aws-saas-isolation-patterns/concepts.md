@@ -18,6 +18,20 @@ what you *gain*, what you *give up*, and *when* you would choose it over the
 alternative. In a SaaS interview the senior signal is treating isolation as a
 per-layer, per-service, per-tier decision — not an all-or-nothing switch.
 
+**30-second recap of the vocabulary (so this page stands alone).** Picture a
+housing development. A **silo** tenant is a *detached house*: its own walls, plot,
+and utility meters — no shared surfaces, so nothing a neighbor does can reach it,
+but you pay to build a whole house per family. A **pool** tenant lives in *one
+apartment building* with keyed doors: everyone shares the walls, plumbing, and
+lobby, and a lock (a `tenant_id` check or an IAM condition) is the only thing
+keeping tenant A out of tenant B's unit — far cheaper per family, but one bad lock
+or a burst pipe can affect the whole building. A **bridge** is the realistic
+middle: mostly apartments, plus a detached house for the one tenant who pays for
+(or is legally required to have) privacy. **Blast radius** is simply "if this one
+thing breaks or is breached, how many tenants feel it" — a detached house has a
+blast radius of one family; a shared apartment building's burst main can flood
+everyone. Everything below is just *where in the AWS stack you put the walls*.
+
 > [!KEY-TAKEAWAY]
 > The "six patterns" are really *where on the stack you draw the isolation
 > boundary* — account, VPC, subnet, container, or data. A real system is a
@@ -170,7 +184,7 @@ limits drift):**
 | OUs per org | **2,000** |
 | Roots per org | **1** (only ever one) |
 | OU nesting depth | **5 levels** under the root |
-| SCPs per org | **10,000**; max **10 attached per entity**; doc size **10,240 chars** |
+| SCPs per org | order of **~1,000** (verify live); max **10 attached per entity**; policy-document size **10,240 chars** incl. whitespace |
 | RCPs | **2,000** per org; max **5 per entity** |
 | `CreateAccount` rate | **~0.1 req/s (burst 3)**; only **5** concurrent creations; invites capped **20 / 24h** |
 | Per-service org ceilings | Control Tower **10,000**, IAM Identity Center **7,000**, GuardDuty/Security Hub/Macie/Inspector **~10,000**, Detective **1,200**, Audit Manager **250** |
@@ -253,13 +267,13 @@ VPCs; VPC peering / **Transit Gateway** / **PrivateLink** to a shared-services V
 
 | Quota | Value |
 |---|---|
-| VPCs per Region | default **5**, raisable to "hundreds" (raises IGWs per Region by the same amount) |
+| VPCs per Region | default **5**, raisable to "hundreds" (raises **IGWs (Internet Gateways)** per Region by the same amount) |
 | Subnets per VPC | **200** |
 | Route tables per VPC | **200**; routes per table default **500** (raisable to 1,000) |
 | Network ACLs per VPC | **200**; **20 rules** each (raisable to 40 in / 40 out) |
 | Security groups per Region | **2,500**; **60 inbound + 60 outbound rules** each |
-| SGs per ENI | **5** (up to 16); rules × SGs-per-ENI ≤ **1,000** |
-| IPv4 CIDR blocks per VPC | **5** (up to 50); NAU **64,000** per VPC |
+| SGs per ENI (Elastic Network Interface) | **5** (up to 16); rules × SGs-per-ENI ≤ **1,000** |
+| IPv4 CIDR blocks per VPC | **5** (up to 50); **NAU (Network Address Usage)** **64,000** per VPC |
 
 *NAU = **Network Address Usage**: a weighted count of the addressable things in a
 VPC (ENIs, assigned IPs, prefix-list entries, load-balancer addresses), not just
@@ -403,7 +417,9 @@ AWS summary and cross-reference.
 
 **Key AWS data facts.**
 - **DynamoDB:** item max **400 KB**; physical-partition ceilings **~3,000 RCU /
-  1,000 WCU** and ~10 GB per partition → using `tenant_id` as the partition key
+  1,000 WCU** (RCU/WCU = read/write capacity units — one RCU ≈ one strongly
+  consistent 4 KB read per second, one WCU ≈ one 1 KB write per second) and ~10 GB
+  per partition → using `tenant_id` as the partition key
   creates **hot partitions** for large tenants; fix with a **tenant-lookup table +
   secondary sharding** or write-sharding suffixes. IAM
   **`dynamodb:LeadingKeys`** condition enforces pooled item isolation. Default
@@ -484,6 +500,49 @@ sequenceDiagram
   `StringLike s3:prefix [{{tenant}}/*]`.
 - Delivered as a **Lambda layer / shared library**; a non-JWT alternative is a
   reverse proxy (NGINX/Kong) that injects a tenant header.
+
+**Worked example — template in, hydrated policy out.** This is the concrete thing
+a follow-up asks you to draw on the whiteboard. You store *one* template with a
+`{{tenant}}` placeholder and hydrate it per request. Template (before):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"],
+    "Resource": "arn:aws:dynamodb:us-east-1:111122223333:table/Orders",
+    "Condition": {
+      "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["{{tenant}}"] }
+    }
+  }]
+}
+```
+
+For a request whose validated JWT carries `tenantId = "acme"`, the TVM substitutes
+`{{tenant}}` and passes this hydrated document as the STS `AssumeRole` session
+policy (after):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem"],
+    "Resource": "arn:aws:dynamodb:us-east-1:111122223333:table/Orders",
+    "Condition": {
+      "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["acme"] }
+    }
+  }]
+}
+```
+
+The credentials STS hands back are **the intersection** of this session policy and
+the pod's own (broad) role: the role might allow all of DynamoDB, but the session
+policy narrows the *effective* permission to `Query`/`Get`/`Put` on the `Orders`
+table **and only for items whose partition key is `acme`**. A query for tenant
+`globex`'s items now fails with `AccessDenied` even though the underlying role
+could reach them — that intersection is what makes the pool safe.
 
 > [!WARNING]
 > **Hard constraint: an inline STS session policy is capped at 2,048 characters**
@@ -600,18 +659,20 @@ See [`aws-cost-optimization-scaling`](../aws-cost-optimization-scaling/concepts.
 
 ## Noisy neighbor mitigation on AWS
 
-In pooled models one tenant's load can degrade another's. AWS-concrete mitigations:
-- **API Gateway usage-plan throttling/quotas** and **Lambda reserved concurrency**
-  to cap per-tenant/per-tier consumption.
-- **RDS Proxy** to bound connection contention; **DynamoDB adaptive capacity +
-  write-sharding** to spread hot partitions.
-- **EKS ResourceQuota/LimitRange + Pod priority** so premium tenants preempt basic.
-- **Sole-tenant nodes** (affinity + taints) for hot or sensitive tenants.
-- **Bridge-promote** a chronically noisy or high-value tenant to a siloed tier
-  (own VPC or account).
+In pooled models one tenant's load can degrade another's. The per-layer caps that
+contain this are already covered above — **API Gateway usage plans + Lambda
+reserved concurrency** (see *Tier-based throttling*), **EKS ResourceQuota /
+LimitRange + Pod priority** and **sole-tenant nodes** (see *Container-layer
+isolation*), and **RDS Proxy + DynamoDB write-sharding** for the data tier (see
+*Data-layer isolation*). Apply those first.
 
-The bridge model is the durable answer: pool by default, and promote specific
-tenants to silo when they justify it.
+The genuinely distinct move — and the durable answer — is **bridge-promotion**:
+when a specific tenant is *chronically* noisy or valuable enough to justify it,
+don't keep tightening pooled caps; lift that one tenant out of the pool into a
+siloed tier (its own VPC or account) while everyone else stays pooled. Pool by
+default, silo the exception. This is what turns "throttling war" into a clean
+capacity and pricing decision — the noisy tenant either pays for the dedicated
+tier or accepts the pooled cap.
 
 ---
 

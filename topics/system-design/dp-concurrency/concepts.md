@@ -41,7 +41,8 @@ stay responsive and the object's concurrency is managed in one place.
 client calls a method on a **Proxy**; the proxy packages the call as a **method request**
 (command object) and enqueues it on an **activation queue**. A **Scheduler** running in the
 servant's own thread dequeues requests (per some policy) and invokes the real method on the
-**Servant**. The call returns immediately to the client with a **Future** it can later read.
+**Servant**. The call returns immediately to the client with a **Future** — a placeholder for
+a result that will exist later (see *Future and Promise* below) — that it can later read.
 Mechanism: *a queue plus a dedicated worker thread*.
 
 **Concrete example.** A logging service: `logger.log(msg)` must never block the request
@@ -216,6 +217,20 @@ pool has many interchangeable workers. **Real-world:** Java `ThreadPoolExecutor`
 `Executors`, servlet-container request pools, database connection pools (same idea for
 connections), `ForkJoinPool`.
 
+**Virtual threads / Project Loom (Java 21) change the sizing calculus.** Classic pools
+size *threads to cores* because OS threads are expensive (~1 MB stack, kernel scheduling), so
+you cap them and queue the rest. Virtual threads (and goroutines) are cheap — thousands to
+millions of them multiplex onto a small set of **carrier** OS threads, and a blocking call
+*unmounts* the virtual thread from its carrier instead of parking the OS thread. That makes
+blocking-per-request viable again: you can go back to a simple thread-per-request model
+without a bounded worker pool. The pool's job shifts from *bounding threads to cores* toward
+**bounding concurrency to a downstream resource** (e.g. a semaphore of 50 permits in front of
+a DB that has 50 connections), because unbounded cheap threads can still overwhelm a
+bottleneck. Caveat — **pinning**: a virtual thread blocked inside a `synchronized` block or a
+native call cannot unmount and holds its carrier, so hot paths should prefer `ReentrantLock`
+over `synchronized`. Structured concurrency (`StructuredTaskScope`) then scopes a request's
+child tasks so they cancel and join together.
+
 ---
 
 ## Leader-Followers
@@ -267,7 +282,8 @@ up a thread per operation. You want the **efficiency of async I/O** at the bound
 the whole system.
 
 **Intent / how it works.** Split the system into layers: an **asynchronous layer** (lower)
-handles I/O via an event demultiplexer and never blocks; a **synchronous layer** (upper)
+handles I/O via an event demultiplexer and never blocks (typically a *Reactor* — see below);
+a **synchronous layer** (upper)
 where tasks run in their own threads using ordinary blocking code; and a **queueing layer**
 between them that decouples the two and mediates the handoff. Async I/O completions are placed
 on the queue; sync worker threads pull from it and process using a blocking model.
@@ -380,6 +396,15 @@ sequenceDiagram
     Proactor->>CH: handleCompletion(result)
 ```
 
+**Concrete example.** A Windows **IOCP** file server: for each client it issues
+`async_read(socket, buffer)` and returns instantly — it does *not* call `recv`. The kernel
+fills `buffer` with the bytes off the wire, then posts a completion to the I/O completion port;
+a thread calling `GetQueuedCompletionStatus` picks it up and runs the completion handler with
+the *already-filled* buffer and a byte count. Contrast the Reactor (Node.js) example above:
+there the loop is told "readable" and *your* code calls `read`; here the read is already done
+by the time you run. A Boost.Asio echo server is the same shape (`async_read_some` →
+handler(bytes)).
+
 **Trade-offs.** *Pros:* highest decoupling and concurrency; the app never blocks and never
 waits on readiness; the OS can optimize the transfer. *Cons:* control flow is inverted and
 harder to follow/debug; buffer lifetime management is tricky (buffers must stay valid until
@@ -423,8 +448,13 @@ discipline — one slow synchronous callback starves everything; a bug in one ca
 stall unrelated work; hard to use multiple cores (need multiple loops or a worker pool).
 *Use when* I/O-bound, high-concurrency, and you can keep callbacks short. *Avoid* for
 CPU-bound work on the same loop. **vs Thread-per-request:** the loop trades parallelism and
-preemption for zero locking and low overhead. **Real-world:** Node.js, browser JS engines,
-Nginx, Python asyncio, GUI main/UI threads.
+preemption for zero locking and low overhead. **vs virtual threads (Loom) / goroutines:** the
+event loop achieves high I/O concurrency by *fragmenting* logic into callbacks; virtual
+threads reach comparable concurrency while letting you write *straight-line blocking code*
+(the runtime unmounts a blocked virtual thread from its carrier, much as the loop parks an
+I/O op). The 2026 trade-off has narrowed to "callback/async syntax vs synchronous syntax" more
+than "scalable vs not." **Real-world:** Node.js, browser JS engines, Nginx, Python asyncio,
+GUI main/UI threads.
 
 ---
 
@@ -460,6 +490,13 @@ classDiagram
     Acceptor ..> ServiceHandler : creates + activates
     Connector ..> ServiceHandler : creates + activates
 ```
+
+**Concrete example.** In Netty, a `ServerBootstrap` (the Acceptor role) listens on port 8080;
+each accepted connection triggers a `ChannelInitializer` that builds a fresh pipeline (TLS
+handler, decoder, your `EchoHandler`) and activates it. The *same* `EchoHandler` class is wired
+by a client `Bootstrap` (the Connector role) for outbound connections — the handler code has no
+idea whether it was reached by `accept()` or `connect()`, which is exactly the reuse the pattern
+buys.
 
 **Trade-offs.** *Pros:* connection logic is written once and reused; service handlers are
 independent of connection role/transport; integrates cleanly with Reactor/Proactor. *Cons:*
@@ -785,6 +822,43 @@ OS process schedulers (CFS), Kubernetes scheduler.
 
 ---
 
+## Memory visibility and happens-before
+
+**Intuition first.** You'd think that once thread A writes `x = 42`, thread B reading `x`
+sees 42. On a modern multicore CPU with per-core caches, compiler reordering, and store
+buffers, **that is not guaranteed** — B may see a stale value, or see writes in a different
+order than A issued them, *unless the two threads are connected by a synchronization edge*.
+Concurrency isn't only about mutual exclusion (one-at-a-time); it's equally about
+**visibility** (does my write become visible to you) and **ordering** (in what order do you
+see my writes). Locks give you *both*; that's why a lock is more than a "one at a time" gate.
+
+**The one rule to carry: happens-before.** A write in thread A is guaranteed visible to a
+read in thread B **only if there is a happens-before edge from the write to the read.** The
+edges the Java Memory Model (and most others) give you are:
+
+- **Unlock → lock** on the same monitor: everything A did before releasing the lock is
+  visible to B after B acquires it.
+- **`volatile` write → `volatile` read** of the same field: a `volatile` write publishes all
+  prior writes to any thread that later reads that field.
+- **Thread `start()` → the started thread**, and **a thread's actions → another thread's
+  `join()`** on it.
+- **`final`-field safe publication:** once a constructor finishes, other threads that receive
+  the reference *through a data race–free path* see the correctly-initialized `final` fields.
+
+If no such edge exists, the writes are a **data race** and the outcome is undefined — a bug
+that passes tests on one CPU and corrupts state on another. Three sections below rest on this:
+**Lock and Mutex** (the unlock→lock edge gives visibility, not just exclusion),
+**Double-Checked Locking** (`volatile` supplies the edge that stops a reader seeing a
+half-constructed object), and **Immutable Object** (`final`-field safe publication is *why*
+you can share an immutable freely with no locks).
+
+**Watch out:** "it works on my machine" is worthless for visibility bugs. A missing
+happens-before edge often appears correct on strongly-ordered x86 and only breaks on
+weakly-ordered ARM/POWER or after the JIT reorders. Reason about the *edges*, not about
+observed behavior.
+
+---
+
 ## Lock and Mutex
 
 **Problem it solves:** Two or more threads read and write the same mutable data
@@ -795,8 +869,8 @@ semaphore, at most N) can execute at a time.
 **Intent / how it works.** A **mutex** (mutual-exclusion lock) is acquired before entering a
 critical section and released after; a second thread that tries to acquire it blocks until
 the holder releases. Beyond exclusion, acquiring/releasing establishes a **happens-before**
-edge so writes made under the lock are *visible* to the next holder (memory visibility, not
-just mutual exclusion). A **semaphore** generalizes this to N permits (allow up to N threads),
+edge (see *Memory visibility and happens-before* above) so writes made under the lock are
+*visible* to the next holder (memory visibility, not just mutual exclusion). A **semaphore** generalizes this to N permits (allow up to N threads),
 useful for bounding a resource pool. Mechanism: *atomic acquire/release with a wait set +
 memory barrier*.
 
@@ -879,8 +953,9 @@ lock and **check again** (another thread may have initialized it while you waite
 initialize. The second check under the lock prevents double-initialization; the first check
 avoids locking once initialized. **Crucially**, the field must be `volatile` (or use a memory
 barrier) — otherwise instruction reordering can publish a *non-null but not-fully-constructed*
-reference to a racing reader. Mechanism: *unlocked read fast-path + locked re-check +
-`volatile` for safe publication*.
+reference to a racing reader (the `volatile` write→read edge from *Memory visibility and
+happens-before* above is exactly what prevents this). Mechanism: *unlocked read fast-path +
+locked re-check + `volatile` for safe publication*.
 
 ```mermaid
 sequenceDiagram
@@ -1148,8 +1223,10 @@ never changes after construction.
 
 **Intent / how it works.** Make all fields final/read-only, set them fully in the constructor,
 expose no mutators, and defensively copy any mutable inputs/outputs so no reference escapes.
-Because the object's observable state never changes after **safe publication**, every thread
-sees the same value with no locks — immutability *is* thread-safety. "Changing" it means
+Because the object's observable state never changes after **safe publication** (the
+`final`-field edge from *Memory visibility and happens-before* above guarantees other threads
+see the fully-initialized fields), every thread sees the same value with no locks —
+immutability *is* thread-safety. "Changing" it means
 creating a *new* object. Mechanism: *no post-construction writes → no shared mutable state →
 no synchronization needed*.
 
@@ -1198,6 +1275,13 @@ stateDiagram-v2
     Copying --> V2 : atomic swap reference to V2
     V2 --> V2 : new readers see V2; old readers still see V1
 ```
+
+**Concrete example.** A `CopyOnWriteArrayList` routing table read on every request. Reads
+happen thousands of times/sec with **zero** locking. A config reload adds one route: the writer
+copies the 200-entry array to a new 201-entry array, sets the new entry, and atomically swaps
+the field. A request that grabbed the old 200-entry reference mid-reload keeps iterating it
+safely (no `ConcurrentModificationException`); the next request sees all 201. The whole
+200-element copy is the price of that one write.
 
 **Trade-offs.** *Pros:* zero-lock, contention-free reads; readers get a consistent snapshot;
 iterators never throw concurrent-modification errors. *Cons:* **every write copies the entire
@@ -1284,6 +1368,14 @@ sequenceDiagram
     end
 ```
 
+**Concrete example (numbers-in → numbers-out).** Two threads each `incrementAndGet()` an
+`AtomicInteger` currently holding **41**. Both read `expected = 41` and compute `next = 42`.
+Thread A's `CAS(41, 42)` runs first: the value *is* 41, so it swaps to **42** and returns 42.
+Thread B's `CAS(41, 42)` now runs: the value is **42**, not the 41 it expected → **fails**. B
+loops, re-reads `expected = 42`, computes `next = 43`, `CAS(42, 43)` succeeds → returns 43. Net
+result: both increments land, counter = 43, no lock ever taken, one wasted retry. (With a plain
+`count++` instead, both could read 41 and both write 42 — the classic lost update.)
+
 **Trade-offs.** *Pros:* no lock contention or deadlock; scales well under **low-to-moderate**
 contention; fine for counters/flags/lock-free structures. *Cons:* the **ABA problem** (value
 changes A→B→A and CAS wrongly succeeds — needs version stamps / `AtomicStampedReference`);
@@ -1346,7 +1438,8 @@ The broker delivers each message to **exactly one** consumer (competing for mess
 adding consumers increases parallelism and provides failover. Consumers should be **idempotent**
 because at-least-once delivery and redelivery-after-failure can duplicate messages. This is the
 distributed, cross-process sibling of in-process Producer-Consumer. Mechanism: *one queue, N
-independent consumers, broker load-balances/at-most-once-per-message delivery*.
+independent consumers; the broker load-balances so each message goes to exactly one consumer
+at a time (competing), typically with at-least-once delivery*.
 
 ```mermaid
 sequenceDiagram
@@ -1619,6 +1712,13 @@ options are simpler and safer when they apply.
    Fix with separate pools (bulkheads), async composition, or larger/decoupled pools.
 8. **"How do you size a thread pool?"** — CPU-bound: ~#cores; I/O-bound: cores × (1 + wait/compute).
    Measure; too many threads thrash, too few underutilize. Bound the queue to expose overload.
+   *Worked example:* 8 cores, each request spends ~90 ms waiting on I/O and ~10 ms on CPU →
+   wait/compute = 9, so pool ≈ 8 × (1 + 9) = 80 threads to keep the cores busy while others wait.
+   With **virtual threads (Loom)** you stop sizing threads-to-cores entirely — run
+   thread-per-request on virtual threads and instead bound *concurrency to the bottleneck* (e.g.
+   a `Semaphore(50)` in front of a 50-connection DB pool), since a million cheap virtual threads
+   would otherwise stampede the database. Watch for pinning (`synchronized` / native calls hold
+   the carrier).
 9. **"CAS vs lock — trade-off?"** — CAS is optimistic/lock-free (no deadlock, scales at low
    contention) but suffers ABA and retry storms under high contention and only covers one
    variable; locks are pessimistic (block, can deadlock) but handle multi-variable invariants.

@@ -117,13 +117,20 @@ is destroyed (no multi-AZ redundancy). What otherwise differs across classes is
 | **One Zone-IA** | Re-creatable, infrequent | 99.5% | 30 days | 128 KB | ms (immediate) | per-GB retrieval |
 | **Intelligent-Tiering** | Unknown/changing access | 99.9% | none* | none | ms (frequent/IA tiers) | none for freq/IA; monitoring fee |
 | **Glacier Instant Retrieval** | Archive, rare, needs ms | 99.9% | 90 days | 128 KB | milliseconds | per-GB retrieval |
-| **Glacier Flexible Retrieval** | Archive, minutes-hours OK | 99.99% (after restore) | 90 days | none | 1–5 min (expedited) to 3–5 h (standard); bulk 5–12 h | per-GB + per-request |
-| **Glacier Deep Archive** | Cold, ≤2x/yr, hours OK | 99.99% (after restore) | 180 days | none | 12 h (standard), up to 48 h (bulk) | per-GB + per-request |
+| **Glacier Flexible Retrieval** | Archive, minutes-hours OK | N/A until restored (11 nines durability) | 90 days | none | 1–5 min (expedited) to 3–5 h (standard); bulk 5–12 h | per-GB + per-request |
+| **Glacier Deep Archive** | Cold, ≤2x/yr, hours OK | N/A until restored (11 nines durability) | 180 days | none | 12 h (standard), up to 48 h (bulk) | per-GB + per-request |
 
 \*Intelligent-Tiering has no minimum duration but has a small **per-object monitoring
 fee**; objects auto-move between Frequent, Infrequent (30d), and optional Archive
 Instant (90d), Archive Access (90–730d), and Deep Archive Access (180d+) tiers based
 on observed access.
+
+*(On the archive tiers' availability: a stored Glacier Flexible / Deep Archive object
+is not directly `GET`-able — you must first issue a **restore** to stage a temporary
+copy, so "availability SLA" doesn't apply the same way it does to the instant classes.
+Their **durability is still 11 nines**; the table therefore shows "N/A until restored"
+rather than asserting a specific availability percentage, which is the honest answer if
+an interviewer presses on it.)*
 
 **Cost intuition (rough, us-east-1 order of magnitude):** Standard ~$0.023/GB-mo;
 Standard-IA ~$0.0125; Glacier Instant ~$0.004; Glacier Flexible ~$0.0036; Deep Archive
@@ -261,11 +268,24 @@ prefixes** in a bucket, so aggregate throughput is effectively unbounded: parall
 reads/writes across many prefixes and you can reach tens or hundreds of thousands of
 requests per second.
 
-**Key insight (post-2018):** S3 partitions by key **prefix**, and these limits are
-**per prefix**, not per bucket. So a bucket with 10 prefixes each doing 5,500 GET/s can
-sustain 55,000 GET/s. When S3 sees sustained load on a prefix it **automatically
-splits the partition** — but that adaptation takes time (you may see 503 SlowDown
-during ramp).
+**What a "partition" actually is (the mechanic most explanations skip).** S3's index —
+the map from keys to object locations — is itself a huge sorted structure sharded into
+**partitions**, where each partition owns a **contiguous range of the sorted keyspace**
+(e.g. one partition might own everything from `logs/2026/07/16/a…` to
+`logs/2026/07/16/m…`). The 3,500 write / 5,500 read budget is **per partition**, and S3
+**dynamically maps partitions onto ranges of your prefixes** — it is *not* one budget
+per distinct visible prefix. So creating a thousand prefixes does not instantly give you
+a thousand budgets: initially many prefixes may sit inside the **same** partition and
+share one budget. When S3 observes sustained load on a hot key range it **splits that
+partition** into two (each covering half the range, each with its own full budget) and
+migrates the index — this is the "auto-partition / repartition" behavior. That split
+takes minutes, which is exactly why a cold prefix that suddenly gets hammered returns
+**503 SlowDown during ramp-up** and then stops once S3 has repartitioned underneath it.
+
+**Key insight (post-2018):** because budgets are per partition and partitions track hot
+key ranges, spreading load across many distinct prefix ranges lets S3 fan it onto many
+partitions. A bucket whose traffic is spread across 10 well-separated prefix ranges,
+each on its own partition doing 5,500 GET/s, can sustain 55,000 GET/s.
 
 **Hot-partition / key-design trade-off:**
 - **Old advice (pre-2018):** add a random hash prefix to avoid sequential keys
@@ -408,6 +428,54 @@ intersection of all of them** (an explicit Deny anywhere wins):
   for shared data sets at scale (per-app/per-tenant policies without one giant bucket
   policy). **VPC-only access points** restrict a dataset to a VPC.
 
+**Evaluation order (the rule that makes "intersection" concrete):** within an account,
+IAM sums every applicable policy and applies **explicit `Deny` > explicit `Allow` >
+default (implicit) `Deny`**. So a request is allowed only if *some* policy explicitly
+allows it **and** *no* policy explicitly denies it — one `Deny` anywhere (IAM policy,
+bucket policy, SCP, BPA) vetoes everything else. That is why the safest guardrails are
+written as `Deny`.
+
+**Concrete bucket policy — force HTTPS and scope a tenant to its prefix.** This is the
+artifact behind the abstract "conditions" bullet:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::acme-media",
+        "arn:aws:s3:::acme-media/*"
+      ],
+      "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+    },
+    {
+      "Sid": "TenantReadsOwnPrefixFromVpce",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::111122223333:role/tenant-42" },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::acme-media/tenants/42/*",
+      "Condition": {
+        "StringEquals": { "aws:SourceVpce": "vpce-0abc123" }
+      }
+    }
+  ]
+}
+```
+
+Read it top-down: the first statement is an **explicit `Deny`** that fires for *any*
+principal whose request arrived over plain HTTP (`aws:SecureTransport=false`) — because
+`Deny` wins, no later `Allow` can re-open that hole. The second grants `tenant-42` read
+access **only under the `tenants/42/` prefix** and **only** when the call comes through
+a specific VPC endpoint (`aws:SourceVpce`); a request for `tenants/43/*`, or the same
+role coming from the public internet, simply finds no matching `Allow` and hits the
+default `Deny`. (For an IAM-identity policy you'd use `s3:prefix` on `ListBucket` and a
+`Resource` ARN scoped to the prefix to get the same per-tenant confinement.)
+
 **Trade-offs / best practices:**
 - Prefer **bucket policies + IAM over ACLs**; disable ACLs (Object Ownership = Bucket
   Owner Enforced).
@@ -543,7 +611,7 @@ problems:
 | Scope | **Regional**, 11 nines, multi-AZ | **Single AZ** (snapshot to S3 for durability) | Regional, multi-AZ |
 | Mutation | Immutable, full-object replace | In-place random read/write (real disk) | In-place random read/write, POSIX locks |
 | Capacity | Effectively unlimited; 5 TB/object | Provisioned per volume (up to 64 TiB) | Elastic, petabytes, pay-per-use |
-| Latency | ~tens of ms first byte (HTTP) | sub-ms (local block) | low-ms (network file) |
+| Latency | ~tens of ms first byte (HTTP); single-digit ms with **Express One Zone** | sub-ms (local block) | low-ms (network file) |
 | Throughput | Very high via parallelism/prefixes | High, provisioned IOPS (io2 Block Express) | Scales with size / provisioned mode |
 | Typical use | Data lake, backups, media, static assets, logs | Boot volumes, databases needing block I/O | Shared app files, home dirs, CMS, lift-and-shift NFS |
 | Cost model | Per GB + requests + egress | Per provisioned GB + IOPS (paid even if idle) | Per GB used (+ throughput mode) |
@@ -561,6 +629,17 @@ problems:
   convenience choice for shared POSIX but costs more per GB than S3 and than EBS
   general-purpose. Don't put a transactional DB on S3, and don't use EBS/EFS as a data
   lake.
+- **"But I want file semantics on my S3 data" — the boundary is softer than "never."**
+  Two managed shims expose S3 through a file-like interface: **Mountpoint for Amazon
+  S3** (a client that mounts a bucket as a local filesystem, optimized for
+  high-throughput sequential/read-heavy access like ML training and analytics), and
+  **Amazon S3 File Gateway** (an on-prem/edge NFS/SMB front end that caches locally and
+  writes objects back to S3). Neither gives you **true POSIX semantics** — no byte-range
+  in-place random writes, no POSIX locking, rename/append are emulated or restricted —
+  so they are not a substitute for EFS when an app genuinely needs a shared read-write
+  POSIX filesystem. They exist to let file-oriented tools *read* (and append-style write)
+  S3 objects without rewriting the app; reach for **EFS** the moment you need real
+  concurrent in-place mutation and locking.
 
 ---
 

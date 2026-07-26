@@ -19,7 +19,8 @@ Zone (AZ)** > data center. Plus a separate **edge** network (CloudFront PoPs, Lo
 Wavelength, Outposts) that pushes compute/content closer to users.
 
 - **Region** = a geographic area (e.g., `us-east-1` N. Virginia, `eu-west-1` Ireland) with
-  **3+ AZs** (most have 3; some have 4–6). Regions are the blast-radius boundary for most
+  **3+ AZs** (the durable fact is *at least 3*; many newer Regions have more — don't quote a
+  hard upper bound, it varies by Region). Regions are the blast-radius boundary for most
   AWS services and the isolation boundary for data residency/sovereignty. **Nothing crosses
   Region boundaries automatically** — you replicate explicitly (S3 CRR, DynamoDB global
   tables, Aurora Global Database). Region-scoped means an outage in one Region should not
@@ -33,10 +34,11 @@ Wavelength, Outposts) that pushes compute/content closer to users.
   stable identifier is the **AZ ID** (e.g., `use1-az4`). AZs are the fundamental unit of HA:
   spreading across AZs survives a single-facility failure (power, flood, fire) while keeping
   synchronous replication cheap.
-- **Edge / PoP** = 600+ CloudFront Points of Presence + regional edge caches for content
-  delivery, TLS termination, Lambda@Edge / CloudFront Functions, and Route 53 / AWS Shield /
-  WAF entry points. Edge defeats speed-of-light latency for reads and absorbs DDoS near the
-  source.
+- **Edge / PoP** = a large and steadily growing global fleet of CloudFront Points of Presence
+  (**600+ and climbing** — quote the order of magnitude, not an exact figure that drifts yearly)
+  + regional edge caches for content delivery, TLS termination, Lambda@Edge / CloudFront
+  Functions, and Route 53 / AWS Shield / WAF entry points. Edge defeats speed-of-light latency
+  for reads and absorbs DDoS near the source.
 - **Local Zones** = an extension of a Region placed in a metro (e.g., LA) for **single-digit
   ms latency** to that metro for latency-sensitive workloads (gaming, media, real-time). You
   get a subset of services. **Wavelength** embeds compute inside telco 5G networks for ultra-
@@ -101,6 +103,12 @@ changes**, **refine operations procedures frequently** (game days), **anticipate
 for automated, canary/blue-green deploys; CloudWatch dashboards/alarms; X-Ray tracing; AWS
 Systems Manager runbooks (Automation documents); Config for drift detection.
 
+**Concrete anchor — a canary deploy.** "Frequent small reversible changes" in practice: a
+CodeDeploy `Canary10Percent5Minutes` config shifts **10% of traffic** to the new version, holds
+**5 minutes** while a CloudWatch alarm watches error rate/latency, then shifts the remaining 90%
+only if the alarm stays green — otherwise it **auto-rolls-back** to the old version. The bad
+change is seen by ~10% of users for ~5 minutes instead of everyone, and rollback is automatic.
+
 **Trade-offs.** IaC costs upfront authoring time and a learning curve but pays back in
 repeatability, review, and disaster recovery. Blue/green deploys cut deploy risk but
 temporarily double infrastructure cost; canary/rolling deploys are cheaper but expose a
@@ -157,6 +165,77 @@ directly with KMS?" has a crisp answer: throughput limits, the 4 KB cap, and per
 
 ---
 
+## VPC and networking fundamentals
+
+**Intuition.** A **VPC (Virtual Private Cloud)** is your own private slice of the AWS network —
+a logically isolated IP space (a CIDR block, e.g. `10.0.0.0/16`) that you subdivide and wire up
+yourself. Think of it as renting an empty building: AWS gives you the walls and the address
+range; *you* decide which rooms (subnets) face the street, which are locked interior vaults, and
+which doors connect to the outside.
+
+- **Subnets** carve the VPC CIDR into per-AZ ranges (one subnet lives in exactly one AZ, so
+  multi-AZ = one subnet per AZ). A subnet is **public** or **private** purely by what its **route
+  table** says — there is no "public" checkbox on the subnet itself:
+  - **Public subnet** = its route table has a `0.0.0.0/0 → Internet Gateway` route. Resources with
+    a public IP can talk to the internet both ways.
+  - **Private subnet** = no route to an Internet Gateway. Instances have no inbound reachability
+    from the internet.
+- **Internet Gateway (IGW)** = the VPC's door to the public internet; it does bidirectional NAT
+  for instances that have public IPs. **NAT Gateway (NAT GW)** = lets instances in a *private*
+  subnet make **outbound-only** connections (OS updates, calling external APIs) without being
+  reachable from outside. **Cost gotcha:** a NAT GW bills an **hourly charge + a per-GB data-
+  processing charge on everything through it** — a classic surprise line item; route heavy
+  private-subnet traffic to AWS services through VPC endpoints instead (below).
+- **Route tables** are the switching logic: each subnet is associated with one, and its routes
+  decide where each destination CIDR goes (local, IGW, NAT GW, VPC endpoint, Transit Gateway,
+  peering). Changing "public vs private" is a route-table edit, nothing more.
+
+**Security groups vs NACLs — the two firewalls, and when you need both.**
+
+| | Security group (SG) | Network ACL (NACL) |
+|---|---|---|
+| Attaches to | the ENI / instance (resource level) | the subnet (all resources in it) |
+| State | **stateful** — return traffic auto-allowed | **stateless** — you must allow both directions |
+| Rules | **allow only** (implicit deny for the rest) | **allow *and* deny**, evaluated by rule number |
+| Typical use | primary, per-workload firewall | coarse subnet-wide guardrail / explicit blocks |
+
+Because an SG is **stateful**, if you allow inbound `:443` the response goes back automatically —
+you don't open the ephemeral return ports. A NACL is **stateless**, so you must allow the inbound
+request *and* the outbound ephemeral-port response separately. **When to use both:** SGs are your
+everyday tool (default to them). Reach for a NACL when you need a subnet-wide rule an SG can't
+express — most importantly an **explicit deny** (e.g., blocklist a malicious CIDR for the whole
+subnet), since SGs can only allow. Defense in depth = SG (fine-grained allow) + NACL (broad deny).
+
+**VPC endpoints — keeping traffic off the internet (cost + security).** By default, an instance
+in a private subnet reaching **S3** or **DynamoDB** would route out through a NAT GW to the public
+service endpoint — paying NAT data-processing charges and leaving the private network. VPC
+endpoints fix that:
+
+- **Gateway endpoints** (S3 and DynamoDB only) add a route-table entry so traffic to those two
+  services stays on the AWS backbone. They are **free** and are the direct answer to *"how does a
+  Lambda/EC2 in a private subnet reach S3 with no internet egress and no NAT cost?"* — attach an
+  S3 gateway endpoint and add its route; no IGW, no NAT GW, no egress bill.
+- **Interface endpoints (AWS PrivateLink)** put an **ENI with a private IP** for a service (most
+  AWS services, and third-party/partner services) directly inside your subnet, so you call it over
+  a private IP that never touches the internet. These bill an hourly + per-GB charge, but keep
+  traffic private and can still be cheaper and safer than routing through a NAT GW.
+
+**How Transit Gateway stitches VPCs.** VPC **peering** is a 1:1 private link between two VPCs and
+is **non-transitive** (A↔B and A↔C does *not* give B↔C), so N VPCs need up to `N(N-1)/2` peerings —
+a mesh that explodes. **Transit Gateway (TGW)** is a regional hub-and-spoke router: each VPC (and
+on-prem via VPN/Direct Connect) attaches once to the TGW, which routes between them. It scales to
+hundreds of VPCs with `N` attachments instead of a full mesh, which is why the multi-account
+diagram puts a shared TGW in the Infrastructure OU.
+
+**Trade-offs.** Public subnets buy direct internet reachability at the cost of a larger attack
+surface — keep only load balancers / bastions there and push app + data tiers into private
+subnets. NAT GW buys simple private-subnet egress but bills per GB, so it silently dominates cost
+for chatty workloads; gateway endpoints remove that entirely for S3/DynamoDB. TGW buys simple,
+scalable any-to-any connectivity at the cost of a per-attachment + per-GB charge and a central
+thing to manage; peering is cheaper for a couple of VPCs but doesn't scale as a mesh.
+
+---
+
 ## Reliability pillar
 
 **Definition & principles.** The ability of a workload to perform its intended function
@@ -179,6 +258,25 @@ the **control plane** (provisioning/changing resources). Depend on the data plan
 failover — e.g., pre-provision capacity and use Route 53 health checks rather than calling
 APIs to launch new resources mid-incident.
 
+**Worked example — static stability.** You run a service that needs **60 instances** of steady
+capacity, spread across **3 AZs**. Two ways to survive one AZ going dark:
+
+- **Statically stable (right).** Pre-provision to **N+1 AZ capacity**: put 30 instances in each
+  of the 3 AZs = **90 running instances** (each AZ alone can carry 60 if the other two survive,
+  and any *one* AZ can fail while the remaining two, at 60 total, still serve full load). When
+  `1a` drops, the 60 instances in `1b`+`1c` are **already running** — recovery needs **zero**
+  new launches, so it works even if the EC2 control plane (`RunInstances`) is itself impaired or
+  throttled during the regional stress. You pay for ~50% idle headroom; that idle capacity *is*
+  the insurance.
+- **Statically unstable (the anti-pattern).** Run exactly 60 (20 per AZ) and, on AZ loss, call
+  `RunInstances` to launch 20 replacements. The problem: a big AZ event is exactly when everyone
+  else is *also* calling `RunInstances`, so the control plane is slow/throttled/degraded — your
+  failover depends on the least-reliable thing at the worst possible moment. Recovery stalls
+  precisely when you need it.
+
+The rule: **during a failure, only lean on capacity and mechanisms that already exist** (data
+plane), never on provisioning new ones (control plane).
+
 **Trade-offs.** More nines cost exponentially more (each nine roughly 10x the effort/cost).
 Multi-AZ is the standard reliability floor; multi-Region is for the top nines and DR. Retries
 improve success but can cause retry storms/metastable failures — always add backoff, jitter,
@@ -192,8 +290,8 @@ arithmetic interviewers make you do live, so practice it numbers-in → numbers-
    60 = 52.6 min/yr`. Five nines: `0.00001 × 8,760 × 60 = 5.26 min/yr`. Now the memorized
    table isn't magic — you can regenerate any row.
 2. *Components in series (multiply).* A request must pass through an ALB (99.99%), an EC2 tier
-   in an ASG, and RDS Multi-AZ (99.95%). Independent components in the request path multiply:
-   `A_total = 0.9999 × 0.9995 × 0.9999 ≈ 0.99930`, i.e. **99.93%**, or `0.0007 × 8,760 ≈ 6.1
+   in an ASG (say 99.99%), and RDS Multi-AZ (99.95%). Independent components in the request path
+   multiply: `A_total = 0.9999 × 0.9999 × 0.9995 ≈ 0.99930`, i.e. **99.93%**, or `0.0007 × 8,760 ≈ 6.1
    h/yr` of downtime. Note the total is **worse than the weakest link** — and the weak link
    here is RDS at 99.95%. Spending effort hardening the 99.99% ALB is wasted; fix RDS first.
 3. *Redundancy in parallel (the complement rule).* Put `n` independent replicas behind the LB
@@ -201,6 +299,39 @@ arithmetic interviewers make you do live, so practice it numbers-in → numbers-
    each: `1 − (0.01)^3 = 1 − 0.000001 = 0.999999` → **six nines (99.9999%)** for that tier.
    This is why horizontal redundancy is the cheapest reliability lever — the *unavailability*
    shrinks geometrically, so a few mediocre instances beat one gold-plated one.
+
+**Intuition — blast radius, and two patterns that shrink it.** Redundancy keeps you *up*; the
+next question is *how much of your fleet does one bad thing take down?* A "poison-pill" request,
+a corrupt tenant, or a bad deploy can knock over any worker it touches. If every customer shares
+the *same* pool of workers, one poison pill can cascade to everyone. **Cell-based architecture**
+and **shuffle sharding** are the two AWS patterns that bound how far the damage spreads.
+
+**Cell-based architecture** = slice the whole stack (LB + compute + data) into independent,
+identical **cells**, and pin each customer to exactly one cell. A cell is a self-contained mini-
+deployment that shares nothing with its siblings. Deploy changes cell-by-cell; if a deploy or a
+poison-pill breaks a cell, blast radius = **that one cell's customers**, not the fleet. (You add
+a thin, ultra-simple routing layer to map customer → cell; keep it dumb so *it* never becomes the
+shared fault.)
+
+**Worked example — shuffle sharding.** Suppose you have a fleet of **8 workers** and you give each
+customer a "shard" of just **2 workers** (requests for that customer only land on those 2).
+
+- Number of distinct 2-worker shards = "8 choose 2" = `(8 × 7) / 2 = 28` combinations.
+- Now one abusive/poison customer melts *both* of its 2 workers. Which other customers are fully
+  taken down? Only those assigned the **exact same pair** — and a random customer draws that
+  specific pair with probability `1/28 ≈ 3.6%`.
+- Every other customer overlaps on **at most one** of the two bad workers, so they still have a
+  healthy worker to serve them (assuming a client that retries the survivor). Compare this to a
+  single shared pool of 8, where a poison pill that saturates the fleet takes down **100%** of
+  customers.
+- Scale the intuition: bump the fleet to 100 workers with a shard of 5 and the combinations
+  explode into the tens of millions, so the fraction of customers fully overlapping any one
+  victim becomes vanishingly small. That is the whole trick — **overlapping virtual shards make
+  full-overlap statistically rare, so one bad tenant degrades a tiny slice instead of everyone.**
+
+Cell-based architecture bounds blast radius by *hard partitioning*; shuffle sharding bounds it
+*statistically* with far fewer resources. They compose — e.g., shuffle-shard customers across
+workers *inside* each cell.
 
 ---
 
@@ -247,6 +378,14 @@ Storage tiering (S3 Intelligent-Tiering auto-moves objects; Glacier for archive)
 **data transfer**: cross-AZ, cross-Region, and egress to internet all cost money; ingress is
 usually free.
 
+**Concrete anchor — Savings Plan break-even.** Say a 1-year Compute Savings Plan gives ~30% off
+On-Demand (rates vary — verify current pricing). If an instance is $1.00/hr On-Demand, the
+committed rate is ~$0.70/hr, but you pay that $0.70 **for the full year whether or not you use
+it**. Break-even utilization = `0.70 / 1.00 = 70%` — if the instance runs **more than ~70% of the
+time**, the commitment wins; if it's idle more than ~30% of the year, On-Demand (or Spot) is
+cheaper. That is the mental model: commit for the steady baseline, leave the spiky top on
+On-Demand/Spot.
+
 **Trade-offs.** Commitments (SP/RI) trade flexibility for discount — over-commit and you pay
 for unused capacity; under-commit and you leave savings on the table. Spot trades
 availability for price. Serverless trades higher per-unit price for zero idle cost — cheapest
@@ -270,6 +409,13 @@ instance is greener per unit of work), **anticipate and adopt more efficient har
 offerings** (Graviton, managed services with high multi-tenant utilization), **use managed
 services** (shared, high-utilization), and **reduce the downstream impact** of your workloads
 (smaller payloads, fewer device requirements).
+
+**Concrete anchor — consolidation.** Suppose you run **10 instances averaging 30% CPU**. That's
+`10 × 0.30 = 3.0` instances' worth of actual work spread over 10 provisioned boxes — 7 machines'
+worth of capacity (and its embodied + running carbon) is idle. Consolidate the workloads onto
+**4 instances** and each lands near `3.0 / 4 = 75%` utilization: same useful work, ~60% fewer
+running machines, proportionally less energy and cost. This is the sustainability lever in one
+number — raise work-done-per-provisioned-resource.
 
 **Trade-offs.** Sustainability and cost optimization usually align (both reward high
 utilization and right-sizing), but not always: maximum performance/redundancy (idle standby
@@ -444,7 +590,7 @@ The interview trick: translate a generic design into AWS and back. Know the mapp
 | L4 load balancer | NLB | TCP/UDP, ultra-low latency, static IP, millions of RPS |
 | DNS + global routing | Route 53 | health checks, latency/geo/weighted routing |
 | Anycast / fast failover | Global Accelerator | static anycast IPs, edge entry |
-| CDN | CloudFront | 600+ PoPs, edge compute (CF Functions, Lambda@Edge) |
+| CDN | CloudFront | hundreds of PoPs (600+, growing), edge compute (CF Functions, Lambda@Edge) |
 | Object store | S3 | 11 nines durability, strong read-after-write since Dec 2020, 5 TB max object |
 | Block store | EBS | attached to EC2, single-AZ (snapshots to S3) |
 | Shared file system | EFS (NFS, multi-AZ), FSx | |

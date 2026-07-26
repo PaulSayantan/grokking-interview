@@ -6,7 +6,9 @@ Leymann, Retter, Schupeck & Arbitter (*Cloud Computing Patterns*, Springer 2014;
 catalogued at [cloudcomputingpatterns.org](https://www.cloudcomputingpatterns.org/)) that
 describe cloud application **architecture** — how to decompose an application into loosely
 coupled, mostly **stateless** components, and how those components should process messages
-**reliably** in a world of at-least-once delivery.
+**reliably** in a world of at-least-once delivery (*the broker may hand the same message to a
+consumer more than once* — defined fully under Idempotent Processor) and eventual consistency
+(*a read may briefly return a stale value before all replicas converge* — see Data Abstractor).
 
 These are **vendor-neutral, abstract patterns** — the reusable solutions that underpin
 cloud-native design regardless of AWS/Azure/GCP. Each section gives the pattern's **intent**
@@ -56,6 +58,49 @@ flowchart TD
   UI --> DAB
 ```
 
+Notice the UI has **two arrows out**: one *into* the broker (write path) and one *into* the Data
+Abstractor (read path). That is not an accident — it is the sync-in / async-out split in action, and
+the walkthrough below shows why.
+
+---
+
+## Tracing One Request End-to-End
+
+The patterns below are easy to learn as isolated boxes and hard to see *cooperating*. So before the
+catalogue, walk one real request through the diagram above. **Scenario: a user uploads a video that
+must be transcoded.**
+
+1. **UI Component (stateless, sync-in / async-out).** The browser POSTs the upload to a UI instance
+   behind a load balancer. The UI does *not* transcode inline (that would take minutes and hold the
+   HTTP connection open). Instead it writes the raw file to blob storage, **enqueues** a
+   `TranscodeJob{videoId=V, key=upload/V.mov}` message onto the broker, and immediately returns
+   `202 Accepted` + `videoId=V`. The user's request is now decoupled from the slow work — this is
+   the "sync in, async out" translation. Because the UI kept no state, the very next poll can land on
+   a *different* UI instance and still work.
+2. **Broker / Elastic Queue.** The message sits in the queue. Queue depth (say it jumps to 5,000
+   pending jobs after a viral moment) is the **scaling signal**: the Elastic Queue tells the
+   Processing tier to scale from 2 workers to 40. The queue also absorbs the burst (backpressure) so
+   nothing downstream is overrun.
+3. **Processing Component (stateless, elastic).** A worker drains one message via the visibility
+   timeout mechanism (receive → message hidden → process → delete). It transcodes V, then hands the
+   result to the Data Access Component to persist `status=DONE, progress=100`. Because delivery is
+   at-least-once, the worker is **idempotent** — keyed on `videoId=V`, so if the same job is
+   delivered twice (slow worker, timeout expiry) the second run is a harmless no-op, not a second
+   transcode.
+4. **Data Access Component → Storage.** All writes go through the one data-access module, so the
+   worker never touches storage protocols directly.
+5. **UI polls the Data Abstractor (read path).** Meanwhile the browser polls `GET /videos/V`. That
+   read goes through the **Data Abstractor**, which reads an eventually-consistent projection and
+   returns an *approximation* — `"processing ~80%"` — rather than an exact byte count that would
+   flicker as replicas converge. When the write from step 3 has propagated, a later poll shows
+   `"ready"`.
+
+Every load-bearing thread in this document appears once here: **loose coupling** (UI never calls the
+worker directly), **statelessness** (any UI/worker instance serves any request), **elastic
+queue-depth scaling** (step 2), **at-least-once + idempotency** (step 3), and **eventual
+consistency hidden behind approximation** (step 5). Keep this trace in mind as you read each pattern
+in isolation below.
+
 ---
 
 ## Loose Coupling
@@ -73,6 +118,16 @@ components within one application — be minimized?*
 platform, data format, and must assume B is available *right now*. That web of assumptions
 makes it hard to scale, update, replace, or fail-over any single component independently.
 
+The concrete failure this prevents is the **distributed monolith** — a chain of synchronous calls
+(A→B→C→D) that looks decomposed but behaves as one brittle unit. Two things go wrong at scale.
+First, **latency adds up**: if each hop takes 20 ms the user waits 80 ms, and one slow downstream
+(D stalls to 2 s) stalls the *entire* chain. Second, one down component **fails the whole request**,
+and clients retrying a slow/failing D produce a **retry storm** that piles more load onto the
+already-struggling component — a cascading failure that takes the system down. A broker breaks both:
+A drops its message and returns; the queue **buffers** the backlog (backpressure) instead of hammering
+D; and D recovers by draining at its own pace. That is the "why" the broker exists, not just decoupling
+for its own sake.
+
 **Solution.** Route communication through an **intermediary (broker)** rather than
 partner-to-partner. The broker **encapsulates the assumptions** the partners would otherwise
 make about each other — location, platform, timing (availability), and data format — so each
@@ -87,8 +142,10 @@ isolation, but adds latency, eventual consistency, and operational complexity (a
 harder end-to-end debugging). Don't broker two components that are truly one transactional unit.
 
 **Related patterns.** Distributed Application, Message-oriented Middleware, Eventual
-Consistency, Watchdog. **Deep dive:** see `message-queues-and-async` (broker mechanics) and
-`microservices-monolith-api-design` (coupling in service design).
+Consistency, Watchdog (*a supervisory component that detects failed or unresponsive components and
+triggers recovery — e.g. restarts them or reroutes work; full treatment in
+`resilience-tradeoffs-deep-dive`*). **Deep dive:** see `message-queues-and-async` (broker mechanics)
+and `microservices-monolith-api-design` (coupling in service design).
 
 ---
 
@@ -98,9 +155,11 @@ Consistency, Watchdog. **Deep dive:** see `message-queues-and-async` (broker mec
 application components?*
 
 **Problem / context.** Cloud environments are scale-out and often guarantee availability of
-the *environment*, not of any single IT resource (Environment-based Availability). An
-application must be structured to exploit many, possibly redundant, resources rather than one
-big node.
+the *environment*, not of any single IT resource — this is **Environment-based Availability**: the
+cloud provider guarantees the *pool/environment* stays available (there will always be healthy
+capacity), but any *individual* instance may fail or be reclaimed at any time, so you must design for
+resource failure. An application must therefore be structured to exploit many, possibly redundant,
+resources rather than one big node.
 
 **Solution.** Split functionality into **independent components**, each providing a specific
 function (a *logical* decomposition), then group components into **tiers** that are deployed
@@ -159,10 +218,26 @@ exactly what makes horizontal scaling and failure recovery trivial.
 are stateless"; JWT/cookie session tokens instead of server-side sessions; external session
 stores (Redis/ElastiCache, DynamoDB, Memcached).
 
-**Trade-offs / when to use.** Externalizing state adds a storage round-trip per request and load
-on the state store; some workloads (long-lived connections, in-memory game state) are inherently
-stateful — then confine and replicate state deliberately (**Stateful Component**). Prefer
-stateless wherever the domain allows.
+**Trade-offs / when to use.** Externalizing state adds a storage round-trip per request, and — more
+sharply — the external state store now becomes a **shared, hot critical dependency**: every request
+touches it, so it is a potential bottleneck and single point of failure that you must size for peak
+load and make highly available (replicated, multi-AZ). You have traded per-instance fragility for a
+central dependency. Some workloads (long-lived connections, in-memory game state) are inherently
+stateful — then confine and replicate state deliberately (**Stateful Component**). Prefer stateless
+wherever the domain allows.
+
+**Sticky sessions (session affinity) are the anti-pattern statelessness replaces.** Affinity pins a
+user to the instance that holds their in-memory session, so the load balancer routes their requests
+back to it. It looks convenient but it defeats the whole point: the balancer can no longer freely
+rebalance load (a hot instance stays hot), and you cannot **gracefully drain** an instance for deploy
+or scale-in without dropping or migrating live sessions. Externalized session state (token in the
+request, or Redis/DynamoDB) removes affinity, so *any* instance serves *any* request and drain is
+free.
+
+Finally, "stateless" does **not** forbid a local cache. An **ephemeral local read cache** is fine — as
+long as it is *not authoritative*: correctness must never depend on it (a cold instance that lost its
+cache must still return correct results by reading the external store). The rule is "no authoritative
+state in the instance," not "no data in memory."
 
 **Related patterns.** Relational Database, Key-Value Storage, Blob Storage, Message-oriented
 Middleware, Stateful Component. **Deep dive:** `scalability-and-load-balancing` (scale-out &
@@ -330,8 +405,13 @@ that could lead to duplicate function execution?*
 - **Eventual consistency** in storage — a component may read *stale* data (a change already
   processed isn't visible yet) and re-process it.
 
-Exactly-once delivery is expensive/often impractical at scale, so the pragmatic cloud default is
-**at-least-once + idempotent processing**.
+Bounded exactly-once mechanisms *do* exist — SQS FIFO with content-based deduplication, and Kafka's
+transactional exactly-once semantics (EOS) — so "exactly-once is impossible" is too strong. But each
+is **scoped**: FIFO dedup only covers a limited window (see below) and caps throughput; Kafka EOS is
+per-cluster (a single Kafka transaction, not end-to-end across your DB and downstream services) and
+also costs throughput. End-to-end exactly-once across heterogeneous services is what stays impractical
+at scale. So the pragmatic cloud default remains **at-least-once + idempotent processing** — it works
+everywhere, cheaply, and doesn't depend on a single broker's feature set.
 
 **Solution.** Make repeated messages / inconsistent reads harmless via one of two approaches:
 
@@ -409,6 +489,12 @@ read-and-delete. The processor **reads the message, processes it, and writes the
 single transactional context**, then removes the message — all commit or all roll back. On failure,
 the transaction rolls back, the **message stays in the queue for re-processing**, and data stays
 consistent.
+
+Be precise about what this buys: it gives **effectively-once (exactly-once *processing*)** — no message
+is lost and no *committed* side effect is duplicated — not exactly-once end-to-end *delivery*. The
+message can still be *delivered* more than once (a crash after processing but before the ack rolls the
+whole thing back, so it reappears); the transaction just guarantees the *committed effect* happens
+exactly once.
 
 > [!TIP]
 > Transaction-based vs Timeout-based Processor: the transaction-based approach relies on a **shared
@@ -489,14 +575,14 @@ sequenceDiagram
   participant Q as Queue (broker)
   participant A as Worker A
   participant B as Worker B
-  A->>Q: receive M (t=0)
-  Note over Q: M hidden for 30s
-  Note over A: processing (needs 45s)
-  Q-->>Q: t=30 timeout expires → M visible again
-  B->>Q: receive M (t=31)
-  Note over B: processing the SAME M
-  A->>Q: DeleteMessage(M) at t=45 (success)
-  Note over B: B still runs to t=76 → work done twice
+  A->>Q: receive M (t=0);
+  Note over Q: M hidden for 30s;
+  Note over A: processing (needs 45s);
+  Q-->>Q: t=30 timeout expires → M visible again;
+  B->>Q: receive M (t=31);
+  Note over B: processing the SAME M;
+  A->>Q: DeleteMessage(M) at t=45 (success);
+  Note over B: B still runs to t=76 → work done twice;
 ```
 
 > [!KEY-TAKEAWAY]

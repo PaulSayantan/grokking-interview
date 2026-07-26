@@ -508,6 +508,17 @@ you now **maintain a second copy of the data** and the projection code; and you
 must handle **rebuilds** (replay events to reconstruct a corrupted/changed view)
 and out-of-order/duplicate events (idempotent, order-tolerant projectors).
 
+> [!INTERVIEW] **"Is that event sourcing?"** — a common probe here. **No, they're
+> distinct.** *CQRS* just means separate read and write models — you can do CQRS
+> with plain state-stored tables (the write side updates rows, and publishes a
+> change event to build the read side). *Event sourcing* is the stronger idea
+> that the **append-only log of events IS the source of truth** — you never store
+> current state directly; you derive it by replaying events. The connection: a
+> full projection **rebuild** requires a complete, replayable event log — and
+> *that* is event sourcing's contribution. So you can have CQRS without event
+> sourcing (rebuild from a snapshot or by re-querying sources), but event-sourced
+> systems almost always use CQRS to serve queries. Don't conflate them.
+
 ```mermaid
 flowchart LR
     subgraph "API composition (read-time join)"
@@ -586,9 +597,15 @@ senior from mid-level answers.
   that drops the header creates a blind spot in every trace that passes through
   it. This is not optional infrastructure; it's a prerequisite.
 - **Observability triad.** You need centralized **logs** (correlated by trace
-  id), **metrics** (RED — Rate/Errors/Duration — per service, plus the four
-  golden signals), and **traces**, all aggregated — because "which of the 40
-  services caused this p99 spike?" is unanswerable from any single box.
+  id), **metrics** (RED — Rate/Errors/Duration — per service, plus the **four
+  golden signals**: *latency, traffic, errors, saturation* — Google SRE's list,
+  which is RED plus saturation, i.e. how "full" a resource is: CPU, memory,
+  thread pool, queue depth), and **traces**, all aggregated — because "which of
+  the 40 services caused this p99 spike?" is unanswerable from any single box.
+  (The trace-context headers named above — W3C `traceparent`, and the `Sunset`/
+  `Deprecation` headers of RFC 8594 in the versioning section — are just
+  standardized header formats so different vendors' tools interoperate; the
+  exact spec text matters less than knowing *why* they exist.)
 - **Deployment and release surface.** N services = N pipelines, N sets of build/
   test/deploy config, N rollback procedures. Cross-service changes need
   **backward/forward-compatible, decoupled rollouts** (expand-contract / parallel
@@ -776,6 +793,64 @@ atomicity for availability + eventual consistency, which is the microservices
 default. (See the dedicated **saga / distributed-transactions** topic for retry,
 timeout, and semantic-lock details.)
 
+### Resilience patterns (circuit breaker, bulkhead, backoff and jitter)
+
+**Intuition.** Sync calls fail and go slow, and *"one slow downstream takes
+everything down"* is the follow-up interviewers reach for. The mental model:
+treat every remote dependency like a fuse box in your house — you want a blown
+appliance to trip *its* breaker, not burn down the whole house. These four
+patterns are how you contain the blast.
+
+- **Timeout.** Never wait forever. Cap every remote call (say 200 ms). Without a
+  timeout, a hung dependency parks a request thread indefinitely; enough of those
+  and *your* service runs out of threads and dies too — the failure propagates
+  *backwards* up the call chain.
+- **Retry with backoff + jitter.** On a transient failure, retry — but not
+  immediately or in lockstep. **Backoff** means each retry waits longer
+  (exponential: 100 ms, 200 ms, 400 ms). **Jitter** means adding a *random*
+  offset to each wait. Why jitter matters: if a dependency blips and 10 000
+  callers all retry at *exactly* 100 ms, they arrive as one synchronized wave —
+  a **thundering herd / retry storm** that re-kills the recovering service.
+  Jitter smears those retries across the window so the load is spread out.
+- **Circuit breaker.** A stateful wrapper around a dependency with three states:
+  **CLOSED** (normal — calls pass through, failures are counted), **OPEN**
+  (after the failure rate crosses a threshold, the breaker *stops calling* the
+  dependency entirely and fails fast — returning an error or fallback instantly
+  instead of waiting on a timeout), and **HALF-OPEN** (after a cooldown, it lets
+  *one* trial request through; success -> back to CLOSED, failure -> back to
+  OPEN). The point: once a dependency is clearly down, hammering it with doomed
+  calls only piles on load and burns your threads on guaranteed timeouts —
+  failing fast is kinder to both sides and lets the dependency recover.
+- **Bulkhead.** Named after a ship's watertight compartments: partition your
+  resources (thread pools / connection pools) *per dependency* so one saturated
+  downstream can't consume every thread. If calls to the flaky "reviews" service
+  get their own pool of, say, 20 threads, then even when all 20 are stuck, the
+  "checkout" path still has its own pool and keeps serving.
+
+**Worked example — how the breaker saves the fleet.** Say your service has a
+pool of **100** request threads and each incoming request calls a downstream
+`reviews` service. Normally `reviews` answers in 20 ms, so a thread is busy 20 ms
+and the pool easily handles the load. Now `reviews` hangs and every call takes
+the full **2 s** timeout before failing:
+
+- *Without a breaker:* at ~200 requests/sec, each thread is tied up 2 s, so the
+  100-thread pool is fully occupied after ~0.5 s. Thread 101 onward gets no
+  thread — **every** request now fails or queues, including ones that don't even
+  touch `reviews`. One slow dependency has taken the whole service down.
+- *With a breaker (threshold: 50% failures over the last 20 calls):* the first
+  ~20 calls hit the 2 s timeout and trip the breaker to OPEN. From that instant
+  every `reviews` call **fails in <1 ms** with a fallback ("reviews
+  unavailable") instead of holding a thread for 2 s. Threads free up immediately,
+  the pool stays healthy, and unrelated requests are unaffected. After a 10 s
+  cooldown the breaker goes HALF-OPEN, sends one probe; when `reviews` recovers,
+  that probe succeeds and the breaker closes. Add a **bulkhead** and the
+  isolation is even cleaner: `reviews` calls were capped at 20 threads all along,
+  so the other 80 were never at risk in the first place.
+
+These are exactly the mitigations a **service mesh** (next section) can provide
+without app code, and they're the concrete answer to *"a downstream is slow — how
+do you stop it cascading?"*
+
 ---
 
 ## The fallacies of distributed computing
@@ -807,7 +882,10 @@ monolith didn't have. Moving a call across the network buys you independent
 deployability but *bills* you reliability engineering (retries, circuit
 breakers), latency budget, security work, and observability. When you propose
 splitting a service, you're implicitly signing up to pay all eight. That's the
-"distributed-systems tax," and it's the reason "monolith first" is sound advice.
+"distributed-systems tax" (the standing operational cost catalogued in **The
+operational tax of microservices** above — tracing, N pipelines, expand-contract
+rollouts, on-call), and it's the reason "monolith first" is sound advice. The
+fallacies are the *root causes*; the operational tax is the *bill*.
 
 ---
 

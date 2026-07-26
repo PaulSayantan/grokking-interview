@@ -112,6 +112,9 @@ Elastic Queue, Watchdog). *Deep dive:* provider-specific depth lives in the `aws
 
 ## Managed Configuration
 
+*Intuition:* a single thermostat panel for the whole building — turn one dial and every
+room adjusts, instead of walking to each radiator to reset it by hand.
+
 **Intent — "How can the configuration of scaled-out application component instances be
 controlled in a coordinated fashion?"**
 
@@ -150,6 +153,9 @@ mechanisms themselves are covered in `messaging-databases`.
 
 ## Elasticity Manager
 
+*Intuition:* a car's engine-temperature gauge driving the fan — it reacts to how hot the
+resources already are, not to how many cars are on the road.
+
 **Intent — "How can the number of required application component instances be determined
 based on the *utilization of hosting IT resources*?"**
 
@@ -179,6 +185,10 @@ Provider Adapter, Stateless Component. *Deep dive:*
 
 ## Elastic Load Balancer
 
+*Intuition:* a maître d' who both seats diners at open tables *and* counts the people
+walking in — so the kitchen knows to call in more cooks before the food, not the guests,
+starts backing up.
+
 **Intent — "How can the number of required application component instances be determined
 based on monitored *synchronous* accesses?"**
 
@@ -207,6 +217,9 @@ ELB/ASG specifics in `system-design/scalability-and-load-balancing` and
 ---
 
 ## Elastic Queue
+
+*Intuition:* open more checkout lanes when the line gets long, not when the cashiers look
+tired — scale to the backlog you can see waiting, not to how busy the workers feel.
 
 **Intent — "How can application component instances be scaled up or down based on monitored
 *asynchronous* (message-based) accesses?"**
@@ -288,6 +301,10 @@ Processor, Stateless Component. *Deep dive:*
 
 ## Elasticity Management Process
 
+*Intuition:* the shift manager who reads the floor gauges and the reservation book, then
+decides how many staff to call in or send home — the brain that turns the sensors' readings
+into hiring and firing.
+
 **Intent — "How can the number of resources used for scaling be adjusted to match current
 *and expected* workload?"**
 
@@ -320,7 +337,16 @@ the "expected workload" half.
 
 **Trade-offs / when to use.** Reactive-only scaling always trails a spike (provisioning
 lag); combine with **scheduled/predictive** scaling and **Standby Pooling** to cover the lag.
-Tune intervals and cooldowns to avoid **thrashing** (oscillating scale up/down).
+Tune intervals and cooldowns to avoid **thrashing** (oscillating scale up/down). The
+mechanics that stop thrashing are worth naming in an interview: (1) a **deadband /
+hysteresis** — don't act inside a band around the target (e.g. hold steady between 45% and
+55% CPU) so a metric hovering near target doesn't ping-pong; (2) **cooldown windows** — after
+a scaling action, ignore the metric for a fixed period so newly-launched instances have time
+to boot and pull down the average before you react again; (3) **asymmetric policy —
+scale-up-fast, scale-down-slow**: add capacity aggressively on the way up (getting it wrong
+costs a few dollars) but remove it conservatively on the way down (getting it wrong drops
+requests), typically via a shorter scale-out cooldown and a longer scale-in one. Step scaling
+(bigger jumps for bigger breaches) beats simple target-tracking when spikes are large.
 
 **Related patterns.** Standby Pooling Process, Feature Flag Management Process, Update
 Transition Process, Elastic Infrastructure/Platform, Stateless Component; drives the
@@ -330,6 +356,9 @@ operational-elasticity *process* depth in `reliability-ops`.
 ---
 
 ## Feature Flag Management Process
+
+*Intuition:* a power grid's brownout — when demand outruns supply, dim the lights and drop
+the air-conditioning instead of blacking out the whole city.
 
 **Intent — "How can the performance of an application degrade *gracefully* if workload
 increases but additional cloud resources are unavailable or take too long to provision?"**
@@ -363,6 +392,9 @@ Standby Pooling Process. *Deep dive:* progressive-delivery mechanics in the DevO
 ---
 
 ## Update Transition Process
+
+*Intuition:* build the new bridge next to the old one and reroute traffic once it's open —
+never close the only bridge while you rebuild it.
 
 **Intent — "How can components of a distributed application be updated *without disrupting
 service*?"**
@@ -410,6 +442,9 @@ Elasticity Management Process. *Deep dive:* blue-green/canary/rolling specifics 
 ---
 
 ## Standby Pooling Process
+
+*Intuition:* a taxi rank with cabs idling out front — the moment a customer walks up, one
+pulls away instantly instead of being dispatched from the far side of the city.
 
 **Intent — "How can defined provisioning times be ensured while using pay-per-use resources
 *optimally*?"**
@@ -462,6 +497,10 @@ depth in `reliability-ops`; workload/capacity modeling in
 
 ## Resiliency Management Process
 
+*Intuition:* a building's fire-safety system — the smoke detector (Watchdog) trips, and this
+is the wiring that sounds the alarm, calls the fire department, and unlocks the exits, all
+without anyone deciding to.
+
 **Intent — "How can the overall availability of an application be ensured *automatically*
 even if individual component instances fail?"**
 
@@ -492,10 +531,19 @@ so replacements come from a warm pool.
 
 **Trade-offs / when to use.** Essential for hands-off high availability, but effective only
 with **stateless/replaceable components**, meaningful health checks, and guards against
-**replacement storms** (a systemic fault can trigger endless replace loops — combine with
-backoff and circuit-breaking). Distinguish from **Elasticity Management Process**:
-resiliency replaces *failed* instances (availability); elasticity changes the *count* to
-match load (capacity).
+**replacement storms**. The failure mode a senior interviewer will probe: the naive
+"health-check fails → kill and replace" loop *assumes the fault is instance-local*. If the
+fault is instead **systemic** — a bad config that just rolled out, or a downstream dependency
+outage that makes every instance fail its health check — then the freshly provisioned
+replacements fail the *same* check, and the loop churns the entire fleet in a tight cycle,
+turning a recoverable dependency blip into a self-inflicted, fleet-wide outage (and hammering
+the ailing dependency with reconnect storms on top). The guards: a **max-replacement rate /
+budget** (cap how many instances you'll cycle per window so you can't churn the whole fleet);
+**circuit-breaking** on the dependency so instances stay up and fail fast instead of tripping
+liveness; and **distinguishing instance-local from systemic failure** — if *many* instances
+go unhealthy at once, that's a signal to *stop replacing* and page a human, not to replace
+harder. Distinguish from **Elasticity Management Process**: resiliency replaces *failed*
+instances (availability); elasticity changes the *count* to match load (capacity).
 
 **Related patterns.** **Watchdog** (its sensor), Stateless Component, Elasticity Management
 Process, Standby Pooling Process. *Deep dive:*
@@ -503,6 +551,45 @@ Process, Standby Pooling Process. *Deep dive:*
 and `reliability-ops`.
 
 ---
+
+## Worked scenario: one spike, all the patterns firing
+
+The patterns are easiest to *feel* when you watch them interact on a single incident. Reuse
+the flash-sale numbers from Standby Pooling: each instance serves **100 req/s**, baseline
+traffic is **200 req/s** (so **2 instances**, each at capacity), cold boot is **90s**, and a
+sale drives traffic **200 → 800 req/s over 30s**.
+
+1. **t = 0s — Sense.** The **Elastic Load Balancer** distributing the synchronous request
+   traffic also *measures* it, and reports `RequestCountPerTarget` climbing. (The
+   **Elasticity Manager**'s CPU signal would also rise, but it *lags* — CPU only pegs after
+   latency has already suffered — so the request-rate sensor trips first.)
+2. **t ≈ 10s — Decide.** The **Elasticity Management Process** turns the signal into a count.
+   Target-tracking math: with request rate now ~800 req/s and each instance good for 100
+   req/s, `desired = ceil(800 / 100) = 8`, i.e. **+6 instances**. Because it uses a
+   scale-**out** cooldown far shorter than its scale-**in** cooldown (asymmetric policy), it
+   commits to adding all 6 immediately rather than dribbling them in.
+3. **t ≈ 10–15s — Act (the happy path).** Those 6 come from the **Standby Pooling Process**'s
+   warm list, sized exactly `peak − baseline = 8 − 2 = 6`. Warm instances skip the 90s boot
+   and join the LB in seconds, so the fleet reaches 8 instances *well inside* the 30s ramp and
+   serves the full 800 req/s with no dropped requests.
+4. **Act (the bad path) — warm pool exhausted.** Suppose the pool was only 3 deep (someone
+   under-sized it). 2 + 3 = 5 instances = 500 req/s of capacity against 800 req/s of demand;
+   the remaining 3 (to reach the 8 needed) must cold-boot and won't be ready for 90s. For
+   those 90s you're **300 req/s short**. Now the **Feature Flag Management Process** earns its keep: flip off
+   non-critical features (recommendations, rich search) so each instance's per-request cost
+   drops and the 5 live instances absorb the 800 req/s degraded-but-up, instead of the whole
+   fleet collapsing. When the cold instances arrive at t ≈ 100s, re-enable the features and
+   refill the warm pool in the background.
+5. **After the sale — Decide again, carefully.** Traffic falls back to 200 req/s. Elasticity
+   Management computes `ceil(200 / 100) = 2` and scales *in* — but slowly, gated by the long
+   scale-in cooldown and a deadband, so a brief post-sale echo doesn't trigger a scale-out /
+   scale-in **thrash**.
+
+Orthogonally, the **Watchdog** + **Resiliency Management Process** run this whole time on a
+*separate* loop: if one of the 8 instances hangs, the Watchdog detects it and Resiliency
+Management retires-and-replaces it (ideally pulling the replacement from the warm pool too) —
+holding *availability* while Elasticity Management holds *capacity*. Same actuator
+("provision an instance"), different trigger.
 
 ## Common Interview Follow-ups
 

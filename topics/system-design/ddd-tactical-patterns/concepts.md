@@ -18,7 +18,8 @@ value objects, aggregates, domain events, repositories, factories, and domain se
 > **Boundary of this topic.** Strategic DDD — bounded contexts, context maps,
 > anti-corruption layers, subdomains, how services map to contexts — is covered in
 > **See also: microservices-ddd-and-boundaries**. Repository and Value Object *as
-> enterprise/PoEAA patterns* (Repository vs DAO, Data Mapper, etc.) live in **See also:
+> enterprise patterns* from **PoEAA** (Martin Fowler's *Patterns of Enterprise Application
+> Architecture*) — Repository vs DAO, Data Mapper, etc. — live in **See also:
 > dp-enterprise-application**. CQRS, Event Sourcing, Saga, and the outbox pattern for
 > reliable event publishing live in **See also: event-driven-cqrs-saga-cdc**. Here we
 > focus on the *tactical building blocks* and how they fit together.
@@ -197,11 +198,70 @@ sequenceDiagram
     App->>Inv: reserveStock() [transaction 2]
 ```
 
+**But what if transaction 2 fails?** The order is already submitted, yet stock was
+never reserved — the system is temporarily inconsistent. Eventual consistency is *not*
+free: you need (a) reliable event delivery so the `reserveStock` step is retried until it
+succeeds (idempotently), and (b) a **compensating action** for the case where it can
+*never* succeed — e.g. stock is genuinely unavailable, so you raise
+`OrderCouldNotBeFulfilled` and cancel/refund the order. A multi-step business flow with
+compensations is a **saga**; reliable delivery is the **transactional outbox**. Both live
+in **See also: event-driven-cqrs-saga-cdc**. The point here: the moment you cross an
+aggregate boundary you own the "what if the other side fails?" question.
+
 > [!INTERVIEW]
 > If asked "why can't `placeOrder()` also decrement inventory in the same transaction?",
 > the crisp answer: *because Order and Inventory are separate aggregates.* Cross-aggregate
 > consistency is achieved with a domain event and a second transaction, giving eventual
 > consistency, which is what lets these aggregates live in different services/shards later.
+
+---
+
+## Protecting invariants under concurrent writes
+
+Calling the aggregate a "consistency boundary" raises an immediate question: an invariant
+checked *inside* the root only holds if two transactions can't both check it, both pass,
+and both save. Consider `total ≤ creditLimit`, limit = $100, current total = $80:
+
+- Tx A loads the order (total $80), adds a $15 line → new total $95 ≤ $100, passes.
+- Tx B loads the *same* order (also total $80, it hasn't seen A's uncommitted change),
+  adds a $15 line → new total $95 ≤ $100, also passes.
+- Both save. Final persisted total = $110. The invariant is **violated** even though every
+  in-memory check passed. This is a lost update / write-write race.
+
+The aggregate boundary is not just a *grouping* — it is the unit of the **concurrency
+control**, and the standard mechanism is **optimistic locking**:
+
+- The root carries a **version** field (an integer bumped on every change). In JPA this is
+  a `@Version` column; in a hand-rolled repository it's a `version` column you compare.
+- On save, the repository does a **compare-and-set**: `UPDATE orders SET ..., version = 6
+  WHERE id = ? AND version = 5`. It writes the new state *only if* the version still equals
+  the value you loaded.
+- Trace the race again: A loads version 5, B loads version 5. A commits first: the row goes
+  to version 6, `WHERE version = 5` matched. B now tries `... WHERE version = 5` — but the
+  row is at version 6, so **0 rows update**. B's save fails with an optimistic-lock
+  exception. The application catches it and **retries**: reload (total is now $95, version
+  6), re-run `addLine($15)` → $110 > $100 → the invariant now correctly *rejects* the line.
+  No invalid state is ever persisted.
+
+Why "optimistic": you *assume* conflicts are rare and only pay a cost (a retry) when one
+actually happens — no locks are held while a user thinks. The alternative is **pessimistic
+locking** (`SELECT ... FOR UPDATE`): B blocks until A commits, then reads the fresh $95.
+That guarantees no retry but holds a row lock for the whole transaction, cutting throughput
+and inviting deadlocks under contention.
+
+> [!KEY-TAKEAWAY]
+> "One transaction per aggregate" and "design small aggregates" are the *same* idea seen
+> from the concurrency angle: the aggregate is the unit that gets versioned/locked, so a
+> big aggregate serializes unrelated edits (every change bumps one version → constant
+> retries — exactly the "optimistic-lock retries" symptom in "Designing small aggregates"),
+> while small aggregates let independent work proceed in parallel.
+
+The trade-off decides real designs: pick optimistic locking when writes to the same
+aggregate are infrequent (the common case) and you can tolerate an occasional retry; pick
+pessimistic when contention on a single aggregate is high and retries would storm, and you
+can afford the reduced concurrency. If *neither* is acceptable, that is the signal to
+**redesign the aggregate boundary** so the contended invariant no longer sits on one hot
+root (see the booking example under "Designing small aggregates").
 
 ---
 
@@ -261,6 +321,39 @@ Signs your aggregate is too big:
 > *must* be inside one aggregate (Order + OrderLines). An invariant like "a customer's
 > lifetime spend" that can lag a few seconds does *not* — compute it eventually from
 > order events.
+
+### Worked example: the "seats ≤ capacity" hotspot
+
+The hardest boundary calls are ones where a strong invariant *seems* to force a giant
+aggregate. Take a `ConferenceRoom` with **capacity 100** and thousands of people trying to
+book concurrently. The invariant "seats reserved may not exceed capacity" spans *all*
+bookings, so the naive reading is: make the room the aggregate and put every booking
+inside it.
+
+Trace what that costs. The room is one aggregate → one version field → one optimistic
+lock. Two bookings arriving in the same instant both load version 5; one commits (version
+6), the other's compare-and-set fails and retries. With capacity 100 and, say, 5,000
+concurrent attempts, *every* booking contends on that single version — you have
+effectively **serialized all 5,000 writes** through one row, and most of them retry
+repeatedly. The invariant is safe but throughput collapses. This is a contention hotspot.
+
+Now weigh the two real resolutions against the numbers:
+
+- **Keep it one aggregate and accept serialization.** Correct choice when arrival rate is
+  low relative to how fast you commit — e.g. a meeting room booked a handful of times a
+  day. 100 capacity, ~10 bookings/day → contention is a non-issue; the simplest model wins.
+- **Redesign the boundary** when the rate is genuinely high (flash-sale seat release,
+  10k+/min). Model each seat (or a small pool of seats) as its own **SeatHold** aggregate
+  keyed by seat id. Now the invariant "this *specific* seat is held by at most one person"
+  is strongly consistent *inside* a tiny aggregate, and 100 seats give you 100 independent
+  locks instead of one — writes to different seats never contend. The *aggregate-level*
+  "total ≤ 100" is now maintained by construction (only 100 seat aggregates exist) and any
+  cross-cutting count is reconciled **eventually** from `SeatHeld` / `SeatReleased` events.
+
+The reasoning is always the same tension: **strong-consistency invariant vs write
+contention.** A big aggregate maximizes the first and destroys the second. You only pay for
+the smaller-aggregate redesign (and the eventual reconciliation it implies) when the
+contention is real — otherwise keep it simple.
 
 ---
 
@@ -456,8 +549,9 @@ business logic lives in service classes that operate on them. It *looks* object-
 
 Why Fowler calls it an anti-pattern:
 
-- **It contradicts the core of OO** — combining data and behavior. It's a Transaction
-  Script in disguise.
+- **It contradicts the core of OO** — combining data and behavior. It's a **Transaction
+  Script** (business logic in a procedure/service method, operating on plain data objects)
+  in disguise, just dressed up as objects.
 - **You pay the cost of a domain model (mapping to the DB, the object graph) without the
   benefit** (rules organized around the data they govern). "The more behavior you find in
   the services, the more likely you are robbing yourself of the benefits of a domain
@@ -537,8 +631,11 @@ business complexity** — that's where a rich model pays back its cost.
 **Overkill when:**
 
 - The app is essentially CRUD — forms over data with trivial validation. A **Transaction
-  Script** or **Active Record** approach is simpler and perfectly appropriate; forcing
-  aggregates, repositories, factories, and domain services adds ceremony with no payoff.
+  Script** (one procedure per use case — the business logic sits in the service method,
+  operating on plain data with no rich objects) or **Active Record** (a domain object that
+  also knows how to persist itself: one class = one table row, with `save()`/`find()` on
+  it) approach is simpler and perfectly appropriate; forcing aggregates, repositories,
+  factories, and domain services adds ceremony with no payoff. (Both are PoEAA patterns.)
 - It's a short-lived prototype, or the "domain" is just moving rows between tables.
 
 | Signal | Lean rich DDD | Lean simple (CRUD/Transaction Script) |
@@ -567,8 +664,14 @@ business complexity** — that's where a rich model pays back its cost.
   splits, and force you to decide what *must* be atomic vs what can be eventually
   consistent.
 - **"How do you keep two aggregates consistent?"** Not in one transaction — update one,
-  raise a domain event, react in a second transaction (eventual consistency). For reliable
+  raise a domain event, react in a second transaction (eventual consistency). If the second
+  transaction can fail, add retries plus a compensating action (a saga). For reliable
   delivery use the transactional outbox (See also: event-driven-cqrs-saga-cdc).
+- **"Two requests modify the same aggregate at once — how is the invariant protected?"**
+  Optimistic locking: the root has a version field; save is a compare-and-set on that
+  version, and the stale writer fails and retries (reloading and re-checking the invariant).
+  Pessimistic (`SELECT ... FOR UPDATE`) is the higher-contention alternative at a throughput
+  cost. Constant retries mean the aggregate is too big — split it.
 - **"Why reference other aggregates by id?"** Keeps aggregates small and independently
   loadable, prevents accidental multi-aggregate transactions, and makes the model work
   across shards/services.

@@ -64,7 +64,7 @@ tables.
 | Dimension | Data lake (S3 + Glue + Athena) | Data warehouse (Redshift) | Lakehouse (S3 + Iceberg) |
 |---|---|---|---|
 | Schema | schema-on-read | schema-on-write | schema-on-read + table metadata (ACID) |
-| Data types | any (structured/semi/unstructured) | structured/semi (SUPER) | structured/semi, open columnar |
+| Data types | any (structured/semi/unstructured) | structured/semi (SUPER type) | structured/semi, open columnar |
 | Ingest cost | cheap (just land files) | ETL work up front | cheap land + light transform |
 | Query latency | seconds (cold, per-scan) | ms–seconds (tuned, cached) | seconds |
 | Cost model | pay per TB scanned + S3 storage | pay for cluster/RPU + storage | pay per engine used + S3 |
@@ -79,6 +79,12 @@ partitioning. **Pick warehouse** when many analysts run repeated joins/aggregati
 with tight SLAs; **pick lake** when data is large, diverse, exploratory, or feeds ML;
 **pick lakehouse** when you want one governed copy queried by several engines and need
 row-level updates/deletes (GDPR erasure, CDC upserts).
+
+> [!TIP]
+> **SUPER** (in the table above) is Redshift's native semi-structured column type — it
+> stores JSON-like nested documents in a single column and lets you query them with
+> `PartiQL` (SQL extended for nested/schemaless data), so you can land semi-structured
+> events in a warehouse without flattening them into rigid columns first.
 
 ---
 
@@ -128,9 +134,13 @@ see the *same* table definitions. It is effectively a managed Hive Metastore.
   transformation jobs, priced by **DPU-hour** (1 DPU = 4 vCPU + 16 GB), billed per
   second with a 1-minute minimum. Glue Studio gives a visual job builder; DynamicFrames
   add schema-flexibility over Spark DataFrames.
-- **Glue triggers / workflows / blueprints** orchestrate jobs; **Glue Data Quality**
-  and **Glue Schema Registry** add validation and Avro/JSON/Protobuf schema governance
-  for streams.
+- Around the core ETL sit orchestration and governance helpers you reach for as needs
+  arise: **triggers/workflows** when you must chain and schedule jobs into a DAG,
+  **Data Quality** when you need to assert row-level rules (nulls, ranges, uniqueness)
+  and fail a pipeline on bad data, and the **Schema Registry** when producers and
+  consumers of a stream must agree on an evolving Avro/JSON/Protobuf schema. (Blueprints,
+  a parameterized-job templating feature, also exists but is peripheral.) Don't memorize
+  the list — reach for each only when its specific problem shows up.
 
 **Trade-offs.**
 - **Crawler vs explicit schema:** crawlers save effort on unknown/changing data but risk
@@ -242,21 +252,25 @@ classic ETL/ELT job.
 **Intuition.** Redshift is a **massively parallel processing (MPP), columnar** data
 warehouse. A **leader node** parses/plans and aggregates; **compute nodes** are split
 into **slices** that each work a shard of the data in parallel. Columnar storage + zone
-maps + compression make aggregations over billions of rows fast.
+maps + compression make aggregations over billions of rows fast. A **zone map** is
+per-block min/max metadata Redshift keeps for each 1 MB disk block; when a query filters
+`WHERE order_date = '2026-07-16'`, the engine checks each block's min/max and **skips any
+block whose range can't contain the value** — reading only the handful of blocks that
+might match instead of the whole column.
 
-**RA3 with managed storage (and newer RG Graviton nodes).** RA3 nodes **decouple
-compute from storage**: hot data on local SSD, the rest transparently on **Redshift
-Managed Storage (RMS)** backed by S3, so you **scale and pay for compute and storage
-independently**. Sizes include `ra3.large`, `ra3.xlplus`, `ra3.4xlarge`,
-`ra3.16xlarge` (up to 128 nodes, up to 16 PB managed storage on the largest). Newer
-**RG** Graviton nodes add an integrated data-lake query engine (vs RA3 using Spectrum).
-Legacy **DC2** nodes bundle compute+local SSD (good for <1 TB, cheapest small clusters,
-but you can't scale storage separately).
+**RA3 with managed storage.** RA3 nodes (Graviton-based) **decouple compute from
+storage**: hot data on local SSD, the rest transparently on **Redshift Managed Storage
+(RMS)** backed by S3, so you **scale and pay for compute and storage independently**.
+Sizes include `ra3.large`, `ra3.xlplus`, `ra3.4xlarge`, `ra3.16xlarge` (large clusters
+scale to many nodes and multiple PB of managed storage — verify exact current node/PB
+caps in the docs, as they rise over time). Legacy **DC2** nodes bundle compute+local SSD
+(good for <1 TB, cheapest small clusters, but you can't scale storage separately).
 
-**Redshift extras:** **AQUA**, **materialized views** (incl. auto-refresh),
-**result caching**, **automatic table optimization** (auto dist/sort key), **zero-ETL
-integrations** (Aurora/RDS/DynamoDB → Redshift with no pipeline), **data sharing**
-across clusters/accounts, and **federated queries** to RDS/Aurora.
+**Redshift extras:** **materialized views** (incl. auto-refresh), **result caching**,
+**automatic table optimization** (auto dist/sort key), **zero-ETL integrations**
+(Aurora/RDS/DynamoDB → Redshift with no pipeline), **data sharing** across
+clusters/accounts, and **federated queries** to RDS/Aurora. (Note: AQUA, an earlier
+hardware query accelerator, has been discontinued — do not cite it as a live feature.)
 
 **Trade-offs.**
 - **RA3 vs DC2:** RA3 wins when storage grows faster than compute needs or data > a few
@@ -291,6 +305,20 @@ favors queries filtering on the leading columns (and range/time filters); an
 maintain (`VACUUM`). Choose sort keys matching your `WHERE`/range predicates (often the
 date column).
 
+**Worked example — what skew actually looks like.** Say a cluster has 2 nodes × 8 slices
+= 16 slices, and you set `DISTKEY(country)` on a 100M-row events table where 60% of rows
+are `country = 'US'`. Redshift hashes each distinct key value to one slice, so **all 60M
+US rows land on a single slice** while the remaining 40M spread across the other 15. That
+one slice now holds ~60M rows and the others average ~2.7M — a skew ratio of ~22×. During
+a scan or aggregation the 15 light slices finish almost immediately and **sit idle
+waiting** for the one hot slice to grind through 60M rows; effective parallelism collapses
+toward that single slice, so the query runs roughly 10× slower than a balanced layout
+(60M on the hot slice vs 6.25M per slice if evenly spread) and that slice can also hit
+`disk-full` first. Contrast with `DISTKEY(user_id)` on a high-cardinality,
+evenly-distributed column: each slice gets ~6.25M rows and all 16 work in parallel. You
+detect skew via `svv_table_info` (`skew_rows` / `skew_sortkey1`) — a high ratio is the
+tell. Fix: pick an even, high-cardinality dist key, or switch that table to `EVEN`/`ALL`.
+
 **Other levers:** `VACUUM`/`ANALYZE` (reclaim space, update stats — largely automated
 now), compression encodings (auto via `COPY`), and **Workload Management (WLM)** queues.
 
@@ -320,8 +348,7 @@ Spectrum scan cost.
   wrong for hot, repeatedly scanned data — load that. 
 - **Spectrum vs Athena:** functionally similar per-scan engines on S3; use **Spectrum**
   when you need to join lake data to Redshift tables or serve it through the Redshift
-  endpoint; use **Athena** for standalone serverless SQL with no cluster. (RG-node
-  clusters use an integrated lake engine instead of Spectrum.)
+  endpoint; use **Athena** for standalone serverless SQL with no cluster.
 
 ---
 
@@ -421,7 +448,12 @@ conversion to **Parquet/ORC**, compression, and dynamic partitioning.
 **How it works.** Firehose batches by **buffer size (e.g., 1–128 MB) or buffer interval
 (e.g., 60–900 s)**, whichever hits first — so there's inherent delivery latency (tens of
 seconds to minutes), the price of no-ops batching. It **auto-scales** (no shards to
-manage) and is **at-least-once**. Delivery to Redshift is via S3 + `COPY`.
+manage) and is **at-least-once**. Delivery to Redshift is via S3 + `COPY`. Because
+delivery is at-least-once, a record can be written **more than once** (e.g., on retry
+after a partial failure), so downstream must tolerate duplicates: dedupe in the Lambda
+transform, or land into an Iceberg/Hudi table and `MERGE` on a natural key so re-delivered
+rows upsert rather than double-count — the same discipline applies to the Redshift `COPY`
+target (stage + merge, don't blindly append).
 
 **Trade-offs.**
 - **Firehose vs Kinesis Data Streams:** Firehose is fully managed near-real-time
@@ -517,7 +549,9 @@ Q&A / generative BI.
 **ETL** (Extract-Transform-Load): transform data *before* loading (Glue/EMR Spark writes
 clean Parquet, then load to Redshift). **ELT** (Extract-Load-Transform): load raw data
 into the target (S3 or Redshift) first, then transform *in place* with SQL (Redshift
-SQL, dbt, Athena CTAS).
+SQL; **dbt** — "data build tool", a framework that manages SQL transformations as
+version-controlled, dependency-ordered models; **Athena CTAS** — `CREATE TABLE AS
+SELECT`, which materializes a query's result as a new table/files).
 
 **Trade-offs.**
 - **ETL** keeps the warehouse clean and controls schema/quality up front, but adds a
@@ -611,7 +645,7 @@ A consolidated decision guide:
   catalog-centric scheduled ETL.
 - **Redshift provisioned vs Serverless:** steady 24/7 (reserved, cheapest) vs
   spiky/intermittent (zero idle).
-- **RA3/RG vs DC2:** decoupled scaling / large data vs small (<1 TB) cheap fixed.
+- **RA3 vs DC2:** decoupled scaling / large data vs small (<1 TB) cheap fixed.
 - **Firehose vs Kinesis Data Streams:** managed delivery/landing (no replay) vs durable
   low-latency replayable log.
 - **Streaming vs batch ingest:** freshness SLA vs cost/simplicity.
@@ -683,7 +717,7 @@ under mis-tuned buffering, and S3 hot prefixes degrade in *throttling*.
 - AWS Prescriptive Guidance — "Build a modern data architecture / lakehouse on AWS".
 - Amazon Athena User Guide (pricing $5/TB, 10 MB min, partition projection, Iceberg,
   Provisioned Capacity, Athena for Spark).
-- Amazon Redshift Management & Database Developer Guides (RA3/RG/DC2 node specs,
+- Amazon Redshift Management & Database Developer Guides (RA3/DC2 node specs,
   managed storage, distribution styles, sort keys, Spectrum, concurrency scaling, WLM,
   Serverless RPUs, zero-ETL, data sharing).
 - AWS Glue Developer Guide (Data Catalog, crawlers, DPU pricing, Data Quality, Schema

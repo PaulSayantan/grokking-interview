@@ -95,7 +95,9 @@ multiple aggregates, those aggregates are effectively fused into a larger
 consistency boundary — you've drawn the aggregate too small (or you need them in
 the same one). More importantly, in a microservices world **aggregates map to
 data ownership and often to services**, so a cross-aggregate transaction becomes
-a cross-service distributed transaction (2PC/saga) — the thing you're trying to
+a cross-service distributed transaction (**2PC** — two-phase commit, where a
+coordinator asks every participant to *prepare*, then *commit*, holding locks the
+whole time — or a **saga**; both are covered later) — the thing you're trying to
 avoid. Keeping aggregates small keeps transactions local and enables
 database-per-service.
 
@@ -230,6 +232,20 @@ writes inside the *one* DB transaction, not a distributed transaction across DB
 and broker. Consumers must be **idempotent** because at-least-once delivery is
 the norm.
 
+**Domain events vs event sourcing (don't conflate them).** A domain event is a
+*notification*: "this fact happened," published so others can react. **Event
+sourcing** is a *persistence model*: instead of storing current state in a row you
+overwrite, you store the **append-only log of events** and rebuild current state
+by *replaying* them (`OrderCreated → LineAdded → LineAdded → Paid` replays to the
+current order). The two are related but independent choices — you can emit domain
+events from a boring row-per-aggregate store (most systems do), and you can event-
+source an aggregate without publishing anything externally. A senior interviewer
+often probes this: event sourcing gives you a perfect audit trail and time-travel
+but costs you snapshotting, schema-evolution-of-old-events, and read-model
+projections; you don't need it just to get decoupling. Either way, the reliable-
+publish mechanism from your commit to the outside world is the **transactional
+outbox** (below), not event sourcing itself.
+
 **Trade-offs.** Events buy loose coupling and a natural audit log, but you give
 up the ability to reason about a workflow by reading one call stack — logic is
 smeared across subscribers ("what actually happens when an order is placed?"
@@ -264,6 +280,27 @@ that dependency. Choose **Conformist** when the upstream model is acceptable and
 you can't influence it and translation isn't worth it; choose **ACL** when the
 upstream model would corrupt yours (legacy monolith, third-party API with a
 foreign model) and cleanliness is worth the translation cost.
+
+A small context map makes the power dynamics visible at a glance — read the arrow
+as "upstream (U) feeds downstream (D)," and note where the downstream defends
+itself with an ACL:
+
+```mermaid
+flowchart LR
+  Legacy["Legacy Billing (monolith)<br/>upstream, messy model"]
+  Sales["Sales context<br/>downstream"]
+  Ship["Shipping context"]
+  Std["ISO 20022 / carrier API<br/>Published Language"]
+
+  Legacy -->|"U → D"| ACL["Anti-Corruption Layer<br/>(translates legacy → clean)"]
+  ACL --> Sales
+  Sales -->|"U → D (Customer-Supplier)"| Ship
+  Std -->|"Conformist"| Ship
+```
+
+Sales can't change Legacy Billing, so it wraps it in an ACL; Shipping is a
+*customer* of Sales (Sales prioritizes Shipping's needs) but a *conformist* to the
+external carrier standard it has no power over.
 
 **Trade-offs.** Shared Kernel minimizes duplication but maximizes coupling — the
 shared code becomes a coordination bottleneck; use it only for genuinely stable,
@@ -538,6 +575,16 @@ not a wiki page.
 customer name and product details" can't be one SQL join. Three canonical
 patterns, each with distinct trade-offs.
 
+One of them, **CQRS (Command Query Responsibility Segregation)**, is worth
+stating plainly up front because the acronym hides a simple idea: **stop using
+one model for both writes and reads.** The write side (commands) keeps the rich,
+normalized aggregate that enforces invariants; the read side (queries) is one or
+more *separate, purpose-built, denormalized* views shaped exactly for how they're
+queried, kept up to date from the write side's events. Reads and writes now scale,
+evolve, and are stored independently — the write model can be a normalized SQL
+table while the read model is a flattened document in Elasticsearch. That
+separation is the whole point; everything below is mechanism.
+
 | Pattern | How | Best for | Cost / risk |
 |---|---|---|---|
 | **API Composition** | A composer/gateway calls each owning service and joins in memory | Simple queries, few sources, freshest data | In-memory joins don't scale; latency = slowest call; fan-out fragility; N+1 |
@@ -589,7 +636,9 @@ sync/async wire format itself.
 - **Async decouples in time**: the queue absorbs bursts (load leveling) and
   outages (messages wait). But you inherit eventual consistency, out-of-order and
   duplicate delivery (need idempotency), harder debugging (no single call stack),
-  and the queue itself as a component to operate and monitor (lag, DLQs).
+  and the queue itself as a component to operate and monitor (consumer lag, and
+**DLQs** — dead-letter queues, where a message lands after it fails processing
+too many times so it stops blocking the queue and can be inspected later).
 
 **Coupling dimensions to name in an interview.** *Afferent/efferent* (who
 depends on whom), *temporal* (must both be up now?), *deployment* (must deploy
@@ -782,6 +831,22 @@ sits between new services and the legacy model so legacy semantics don't leak.
 Data is migrated incrementally, often with dual-write or CDC to keep the two
 sides in sync during transition.
 
+The façade is the whole trick: clients keep hitting one address while you move
+capabilities out from behind it one at a time.
+
+```mermaid
+flowchart LR
+  Client["Clients"] --> Facade["Façade / routing layer<br/>(gateway, reverse proxy)"]
+  Facade -->|"/checkout (extracted)"| NewSvc["New Checkout service"]
+  Facade -->|"/reports (not yet moved)"| Mono["Legacy monolith"]
+  Facade -->|"/billing (not yet moved)"| Mono
+  NewSvc -->|"reads legacy data via"| ACL["Anti-Corruption Layer"]
+  ACL --> Mono
+```
+
+Over time more arrows flip from the monolith to new services; when the last one
+flips, the monolith is dead code and you delete it.
+
 **Why it wins over big-bang rewrite.** Continuous delivery of value; risk is
 bounded per increment and reversible (flip the flag back); the business keeps
 running; you learn the real boundaries as you go instead of guessing them all up
@@ -844,6 +909,28 @@ Step (forward)          Local commit / effect                 Saga state
 C3 (Payment)            nothing captured → nothing to undo     (no-op)
 C2 Release Inventory    reserved −2 → onHand back to 100        Inv=RELEASED
 C1 Cancel Order         Order status: RESERVED → CANCELLED      Order=CANCELLED
+```
+
+The same failure as an orchestrated sequence — forward path in solid arrows,
+compensation path fired in reverse once payment declines:
+
+```mermaid
+sequenceDiagram
+  participant O as Orchestrator;
+  participant Ord as Order svc;
+  participant Inv as Inventory svc;
+  participant Pay as Payment svc;
+  O->>Ord: Create Order (PENDING);
+  Ord-->>O: ok;
+  O->>Inv: Reserve stock (-2);
+  Inv-->>O: RESERVED;
+  O->>Pay: Capture $50;
+  Pay-->>O: DECLINED (fail);
+  Note over O: step 3 failed → compensate in reverse;
+  O->>Inv: Release stock (+2);
+  Inv-->>O: RELEASED;
+  O->>Ord: Cancel Order;
+  Ord-->>O: CANCELLED;
 ```
 
 Read the status transitions as one thread: `PENDING → RESERVED → CANCELLED`
@@ -934,7 +1021,9 @@ migrations disappoint.
   you need trace IDs propagated (W3C Trace Context / OpenTelemetry) to reconstruct
   "what happened" — a monolith gave you this for free in one stack trace.
 - **Centralized, correlated logging + metrics** across services; per-service
-  dashboards, RED/USE metrics, SLOs.
+  dashboards, **RED** (Rate, Errors, Duration — the request-centric view of a
+  service) and **USE** (Utilization, Saturation, Errors — the resource-centric
+  view of a host/queue) metrics, SLOs.
 - **Deployment/CI-CD per service**, service discovery, config management, and
   **contract testing** to keep independent deploys safe.
 - **Resilience machinery:** timeouts, retries with backoff+jitter, circuit
@@ -959,6 +1048,85 @@ off at sufficient scale. For a small org, the platform is unaffordable and the
 tax is naked — another argument for the modular monolith until you're big enough.
 
 ---
+
+## Worked example: one e-commerce checkout, end to end
+
+Every section above used a throwaway example. Here is *one* system carried through
+all the pieces, so bounded contexts → aggregates → data ownership → saga → read
+model assemble into a single picture — the picture you'd draw on a whiteboard.
+
+**Step 1 — Find the bounded contexts (and thus candidate services).** Talking to
+the business, three subdomains fall out, each with its own ubiquitous language:
+
+| Context | Owns (aggregate) | "Product" means | Subdomain type |
+|---|---|---|---|
+| **Ordering** | `Order` (+ `OrderLine` value objects) | a SKU + qty + captured price | core |
+| **Payments** | `Payment` | an amount to charge | generic (buy a PSP) |
+| **Inventory** | `StockItem` | a SKU + on-hand/reserved counts | supporting |
+
+Three contexts → three services, each owning *whole* aggregates. Note "Product"
+means something different in each — no shared `Product` god-object.
+
+**Step 2 — Data ownership.** Each service owns its tables privately. Ordering has
+no `stock` table; Inventory has no `orders` table. `Order` references inventory
+and customer **by identity** (`sku`, `customerId`), never by object. No
+cross-service JOIN, no cross-service ACID transaction, no foreign keys across the
+boundary — exactly the losses `## Data ownership and database-per-service` warns
+about.
+
+**Step 3 — Place an order (the saga).** "Place order" spans all three services, so
+it can't be one transaction. It's the orchestrated saga from the saga section,
+with concrete numbers. Customer 88 buys 2× SKU-A @ \$10 and 1× SKU-B @ \$30 =
+**\$50**:
+
+```
+Step                 Local commit (own service, own txn)        Running state
+─────────────────────────────────────────────────────────────────────────────
+1 Create Order       Order#4711: lines=[A×2@10, B×1@30]          Order=PENDING
+                     INVARIANT total == 2*10 + 1*30 == 50 ✓
+2 Reserve Inventory   SKU-A onHand 100→98 reserved+2             Inv=RESERVED
+                      SKU-B onHand 40→39  reserved+1             Order=RESERVED
+3 Capture Payment     PSP charges customer 88 → \$50 captured    Pay=CAPTURED
+                      (idempotency key = orderId 4711, so a       Order=CONFIRMED
+                       retry never double-charges — see below)
+```
+
+Happy path: `PENDING → RESERVED → CONFIRMED`. Now fail step 3 (card declined):
+compensations fire in reverse — release SKU-A/SKU-B reservations (onHand back to
+100/40), cancel Order → `CANCELLED`. Money never moved, so payment compensation
+is a no-op; had the decline happened *after* capture, compensation would be a
+**refund** (semantic undo), never a DB rollback.
+
+**Step 4 — Idempotency on the money step.** Payment uses `orderId 4711` as the
+idempotency key. If the orchestrator times out and retries "Capture \$50," the
+Payments service sees key `4711` already `done` and returns the stored
+`{captured:$50}` — the card is charged **exactly once** even though the request
+arrived twice. This is the mechanism from `## Idempotency key design`, applied.
+
+**Step 5 — Reliable events (outbox).** When Ordering commits `Order#4711
+CONFIRMED`, it inserts an `OrderConfirmed` row into its **outbox** table *in the
+same local transaction*. A relay publishes it at-least-once. No dual-write: the
+event exists if and only if the order committed.
+
+**Step 6 — Query across services (CQRS read model).** The "My Orders" page needs
+order status + product names + shipping ETA — data owned by three services. Rather
+than fan out on every page load (API composition, fragile at scale), a projector
+consumes `OrderConfirmed`, `InventoryReserved`, etc. and maintains one
+denormalized `order_summary` document. The page reads that single store — fast —
+accepting that it lags the write side by projector latency (eventual consistency).
+
+**Step 7 — Conway.** Three stream-aligned teams — Ordering, Payments, Inventory —
+each own one context end-to-end (build, deploy, on-call). A feature like "gift
+wrapping" lives inside Ordering and ships without a cross-team meeting. That local
+change is the signal the boundaries are right.
+
+> [!KEY-TAKEAWAY]
+> The through-line: **aggregate = transaction boundary** (step 1), **aggregate ≈
+> service = data owner** (step 2), **cross-aggregate consistency = saga +
+> compensation** (step 3), **safe retries = idempotency** (step 4), **reliable
+> publish = outbox** (step 5), **cross-service reads = CQRS read model** (step 6),
+> **one team per context = Conway** (step 7). Every abstract section is one move in
+> this one game.
 
 ## Common interview follow-up questions
 

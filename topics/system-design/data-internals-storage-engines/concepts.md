@@ -49,6 +49,15 @@ SSTable is gated by a **bloom filter** (skip if key definitely absent) and a spa
 index (binary-search to the right block). Worst case a read touches every level, so
 read cost grows with the number of sorted runs — this is **read amplification**.
 
+Crucially, the *worst* case is rarely the *common* case. A single logical key can
+have live copies in several runs (each update wrote a new version), so the read stops
+at the **first (newest) run** that contains it — it does not keep scanning older runs
+once found. Most hot data is served from the **block cache** (and the OS page cache)
+rather than disk, and the bloom filter makes the overwhelmingly common "key absent in
+this SSTable" case near-free (one in-memory bitmap probe, no disk I/O). So real read
+amplification sits far below the `O(#runs)` worst case — a well-tuned engine typically
+does one or a small number of disk reads per point lookup, not one per level.
+
 **Systems.** RocksDB/LevelDB, Cassandra, ScyllaDB, HBase, BigTable, InfluxDB,
 CockroachDB & TiKV (RocksDB under the hood), and the write path of many others.
 
@@ -58,10 +67,12 @@ immutable data packs well). You pay **read amplification** (multiple runs to che
 **compaction is a background tax**: it competes for disk I/O and CPU, and if write
 rate outruns compaction throughput the LSM enters *write stall / backpressure*
 (RocksDB literally throttles or stops writes). Compaction also causes p99/p999
-latency spikes when a large merge saturates I/O. When to prefer: write-heavy,
-ingest-heavy, TTL/time-series workloads. When to avoid: read-latency-critical
-point lookups on data that fits in a B-tree cache, or workloads that can't tolerate
-compaction jitter.
+latency spikes when a large merge saturates I/O.
+
+- **Prefer when:** write-heavy / ingest-heavy / TTL / time-series workloads, or
+  compressible data on SSDs where write endurance matters.
+- **Avoid when:** read-latency-critical point lookups on data that fits in a B-tree
+  cache, or workloads that can't tolerate compaction-induced p99 jitter.
 
 ---
 
@@ -141,11 +152,23 @@ expense of the third (Athanassoulis et al., 2016). It is the storage-engine anal
 of "pick two."
 
 - **B+tree:** optimizes **Read** (and reasonable memory) → pays **Update** cost.
-- **LSM (leveled):** optimizes **Update** and **Memory** → pays **Read** cost.
+- **LSM (leveled):** optimizes **Read** and **Memory** (space) → pays **Update**
+  (high write amplification, ~10–30×).
 - **LSM (size-tiered):** optimizes **Update** → pays **Read** and **Memory**.
 - **Hash index / in-memory:** optimizes **Read** and **Update** → pays **Memory**.
 - **Bloom filters, zone maps, learned indexes** are all *auxiliary* structures that
   buy read overhead reduction by spending memory.
+
+**Reconciling the two LSM bullets (this trips people up).** Relative to a B+tree,
+*all* LSM variants are update-optimized — that's the whole point of turning random
+writes into sequential appends. But *within* the LSM family, the compaction strategy
+slides you along the **Read ↔ Update** axis, exactly as the compaction table above
+shows: **leveled** pays heavy write amplification (an Update cost) to win low read
+*and* space amplification, so in RUM terms it optimizes Read+Memory and pays Update;
+**size-tiered** does the opposite — cheap writes (low WA) at the cost of higher read
+*and* space amplification, so it optimizes Update and pays Read+Memory. The two
+bullets are consistent with the compaction section: leveled is the Update-payer,
+size-tiered is the Read+Memory-payer.
 
 **Why it matters in interviews:** it reframes "LSM vs B-tree" as choosing which
 overhead your workload can afford. Bloom filters, caching, and adaptive indexing
@@ -339,6 +362,35 @@ write-write conflict is created), or lock a summary/parent row, or use a seriali
 level. In an interview: "SI doesn't prevent write skew; either use SSI/serializable,
 or take explicit read locks (`SELECT FOR UPDATE`) to materialize the conflict."
 
+**The three families of serializability (the classic follow-up: "what are the ways
+to implement SERIALIZABLE and their trade-offs?").** SSI is only one of three
+canonical mechanisms, and a senior interviewer expects the contrast:
+
+- **Strict two-phase locking (S2PL / SS2PL) — pessimistic.** Acquire shared locks on
+  everything you read and exclusive locks on everything you write, and hold them until
+  commit (predicate/range locks — e.g. gap or next-key locks — cover phantoms). Reads
+  *block* conflicting writes and vice versa, and the scheme can **deadlock** (the
+  engine detects a cycle and aborts a victim). *Pick when* contention is high and you
+  want predictable, no-retry-churn behavior — you pay with blocking and reduced
+  concurrency. Used by SQL Server (default) and DB2, and older systems generally.
+- **Serializable Snapshot Isolation (SSI) — optimistic.** Run like SI (non-blocking
+  reads, no read locks that block writers), track rw-dependencies, and abort a
+  transaction only when a dangerous structure appears. *Pick when* contention is low
+  to moderate and read latency matters — you pay with **false-positive aborts** under
+  high contention, so the app **must** implement retry loops. Used by PostgreSQL
+  `SERIALIZABLE`.
+- **Deterministic execution (e.g. Calvin) — pre-ordering.** Decide a global serial
+  order for transactions *up front* (a sequencing layer) and then execute them
+  deterministically on every replica, so all replicas reach the identical state with
+  no cross-replica agreement per transaction. *Pick when* you want serializability
+  across geo-replicas without 2PC-style coordination overhead — you pay by needing to
+  know a transaction's read/write set in advance (interactive, "read-then-decide"
+  transactions are awkward). This is the FaunaDB/Calvin lineage.
+
+One-line summary: **2PL blocks, SSI aborts-and-retries, deterministic pre-orders.**
+2PL degrades via lock waits and deadlocks under contention; SSI degrades via retry
+churn; deterministic avoids both but constrains the transaction model.
+
 ---
 
 ## Schema evolution, backward and forward compatibility
@@ -496,6 +548,13 @@ a real outage mode, and they also hold back vacuum). The outbox adds write
 amplification and a relay component, and delivers *at-least-once*, not exactly-once —
 idempotency is mandatory downstream.
 
+- **Prefer the outbox when:** you need reliable event emission for every committed
+  state change and can't do (or don't trust) 2PC across DB and broker — you gain
+  atomic write+event via one local transaction.
+- **Cost you accept:** extra write amplification, a relay component to run, and
+  *at-least-once* (never exactly-once) delivery — so every consumer must dedupe by
+  event id.
+
 ---
 
 ## Columnar versus row storage
@@ -525,6 +584,11 @@ to many separate column files, and single-row point lookups reassemble a row fro
 scattered columns. So column stores favor **bulk/append loads** and are frequently
 **append-mostly** with background merges (Vertica's WOS/ROS, sorted projections).
 Updates are expensive; many column stores don't do in-place updates at all.
+
+- **Prefer when:** analytical scans/aggregations over a few columns of many rows, and
+  loads that arrive in bulk or append batches.
+- **Avoid when:** high-selectivity single-row reads/writes and frequent in-place
+  updates (that's OLTP — keep it on a row store and replicate to a column store).
 
 **Systems / formats.** Row: Postgres/MySQL/InnoDB (OLTP). Columnar: Redshift, Vertica,
 ClickHouse, BigQuery, Snowflake; file formats **Parquet** and **ORC**; Apache Arrow

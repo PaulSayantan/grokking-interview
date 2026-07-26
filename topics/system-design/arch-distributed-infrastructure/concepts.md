@@ -28,6 +28,16 @@ topic**. They are referenced here as adjacent but are not deep-dived.
 > ops maturity, blast-radius tolerance) and mapping them to a style's
 > trade-offs. Styles move complexity around; they never delete it.
 
+**A term you'll see in every trade-off below: the "-ilities."** Each style ends
+with an *-ilities* line. *-ilities* is architecture shorthand for the **quality
+attributes / non-functional requirements** a style optimizes or sacrifices —
+**scal**ability, **avail**ability, **oper**ability, **evolv**ability,
+**test**ability, port**ability**, and so on (they mostly end in "-ility," hence
+the nickname). Functional requirements say *what* the system does; the -ilities
+say *how well* it does it under scale, failure, and change — and naming which
+-ilities a style buys and which it spends is the fastest way to make a trade-off
+concrete rather than hand-wavy.
+
 ---
 
 ## Client-Server and N-Tier
@@ -294,8 +304,11 @@ sequenceDiagram
 ```
 
 **Architectural treatment (overview only).** Serverless pushes elasticity and ops
-to the platform; you pay only for execution. Costs: **cold starts**,
-execution-time and memory/state limits, and **vendor lock-in** through
+to the platform; you pay only for execution. Costs: **cold starts** (the latency
+to spin up a fresh runtime for the first request to a new instance — roughly
+**tens of milliseconds** for a small interpreted/Node/Python function up to
+**one-to-a-few seconds** for a heavy JVM/.NET runtime or a large dependency
+bundle), execution-time and memory/state limits, and **vendor lock-in** through
 proprietary triggers and services. Orchestrating multi-step workflows needs a
 state machine (e.g. Step Functions) rather than in-function loops.
 
@@ -364,7 +377,11 @@ just the plumbing around that whiteboard — one routes work to workers, one *is
 the replicated whiteboard, one coordinates work that spans workers, and one
 spins workers up and down. The term **tuple space** comes from the Linda /
 JavaSpaces model: a shared associative memory that processes read from and write
-to by pattern, like a blackboard nobody owns.
+to by pattern, like a blackboard nobody owns. The whole payoff is latency scale:
+a read served from local RAM is on the order of **microseconds (~µs)**, whereas a
+round-trip to a shared database is on the order of **milliseconds (~ms)** — three
+orders of magnitude slower — so keeping the working set in memory turns a
+per-request DB call into a local lookup.
 
 **How it works / key components.** Named after the **tuple space** / in-memory
 data grid idea. Requests hit stateless **processing units (PUs)** that keep the
@@ -533,6 +550,15 @@ scalability but you lose a single, readable control flow: reasoning becomes
 consistency**, **ordering**, and **duplicate** concerns. Patterns like CQRS,
 Event Sourcing, Saga, and CDC formalize event-based data flows.
 
+> [!TIP]
+> When an interviewer says "we need exactly-once," don't promise it. True
+> **exactly-once *delivery*** is effectively unachievable end-to-end in
+> distributed messaging (a sender can never distinguish "message lost" from
+> "ack lost," so it must retry, which can duplicate). What real systems ship is
+> **at-least-once delivery + idempotent consumers** — dedup on a stable key so a
+> re-delivery is a no-op — which yields *exactly-once **effect*** ("effectively-once").
+> See the Broker worked example above and **`message-queues-and-async`**.
+
 > [!KEY-TAKEAWAY]
 > **Deep dive: see `event-driven-cqrs-saga-cdc`** for CQRS, Event Sourcing, Saga
 > (choreography vs orchestration), and Change Data Capture.
@@ -668,7 +694,13 @@ flowchart TD
 **Architectural treatment (overview only).** The mesh standardizes L7 traffic
 control and gives uniform observability and zero-trust security without editing
 each service. The cost is a proxy hop per call (latency + CPU/memory) and a
-non-trivial platform to operate.
+non-trivial platform to operate. As an order-of-magnitude anchor, each sidecar
+hop typically adds on the order of **~0.5–2 ms** of latency per call plus a
+fixed **CPU/memory** tax per pod (a proxy process running next to every
+instance); in a chain of 5 service-to-service calls that's a request passing
+through 10 proxies, so single-digit milliseconds of mesh overhead can dominate
+an otherwise sub-millisecond call chain — which is why latency-critical hot paths
+sometimes opt out.
 
 > [!INTERVIEW]
 > **"What's new in service mesh?"** The per-instance sidecar's latency and
@@ -763,10 +795,84 @@ the pointer.
   coordinates/accepts writes while **replicas** scale reads and provide failover.
   Data-layer deep dive: **`databases-sql-nosql-sharding-replication`**; leader
   election: `consensus-clocks-and-time`.
+- **API Gateway (edge, north-south).** *Problem:* give clients a single managed
+  entry point in front of many services and centralize edge concerns —
+  authentication, TLS termination, rate limiting, request routing, and
+  aggregation — so each service doesn't re-implement them. This is the
+  **north-south** (client↔system) edge tier referenced by Microservices,
+  Serverless, and the Service-Mesh follow-ups; it is the *complement* of a service
+  mesh, which handles **east-west** (service↔service) traffic internally. Deep
+  dive: **`microservices-monolith-api-design`** (and `caching-and-cdn` /
+  `aws-dns-cdn-route53-cloudfront` for edge routing).
 - **Distributed Monolith (anti-pattern).** *What NOT to build:* microservices
   deployment cost with monolith coupling — services that must deploy in lock-step
   and/or share a database. The cautionary contrast in the Microservices-vs-SOA
   discussion; caused by bad boundaries (**`microservices-ddd-and-boundaries`**).
+
+---
+
+## One request, three styles
+
+The shapes above become tangible when you follow **one concrete request** —
+"place order #4711, charge $60, reserve 2 units, notify the customer" — through
+three different styles and watch *where the cost lands*.
+
+**A) Synchronous N-tier / request-response.** The client calls one endpoint; the
+app tier does everything in a single call chain and (ideally) one DB transaction:
+
+```
+Client → App tier:  BEGIN
+                      insert order #4711
+                      inventory -= 2
+                      charge $60
+                    COMMIT  → 200 OK
+```
+- *Consistency:* strong — one transaction, all-or-nothing. If the charge fails,
+  the whole thing rolls back; inventory is never left dangling.
+- *Latency:* the client **waits** for the slowest step (the payment gateway), so
+  tail latency is the sum of the chain.
+- *Tracing:* trivial — it's one stack trace in one process.
+- *Cost:* it doesn't scale independently, and a slow payment provider stalls the
+  user's whole request.
+
+**B) Broker / async request-reply.** The app tier commits the order locally, then
+drops a message on the broker and returns immediately; a worker charges later:
+
+```
+Client → Orders svc:  insert order #4711 = PENDING; COMMIT → 202 Accepted
+Orders → Broker:      enqueue {charge $60, reserve 2, msgId m-88}
+   (worker, later)    dequeue m-88 → charge → reserve → emit "order confirmed"
+```
+- *Consistency:* **eventual** — the client gets `202 Accepted` before the charge
+  happens; the order is `PENDING` for a window.
+- *Latency:* the user-facing response is fast (no wait on payment); the *work*
+  finishes asynchronously.
+- *Tracing:* harder — you must correlate the HTTP request with `m-88` across the
+  queue. And because delivery is at-least-once, the worker **must be idempotent**
+  on `m-88` (see the Broker worked example) or a redelivery double-charges.
+
+**C) Event-driven choreography (a saga).** No coordinator: each service reacts to
+the previous one's event and, on failure, emits a compensating event:
+
+```
+Orders  emits OrderPlaced(#4711)
+ → Inventory reacts: reserve 2 → emits InventoryReserved
+   → Payments reacts: charge $60 → DECLINED → emits PaymentFailed
+     → Inventory reacts to PaymentFailed: release 2 (compensation)
+       → Orders reacts: mark #4711 CANCELLED
+```
+- *Consistency:* eventual, via **saga** compensations — there's a window where 2
+  units sit reserved for an order that never pays (identical to the Microservices
+  worked example).
+- *Latency:* each hop is independent and parallelizable, but the *end-to-end*
+  outcome spans many asynchronous steps.
+- *Tracing:* hardest — the control flow lives in "who reacts to what," so you need
+  distributed tracing (correlation IDs) to reconstruct one logical transaction.
+
+**The through-line:** the *same* business request costs you strong consistency and
+independent scaling in (A), buys back responsiveness and decoupling in (B) and (C)
+but spends it on eventual consistency, mandatory idempotency, and much harder
+tracing. That migration of cost — never its disappearance — is the whole game.
 
 ---
 

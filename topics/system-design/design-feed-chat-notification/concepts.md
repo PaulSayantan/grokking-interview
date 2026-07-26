@@ -42,14 +42,21 @@ delivery with dedup.
 - Average fan-out (followers per poster) ~ hundreds; power-law tail into the
   **100M+ followers** for top accounts.
 - Fan-out-on-write cost: 7K writes/sec × ~500 avg followers ≈ **3.5M timeline
-  inserts/sec** — this is why the celebrity tail must be special-cased.
+  inserts/sec** — this is why the celebrity tail must be special-cased. Note the
+  ~500 is a **mean dragged up by the whale tail**; the *median* poster has far
+  fewer followers (tens to low hundreds), so most posts are actually cheap to fan
+  out. That gap between mean and median is exactly why hybrid works: special-case
+  the handful of expensive accounts, fan out the cheap majority on write.
 - Storage per tweet: ~300 bytes text + metadata; 600M/day × 300B ≈ **180 GB/day**
   of tweet bodies (media stored separately in blob/CDN). Timelines are far larger
   because they are denormalized copies — bound them (e.g., cache last ~800
   entries/user).
 - Chat (WhatsApp-scale): 100B+ messages/day ≈ **1M+ msgs/sec avg**; a single
   connection server holds **~1M persistent WebSocket connections** with tuned
-  epoll/kqueue; message body ~100 bytes.
+  **epoll/kqueue** (the OS event-notification syscalls — `epoll` on Linux,
+  `kqueue` on BSD/macOS — that let one server watch tens of thousands of idle
+  sockets with a single thread instead of one thread per connection); message
+  body ~100 bytes.
 
 **API surface (REST + realtime).**
 ```
@@ -113,6 +120,55 @@ Home timeline = merge( precomputed_inbox(me),
 ```
 This bounds write amplification (no 100M-insert storms) while keeping reads cheap
 for the common case (you follow only a handful of celebrities).
+
+**Worked example — how the merge actually runs.** This is the step interviewers
+push on ("walk me through the merge"). Say I follow 400 accounts, 3 of which are
+celebrities (above the fan-out threshold), and I request one page of 20 items.
+
+1. **Read the push inbox.** `ZREVRANGE timeline:me 0 199` → the top ~200 tweet
+   ids already fanned out to me from my 397 non-celebrity followees. Each entry is
+   `(tweetId, score)` where the tweetId is a **Snowflake** (timestamp in the high
+   bits, so it is *already* time-sortable) and score is either the raw timestamp
+   or a precomputed rank. Cost: 1 Redis read.
+2. **Pull the celebrities.** For each of my 3 celebrity followees, read their most
+   recent ~20 tweet ids from a *shared, cached* per-author list
+   (`recent:celebrityId`). Fan-in is 3 reads, not 400 — that is the whole point of
+   the threshold. Say this yields 3 × 20 = 60 candidate ids.
+3. **Merge into one candidate set.** Union the ~200 push ids + ~60 pull ids ≈ 260
+   candidate ids. Because both streams carry Snowflake ids, a straight descending
+   sort by id gives a correct time order without any wall-clock comparison.
+4. **Dedup by tweetId.** A celebrity you follow might also have been captured
+   elsewhere (a retweet already in your inbox, or the same tweet arriving from two
+   paths). Dedup on `tweetId` into a set so each tweet appears once. 260 →, say,
+   255 unique.
+5. **Rank the unified set, then hydrate the page.** Run the ranker (chronological
+   sort, or the ML scorer — see the ranking section) over all 255 candidates
+   *together* so push and pull content compete on the same footing, take the top
+   20, and only then hydrate those 20 (multi-get full tweet bodies + counters).
+   You hydrate 20, not 255 — hydration is the expensive hop, so rank on cheap ids
+   first.
+
+The key insight: the celebrity set per user is tiny (a handful), so the pull
+fan-in is bounded and cheap, and **ranking always runs on the combined candidate
+set** — never on push-only then pull bolted on afterward, which would let
+celebrity content jump the queue or never compete at all.
+
+**Worked example — what happens when you follow someone (backfill).** New follow
+is listed above as a cost of fan-out-on-write; here is the resolution. Suppose at
+09:00 I follow Bob, who has 5,000 tweets of history. You do **not** retro-inject
+all 5,000 into my inbox — that is a write storm per follow and most of it will
+never be read. Instead, one of two bounded strategies:
+
+- **Read-time merge (lazy):** treat Bob like a mini-celebrity for a while — pull
+  Bob's recent tweets at read-time merge (exactly step 2 above) and blend them in.
+  As Bob posts *new* tweets after 09:00, normal fan-out-on-write appends them to
+  my inbox, so the inbox naturally fills and the pull for Bob can stop.
+- **Bounded async backfill:** kick a background job that injects only Bob's most
+  recent window (e.g., last ~50 tweets or last 7 days), never the full 5,000. The
+  page-1 experience is correct; deep history still falls to the pull path.
+
+Either way the invariant is: **bounded work per follow, never unbounded history
+injection.**
 
 **Comparison.**
 
@@ -276,13 +332,37 @@ flowchart TD
   web tiers. A user is pinned to one gateway; a **session registry** maps
   userId→gatewayId so the chat service knows where to push. On disconnect, clean
   up the mapping.
+- **Authentication and authorization on a long-lived connection.** A WebSocket
+  starts as an HTTP upgrade, so auth happens *at the handshake*. Prefer a
+  **short-lived bearer token** (a JWT the client got from the auth service) sent
+  in the first frame or an `Authorization` header on the upgrade — not a cookie
+  (ambient cookies invite CSRF-style cross-site connection attempts) and ideally
+  not a query param (it leaks into logs/proxies). The connection outlives the
+  token: the client silently refreshes and re-presents a new token over the live
+  socket before the old one expires, and the gateway drops the connection if
+  re-validation fails. **Authorization is separate from authentication** — being
+  a valid user does not mean you may join channel C. Before subscribing a socket
+  to a channel or pushing a channel message to it, the chat service checks
+  membership/ACLs for (userId, channelId); do it once at join and re-check on
+  sensitive actions, not on every message.
 - **Routing a message:** sender → its gateway → chat service persists + gets a
   Snowflake id → looks up recipient's gateway via registry → publishes → that
   gateway pushes over the recipient's socket. If recipient offline, enqueue for
   offline delivery + trigger a push notification.
-- **Scale:** load-balance connections (least-connections, sticky by connection).
-  A tuned server holds ~1M WebSockets; you scale horizontally and need graceful
-  drain on deploy (mass reconnect is a thundering herd — jitter reconnects).
+- **Scale, and how the pieces find each other.** The flow that ties the load
+  balancer, registry, and reconnect together: (1) a client's new connection hits
+  the **load balancer**, which picks a gateway (least-connections, sticky by
+  connection so an established socket stays put). (2) The chosen gateway writes
+  `userId → gatewayId` into the **session registry** (Redis) with a **TTL**, and
+  refreshes it while the socket is alive. (3) A stateless publisher never needs to
+  know topology — it just looks up `userId` in the registry to find the owning
+  gateway and routes the message there. (4) **On node death**, that gateway's
+  registry entries stop being refreshed and *expire via TTL*, so stale routes
+  self-clean; the ~1M orphaned clients detect the drop and **reconnect with
+  jittered backoff** (never all at once — that is a thundering herd), the LB
+  spreads them across surviving gateways, and each new gateway re-registers the
+  users it now holds. Graceful drain on deploy is the planned version of the same
+  dance. A tuned server holds ~1M WebSockets; you scale horizontally.
 
 **Trade-offs.**
 - WebSocket vs long polling: WS is lowest-latency and cheapest per message once
@@ -327,8 +407,9 @@ not raw wall-clock timestamps.
 - Per-conversation order (cheap, sufficient) vs global total order (needs a global
   sequencer/consensus — huge bottleneck, unnecessary). Always pick per-conversation.
 - Snowflake ids vs DB auto-increment: Snowflakes are distributed, sortable, and
-  need no central counter, but embed clock assumptions (NTP skew, clock rollback
-  guards) and worker-id coordination. Auto-increment is simple but centralizes and
+  need no central counter, but embed clock assumptions (**NTP** — Network Time
+  Protocol, the service that keeps server clocks synced to within milliseconds —
+  skew, plus clock rollback guards) and worker-id coordination. Auto-increment is simple but centralizes and
   won't shard. Pick Snowflake at scale.
 - Server-assigned vs client-assigned ids: server-assigned gives authoritative
   order but the client must wait for the ack to know its id; client can show an
@@ -433,8 +514,11 @@ messages; a Rust migrator hit 3.2M rows/sec.
 - **Time-bucketing** partitions bounds partition size and hot-row risk but adds
   read complexity (may span buckets for a page). Without buckets, a busy channel's
   partition grows unbounded and becomes a hotspot.
-- SSTable-based stores (Cassandra/Scylla) favor write-heavy append workloads over
-  update-heavy ones; message edits/deletes are handled as tombstones/new versions
+- **SSTable**-based stores (Cassandra/Scylla) favor write-heavy append workloads
+  over update-heavy ones. An SSTable (Sorted String Table) is an immutable,
+  key-sorted file flushed from an in-memory buffer; writes just append and later
+  compact, which is why appends are cheap but in-place updates are not. Message
+  edits/deletes are handled as tombstones/new versions
   — many tombstones hurt reads, so design for append.
 
 ---
@@ -461,7 +545,7 @@ flowchart TD
   business logic.
 - **User preferences & device registry.** Store per-user channel opt-ins,
   quiet-hours, and device tokens (a user has many devices). Respect opt-out and
-  regulatory rules (unsubscribe, DND).
+  regulatory rules (unsubscribe, **DND** — do-not-disturb windows).
 - **Templating.** Separate content (localized templates) from delivery; render
   per locale/channel. A template service lets non-engineers change copy.
 - **Async, queue-per-channel.** Channels have wildly different latency/throughput/
@@ -519,8 +603,8 @@ This makes an at-least-once pipeline effectively deliver once *to the user*.
 
 ## Notification prioritization and delivery guarantees
 
-**Intuition.** An OTP/2FA code and a "someone you may know" suggestion are not
-equal. Priority governs which channel, how fast, and what happens under load.
+**Intuition.** An **OTP** (one-time password) / **2FA** (two-factor
+authentication) code and a "someone you may know" suggestion are not equal. Priority governs which channel, how fast, and what happens under load.
 
 **How.**
 - **Priority classes / separate queues.** Transactional/critical (OTP, security,
@@ -565,7 +649,8 @@ flowchart TD
   the recipient's inbox/mailbox and fire a push notification; deliver on
   reconnect via last-seen cursor sync.
 - **Delivery layers as datacenters/cells.** Cell-based / edge deployment: put
-  gateways close to users (edge PoPs) and keep the pub/sub regional; route by geo.
+  gateways close to users (edge **PoPs** — points of presence, the provider's
+  edge locations near end users) and keep the pub/sub regional; route by geo.
 
 **Trade-offs.**
 - Push over persistent connection (instant, but only for online users and needs

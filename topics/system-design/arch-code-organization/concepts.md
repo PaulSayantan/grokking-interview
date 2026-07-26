@@ -47,7 +47,13 @@ Persistence → Database**. Each layer has one responsibility. The core rule is 
 isolation**: a layer only calls the layer directly below it. Layers are **closed** by default (a
 request must pass *through* each layer, so a change in one layer does not force changes in
 distant ones). A layer can be made **open** to allow skipping — but every open layer weakens the
-isolation contract and must be documented. The **architecture sinkhole anti-pattern** appears
+isolation contract and must be documented. **Concrete case:** a shared *Services* /
+utility layer (logging, feature flags, common reference-data lookups) is deliberately
+marked **open** so any layer — Presentation, Business, or Persistence — may call it
+directly instead of forcing every access down through the stack. You accept that each
+open layer is a *documented exception* to the layers-of-isolation contract: the payoff is
+avoiding pointless pass-through hops for cross-cutting utilities, the price is that a
+future change to that layer can now ripple to any caller, not just the one above it. The **architecture sinkhole anti-pattern** appears
 when most requests fall straight through the layers doing no real work (pure pass-through),
 adding cost with no value; a small percentage of pass-through is fine, a large percentage means
 layered is the wrong style.
@@ -80,14 +86,27 @@ flowchart TD
     P -. "closed layers: cannot skip a layer" .-> B
 ```
 
+**On disk** the horizontal cut is literal — you group by *technical role*, so one feature's
+code is scattered across three sibling folders:
+
+```text
+src/
+  controller/   OrderController.java   CustomerController.java   # Presentation
+  service/      OrderService.java      CustomerService.java      # Business
+  repository/   OrderRepository.java   CustomerRepository.java   # Persistence
+```
+
 **Trade-offs:**
 - *Pros:* Simplest to build and understand; excellent starting point; low cost; strong
   *technical* separation of concerns; matches teams organized by technical role.
 - *Cons:* Dependencies point **downward toward the database** (the domain depends on
   persistence) → business logic is hard to unit-test in isolation; low deployability (the whole
   monolith redeploys for any change); layers become change-ripple paths; sinkhole risk.
-- *-ilities:* Optimizes **simplicity, cost, familiarity**. Weak on **deployability**,
-  **scalability** (deploys and scales as one unit), and **evolvability**.
+- *-ilities* (the **quality attributes / non-functional requirements** a style optimizes or
+  sacrifices — testability, deployability, scalability, evolvability, etc.; the vocabulary
+  *Fundamentals of Software Architecture* uses to frame every trade-off): Optimizes
+  **simplicity, cost, familiarity**. Weak on **deployability**, **scalability** (deploys and
+  scales as one unit), and **evolvability**.
 - *Use when:* small apps, MVPs, tight budgets/timelines, teams split by technical skill.
 - *Avoid when:* you need independent deployability, high testability of domain logic, or the app
   is large and evolving quickly.
@@ -225,6 +244,33 @@ flowchart LR
     FW -.->|"Dependency Rule: source deps point INWARD only"| EN
 ```
 
+**Worked example — the "heaviest ceremony," shown.** One `POST /orders` request is deliberately
+re-shaped at *every* boundary crossing so no inner shape ever leaks outward. Follow one order
+through the data structures:
+
+```text
+HTTP JSON body
+  -> CreateOrderRequest   (web DTO; whatever the HTTP framework parsed — snake_case, strings)
+  -> [mapper] ->
+  CreateOrderInput        (use-case input model; validated, typed; framework-agnostic)
+  -> PlaceOrder use case builds an ->
+  Order                   (ENTITY; enterprise rules live here: validate(), applyDiscount())
+  -> [use case emits] ->
+  CreateOrderOutput       (use-case output model; plain result data, no HTTP/JSON concepts)
+  -> [presenter] ->
+  OrderViewModel          (formatted for THIS delivery mechanism: currency strings, ISO dates)
+  -> serialized to HTTP JSON response
+```
+
+That is **five distinct in-code data structures plus two transforms (a mapper and a presenter)
+for one endpoint.** The reason it exists: the `Order` entity's shape must never leak out to the
+web framework or UI, and the JSON shape must never leak in to the entity — each boundary crossing
+gets its own structure so a change on one side (rename a JSON field, swap the web framework)
+cannot force a change to the domain. Now the verdict lands with evidence: on a **rich domain**
+that indirection pays for itself; on a **thin CRUD** endpoint that just echoes a row back, all
+five structures carry the *same* fields and the mapper/presenter are pure copy-boilerplate — the
+ceremony with none of the payoff.
+
 **Trade-offs:**
 - *Pros:* Frameworks/DB/UI become swappable, deferrable "details"; use cases are testable without
   infrastructure; explicit separation of **enterprise rules (entities) vs application rules (use
@@ -279,8 +325,9 @@ flowchart LR
 **Differs from adjacent styles:** Onion, Clean, and Hexagonal are **the same idea (dependency
 inversion toward a domain core) with different vocabularies** — see the dedicated comparison
 below. Onion's distinguishing claim is that it explicitly names the **domain model** (not
-"entities") as the innermost ring and popularized the phrase "dependency inversion at the
-architecture level"; it grew directly out of DDD.
+"entities") as the innermost ring and popularized applying the **Dependency Inversion
+Principle at the architecture level** (not just between individual classes) to place the
+domain model at the center; it grew directly out of DDD.
 
 ---
 
@@ -396,6 +443,28 @@ answer.
   until an acceptable solution is reached or no KS can make further progress. Control is data-driven
   (state on the blackboard triggers activation), not a fixed call sequence.
 
+**Worked trace — speech recognition, step by step.** This is the most unfamiliar style here, so
+watch "opportunistic" control actually happen. Say the audio is "recognize speech." The
+blackboard starts holding only the raw audio; three knowledge sources sit idle until the state
+gives them something to work on:
+
+1. Blackboard = `[audio waveform]`. The **acoustic KS** is the only one that can act on raw
+   audio; the controller picks it. It writes candidate phonemes: `/r/ /eh/ /k/ .../s/ /p/ /ie/ /ch/`.
+2. Blackboard now = `[phonemes]`. The controller sees phonemes appeared, so it *now* picks the
+   **lexical KS**, which segments the same phoneme stream into competing word candidates:
+   `"wreck a nice"` **vs** `"recognize"` for the opening, and `"beach"` **vs** `"speech"` for the
+   tail — the phonemes are genuinely ambiguous, so both segmentations survive onto the blackboard.
+3. Blackboard = `[candidate word sequences]`. The controller picks the **grammar KS**, which
+   scores phrases against a language model: `"recognize speech"` beats `"wreck a nice beach"`, so
+   it strengthens that hypothesis and prunes the other.
+4. The controller loops, sees no KS can improve the top hypothesis, and stops. Output:
+   **"recognize speech."**
+
+The key point: **none of that order was hard-coded.** The controller chose acoustic → lexical →
+grammar purely because of what was *on the blackboard at each moment*. Feed noisier audio and the
+lexical KS might fire twice, or the grammar KS might send control back to the acoustic KS to
+re-examine a segment — a fixed pipeline (Pipe-and-Filter) could never reorder itself like that.
+
 ```mermaid
 flowchart TD
     CTRL["Control loop (monitors state, schedules KS opportunistically)"]
@@ -458,6 +527,22 @@ build on a banned import. A **boundary violation** looks like `billing.InvoiceSe
 `OrdersApi.getOrder(id)`. Without these guards nothing at runtime stops that shortcut, so the "modular"
 monolith silently rots into a big ball of mud.
 
+**On disk** the cut is *vertical by domain module*, and each module repeats the internal
+layering privately — contrast this with the flat `controller/ service/ repository/` of plain
+Layered above:
+
+```text
+src/
+  orders/     api/ OrdersApi.java        (public facade — the ONLY thing others may import)
+              domain/ Order.java          (package-private: invisible outside orders/)
+              infra/ JpaOrderRepository.java
+  billing/    api/ BillingApi.java
+              domain/ Invoice.java
+              infra/ ...
+  catalog/    api/ CatalogApi.java
+              domain/ ...  infra/ ...
+```
+
 ```mermaid
 flowchart TD
     API["Single deployable app"] --> M1["Module: Orders (own schema)"]
@@ -494,6 +579,21 @@ technical layer. Each slice contains everything it needs end-to-end (request →
 access), so slices are largely independent and may even use different internal patterns (one
 slice can be a thin CRUD call, another can invoke a rich domain model). It is commonly paired with
 **CQRS-style** request handlers — one handler per command/query.
+
+**On disk** you group by *feature*, not by layer — everything one use case touches lives in one
+folder, so adding or deleting a feature is adding or deleting a directory:
+
+```text
+src/
+  features/
+    CreateOrder/   CreateOrder.cs   (endpoint + handler + validation + data access, together)
+    CancelOrder/   CancelOrder.cs
+    GetOrder/      GetOrder.cs      (this slice can be a thin CRUD read…)
+    ShipOrder/     ShipOrder.cs     (…while this one invokes a rich domain model)
+```
+
+Notice there is **no top-level `controller/` or `repository/` folder** at all — the horizontal
+layers still exist *inside* each slice, but the primary axis of organization is the feature.
 
 ```mermaid
 flowchart TD

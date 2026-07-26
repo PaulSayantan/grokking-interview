@@ -45,6 +45,10 @@ their own (virtual) local disks — statelessness streamlines provisioning,
 decommissioning, and failure recovery. But operating systems and many applications
 expect to read and write a normal, mountable disk with a local file system.
 
+**Mental model.** Think of block storage as a **hard drive you rent from the cloud and
+plug into one machine**: the disk itself lives in the datacenter, but from the server's
+point of view it is just `/dev/xvdf`, formatted and mounted like any physical drive.
+
 **Solution.** A centralized storage resource is presented to a server *as if it were a
 locally attached hard disk* — a **block device**. The OS formats it, mounts it, and
 accesses it through the local file system exactly as it would a physical disk, while
@@ -88,6 +92,11 @@ photos, videos, backups, logs, static assets. These do not need relational query
 power; they need to be stored durably and fetched by name over the network from any
 component.
 
+**Mental model.** Blob storage is a **valet coat-check**: you hand over a whole object
+and get back a **claim ticket** (the key). To get the object you present the ticket and
+receive the whole thing back — you never reach into the coat pocket to change one item
+in place. To alter anything you take the whole coat and check in a new one.
+
 **Solution.** Files are arranged in a **directory-like hierarchy** resembling a file
 system. Each file gets a **unique identifier** built from its position in the folder
 hierarchy plus its filename (the "key"). Applications pass that identifier to an
@@ -108,8 +117,13 @@ tier for data lakes, static-site hosting, and CDN origins.
 read-many data accessed concurrently by many clients over HTTP(S) — cheap, effectively
 unbounded, highly durable. It is **not** a disk (you can't mount it and run a database
 on it) and offers only object-granularity operations, no rich queries or transactions.
-Many object stores default to **Eventual Consistency** for cross-region replication
-even if single-object reads are strongly consistent.
+Be precise about which layer is eventual: **single-region** object reads on modern
+object stores are **strongly consistent** (Amazon S3 has provided strong
+read-after-write consistency for all single-object operations within a bucket since
+December 2020). It is the **asynchronous cross-region / multi-region replication** layer
+(S3 Cross-Region Replication, GCS multi-region) that is Eventual — a copy written in one
+Region takes time to appear in the replica Region. So "eventual" here describes the
+replication step, not a plain read in the bucket you just wrote to.
 
 **Related patterns.** Block Storage (sibling; disk vs object), Data Access Component,
 Stateless Component, Strict / Eventual Consistency.
@@ -208,6 +222,12 @@ ensuring data consistency at all times?*
 lost, data can still be recovered from the others. The challenge is keeping that
 redundancy without letting replicas diverge — a client that just wrote a value expects
 to read it back, from any replica.
+
+**Mental model.** Picture two overlapping guest lists. The write list names the replicas
+that must confirm a new value; the read list names the replicas you ask when reading. If
+you require the two lists to be big enough that they **always share at least one common
+name**, then whoever you read is guaranteed to include someone who witnessed the latest
+write — so you can never miss it. That "must share a name" property is the quorum overlap.
 
 **Solution.** Data is duplicated across `n` replicas, and each read touches `r` replicas
 while each write touches `w` replicas. Consistency is guaranteed by a **quorum overlap
@@ -317,6 +337,11 @@ offerings that can be configured for either guarantee.
 
 ## Virtual Networking
 
+*This is the **Communication** substrate of the topic: every messaging pattern later in
+this file — brokers, queues, delivery guarantees — rides on top of the virtual network
+set up here. Storage gives you the "where," consistency the "how correct," and the
+network the "how they talk."*
+
 **Intent.** *How can network connectivity between cloud-hosted IT resources be set up
 dynamically and on-demand?*
 
@@ -414,10 +439,62 @@ processor patterns.
 
 ---
 
+## Delivery Guarantee versus Ordering Guarantee
+
+**Why this is a separate axis.** New readers routinely conflate two independent
+questions: *"will the message arrive (and how many times)?"* — the **delivery guarantee**
+(at-least-once, exactly-once, etc.) — and *"in what order will messages arrive?"* — the
+**ordering guarantee**. They are orthogonal. A queue can be at-least-once but unordered
+(SQS standard), or at-least-once *and* strictly ordered (SQS FIFO). Neither implies the
+other, and an interviewer often probes ordering right after you name a delivery semantic.
+
+**Three ordering levels, from strongest to loosest:**
+
+- **Global / total order** — every consumer sees *all* messages in one single sequence.
+  Simple to reason about but a scalability trap: only *one* consumer can advance the
+  single sequence at a time, so throughput is capped at what one consumer can process.
+- **Per-key / per-partition order** — messages that share a routing key are ordered
+  relative to each other, but different keys are independent and can be processed in
+  parallel. This is the sweet spot: you keep the ordering you actually need (all events
+  for `order-123` in sequence) while scaling horizontally across keys.
+- **Best-effort / no order** — the broker makes no promise; maximum throughput and the
+  default for high-volume systems where each message is self-contained.
+
+**Worked example — why strict ordering caps parallelism.** Say a partition holds
+messages `[m1, m2, m3, m4]` and each takes 100 ms to process. Under **strict per-partition
+order**, a consumer must finish `m1` before starting `m2` (otherwise `m2` could commit
+first and violate order), so the four messages take `4 × 100 ms = 400 ms` on **one**
+consumer — adding a second consumer to that partition buys you nothing. Now suppose the
+four messages belong to **four different keys**. Route each key to its own partition and
+four consumers process all four in parallel in `~100 ms` — a 4× speedup — because ordering
+only needs to hold *within* a key, not across keys. That is the ordering-vs-throughput
+trade-off: **you buy parallelism by narrowing the scope over which order must hold.**
+
+**How real brokers give you scalable partial order.** Kafka orders messages **within a
+partition**; you pick the partition with a **partition key** (e.g. `orderId`), so all
+events for one order stay ordered while different orders spread across partitions and
+consumers. SQS **FIFO** does the same with a **MessageGroupId**: strict order *within* a
+group, parallel delivery *across* groups. In both, the number of independent keys/groups
+is your ceiling on consumer parallelism — few groups means little parallelism, many
+groups means you scale out but only get *partial* (per-group) ordering, never a global
+one for free.
+
+**Interviewer follow-up.** If you say "SQS FIFO for ordering," expect *"what does that
+cost you?"* Answer: throughput and parallelism — FIFO serializes per message-group, and a
+single hot group becomes a bottleneck. If you only need per-entity order, key by that
+entity so unrelated entities still process concurrently.
+
+---
+
 ## Exactly-once Delivery
 
 **Intent.** *How can it be assured that a message is delivered exactly once to a
 receiver?*
+
+**Reading note.** Exactly-once is defined below as **at-least-once + deduplication**, so
+it builds on the next pattern. If you are reading top-to-bottom, skim **At-least-once
+Delivery** (the next section) first — it explains the ack-and-retransmit loop that
+exactly-once layers dedup on top of.
 
 **Problem / context.** In distributed messaging, duplicates are a very critical design
 issue. Some receivers cannot tolerate processing the same message twice — e.g.

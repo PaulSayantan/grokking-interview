@@ -55,11 +55,19 @@ predict. The three pillars are complementary, not interchangeable:
 | Traces | X-Ray / ADOT | "Where in the call graph did time/errors go?" | End-to-end latency attribution | Sampled; instrumentation effort |
 
 **How they connect.** The modern pattern is **correlation**: emit a `trace_id` into
-structured logs and as a metric dimension so you can pivot metric → log → trace for
-the same request. CloudWatch **Metric Filters** turn logs into metrics; **Embedded
-Metric Format (EMF)** lets a log line *carry* metrics so you extract high-cardinality
-metrics without a separate `PutMetricData` call. X-Ray's service map is built from
-traces; CloudWatch **Application Signals** stitches all three into SLOs.
+your **structured logs** and as an **X-Ray annotation** (an indexed, filterable trace
+field — see the X-Ray section) so you can pivot metric → log → trace for the same
+request. **Never put `trace_id` in a metric *dimension*.** A `trace_id` has one unique
+value per request, so using it as a dimension mints one custom metric *per request* —
+exactly the cardinality-explosion anti-pattern the next section
+([Metric dimensions and cardinality cost](#metric-dimensions-and-cardinality-cost))
+warns against. Instead, use **Embedded Metric Format (EMF)** to attach only
+*low-cardinality* dimensions (`service`, `operation`, `statusClass`) in the same log
+line, while `trace_id`/`requestId` ride along as ordinary searchable *log fields* (not
+dimensions). CloudWatch **Metric Filters** turn logs into metrics; **EMF** lets a log
+line *carry* metrics so you get a metric plus its high-cardinality context in one write,
+without a separate `PutMetricData` call. X-Ray's service map is built from traces;
+CloudWatch **Application Signals** stitches all three into SLOs.
 
 **What an EMF log line actually looks like** (a top interview probe). It is ordinary
 JSON with a reserved `_aws` block that tells CloudWatch which fields to extract as
@@ -112,12 +120,18 @@ own with `PutMetricData` into a custom namespace.
 - **Standard resolution** = 1-minute granularity (the default for most AWS-published
   metrics).
 - **High-resolution** = down to **1-second** granularity (`StorageResolution=1`).
-  Alarms on high-res metrics can evaluate as fast as **10-second** periods.
+  Alarms on high-res metrics support sub-minute evaluation periods — **10 s and 30 s**
+  (standard-resolution alarms evaluate at 60 s or multiples). *(Verify current period
+  options against the CloudWatch User Guide; these are the documented values as of
+  writing.)*
 - **Retention (automatic rollup):** 1-second data is kept **3 hours**; 1-minute data
   **15 days**; 5-minute data **63 days**; 1-hour data **15 months (455 days)**. Data
   ages into coarser resolution; you cannot get 1-second detail from last month.
-- **`PutMetricData`** accepts up to 1,000 metrics per call; you can send **pre-aggregated
-  statistic sets** (min/max/sum/count) instead of raw values to cut API calls and cost.
+- **`PutMetricData`** accepts up to **1,000 unique metrics (data-point entries) per
+  request**, and the request payload is bounded (a ~1 MB request-size limit); you can
+  send **pre-aggregated statistic sets** (min/max/sum/count) instead of raw values to
+  cut API calls and cost. *(Confirm the exact per-request count and size limits against
+  the current CloudWatch User Guide.)*
 
 **Basic vs detailed monitoring.** EC2 basic monitoring = 5-minute metrics (free);
 **detailed monitoring** = 1-minute (paid). Lambda/API Gateway emit 1-minute metrics
@@ -179,9 +193,19 @@ threshold evaluated over N periods (`EvaluationPeriods`) with an `M of N` "datap
 to alarm" rule. On transition it fires **alarm actions**: publish to **SNS**, trigger
 **Auto Scaling**, **EC2 actions** (reboot/stop/recover), or **Systems Manager**.
 
-- **`treatMissingData`** controls behavior when data is absent (`missing`, `notBreaching`,
-  `breaching`, `ignore`) — a classic gotcha: a broken metric source can silently go
-  `INSUFFICIENT_DATA` and never page you.
+- **`treatMissingData`** controls behavior when data is absent, and each value has a
+  precise meaning:
+  - `missing` (the default) — **use the alarm's prior state**: missing points don't
+    change the verdict, so the alarm holds whatever it last was.
+  - `notBreaching` — **treat the missing point as good (OK)**; drags the alarm toward `OK`.
+  - `breaching` — **treat the missing point as bad (in-alarm)**; drags the alarm toward
+    `ALARM`.
+  - `ignore` — **keep the current state and keep evaluating** using existing data points,
+    never transitioning purely on missing data.
+
+  Classic gotcha: a broken metric source can silently go `INSUFFICIENT_DATA` (or, under
+  `notBreaching`, sit in `OK`) and never page you. This is why **liveness/heartbeat
+  alarms should use `breaching`** — no data must mean "assume dead," not "assume fine."
 - **M-of-N** reduces flapping: alarm only if 3 of the last 5 datapoints breach.
 
 **Traced timeline (EvaluationPeriods=5, DatapointsToAlarm=3, period=60s).** The alarm
@@ -370,6 +394,17 @@ generating and exporting metrics, logs and traces; instrument once, export anywh
 EMF), Amazon Managed Service for Prometheus, OpenSearch, or third parties. The
 **X-Ray SDK is effectively in maintenance mode**; AWS now recommends OTel/ADOT for new
 instrumentation.
+
+**The direction of travel (know this as a senior candidate).** OTel/ADOT is not just
+"use a different SDK" — it's the foundation for **CloudWatch Application Signals**, AWS's
+native **APM** (application performance monitoring) layer. Application Signals
+auto-instruments services via OTel/ADOT, discovers your services and their dependencies,
+and gives you a golden-signals dashboard plus first-class **SLOs and error-budget burn**
+(see [SLI, SLO and error budgets on AWS](#sli-slo-and-error-budgets-on-aws)) with no
+manual metric wiring. The X-Ray console experience is folding into the CloudWatch
+console, so the coherent modern arc is: **instrument once with OTel/ADOT → traces land
+in X-Ray, metrics/logs in CloudWatch → Application Signals stitches all three into an
+APM view with SLOs** — rather than three disconnected services.
 
 **Trade-offs.**
 - **X-Ray SDK vs ADOT/OTel:** X-Ray SDK is the simplest path if you only ever use X-Ray

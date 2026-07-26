@@ -72,9 +72,11 @@ ordered collection of **shards**. A shard is the unit of both capacity and order
 - **Egress (read) per shard (shared/classic):** up to **2 MB/s**, shared across all
   standard consumers of that shard, with **GetRecords capped at 5 transactions/s** per
   shard (so ~200 ms polling interval; 10,000 records or 10 MB max per GetRecords call).
-- **Record payload:** classically 1 MB max; the service now accepts records up to
-  **10 MiB** (before base64) using burst capacity, but a single record still counts
-  against the 1 MB/s shard budget, so oversized records throttle you.
+- **Record payload:** a single record's data blob is capped at **1 MB (1,048,576
+  bytes)** before base64 encoding. That one record also consumes from the shard's
+  1 MB/s ingest budget, so a near-max record leaves almost no room for other writes that
+  second — large records throttle you. (Don't confuse this with the *GetRecords* read
+  side, which can return up to 10 MB per call across many records.)
 - **Durability:** each record is synchronously replicated across **3 Availability
   Zones** in the Region before the write is acknowledged. KDS is a regional service;
   there is no automatic cross-Region replication.
@@ -157,7 +159,7 @@ KDS offers two capacity modes:
 |---|---|---|
 | You manage shards | Yes — set + reshard manually | No — AWS auto-scales shards |
 | Default limits | shards × 1 MB/s in, 2 MB/s out | 4 MB/s write, 8 MB/s read (new stream) |
-| Max throughput | unbounded (add shards, 20k/region default) | scales to 200 MB/s write/400 MB/s read (most Regions); up to **10 GB/s write, 20 GB/s read** in us-east-1/us-west-2/eu-west-1 |
+| Max throughput | unbounded (add shards, 20k/region default) | hundreds of MB/s write/read out of the box, raisable to multi-GB/s ceilings in the largest Regions (verify current quotas — these drift) |
 | Scaling behavior | manual / your own autoscaler | doubles based on observed peak of prior 30 days; can't jump >2× peak instantly |
 | Pricing | per shard-hour + PUT payload units | per GB ingested/retrieved (higher $/GB) |
 | Best for | steady, predictable, high-volume | spiky/unknown traffic, new apps, low ops |
@@ -190,7 +192,7 @@ adds latency (~200 ms+ per poll). Fine for 1–2 consumers.
 **2. Enhanced Fan-Out (EFO) consumers** — each registered consumer gets its **own
 dedicated 2 MB/s per shard** (not shared) via **`SubscribeToShard`**, an HTTP/2 push
 stream. Latency drops to **~70 ms** (vs ~200 ms+ polling). You can register up to
-**20 EFO consumers** per stream (up to **50** with On-demand Advantage mode). EFO costs
+**20 EFO consumers** per stream (a soft limit, raisable via a quota increase). EFO costs
 extra (per-consumer-shard-hour + per-GB retrieved) but is the answer when you have many
 independent consumers or need low latency without them starving each other.
 
@@ -355,6 +357,43 @@ planning, spike-friendly, higher $/throughput, feature/quota limits; Provisioned
 lowest cost at scale, full control and features, but you own broker/partition sizing and
 scaling. Start unknown workloads Serverless; graduate heavy steady ones to provisioned.
 
+### Worked example: sizing an MSK provisioned cluster
+
+Unlike a KDS shard's fixed 1 MB/s, a Kafka partition has **no hard per-partition
+throughput cap** — its ceiling is whatever the broker's CPU, network, and disk can
+sustain. So sizing works the other way around: pick a *conservative per-partition
+throughput target* from your record size and consumer parallelism, then divide.
+
+Say you must ingest **60 MB/s** of writes and you budget a conservative **~5 MB/s per
+partition** (a safe planning number for modest records; real ceilings are higher but
+headroom protects tail latency):
+
+1. **Partitions for throughput:** `ceil(60 / 5)` = **12 partitions** minimum on
+   throughput grounds. Consumer parallelism also caps out at partition count — one
+   partition is consumed by at most one consumer in a group — so if you need 20 parallel
+   consumers, bump to **20 partitions** (parallelism binds, not throughput). Take the max
+   of the two, as with KDS shards: **20 partitions**.
+2. **Replication factor:** `RF=3` across 3 AZs is the standard durable default. Each
+   partition now has 3 copies, so the cluster physically stores **20 × 3 = 60 partition
+   replicas**, and every write is replicated to 2 followers before it's acked (with
+   `acks=all` + `min.insync.replicas=2`).
+3. **Brokers:** spread replicas evenly across AZs — a **3-broker** cluster (one per AZ)
+   holds ~20 replicas each; go to **6 brokers** if per-broker load or the per-broker
+   partition ceiling pushes you there. Rule: brokers must be a multiple of your AZ count
+   so replicas balance.
+4. **Storage:** `write_MBps × retention_seconds × RF`. At 60 MB/s, 24 h retention, RF=3:
+   `60 × 86,400 × 3` ≈ **15.5 TB** of provisioned broker storage (offload older segments
+   to **tiered storage** to shrink this).
+
+**Why over-partitioning hurts.** It's tempting to "just create 5,000 partitions for
+headroom." Each partition is a real cost: more open file handles and memory per broker,
+longer **leader-election** and **consumer-group rebalance** times (a rebalance stops
+consumption while every partition is reassigned — with thousands of partitions this is
+seconds of stall), higher end-to-end latency, and slower controller failover. There's a
+practical per-broker partition ceiling (low thousands) for exactly these reasons. Size to
+throughput + parallelism with modest headroom, not "max just in case" — the same
+discipline as not maxing KDS retention.
+
 ---
 
 ## Kinesis versus MSK versus SQS versus SNS: choosing
@@ -409,6 +448,37 @@ Delivery semantics are a favorite senior-level probe. Defaults:
 cost). The pragmatic, interview-correct answer is almost always **"at-least-once
 delivery + idempotent consumers/dedup keys"** rather than paying for strict
 exactly-once, unless the domain (payments, ledgers) truly demands it.
+
+**How idempotent consumption actually works (concrete pattern).** "Make the consumer
+idempotent" is not hand-waving — it's a specific guard *before* the side effect:
+
+1. Derive a stable **dedup key** from the record. Prefer a business id
+   (`orderId`) if the operation is naturally once-per-entity; otherwise use the KDS
+   **sequence number** (unique and monotonic within a shard) or a producer-supplied
+   idempotency key.
+2. Do a **conditional write** to a small "processed" store, keyed by that dedup key,
+   *guarded so it fails if the key already exists*. In DynamoDB this is
+   `PutItem(dedupKey) with ConditionExpression="attribute_not_exists(dedupKey)"`.
+3. Only if the conditional write **succeeds** do you perform the real side effect
+   (charge the card, insert the row). If it fails with the condition error, this record
+   was already handled — treat it as a **no-op** and checkpoint past it.
+
+Worked trace — record with `orderId=A17` is redelivered after a worker crash:
+
+| Delivery | Conditional PutItem(`A17`) | Side effect | Net result |
+|---|---|---|---|
+| 1st (before crash) | succeeds (key absent) | charge card once | charged, but crash before checkpoint |
+| 2nd (redelivery) | **fails** (`A17` already present) | **skipped** | still charged exactly once |
+
+The card is charged once even though the record was delivered twice — the dedup table,
+not the stream, is what makes processing effectively-once. Set a TTL on the dedup rows
+matching your retention/replay window so the table doesn't grow unbounded.
+
+> [!INTERVIEW] A subtle ordering trap: for money movement, do the conditional write and
+> the side effect **atomically** (e.g. both in one DynamoDB transaction, or make the
+> downstream call itself idempotent with the same key). If you write the dedup row, then
+> crash *before* the side effect, delivery 2 sees the key and skips — and the charge
+> never happens. Guard the *outcome*, not just the attempt.
 
 ---
 
@@ -504,6 +574,47 @@ for KDS. State the RPO/RTO cost of this explicitly.
 **Ordering hazards:** resharding, ParallelizationFactor >1 across keys, and multiple
 producers to the same key from different threads can reorder if not handled; KCL and
 per-partition-key semantics preserve order only when respected.
+
+---
+
+## Security and access
+
+Streaming data is often the most sensitive data in the system (clickstream, payments,
+PII in transit), so a senior design round almost always touches encryption and who is
+allowed to read the stream. The mental model: **encrypt the bytes at rest and on the
+wire, then authenticate and authorize every producer and consumer** — and remember the
+**AWS shared-responsibility model**: AWS secures the managed infrastructure (broker
+patching, host hardening); *you* own topic/stream-level access, key policies, and client
+auth.
+
+**Encryption:**
+- **At rest:** both KDS and MSK encrypt stored data with **AWS KMS**. KDS uses a KMS key
+  (AWS-managed or your own customer-managed key, CMK) for server-side encryption;
+  MSK encrypts broker storage with KMS. A CMK lets you control rotation and revoke
+  access by changing the key policy.
+- **In transit:** **TLS** encrypts producer↔service and service↔consumer traffic for
+  both. MSK can additionally enforce **TLS for in-cluster broker-to-broker** traffic.
+
+**Authentication and authorization:**
+- **KDS:** access is purely **IAM** — every `PutRecord`/`GetRecords`/`SubscribeToShard`
+  call is an IAM-authenticated action gated by IAM policies (and optionally resource
+  policies for cross-account consumers). There's no separate username/password layer.
+- **MSK** offers several auth modes — pick by client compatibility and org standards:
+  - **IAM access control** — authenticate Kafka clients with IAM roles/policies (native
+    on AWS, no secret to manage; MSK Serverless supports *only* this).
+  - **SASL/SCRAM** — username/password stored in AWS Secrets Manager; good when clients
+    can't use IAM but you still want managed credentials.
+  - **mTLS (TLS client certificates)** — mutual TLS via AWS Certificate Manager Private
+    CA; strongest for zero-trust or when existing Kafka clients already use certs.
+- **Network isolation:** both run inside your **VPC**; reach them privately (no public
+  internet) via VPC networking / interface endpoints, and lock down with security groups
+  so only your producer/consumer subnets can connect.
+
+**Trade-off:** IAM auth is the lowest-friction on AWS (no secrets to rotate) but ties you
+to AWS-aware clients; SASL/SCRAM and mTLS exist for portability and existing Kafka
+tooling at the cost of managing secrets or a certificate authority. Use a customer-managed
+KMS key (not the AWS-managed default) when compliance requires *you* to control and audit
+key access; otherwise the AWS-managed key is simpler and free of key-management cost.
 
 ---
 

@@ -172,6 +172,33 @@ reads on an alternate sort order *and* (b) queries always stay within a single P
 exclusively. Remember the reliability trap: a throttled GSI can throttle base writes,
 so size GSI capacity generously or use on-demand.
 
+**Sparse indexes (a staple advanced pattern).** Here is the key mechanical fact that
+unlocks a whole class of cheap designs: **an item only appears in a GSI if it actually
+has the GSI's key attribute(s).** Items missing that attribute are simply *not
+projected* into the index. That is not a limitation — it is a feature you exploit on
+purpose. By writing the GSI key attribute onto **only the subset of items you care
+about**, you build a pre-filtered index for free.
+
+*Intuition:* instead of scanning a big table and filtering (which, as we just saw,
+still bills you for every item read), you make the index itself contain *only* the rows
+you'd have kept.
+
+**Worked example — an "unprocessed jobs" queue.** Say a `jobs` table has 10,000,000
+completed jobs and, at any moment, ~500 jobs still needing processing. Give each job a
+`gsiUnprocessedPK` attribute **only while it is unprocessed**, and when a worker
+finishes a job, `REMOVE` that attribute (or overwrite the item without it).
+- The GSI on `gsiUnprocessedPK` contains **~500 items**, not 10,000,000.
+- Fetching the backlog is a `Query`/`Scan` over the GSI reading **~500 items** →
+  ~cheap.
+- Compare to keeping a `status` attribute on all 10M items and scanning + filtering:
+  that reads **10,000,000** items every poll (see the FilterExpression trap) — roughly
+  a **20,000x** difference in RCU.
+
+Other classic uses: index only `flagged = true` records, only orders in state `OPEN`,
+only users who opted into a feature. You save both **storage** (the index holds a tiny
+subset) and **RCU** (you never read the irrelevant majority). Sparse indexes pair
+directly with GSI overloading below.
+
 ---
 
 ## Capacity modes: provisioned with auto scaling versus on-demand
@@ -189,12 +216,18 @@ absorb sudden spikes well. Provisioned also supports **reserved capacity** (1-/3
 commitments) for deep discounts.
 
 **On-demand capacity:** no capacity to manage; you pay per **request** (per read
-request unit / write request unit). It instantly serves whatever traffic arrives, up
-to the table's previously observed peak doubled (it adapts upward; a brand-new
-on-demand table starts handling several thousand requests/sec and scales as it learns
-your peak). Pay-per-request is roughly **6–7x more expensive per unit** than
-fully-utilized provisioned capacity — but if your utilization is low or spiky, you'd
-pay for idle provisioned capacity anyway.
+request unit / write request unit). It adapts to traffic automatically, but the
+scaling is not literally infinite-instant, and knowing the concrete numbers is a
+senior tell. As of writing (verify current docs, these limits have been raised over
+time): a **brand-new** on-demand table instantly serves up to about **4,000 WCU and
+12,000 RCU** per second — note the read/write asymmetry, reads get the bigger cold
+allowance. Beyond that, on-demand automatically accommodates traffic up to **2x your
+table's previous observed peak within ~30 minutes**. So if you peaked at 10,000
+WCU/sec last week, it can absorb up to ~20,000 WCU/sec smoothly; a spike that instantly
+demands 5x your prior peak can still throttle until the table "learns" the new level.
+Pay-per-request is roughly **6–7x more expensive per unit** than fully-utilized
+provisioned capacity — but if your utilization is low or spiky, you'd pay for idle
+provisioned capacity anyway.
 
 **Cost intuition / back-of-envelope:** On-demand wins when utilization is spiky,
 unpredictable, or low (dev/test, new features, sharp peaks). Provisioned + auto
@@ -266,6 +299,45 @@ just-written config).
 
 ---
 
+## Query versus Scan and the FilterExpression cost trap
+
+**Intuition first.** Think of a `Query` as walking straight to one drawer in a filing
+cabinet (one partition key) and reading the folders you asked for in order. A `Scan`
+is opening *every* drawer and reading *every* folder in the whole cabinet. That is the
+entire difference in cost, and it is one of the most common DynamoDB interview probes
+because getting it wrong blows up your bill.
+
+- **`Query`** targets **one partition key** and optionally a range of sort keys. It
+  only reads items in that item collection. Cheap and O(matching items).
+- **`Scan`** reads the **entire table** (or entire GSI), page by page, 1 MB at a time.
+  Cost is O(table size), not O(results). At scale this is an anti-pattern for any
+  online request path.
+
+**The trap: `FilterExpression` is not a cheap `WHERE`.** A filter is applied
+**server-side *after* items have been read** from the partition(s), just before the
+results are returned over the wire. This means **you are billed RCU for every item
+read, not every item returned.** The filter only shrinks the payload, not the capacity
+consumed.
+
+**Worked example (numbers in → numbers out).** You have a 1,000,000-item table,
+each item ~1 KB, and you `Scan` with `FilterExpression = "status = :open"`; only 10
+items are `OPEN`.
+- Items read: **1,000,000** (the whole table).
+- Bytes read: 1,000,000 × 1 KB = ~1,000,000 KB.
+- RCU (eventually consistent, 4 KB per RCU, two 4 KB reads per RCU): each 1 KB item
+  rounds up to a 4 KB read unit → 1,000,000 read units ÷ 2 (eventual) = **~500,000
+  RCU consumed**.
+- Items returned to you: **10**.
+
+So you paid to read a million items to hand back ten. A newcomer who assumes the filter
+made this "a query for 10 items" is off by five orders of magnitude on cost. The fix is
+to make the thing you filter on part of a **key** — either the base sort key, a GSI, or
+a **sparse index** (see the secondary-index section) — so DynamoDB reads only the
+matching items in the first place. Rule of thumb: **`FilterExpression` is for trimming
+a few stragglers off an already-narrow `Query`, never a substitute for a key or index.**
+
+---
+
 ## Adaptive capacity, hot partitions, and hot keys
 
 **Hot partition:** traffic concentrated on one physical partition because the PK
@@ -288,7 +360,14 @@ across partitions.
 **Design fixes for hot keys:**
 - **Write sharding:** append a random or calculated suffix to spread writes across N
   logical keys, then scatter-gather on read. Essential for counters, leaderboards,
-  time-series "current day" keys.
+  time-series "current day" keys. **Sizing it (numbers in → shard count out):** a
+  single partition key caps at **1,000 WCU/sec**, so to sustain **X** writes/sec on one
+  logical key you need at least **ceil(X / 1000)** shard suffixes. To take a global
+  counter to **50,000 writes/sec**: 50,000 ÷ 1,000 = 50 → use **≥50 shards** (round up
+  to, say, **64** for headroom and to leave slack for uneven hashing). You write to
+  `counter#<random 0..63>` and, on read, `GetItem` all 64 shards and **sum** them
+  (scatter-gather). More shards = more write headroom but more read fan-out, so pick the
+  smallest N that clears your peak.
 - **Add entropy to the PK:** avoid low-cardinality PKs (`status`, `date`); combine with
   something high-cardinality (`date#deviceId`).
 - **DAX / cache** for hot *reads* (see DAX section) to absorb read hotspots.
@@ -621,8 +700,9 @@ events; single item exceeding 400 KB or a single key exceeding 3000 RCU/1000 WCU
 - "How do you implement a global unique constraint (e.g., unique email) in DynamoDB?"
   (Transaction: put the entity + put a `EMAIL#x` lock item with
   `attribute_not_exists`.)
-- "How do you build a counter that handles 50,000 increments/sec?" (Write sharding +
-  aggregate; never one key.)
+- "How do you build a counter that handles 50,000 increments/sec?" (Write sharding:
+  one key caps at 1,000 WCU/sec, so 50,000 ÷ 1,000 = ≥50 shards, round to ~64; scatter
+  writes across `counter#0..63`, sum all shards on read. Never one key.)
 - "PITR vs on-demand backup vs global tables — which protects against what?"
 - "When would you reject DynamoDB and choose Aurora?"
 - "How do you keep a full-text search index in sync with DynamoDB?" (Streams → Lambda →

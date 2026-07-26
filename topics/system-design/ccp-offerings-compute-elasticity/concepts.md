@@ -314,6 +314,16 @@ components. Components deployed into it get storage, communication (via Message-
 Middleware), and other services *from the environment* instead of building them. This is the
 managed **runtime/container** an Elastic Platform hosts your code in.
 
+**Why this is a separate pattern from Elastic Platform.** They are two altitudes of the same
+stack, not duplicates. *Elastic Platform* is the **commercial offering**: the elasticity, the
+billing, the SLA, the "deploy code and we scale it" promise. *Execution Environment* is the
+**concrete shared runtime** — the language runtime plus platform libraries — that lives *inside*
+that offering and actually hosts a component. The split matters because one platform can expose
+**several** execution environments: AWS Lambda (one Elastic Platform) offers Node.js, Python,
+Java, and Go runtimes; App Engine offers standard and flexible environments. You pick the
+*platform* for its elasticity/SLA and the *execution environment* for the language/lifecycle your
+code needs.
+
 **Modern equivalent.** A language/app runtime managed by the platform: the JVM/servlet
 container in a PaaS, the Node/Python runtime in AWS Lambda / Azure Functions / Cloud Functions,
 the App Engine / App Service runtime, or a container runtime + base image + sidecar services on
@@ -354,9 +364,10 @@ flowchart LR
   S --> M1["Map: Processing Component 1"]
   S --> M2["Map: Processing Component 2"]
   S --> M3["Map: Processing Component 3"]
-  M1 --> R["Reduce: consolidate / aggregate"]
-  M2 --> R
-  M3 --> R
+  M1 --> SH["Shuffle: group pairs by key, move across network"]
+  M2 --> SH
+  M3 --> SH
+  SH --> R["Reduce: consolidate / aggregate"]
   R --> O["Result data set"]
 ```
 
@@ -374,13 +385,24 @@ total):
 
 **Reduce** sums each group: `the=5, cat=2, dog=2, sat=1` (checks out: `5+2+2+1 = 10`).
 
-**Why shuffle is the bottleneck — skew made concrete.** Notice `the` already pulled 5 of the
-10 pairs onto one reducer. Now imagine a real corpus where a stopword like `the` is ~90% of
-tokens: with 1 B tokens, the `the` reducer receives ~900 M pairs over the network while every
-other reducer sees a sliver. That one reducer becomes the **straggler** — the whole job's
-finish time is gated by it, and its inbound shuffle traffic saturates the network. (Fixes:
-a **combiner** that pre-sums `(the, 5)` on each mapper before the shuffle, or salting the hot
-key across multiple reducers.)
+**Why shuffle is the bottleneck — skew made concrete.** First, name the terms. The **shuffle**
+is the middle step that moves every `(key, value)` pair from the mappers *across the network* to
+the reducer that owns that key — it is the only all-to-all data movement in the job, which is
+why it dominates cost. **Skew** = an uneven key distribution, where a few keys hold most of the
+values so the pairs pile onto a handful of reducers instead of spreading evenly. A **straggler**
+is one task that runs far longer than its peers; because a reduce phase is not finished until its
+*slowest* reducer finishes, a single straggler gates the whole job's completion time.
+
+Now make it concrete. Notice `the` already pulled 5 of the 10 pairs onto one reducer. Imagine a
+real corpus where a stopword like `the` is ~90% of tokens: with 1 B tokens, the `the` reducer
+receives ~900 M pairs over the network while every other reducer sees a sliver. That one reducer
+becomes the straggler — everyone else finishes in seconds and idles while it grinds through
+900 M pairs, and its inbound shuffle traffic saturates the network. (Fixes: a **combiner** that
+pre-sums each mapper's local pairs *before* the shuffle — e.g. chunk 1's two `the`s collapse to a
+single local `(the, 2)`, and every mapper likewise ships just one `the` pair instead of thousands,
+so ~900 M pairs shrink to one per mapper (final summed to 5 only at the reducer); or *salting* the
+hot key — split `the` into `the#0…the#7` across 8 reducers, then sum the sub-totals in a second
+pass.)
 
 **Modern equivalent.** Apache Hadoop MapReduce and its managed forms — AWS EMR, GCP Dataproc,
 Azure HDInsight — plus the successors that generalize the same map/shuffle/reduce idea: Apache
@@ -389,9 +411,16 @@ BigQuery. Serverless fan-out (Lambda/step functions over sharded input) applies 
 smaller scale.
 
 **Trade-offs / when to use.** Excellent for **embarrassingly parallel, batch** analytics over
-large immutable data with data locality; overkill and high-latency for small data or for
-low-latency/streaming needs (use stream processing instead). The reduce/shuffle step is often
-the bottleneck and a straggler/skew risk.
+large immutable data with data locality — *embarrassingly parallel* meaning the chunks need no
+cross-talk during the map phase, so you can throw N machines at N chunks with near-linear
+speedup. You gain that horizontal scale-out; you give up latency (a job pays fixed
+split/schedule/shuffle overhead) and pay for the network-heavy shuffle. It is overkill and
+high-latency for small data or for low-latency/streaming needs — use stream processing instead
+when results must be continuous rather than per-batch. The decision flips on **data size and
+freshness**: choose Map Reduce when the data is large, immutable, and a minutes-to-hours batch is
+acceptable; avoid it when the data is small enough to fit one machine or answers are needed in
+sub-second time. Watch the reduce/shuffle step: it is often the bottleneck and the straggler/skew
+risk described above.
 
 **Related patterns.** Watchdog (re-issues failed Processing Components), Message-oriented
 Middleware (distributes work), Transaction-based Processor, [Elastic Platform](#elastic-platform)

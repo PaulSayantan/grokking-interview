@@ -36,13 +36,26 @@ tenant's data. This is what AWS SaaS Factory calls **SaaS Identity** and
 Tenant B). So identity must resolve **user -> tenant(s) -> tier -> role**, not
 just authenticate a person.
 
-**On AWS**, the default building block is **Amazon Cognito user pools** (an OIDC-
+**On AWS**, the default building block is **Amazon Cognito user pools** (an
+**OIDC** — OpenID Connect, the JSON/JWT identity layer built on OAuth2 —
 compliant identity provider that issues signed JSON Web Tokens). A user pool
-authenticates users and returns three tokens: an **ID token** and **access token**
-(both JWTs, validity 5 minutes to 1 day) and a **refresh token** (validity 1 hour
-to 3,650 days). Federation (SAML/OIDC to a corporate IdP like Okta or Entra ID,
-or social providers) is layered on top for B2B tenants that bring their own
-directory.
+authenticates users and returns **three** tokens, each with a distinct job — this
+distinction matters later when we decide *which* token to stamp `tenantId` into:
+
+- **ID token** — *who the user is*: identity/profile claims (name, email) meant for
+  the **client/UI** to display. Not intended for authorizing API calls.
+- **Access token** — *what the user may do*: authorization claims and scopes meant
+  for **resource servers/APIs**. This is the token APIs authorize on, which is
+  exactly why you stamp `tenantId` here.
+- **Refresh token** — a long-lived credential used only to **re-mint** the
+  short-lived ID/access pair without forcing the user to log in again.
+
+(The ID and access tokens are both JWTs, validity 5 minutes to 1 day; the refresh
+token's validity ranges from 1 hour to 3,650 days.) Federation — **SAML** (Security
+Assertion Markup Language, the XML-based enterprise SSO standard) or **OIDC**
+(JSON/JWT-based, built on OAuth2) to a corporate **IdP** (identity provider) like
+Okta or Entra ID, or social providers — is layered on top for B2B tenants that
+bring their own directory.
 
 The core modeling decision is **how the tenant is attached to the user**:
 
@@ -73,8 +86,8 @@ data. Three models, each with sharp trade-offs:
 
 | Identity model | How it looks on AWS | Isolation | Cost / ops | When to use |
 |---|---|---|---|---|
-| **Pooled identity** (one shared user pool, tenant is a claim) | Single Cognito user pool; `tenantId` as a custom attribute or group; tenant context injected into the JWT | Weakest — all tenants' users in one directory; a token bug can cross tenants | Cheapest, one pool to operate, easy global search, scales to millions of MAUs | Default for B2C and high-volume B2B pooled SaaS |
-| **Silo identity** (user pool per tenant) | One Cognito user pool per tenant, provisioned at onboarding | Strong — hard directory boundary, per-tenant password/MFA policy, per-tenant IdP | Higher — hits **1,000 user pools per Region** (raisable to 10,000); onboarding must create a pool; cross-tenant admin harder | Regulated/enterprise tenants; tenants demanding their own IdP or data-residency of the directory |
+| **Pooled identity** (one shared user pool, tenant is a claim) | Single Cognito user pool; `tenantId` as a custom attribute or group; tenant context injected into the JWT | Weakest — all tenants' users in one directory; a token bug can cross tenants | Cheapest, one pool to operate, easy global search, scales to millions of MAUs (monthly active users) | Default for B2C and high-volume B2B pooled SaaS |
+| **Silo identity** (user pool per tenant) | One Cognito user pool per tenant, provisioned at onboarding | Strong — hard directory boundary, per-tenant password/MFA (multi-factor auth) policy, per-tenant IdP | Higher — hits **1,000 user pools per Region** (raisable to 10,000); onboarding must create a pool; cross-tenant admin harder | Regulated/enterprise tenants; tenants demanding their own IdP or data-residency of the directory |
 | **Federated identity** (tenant brings its own IdP) | Corporate SAML/OIDC IdP federated into a shared or per-tenant pool | Depends on host pool; auth lives in the customer's directory | Per-tenant IdP config; onboarding wires the federation | B2B enterprise SSO ("log in with your company account") |
 
 With federation you also have to decide **which** corporate IdP a given login goes
@@ -120,6 +133,14 @@ token. Because the pool signs the token, these claims are tamper-evident.
 - The **total combined added claims + scopes** in one token-generation
   transaction must stay within Cognito's limit (**5,000**, adjustable), which is
   generous; the practical cap is JWT size, not this quota.
+- **It runs synchronously on the auth hot path.** The trigger executes *during*
+  authentication, so its latency is added to every login and a slow or failed
+  registry read degrades or **blocks login** for that tenant — you have coupled
+  sign-in availability to the registry. This is the hidden cost of "merge registry
+  data into the token at mint time": cache the user-to-tenant mapping, keep the
+  trigger logic minimal and fast, and have a fallback (e.g. fall back to the
+  Cognito custom attribute if the registry read times out) so a registry hiccup
+  doesn't lock everyone out.
 
 **Worked example — what the decoded token actually looks like.** After the
 pre-token trigger runs, the base64url-decoded **access token** payload that a
@@ -203,22 +224,36 @@ sequenceDiagram
 > background job that runs "for all tenants" and forgets the filter. Propagation is
 > not just the synchronous request path.
 
-**Staleness and revocation.** Because tenant context lives *inside* the JWT, the
+**Staleness and revocation.** A JWT is a **bearer token**: whoever holds it is
+trusted until it expires, and its signature stays verifiable for the token's whole
+TTL — there is no "check with the issuer" step on the hot path (that's the entire
+point of a signed token). So because tenant context lives *inside* the JWT, the
 claims are only as fresh as the token TTL. If you downgrade a tenant from
 `premium` to `basic`, or suspend/offboard them mid-session, a token minted 20
 minutes ago still carries the old `custom:tier`/`custom:role` and keeps working
 until it expires — up to the 1-day max validity. Concretely: with a 1-hour access
-token, an offboarded tenant can keep calling your API for up to ~60 minutes after
-you flip their registry status to `SUSPENDED`. Three ways to force it sooner:
+token, an offboarded tenant (or an attacker who grabbed a live token) can keep
+calling your API for up to ~60 minutes after you flip their registry status to
+`SUSPENDED`. Simply "blocking auth and stopping routing" at offboarding does
+**not** stop a request that already carries a valid token. Three ways to force it
+sooner:
 
 - **Short access-token TTL** (e.g. 5–15 min) so stale claims self-heal quickly —
   the simplest lever, at the cost of more refresh-token round trips.
 - **Explicit revocation** — Cognito **global sign-out** / token revocation
-  invalidates refresh tokens so no *new* access tokens are issued.
-- **Server-side status check** — on sensitive operations, re-read the tenant's
-  `status` from the registry (cheap, cached) and reject if `SUSPENDED`, rather than
-  trusting the token alone. This is the belt-and-suspenders answer that closes the
-  window entirely and ties directly to the `SUSPENDED` offboarding state.
+  invalidates the **refresh** token so no *new* access tokens can be minted; note
+  this stops re-minting but does not retroactively kill an already-issued access
+  token still inside its TTL — that window still closes only on expiry.
+- **Server-side status check (denylist)** — on sensitive operations, re-read the
+  tenant's `status` from the registry (cheap, cached) at the authorizer and reject
+  if `SUSPENDED`, rather than trusting the token alone. This closes the window
+  entirely, but the **trade-off** is that it reintroduces exactly the per-request
+  registry dependency the self-contained JWT was designed to avoid — so reserve it
+  for high-security paths, keep it cache-backed, and accept that it re-couples
+  request availability to the registry. This ties directly to the `SUSPENDED`
+  offboarding state: `SUSPENDED` in the registry is only *enforced in real time*
+  once existing tokens expire — unless you also revoke refresh tokens and/or deny
+  on a live status check.
 
 ---
 
@@ -325,12 +360,59 @@ sequenceDiagram
   of the quota with enormous headroom. The cache TTL must be *shorter* than the
   credential expiry (e.g. refresh at 50 minutes for 1-hour creds) so you never hand
   out an expired session.
+
+  > [!WARNING]
+  > The credential cache must be keyed **strictly by `tenantId`** and the lookup
+  > scoped to the *current request's* tenant. In a warm Lambda execution
+  > environment (or a reused connection/thread), a request serving tenant B must
+  > **never** pick up tenant A's cached session. This is the same "context loss on
+  > reuse" bug flagged elsewhere in this doc — and it is where the caching
+  > optimization can silently *reopen* the exact cross-tenant hole that IAM scoping
+  > just closed. A single global/shared credential variable is the classic version
+  > of this mistake.
 - **Cross-account note:** for a cross-account `AssumeRole`, only the **calling**
   account's STS quota is consumed, not the target account's.
 - **Granularity vs. blast radius:** session tags let **one role** serve all
   tenants (fewer IAM roles to manage) while still isolating per request — versus a
   **role-per-tenant** which is simpler to reason about but multiplies IAM roles
   toward the **1,000 roles per account** soft quota (10,000 max).
+
+### The relational-store equivalent: Postgres Row-Level Security
+
+The IAM-scoped-credential pattern above is strongest for **DynamoDB and S3**,
+where an IAM condition key (`dynamodb:LeadingKeys`, an S3 prefix) can gate access
+at the *item/object* granularity. It does **not** translate to a pooled relational
+table (Aurora / RDS Postgres or MySQL): IAM can grant or deny access to the *table*
+as a whole, but it cannot express "only the rows where `tenant_id = t-8421`"
+inside a shared table. So on relational stores the "credential-enforced" layer moves
+into the database engine itself:
+
+- **Postgres Row-Level Security (RLS).** You attach a policy to the table that
+  filters every query by a session variable, then set that variable from the
+  verified tenant context on each request:
+
+  ```sql
+  ALTER TABLE app_data ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY tenant_isolation ON app_data
+    USING (tenant_id = current_setting('app.current_tenant')::text);
+  -- per request, from the JWT claim — never from the client:
+  SET app.current_tenant = 't-8421';
+  ```
+
+  Now `SELECT * FROM app_data` (no `WHERE`!) silently returns only `t-8421`'s rows,
+  and an `UPDATE`/`DELETE` can't touch anyone else's — the engine enforces the
+  predicate the same way IAM enforced `LeadingKeys` above.
+- **Per-tenant DB roles/schemas or connection pools** are the coarser alternative:
+  a distinct role or schema per tenant, so the connection itself can only see its
+  tenant's data.
+
+> [!WARNING]
+> RLS has the same "context loss on reuse" failure mode as the credential cache.
+> `SET app.current_tenant` lives on the **connection**, and pooled connections are
+> reused across requests. If tenant B checks out a connection that tenant A last
+> set and you forget to reset the variable, B reads A's rows. Reset the tenant
+> variable at checkout (or use `SET LOCAL` inside a transaction so it auto-resets),
+> exactly as you key the credential cache strictly by `tenantId`.
 
 > [!INTERVIEW]
 > "How do you *guarantee* one tenant can't read another's data in a pooled table?"
@@ -434,7 +516,11 @@ Offboarding is the mirror image and is often under-designed:
 
 - **Disable then delete** — first set status=`SUSPENDED`/`DISABLED` (block auth,
   stop routing) so you can reverse an accidental or non-payment offboard, then
-  hard-delete after a retention window.
+  hard-delete after a retention window. **Gotcha:** blocking auth only stops *new*
+  logins — a tenant already holding a valid JWT keeps working until it expires (see
+  *Staleness and revocation* above). To enforce `SUSPENDED` immediately you must
+  also revoke refresh tokens and/or deny on a live registry status check, not just
+  flip the status field.
 - **Data export** — many contracts require a **per-tenant export** before deletion
   (easier with siloed data; in pooled data you must query by `tenantId`).
 - **Resource teardown** — for siloed tenants, delete the CloudFormation stack /

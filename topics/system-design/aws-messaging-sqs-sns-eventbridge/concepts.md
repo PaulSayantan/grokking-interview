@@ -510,9 +510,115 @@ choose the partition key so unrelated entities don't serialize behind each other
 
 ---
 
+## Security, encryption and access control
+
+**Intuition.** A queue or topic is a *shared-nothing front door*: by default only the
+account that created it can touch it, and traffic rides HTTPS. The three questions an
+interviewer probes are (1) *is the data encrypted at rest?* (2) *who is allowed to
+publish/send and receive?* and (3) *how does a client reach the service without going
+over the public internet?* These map cleanly to encryption, resource policies, and VPC
+endpoints. This matters because AWS uses a **shared-responsibility model**: AWS secures
+the service and the physical layer, but *you* own the encryption choice, the access
+policy, and the network path.
+
+**Encryption at rest.**
+- **SSE-SQS / SSE-SNS (AWS-managed keys):** on by default for new queues/topics,
+  zero config, no extra cost. AWS owns and rotates the key. Good enough for most
+  intra-account workloads.
+- **SSE-KMS (customer-managed key, CMK):** you supply a KMS key. You gain (a) an
+  **audit trail** — every `Decrypt`/`GenerateDataKey` shows up in CloudTrail — and
+  (b) the ability to **grant cross-account access to the key** so another account can
+  actually read the messages. You give up money and headroom: KMS calls cost per
+  request and are themselves rate-limited, so a very high-throughput queue can hit
+  **KMS throttling**. Mitigation: SQS caches data keys (the `KmsDataKeyReusePeriod`,
+  60 s–24 h) so it isn't calling KMS on every message — a longer reuse period means
+  fewer KMS calls (cheaper, less throttling) but a wider blast radius if a key is
+  compromised. Pick SSE-KMS when you need audit or cross-account decryption; default
+  to SSE-SQS otherwise.
+- **In transit:** all API calls are HTTPS/TLS; you can additionally *deny* non-TLS
+  requests with a policy condition (`aws:SecureTransport = false`).
+
+**Access control — who can Publish/SendMessage/Receive.**
+- **Identity policies (IAM)** attached to a principal answer "what can *this role* do."
+- **Resource policies** attached to the queue/topic/bus answer "who can touch *this
+  resource*" — and are how you do **cross-account** and how you restrict *which* SNS
+  topic may deliver into an SQS queue. The classic fan-out gotcha: an SNS→SQS
+  subscription silently delivers **nothing** until the SQS queue's resource policy has
+  a statement allowing `sqs:SendMessage` from the SNS topic ARN (scoped with
+  `aws:SourceArn`). Consoles wire this for you; IaC often forgets it.
+- **EventBridge** uses a **resource-based bus policy** to let another account call
+  `PutEvents` on your bus (cross-account event ingestion), plus an IAM role the rule
+  assumes to invoke targets.
+
+**VPC endpoints (PrivateLink).** By default, calling SQS/SNS from inside a VPC goes out
+a NAT gateway to the public endpoint. A **VPC interface endpoint (PrivateLink)** puts a
+private ENI for the service inside your subnet so traffic never leaves the AWS network —
+required for private/no-internet subnets and for compliance ("no data over the public
+internet"). Trade-off: endpoints cost per-hour + per-GB and are regional, but remove NAT
+egress cost and shrink the network attack surface.
+
+**Worked example — service in Account A publishing to a queue in Account B.**
+Goal: a Lambda in **Account A (111111111111)** sends to an SQS queue owned by
+**Account B (222222222222)**.
+
+1. **Account B** attaches a *queue resource policy* allowing
+   `sqs:SendMessage` where `Principal` is `arn:aws:iam::111111111111:root` (or the
+   specific Lambda role ARN — tighter is better).
+2. If the queue uses **SSE-KMS**, Account B's KMS **key policy** must also grant
+   `kms:GenerateDataKey` + `kms:Decrypt` to Account A's principal — *this is the step
+   people forget*: the send succeeds against the queue policy but fails at encryption,
+   so messages silently never arrive.
+3. **Account A's** Lambda role needs an *identity policy* allowing `sqs:SendMessage`
+   on Account B's queue ARN.
+   Both sides must agree — a cross-account action needs an *allow on the resource*
+   **and** an *allow on the identity*. Miss either and it's `AccessDenied`; miss the
+   KMS grant and it's a silent drop.
+
+> [!INTERVIEW] "How does service A in one account publish to a queue in another
+> account?" — answer with the *two-sided* rule (resource policy on the queue **plus**
+> identity policy on the caller), then volunteer the KMS-key-policy gotcha and the
+> `aws:SourceArn` scoping for SNS→SQS. That combination reads as someone who has
+> actually debugged a cross-account `AccessDenied`.
+
+---
+
+## SQS to Lambda scaling and batching
+
+**Intuition.** When Lambda is the consumer you don't write a poll loop — the Lambda
+service runs a hidden poller called an **event-source mapping (ESM)** that long-polls
+the queue, groups messages into batches, and invokes your function. Understanding the
+ESM's *scaling* and *batching* knobs is a frequent senior probe because the defaults
+interact with visibility timeout and the DLQ in non-obvious ways.
+
+- **Batching.** The ESM accumulates a batch before invoking: **batch size** (max
+  records per invoke) and an optional **batch window** (wait up to N seconds to fill a
+  batch). Bigger batches amortize invocation overhead but a single invoke now carries
+  more work — and one poison record can fail the whole batch (see below).
+- **Concurrency scaling.** The ESM starts with a small number of concurrent pollers and
+  **ramps up in steps** (adding pollers per minute) as backlog grows, up to your
+  account concurrency limit — or a per-ESM **`maxConcurrency`** cap you set to protect a
+  fragile downstream (e.g. a database) from a sudden queue-drain stampede.
+- **The visibility-timeout rule.** Set the queue's **visibility timeout to at least 6×
+  the Lambda function timeout.** *Why 6×:* the ESM may retry an invoke internally, and
+  the message must stay hidden across those attempts; if the visibility timeout is
+  shorter than the function can run, the message reappears and a *second* invocation
+  processes it in parallel — duplicate work. Example: function timeout **30 s** →
+  visibility timeout **≥ 180 s**.
+- **Partial failures.** With **`ReportBatchItemFailures`**, the function returns the
+  IDs of only the records that failed; the ESM makes just those visible again while
+  deleting the successes — so one bad record in a batch of 10 doesn't reprocess (and
+  re-bill) the 9 good ones. Each returned-failed record's `receiveCount` still climbs,
+  so it eventually crosses **`maxReceiveCount`** and lands in the **DLQ** exactly as a
+  hand-rolled consumer would — the DLQ is still your poison backstop, batching just
+  narrows what gets retried.
+
+---
+
 ## Failure modes, quotas and cost estimation
 
-**How each design degrades**
+**The one-line takeaway:** durability lives in **SQS**, not in SNS/EventBridge push;
+everything else below is about where each service throttles or drops when pushed past
+its limits. **How each design degrades**
 - **Consumer down / slow:** SQS just grows queue depth (bounded by retention);
   drain later. SNS direct subscribers **lose** messages past the retry window
   unless a subscription DLQ exists. Lesson: durability lives in SQS, not SNS.
@@ -534,7 +640,9 @@ choose the partition key so unrelated entities don't serialize behind each other
   cheaper to make consumers idempotent and eat the duplicate work than to build
   cross-region exactly-once, which does not exist.
 
-**Quotas worth memorizing**
+**Quotas worth memorizing** *(the ones that actually change a design are message size,
+the FIFO throughput ceiling, and the in-flight cap — memorize those three first; the
+rest are for sanity-checking a back-of-envelope):*
 - SQS message size **256 KB**; retention **60 s–14 days** (default 4 days);
   visibility **0 s–12 h** (default 30 s); delay/timer **0–15 min**; long poll
   **≤20 s**; in-flight **120k standard / 20k FIFO**; batch **10 messages**.
@@ -606,6 +714,13 @@ scope as the things juniors forget.
 - "How do these services behave in an AZ failure? A region failure?"
 - "Estimate the monthly SQS cost for 2 billion messages — what's the biggest lever?"
 - "How do you schedule millions of per-user reminders? Why not SQS delay queues?"
+- "How does service A in account 1 publish to a queue in account 2? What are the two
+  policies involved, and what silently breaks if the queue is KMS-encrypted?"
+- "SSE-SQS vs SSE-KMS — when is the customer-managed key worth the cost, and how do
+  you avoid KMS throttling on a high-throughput queue?"
+- "How does SQS reach Lambda? Why must the visibility timeout be ≥ 6× the function
+  timeout, and how does ReportBatchItemFailures interact with the DLQ?"
+- "How do you keep queue traffic off the public internet from a private subnet?"
 
 ## References
 

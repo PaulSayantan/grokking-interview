@@ -47,6 +47,20 @@ cycles, and on-call surfaces.
 - **Operational leverage.** One deploy upgrades everyone; one patch fixes everyone.
 - **Faster iteration.** A single codebase and schema evolves once.
 
+*Feel the numbers behind "statistical multiplexing."* Imagine 1,000 tenants who each
+average ~5% of one capacity unit but occasionally burst to 100%. Give each its own silo
+and you provision **1,000 units** — one per tenant, each sized for its own peak, ~95%
+idle almost all the time. Pool them instead: the aggregate *average* demand is
+1,000 × 5% = **50 units**, and because tenants rarely all spike in the same second
+(their peaks are largely uncorrelated), the combined load stays near that average. Run
+the shared fleet at ~70% utilization with burst headroom and you provision on the order
+of **50 / 0.70 ≈ 72 units** — call it ~100 with safety margin. That's a **~10× cost
+reduction** for the same workload; pooling *sells one tenant's idle 95% to whichever
+tenant needs it right now*. The catch is the flip side of the same coin: if peaks *do*
+correlate (a Monday-morning login rush hits everyone at once), the shared fleet
+saturates and you get the **noisy-neighbor** problem the pool model must defend against.
+(The silo section below quantifies the same effect in dollars.)
+
 **Why it's hard (what sharing costs you):**
 
 - **Isolation risk.** Shared data stores mean a bug can leak across the tenant boundary.
@@ -250,6 +264,15 @@ instance (e.g., PostgreSQL schemas, MySQL "databases"). Stronger object-level se
 and per-tenant backup is easier, but you now have N× schema objects and migrations run
 per schema. Watch catalog bloat and connection limits.
 
+> One engine caveat worth knowing: in **MySQL, "schema" and "database" are synonyms** —
+> there is no intra-database namespace layer — so "schema-per-tenant" in MySQL really
+> means *many databases on one server instance*. In **PostgreSQL, a schema is a true
+> namespace inside a single database**, so schema-per-tenant keeps every tenant in one
+> database (one connection, one `pg_catalog`) while still separating objects. The
+> distinction matters: Postgres schemas share the database's connection and catalog
+> (cheaper, but a shared blast radius for DB-level operations), whereas MySQL's
+> per-tenant "databases" behave more like small silos on a shared server.
+
 **Database-per-tenant.** Each tenant gets a physically separate database. Strongest
 isolation, easiest per-tenant restore/residency/encryption, but lowest density and
 heaviest ops.
@@ -259,6 +282,60 @@ heaviest ops.
 > db-per-tenant ≈ silo. You can also **shard**: put groups of tenants on different
 > shards (pool within a shard, silo between shards). See
 > `databases-sql-nosql-sharding-replication`.
+
+---
+
+## Compute and network isolation
+
+The isolation spectrum is *per layer* — and the data tier isn't the only place it
+applies. The exact same silo/pool/bridge choice repeats at the **compute tier** (which
+CPU/memory/process actually runs a tenant's request) and the **network tier** (which
+subnet/security boundary a tenant lives behind). Interviewers probe this directly: "your
+data is pooled with a `tenant_id` column — but *how do you actually isolate compute*?"
+The intuition is the same as before: the more you dedicate hardware to one tenant, the
+smaller the blast radius and the noisy-neighbor risk, but the lower your density and the
+higher your cost and cold-start overhead.
+
+| Compute model | What's dedicated | Isolation | Density / cost | Blast radius | Typical model |
+|---|---|---|---|---|---|
+| **Shared process + bulkheads** | Nothing; one app process serves all tenants, with per-tenant thread pools / connection pools / concurrency caps | Weakest (logical) | Highest density, lowest cost | One runaway tenant can still degrade the shared process | Pool |
+| **Container or namespace per tenant** | A container / Kubernetes namespace (with resource `requests`/`limits` and network policies) per tenant | Medium (OS + scheduler enforced) | Medium — many per node, some overhead | Contained to that container/namespace | Bridge |
+| **Dedicated compute + VPC/subnet per tenant** | A whole cluster / VM fleet in its own VPC or subnet, own security groups | Strongest | Lowest density, highest cost | One tenant's fleet only | Silo |
+
+**Shared process with bulkheads (pooled compute).** All tenants run inside the same
+application instances; you carve the shared resource into **bulkheads** — separate
+thread pools, connection pools, or concurrency limits keyed by tenant (or tenant tier) —
+so one tenant's saturation can't drain the whole pool (the ship-compartment metaphor: a
+flood in one compartment doesn't sink the ship). Cheapest and densest, but isolation is
+only as strong as your quotas, and a shared-process crash or memory leak still hits
+everyone.
+
+**Container / namespace per tenant (bridge compute).** Each tenant (or tenant tier) gets
+its own container or **Kubernetes namespace** with CPU/memory `requests` and `limits` and
+NetworkPolicies. The OS and scheduler now enforce the boundary, so a tenant that pins CPU
+or OOMs is capped to its own container. You still pack many tenants per node, so density
+stays reasonable — the cost is per-tenant scheduling/packing overhead and more objects to
+operate.
+
+**Dedicated compute + network silo.** Each tenant gets its own compute fleet inside its
+own **VPC / subnet** with dedicated security groups, sometimes reached via **PrivateLink**
+(a private, one-way network endpoint into the tenant's VPC that avoids exposing traffic to
+the public internet). Strongest isolation and the cleanest compliance/residency story, but
+lowest density and highest cost — reserved for enterprise/regulated tiers.
+
+**Serverless as pooled compute with a per-tenant credential.** A very common modern
+pooled-compute pattern: a shared function (e.g., AWS Lambda) handles every tenant's
+request, but on each invocation it assumes a **tenant-scoped IAM role** (see *Isolation is
+not the same as authentication or authorization*). The compute is fully pooled — same code,
+same warm pool — yet each invocation runs with credentials that can only reach *its*
+tenant's data. This gets pool-level density with infrastructure-enforced data isolation,
+which is why it's a go-to for pooled SaaS on AWS.
+
+> [!KEY-TAKEAWAY]
+> "Isolate per layer" is literal: you can run **pooled compute over siloed data**, or
+> **pooled data behind bulkheaded compute**. Pick each tier's point on the spectrum from
+> its own risk/cost profile — a `tenant_id` column says nothing about how compute or the
+> network are isolated.
 
 ---
 
@@ -580,6 +657,28 @@ observability and cost attribution.
 **The tenant directory / mapping table** is the authority for tenant → shard/DB/region/
 tier. It's on the hot path, so it's cached aggressively — and it must be updated
 atomically during onboarding/migration.
+
+**Nested / hierarchical tenancy (B2B2C).** Sometimes a tenant *has its own tenants* — a
+reseller with downstream customers, or an org with departments/teams that must be scoped
+from each other. Instead of a flat `tenant_id`, you model a **hierarchy**: either a
+**composite tenant key** (`reseller_id + org_id`, or a materialized path like
+`acme/eu/sales`) or a parent-pointer tree. Every isolation mechanism above then scopes on
+the *whole path*: RLS predicates and IAM/session tags match the sub-org prefix, routing
+resolves the leaf, and an admin at level N can see everything *below* their node but
+nothing above or sideways. The gotcha is that a single missing level in the composite key
+is the same class of leak as a missing `tenant_id` — the boundary is now the full path,
+not one column.
+
+**Per-tenant cost attribution in a pool.** In a silo, each tenant's cost is just its
+stack's bill. In a *pool*, infrastructure isn't physically partitioned, so there's no
+natural per-tenant meter — attributing shared DB/CPU/storage back to a tenant is a
+genuinely hard problem. You *approximate* it by metering proxies you can tag with
+`tenant_id`: request counts, aggregate query/CPU time, storage bytes, egress, and
+tagged custom metrics — then allocate the shared bill in proportion. It's an estimate,
+not an invoice-grade number, but it's what drives per-tenant profitability analysis,
+usage-based billing, and spotting a tenant whose cost outruns its plan. Name this
+explicitly in interviews: "in a pool I can't physically meter a tenant, so I attribute
+cost via tagged usage signals."
 
 > [!WARNING]
 > A dropped tenant context (a background job, an async callback, a cache lookup) is a

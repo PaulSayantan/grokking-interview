@@ -28,7 +28,8 @@ and most questions become mechanical.
 storage, DynamoDB tables, EFS, snapshots, backups). The threat model is a stolen disk, a
 mis-shared snapshot, or an operator reading raw storage. Nearly every AWS storage service
 integrates with KMS for server-side encryption (SSE): S3 (SSE-S3 with AWS-owned keys,
-SSE-KMS with your keys, or SSE-C with keys you supply per request), EBS (KMS-backed volume
+SSE-KMS with your keys, or **SSE-C** — server-side encryption with *customer-provided* keys,
+where you supply and manage the key on *each request* and AWS never stores it), EBS (KMS-backed volume
 encryption), RDS/Aurora, DynamoDB (encryption at rest is **on by default and cannot be
 disabled**), and so on. S3 now applies SSE-S3 as a **default baseline on all new objects**
 even if you request nothing.
@@ -43,8 +44,9 @@ backend for true end-to-end (higher CPU, needed for PCI/HIPAA-grade zero-trust).
 **Trade-off — where does encryption stop?** Terminating TLS at the ALB and speaking HTTP
 to targets is common and acceptable *inside* a trusted VPC, but it means traffic between
 the load balancer and your app is plaintext — a compromised host or a mirrored ENI can
-read it. Re-encrypting (ALB → HTTPS target, or mTLS between services via App Mesh /
-service mesh) gives defense in depth at the cost of extra TLS handshakes and CPU. Pick
+read it. Re-encrypting (ALB → HTTPS target, or **mTLS** — *mutual TLS*, where both sides present
+certificates so each authenticates the other, not just the client verifying the server —
+between services via App Mesh / service mesh) gives defense in depth at the cost of extra TLS handshakes and CPU. Pick
 end-to-end when regulation or a zero-trust posture demands it; otherwise edge termination
 is the pragmatic default. **Gotcha:** ALB target-group HTTPS re-encryption does *not* validate
 the backend's certificate (no cert pinning by default) — the ALB will happily connect to a target
@@ -97,6 +99,15 @@ zero-touch but you cannot change their policy or use them cross-account. Default
 for low-stakes data; use a CMK the moment you need policy control, cross-account sharing, or
 compliance evidence of key management.
 
+**Gotcha — you cannot delete a KMS key immediately.** KMS enforces a mandatory **7–30 day
+pending-deletion waiting period** (you choose the length; the minimum is 7 days) — there is no
+instant delete. This is deliberate: deleting a key is **irreversible and orphans every ciphertext
+ever encrypted under it** (the data becomes permanently unrecoverable). That is precisely why
+*disabling* the key — which is instant and reversible — is the real kill switch: it blocks all
+crypto operations immediately but lets you re-enable and recover if you were wrong. Scheduled
+deletion is the last resort, and the waiting window is your safety net to catch a mistake and
+cancel it before the key is gone.
+
 ---
 
 ## Envelope encryption and data keys
@@ -130,6 +141,18 @@ Data keys are up to 1024 bytes (typically AES-256, 32 bytes).
 **Why this matters for design:** the KMS API is only called once per data key, not once per
 byte — so a 5 GB object needs *one* KMS call, not millions. This keeps you well under KMS
 request quotas and keeps latency low (the expensive network round-trip to KMS happens once).
+
+**The shared quota — why this is the real bottleneck.** KMS cryptographic operations
+(`Encrypt`, `Decrypt`, `GenerateDataKey`, `ReEncrypt`, …) don't each get their own limit — they
+**all draw from one shared per-Region, per-account request-per-second bucket**. As of writing
+that shared bucket is on the order of **several thousand to tens of thousands of requests/second**
+(commonly cited as ~5,500–50,000 req/s depending on Region, key type, and operation — verify
+current docs), and it is an **adjustable** Service Quota you can raise via a quota-increase
+request. Exceed it and KMS returns `ThrottlingException` (HTTP 400), which surfaces to callers as
+throttled encrypts/decrypts — a real availability problem, not just a bigger bill. This shared,
+throttleable bucket is *exactly* why Bucket Keys and DEK caching (below) exist: they collapse
+many `GenerateDataKey`/`Decrypt` calls into a few, so a high-object-count or high-throughput
+workload stays well under the shared limit instead of hammering it.
 The **KMS Encryption SDK** and **S3 SSE-KMS with S3 Bucket Keys** automate this. **S3 Bucket
 Keys** are a critical cost optimization: instead of calling KMS per object, S3 generates a
 short-lived bucket-level key, cutting KMS request costs by up to ~99% for high-object-count
@@ -228,7 +251,10 @@ alternative but breaks cross-Region decrypt of the same ciphertext.
 
 **AWS CloudHSM** gives you **single-tenant**, dedicated HSMs (FIPS 140-2 Level 3) that *you*
 fully control — you manage users, keys, and the cluster; AWS manages hardware and HA. You
-access it via standard PKCS#11, JCE, or CNG/KSP libraries. **KMS** is **multi-tenant** managed
+access it via **PKCS#11, JCE, or CNG/KSP** — these are the standard client libraries/interfaces
+applications use to talk to any HSM (PKCS#11 is the cross-platform C standard, JCE the Java
+provider interface, CNG/KSP the Windows one), so existing crypto apps can point at CloudHSM
+with little change. **KMS** is **multi-tenant** managed
 crypto with a simple API and deep AWS-service integration, but AWS operates it and you never
 touch the HSM directly.
 

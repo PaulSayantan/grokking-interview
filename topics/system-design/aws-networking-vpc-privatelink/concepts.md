@@ -56,11 +56,16 @@ flowchart TD
     B2["private 10.0.11.0/24 (app tier)"]
     B3["isolated 10.0.21.0/24 no 0.0.0.0/0 (RDS, no internet)"]
   end
-  A1 -->|"→IGW"| IGW["IGW"]
+  A1 -->|"→IGW"| IGW["IGW (regional)"]
   B1 -->|"→IGW"| IGW
-  A2 -->|"→NAT"| NAT["NAT"]
-  B2 -->|"→NAT"| NAT
+  A2 -->|"→NAT-a"| NATa["NAT GW (AZ-a)"]
+  B2 -->|"→NAT-b"| NATb["NAT GW (AZ-b)"]
 ```
+
+*(Diagram note: each app subnet routes to the NAT gateway **in its own AZ** — one NAT
+per AZ, not a shared one. That is what gives AZ-fault isolation and avoids cross-AZ
+data-transfer fees; see the NAT trade-off below. The IGW is a single regional,
+horizontally-scaled object shared by both AZs.)*
 
 **Reserved addresses:** AWS reserves the **first four and the last** IP in every
 subnet (network address, VPC router, DNS `.2`, future use, and broadcast). So a `/24`
@@ -95,8 +100,13 @@ CIDR is implicit and cannot be removed or overridden.
   **free**. It performs 1:1 NAT for instances with public/Elastic IPs. One IGW per
   VPC. Presence of a `0.0.0.0/0 → igw` route is what makes a subnet "public."
 - **NAT Gateway:** managed, AZ-scoped SNAT device for **outbound-only** internet from
-  private subnets. Scales **5 Gbps up to 100 Gbps** automatically, supports up to
-  **~55,000 simultaneous connections per unique destination** (IP+port). Priced at
+  private subnets. Scales **5 Gbps up to 100 Gbps** automatically. The connection limit
+  is a **SNAT-port limit of ~55,000 simultaneous connections per unique destination**,
+  where "destination" means the tuple **(destination IP, destination port, protocol)** —
+  so you get ~55k concurrent connections to *each distinct* endpoint, not 55k total. The
+  classic failure is high fan-out to **one** endpoint (e.g. every host hammering a single
+  API host on 443), which exhausts that tuple's ports and surfaces as `ErrorPortAllocation`
+  — it is *not* about raw traffic volume, and adding bandwidth doesn't help. Priced at
   **~$0.045/hr + ~$0.045 per GB processed** — the per-GB charge is *on top of*
   internet egress and is a classic surprise on the bill.
 
@@ -266,6 +276,22 @@ per-hour + per-GB endpoint cost and is fronted by an NLB (Layer 4 only, no
 HTTP-path routing). If you need many services mutually reachable, peering/TGW is
 simpler than standing up an endpoint service per API.
 
+**PrivateLink vs VPC Lattice — L4 exposure vs L7 service mesh.** PrivateLink operates at
+**Layer 4**: it exposes one NLB-fronted service on a TCP/UDP listener, one-way, with no
+knowledge of HTTP paths, headers, or methods. **Amazon VPC Lattice** is the newer,
+**application-layer (L7)** answer to service-to-service connectivity — an
+**ambient/sidecar-less service mesh** (the data-plane logic lives in the VPC fabric, so
+there is no per-pod proxy to run). Lattice gives you **path- and header-based routing,
+weighted target groups (canary/blue-green), and native IAM auth policies on each
+service**, and it connects services across VPCs and accounts *without* peering or
+non-overlapping CIDR planning. Reach for **PrivateLink** when you're exposing a single
+opaque endpoint to an external/SaaS consumer, need overlap-safe one-way access, or the
+protocol isn't HTTP; reach for **VPC Lattice** when you own **many HTTP(S)/gRPC
+microservices across accounts** and want L7 routing plus identity-based authZ without
+running Envoy sidecars or wiring an N×N mesh yourself. The condition that flips it:
+**do you need L7 semantics + IAM per request (Lattice), or a protocol-agnostic one-way
+L4 pipe to an outside party (PrivateLink)?**
+
 ---
 
 ## VPC peering versus Transit Gateway
@@ -290,17 +316,21 @@ attachments and centralizes routing/inspection.
 | Topology           | 1:1, full mesh needed          | Hub-and-spoke, single attachment per VPC |
 | Transitive routing | **No**                         | **Yes** (via TGW route tables)           |
 | Scale              | ~125 peerings/VPC, mesh O(n²)  | **5,000 attachments** per TGW            |
-| Bandwidth          | No aggregate cap (backbone)    | **Up to 100 Gbps per VPC attachment** per AZ; **~5 Gbps per-flow** cap |
+| Bandwidth          | No aggregate cap (backbone)    | **Up to 100 Gbps per VPC attachment** per AZ; **per-flow cap** (single 5-tuple) — historically 5 Gbps, since raised (verify docs) |
 | Cost               | Data transfer only, no hourly  | **Per-attachment hourly + per-GB processed** |
 | Latency            | Lowest (direct)                | +~small hop through the hub              |
 | Inspection         | Hard (no central chokepoint)   | Easy (central inspection/egress VPC)     |
 
 **Quotas that matter:** TGW 5,000 attachments, 10,000 total routes across all its
-route tables, 20 TGW route tables, 50 peering attachments. Per-flow (single
-TCP/UDP 5-tuple) traffic can't exceed **~5 Gbps** through TGW even though aggregate
-per VPC attachment is up to 100 Gbps per AZ — a real limit for elephant flows (bulk
-migration, backup). Peering has no such per-flow cap, which is one reason to keep a
-direct peering for a specific high-throughput pair even in a TGW world.
+route tables, 20 TGW route tables, 50 peering attachments. A **single flow (one
+TCP/UDP 5-tuple) is capped** through TGW even though aggregate per VPC attachment is
+up to 100 Gbps per AZ — historically this per-flow ceiling was **~5 Gbps**, and AWS has
+since raised it for ENA/jumbo-frame-capable flows (confirm the current figure in the
+TGW quotas docs before quoting a hard number). Either way the *mechanism* is what
+matters in an interview: **aggregate bandwidth scales, but any one flow is bounded**, so
+an elephant flow (bulk migration, backup, a single big replication stream) can't use the
+full attachment. Peering has no such per-flow cap, which is one reason to keep a direct
+peering for a specific high-throughput pair even in a TGW world.
 
 **Trade-off — peering vs TGW.** For **2–3 VPCs** with high, direct throughput and cost
 sensitivity, **peering** wins: free hourly, lowest latency, no per-flow cap. Once you
@@ -531,6 +561,20 @@ more moving parts and ops overhead, but it survives a network-perimeter breach.
 Best practice combines both: private-by-default networking (endpoints, no public IPs)
 **plus** identity-based authorization on every hop.
 
+**Observability — VPC Flow Logs and Traffic Mirroring.** You can't secure or debug what
+you can't see. **VPC Flow Logs** record connection *metadata* — source/dest IP, ports,
+protocol, bytes/packets, and crucially the **ACCEPT or REJECT** decision — per ENI,
+subnet, or whole VPC, delivered to CloudWatch Logs or S3. They are the first tool for
+answering "who talked to whom," proving an SG/NACL actually blocked something (a REJECT
+line), or spotting a **black-holed route** (packets leave but nothing returns). Key
+gotcha: **Flow Logs capture headers/metadata only — never packet payloads**, and they
+don't record traffic to the Resolver, IMDS, or Windows license activation. When you need
+the actual bytes (deep packet inspection, IDS, decoding an app-layer bug), use **Traffic
+Mirroring**, which copies full packets from an ENI to a monitoring appliance — far more
+expensive and higher-volume, so it's targeted, not always-on. In an interview: reach for
+**Flow Logs** to debug connectivity/SG failures and for security audit trails, and
+**Traffic Mirroring** only when metadata isn't enough and you need the payload.
+
 ---
 
 ## Trade-offs and when to use what
@@ -575,14 +619,17 @@ Quick decision guide for the primitives interviewers force you to choose between
   secondary CIDRs or move to IPv6. Can't be fixed by resizing the primary CIDR.
 - **Route table / route limits:** 500 (→1000) routes per RT, 10,000 per TGW —
   large hybrid meshes hit this; summarize/advertise default routes.
-- **TGW per-flow ~5 Gbps cap:** a single elephant flow can't exceed it even though
-  aggregate per attachment reaches ~100 Gbps — bulk transfers should parallelize
-  connections or use direct peering.
+- **TGW per-flow cap:** a single elephant flow (one 5-tuple) can't exceed the per-flow
+  ceiling — historically ~5 Gbps, since raised (verify docs) — even though aggregate per
+  attachment reaches ~100 Gbps. Bulk transfers should parallelize connections or use
+  direct peering.
 - **VPN tunnel ~1.25 Gbps cap:** a single tunnel throttles; need ECMP over multiple
   VPNs (dynamic BGP) or DX.
-- **NAT connection limits:** ~55,000 simultaneous connections per unique destination —
-  high-fan-out to one endpoint exhausts ports (SNAT errors); spread across
-  destinations or use more NAT GWs / interface endpoints.
+- **NAT connection limits:** ~55,000 simultaneous connections per **(dest IP, dest port,
+  protocol)** tuple — high fan-out to *one* endpoint exhausts that tuple's SNAT ports
+  (`ErrorPortAllocation`), while total volume across many destinations is fine. Fix by
+  spreading destinations, fronting the hot endpoint with an interface endpoint, or adding
+  NAT GWs — *not* by adding bandwidth.
 - **Overlapping CIDRs:** two networks can't be peered/TGW-joined — only PrivateLink or
   private NAT can bridge them.
 
@@ -613,7 +660,8 @@ Quick decision guide for the primitives interviewers force you to choose between
   (docs.aws.amazon.com/vpc/latest/userguide/).
 - Amazon VPC quotas page (VPCs/Region, subnets, CIDR /16–/28, SG/NACL rule limits).
 - AWS Transit Gateway User Guide and Transit Gateway quotas (attachments, routes,
-  100 Gbps/attachment aggregate per AZ, ~5 Gbps per-flow, ECMP, appliance mode).
+  100 Gbps/attachment aggregate per AZ, per-flow cap — historically ~5 Gbps, since
+  raised; confirm current value — ECMP, appliance mode).
 - AWS PrivateLink documentation — interface endpoints, endpoint services, gateway vs
   interface endpoints.
 - AWS Site-to-Site VPN User Guide (two tunnels, ~1.25 Gbps/tunnel, ECMP) and AWS

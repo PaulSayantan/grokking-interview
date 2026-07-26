@@ -85,6 +85,21 @@ sticky sessions on a load balancer as a *weak* form. In practice most teams push
 out to a shared store (Redis/ElastiCache, DynamoDB, Cloud Spanner) and keep the compute
 tier **stateless** rather than replicate state peer-to-peer.
 
+**How replicas actually agree (and why it caps scale).** "Replicated among all instances"
+hides a mechanism choice. Two families: **gossip / anti-entropy** — each node periodically
+exchanges its state with a few random peers, so updates spread epidemically and the cluster
+converges *eventually* (how Cassandra, Redis Cluster, and Akka Cluster membership propagate
+state); or **quorum / consensus** — a majority of replicas must acknowledge a write before
+it commits, giving *strict* agreement at the price of a round-trip to that majority
+(**Raft** and **Paxos** are the canonical consensus algorithms; a *quorum* is simply "a
+majority must agree"). Either way, keeping N instances mutually in sync is the **all-to-all
+mesh** drawn above: replication chatter grows on the order of **O(N²)** as every instance
+gossips-with or votes-with the others. Concretely, going from 3 → 10 instances takes the
+pairwise links from 3 to 45 — a ~15× jump in cross-talk for a ~3× jump in nodes. That O(N²)
+cross-talk, not CPU, is the concrete reason the pattern **caps fan-out**: the more state you
+replicate and the stricter the consistency, the sooner that chatter dominates and scale-out
+stalls.
+
 **Trade-offs / when to use.** Replicating state costs bandwidth and coordination and
 limits how far you can scale out — the more state and the stricter the consistency, the
 worse it scales. Use Stateful Component only for **small, hot shared state** where the
@@ -115,7 +130,12 @@ running servers can be **repurposed** without spinning up new machines.
 
 **Solution (abstract).** Bundle **multiple application components** (optionally including
 middleware) into a **single virtual-server image**. A server started from that image can
-then serve *any* of those components — you enable the ones you need per server. Already
+then serve *any* of those components — you enable the ones you need per server. The image
+ships all components **pre-installed but dormant**; flipping a running server from serving
+component X to component Y is a **control signal** — a config flag toggled, a feature flag
+switched, or a bundled service started/stopped — that activates the wanted component on a
+machine that is **already booted**. That is the whole value: you skip the minutes-long
+provision-image-and-boot cycle and repurpose warm capacity in seconds. Already
 running servers can be reused for different purposes **without provisioning or
 decommissioning operations**, improving utilization and provisioning speed. The
 counterpart, the single-purpose image, packages exactly one component for clean scaling
@@ -411,6 +431,11 @@ environment (private cloud / on-prem) that firewalls block inbound to, but compo
 an **open** environment need to reach it. You can't open an inbound hole in the
 restricted environment (that's the whole point of the restriction).
 
+**Intuition.** Think of a **reverse SSH tunnel**, or a call-center agent who **calls you**
+so you never have to dial in: the party behind the wall reaches *out* and holds the line
+open, and all your later requests ride *back down* that line it opened. You never dial into
+the protected network — it dialed out to you.
+
 **Solution (abstract).** **Duplicate the restricted component's interface** in the
 unrestricted environment to form a **proxy**. Critically, the connection is **initiated
 and maintained from the restricted side outward** — since the restricted environment is
@@ -599,11 +624,20 @@ Component Proxy, Message-oriented Middleware, Hybrid Cloud, Compliant Data Repli
   Note real systems mix them per layer.
 - **"A regulated tenant needs its data physically separated."** Dedicated Component for
   the sensitive part, shared/tenant-isolated for the rest — don't silo the whole app.
+  *Likely counter: "But the front door is still shared — how do you stop it becoming a
+  cross-tenant leak?"* → Carry the tenant identity end-to-end (signed token / scoped
+  session), authorize every call against it at the shared tier, and make the shared tier
+  **route** to the tenant's dedicated instance rather than query data itself — so the
+  shared layer holds no tenant data and a bug there can misroute but not cross-read.
 - **"Same data, different legal reach per region — replicate or transform?"** At request
   time → Restricted Data Access Component; at replication time → Compliant Data
   Replication (filter on egress, enrich on ingress).
 - **"Private component must be callable from the cloud but no inbound holes."**
   Application Component Proxy with an outbound-established link from the restricted side.
+  *Likely counter: "What happens when that single tunnel drops or the agent restarts?"* →
+  Run redundant agents holding independent tunnels, health-check the link, have the proxy
+  fail requests fast (or queue briefly) rather than hang while the agent reconnects with
+  backoff — the persistent outbound link is the SPOF you must monitor and duplicate.
 - **"Bridge two clouds' queues" vs "let a third party integrate two companies."**
   Message Mover (you own the relay) vs Integration Provider (integration-as-a-service).
 - **"Why not just one big image with everything?"** Multi-Component Image raises
