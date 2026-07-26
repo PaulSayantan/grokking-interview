@@ -11,7 +11,7 @@ questions:
       cluster's desired state?
     options:
       - "A Git repository holding declarative manifests"
-      - "The etcd datastore"
+      - "The etcd datastore of the cluster's live state"
       - "The CI server's last successful build"
       - "The kube-apiserver's in-memory cache"
     answer: 0
@@ -27,9 +27,9 @@ questions:
     question: |
       Why is Kubernetes described as an especially good fit for GitOps?
     options:
-      - "Because kubectl can only run inside a cluster"
-      - "Because Kubernetes stores manifests in Git internally"
-      - "Because Kubernetes disallows imperative commands"
+      - "Because kubectl can only run from inside a Pod and never from a remote workstation"
+      - "Because Kubernetes clones a Git repo into every node and stores manifests there internally"
+      - "Because Kubernetes rejects all imperative commands unless you pass a special --gitops flag"
       - "Because Kubernetes is already declarative and controllers reconcile toward desired state"
     answer: 3
     explanation: |
@@ -45,10 +45,10 @@ questions:
       A common GitOps setup separates an application "source" repo from a "config" (GitOps) repo.
       What does CI typically do at the boundary between them?
     options:
-      - "Run kubectl apply directly against production"
-      - "Store the container image inside the config repo"
+      - "Run kubectl apply directly against production using cluster-admin credentials held by the runner"
+      - "Store the built container image binary as a committed blob inside the config repo itself"
       - "Build and push the image, then commit the new image tag into the config repo"
-      - "Delete the old Deployment before creating a new one"
+      - "Delete the old Deployment via kubectl and then recreate it fresh before pushing the new tag"
     answer: 2
     explanation: |
       CI builds and pushes the image from the source repo, then bumps the image tag in the config
@@ -62,10 +62,10 @@ questions:
     question: |
       What most fundamentally distinguishes pull-based GitOps from push-based CD?
     options:
-      - "Pull-based GitOps only works with Helm charts"
-      - "Push-based CD cannot deploy to Kubernetes"
+      - "Pull-based GitOps only works with Helm charts and cannot reconcile plain Kustomize overlays"
+      - "Push-based CD is fundamentally incapable of deploying workloads to any Kubernetes cluster"
       - "An in-cluster agent pulls and applies desired state itself, rather than an external pipeline pushing it"
-      - "Pull-based GitOps does not use Git"
+      - "Pull-based GitOps abandons Git entirely and reconciles from an internal database instead"
     answer: 2
     explanation: |
       In pull-based GitOps an agent inside the cluster pulls desired state from Git and applies it
@@ -79,9 +79,9 @@ questions:
     question: |
       What is the headline security benefit of the pull-based GitOps model?
     options:
-      - "Images are automatically scanned for CVEs"
-      - "Git repositories are encrypted at rest by default"
-      - "The agent runs as root on every node"
+      - "Container images are automatically scanned for CVEs before the agent will apply them"
+      - "Git repositories are transparently encrypted at rest by the agent using a per-cluster KMS key"
+      - "The reconciliation agent runs as root on every node so it can enforce host-level policy"
       - "Cluster credentials never leave the cluster; no external CI system holds cluster-admin"
     answer: 3
     explanation: |
@@ -98,9 +98,9 @@ questions:
       GitOps still work here while push-based CD struggles?
     options:
       - "The agent only needs egress to Git, whereas external CI must reach the API server inbound"
-      - "Pull-based GitOps disables the API server"
-      - "Push-based CD does not require any network access"
-      - "GitOps tunnels through etcd directly"
+      - "Pull-based GitOps disables the API server's inbound listener and talks to the kubelet instead"
+      - "Push-based CD reconciles fully offline and needs no network access to the target cluster"
+      - "GitOps opens a direct tunnel into etcd, bypassing the API server's authentication entirely"
     answer: 0
     explanation: |
       A pull-based agent runs inside the cluster and only needs outbound access to Git. Push-based
@@ -114,9 +114,9 @@ questions:
       In GitOps terms, what is "drift"?
     options:
       - "Live cluster state diverging from Git without a corresponding Git change"
-      - "A Git commit that has not yet been pushed"
-      - "The time it takes for an image to be pulled"
-      - "A Deployment slowly scaling up over time"
+      - "A local Git commit that has been authored but not yet pushed to the remote config repo"
+      - "The latency between a registry image push and the kubelet finishing the layer pull"
+      - "A Deployment that the HPA gradually scales up as request volume climbs over the day"
     answer: 0
     explanation: |
       Drift is when live state diverges from what Git declares, without a Git change causing it —
@@ -130,9 +130,9 @@ questions:
       An operator runs `kubectl scale deployment web --replicas=8`. The Argo CD Application for
       web has automated sync with `selfHeal: true` and Git declares `replicas: 3`. What happens?
     options:
-      - "The Deployment stays at 8 replicas permanently"
-      - "Argo CD updates Git to say replicas: 8"
-      - "The Application is deleted"
+      - "The Deployment stays at 8 replicas permanently since manual kubectl edits always win"
+      - "Argo CD writes a new commit updating Git to say replicas: 8 to match the live cluster"
+      - "The Application resource is deleted because the live spec no longer matches its source"
       - "Argo CD detects drift and re-applies Git state, scaling back to 3"
     answer: 3
     explanation: |
@@ -147,10 +147,10 @@ questions:
       A team enables an HPA on a Deployment but also keeps `replicas: 3` hardcoded in Git with
       Argo CD self-heal on. What symptom appears and what's the correct fix?
     options:
-      - "Nothing; HPA and self-heal coexist automatically"
-      - "The HPA is deleted by Argo CD"
+      - "Nothing goes wrong; Argo CD automatically yields the replicas field to any HPA it detects"
+      - "The HPA is deleted by Argo CD because it competes with the self-heal reconciliation loop"
       - "Replica count flaps between HPA's target and 3; remove replicas from the manifest or add ignoreDifferences for /spec/replicas"
-      - "The Deployment is marked Degraded forever with no fix"
+      - "The Deployment is permanently marked Degraded and there is no supported way to recover it"
     answer: 2
     explanation: |
       HPA scales replicas up, self-heal reverts to the hardcoded 3, HPA scales again — flapping.
@@ -165,10 +165,10 @@ questions:
       Why can't a GitOps agent use a naive text comparison between Git manifests and live objects
       to detect drift?
     options:
-      - "Git stores YAML but the cluster stores JSON, so they never match"
+      - "Git stores YAML while the cluster stores raw JSON, so the two serializations can never match"
       - "Kubernetes mutates objects after submission (defaulting, admission webhooks, status writes), so live objects legitimately differ"
-      - "Text comparison is too slow for large clusters"
-      - "Live objects are encrypted"
+      - "Text comparison is far too slow to run across the object count of a large production cluster"
+      - "Live objects are stored encrypted in etcd, so their bytes never match the plaintext in Git"
     answer: 1
     explanation: |
       Kubernetes defaults fields, admission webhooks mutate specs, and controllers write status.
@@ -183,9 +183,9 @@ questions:
       What kind of Kubernetes object does Argo CD use to declare "deploy this Git source to this
       cluster/namespace with this sync policy"?
     options:
-      - "A ConfigMap named argocd-apps"
-      - "A native Deployment"
-      - "A Helm release secret"
+      - "A ConfigMap named argocd-apps holding one entry per deployed source"
+      - "A native Deployment whose pod template points at the target Git source"
+      - "A Helm release secret written into the destination namespace by the agent"
       - "An `Application` custom resource"
     answer: 3
     explanation: |
@@ -200,9 +200,9 @@ questions:
       Which three things does an Argo CD `Application` spec fundamentally declare?
     options:
       - "Source (repo/path/revision), destination (cluster/namespace), and sync policy"
-      - "Image, registry, and tag"
-      - "CPU, memory, and replicas"
-      - "Node selector, taint, and toleration"
+      - "The container image, the registry it lives in, and the specific tag to deploy"
+      - "The CPU request, the memory limit, and the desired replica count for the workload"
+      - "The node selector, the node taint, and the matching pod toleration to schedule with"
     answer: 0
     explanation: |
       An Application declares a source (Git repo + path + targetRevision, or a Helm chart), a
@@ -215,9 +215,9 @@ questions:
     question: |
       What is the purpose of an Argo CD `AppProject`?
     options:
-      - "To store the container images used by Applications"
-      - "To define the HPA scaling policy"
-      - "To render Helm templates"
+      - "To act as an in-cluster registry storing the container images used by its Applications"
+      - "To define the HPA scaling policy that every Application under it must share"
+      - "To render Helm templates into plain manifests before the repo-server clones them"
       - "To group Applications and enforce guardrails on allowed repos, destinations, and resource kinds"
     answer: 3
     explanation: |
@@ -232,10 +232,10 @@ questions:
       In Argo CD's architecture, which component is responsible for cloning the Git repo and
       rendering manifests (running helm template / kustomize build)?
     options:
-      - "The application-controller"
-      - "The API/server (UI)"
+      - "The application-controller, which diffs live state against the rendered manifests"
+      - "The API/server component that backs the web UI, RBAC, and CLI endpoints"
       - "The repo-server"
-      - "The notifications controller"
+      - "The notifications controller, which fires alerts on sync and health transitions"
     answer: 2
     explanation: |
       The repo-server clones the source and renders manifests. The application-controller does the
@@ -249,10 +249,10 @@ questions:
       An Argo CD Application has a syncPolicy with no `automated` block. A new commit lands in Git.
       What happens?
     options:
-      - "The Application immediately syncs the change"
+      - "The Application immediately auto-syncs the change the moment the commit is detected"
       - "The Application goes OutOfSync and waits for a manual sync"
-      - "The Application is deleted"
-      - "Git is reverted automatically"
+      - "The Application is deleted because the desired state changed without an approval"
+      - "Git is reverted automatically back to the previously synced commit by the controller"
     answer: 1
     explanation: |
       Without an automated block, sync is manual. The Application shows OutOfSync and waits for a
@@ -266,9 +266,9 @@ questions:
       What does setting `prune: true` in an Argo CD automated sync policy do?
     options:
       - "Deletes live resources that were removed from Git"
-      - "Removes old ReplicaSets from a Deployment"
-      - "Compresses the Git history"
-      - "Reverts manual edits to running resources"
+      - "Removes old, scaled-to-zero ReplicaSets left behind by a Deployment's rollout history"
+      - "Compresses and garbage-collects the config repo's Git history to save storage"
+      - "Reverts manual kubectl edits made to running resources back to the Git-declared spec"
     answer: 0
     explanation: |
       prune deletes live resources that no longer exist in Git. It is off by default for safety;
@@ -283,10 +283,10 @@ questions:
       By default (when you enable automated sync but set nothing else), what is the state of
       `prune` and `selfHeal` in Argo CD?
     options:
-      - "Both on"
-      - "prune on, selfHeal off"
+      - "Both on by default, so removed resources are pruned and drift is reverted automatically"
+      - "prune on by default, while selfHeal stays off until you explicitly enable it"
       - "Both off — you must opt into each"
-      - "selfHeal on, prune off"
+      - "selfHeal on by default, while prune stays off until you explicitly enable it"
     answer: 2
     explanation: |
       prune and selfHeal are independent switches, both off by default. Automated sync will apply
@@ -301,9 +301,9 @@ questions:
       What does adding the `resources-finalizer.argocd.io` finalizer to an Argo CD Application
       change about deletion behavior?
     options:
-      - "It prevents the Application from ever being deleted"
-      - "It encrypts the Application's secrets"
-      - "It disables pruning"
+      - "It blocks the Application from ever being deleted until the finalizer is manually removed"
+      - "It encrypts the Application's referenced Secrets before they are committed to Git"
+      - "It disables pruning so removed manifests no longer delete their live resources"
       - "Deleting the Application cascade-deletes its managed resources"
     answer: 3
     explanation: |
@@ -318,10 +318,10 @@ questions:
       Someone accidentally deletes an app's whole directory in Git, and its Argo CD Application has
       automated sync with prune enabled. What is the danger, and which guardrail helps?
     options:
-      - "No danger; Argo CD ignores empty directories"
+      - "No danger at all; Argo CD automatically ignores any directory that becomes empty and never prunes the resources it previously created there"
       - "Argo CD prunes the live workloads; guardrails include PR review, Prune=false annotations on critical objects, and dry-run"
-      - "Argo CD recreates the directory in Git automatically"
-      - "The cluster falls back to the previous image with no data loss guaranteed"
+      - "There is no danger; Argo CD detects the missing path and recreates the deleted directory and its manifests back into Git automatically"
+      - "The cluster silently rolls each affected workload back to its previously synced revision and image, so no live resources are ever removed"
     answer: 1
     explanation: |
       Auto-sync + prune will delete live workloads whose manifests vanished from Git. Guardrails
@@ -336,9 +336,9 @@ questions:
       What is the "app-of-apps" pattern in Argo CD?
     options:
       - "A single Application whose Git path contains other Application manifests, which it syncs"
-      - "An Application that manages multiple container images"
-      - "A Helm chart that installs Argo CD itself"
-      - "A way to merge two Git repos"
+      - "A single Application whose pod template runs several containers, one per microservice image it deploys"
+      - "A community Helm chart that installs the Argo CD control plane itself into the argocd namespace"
+      - "A special Application that merges two separate Git repos into one combined source tree before syncing"
     answer: 0
     explanation: |
       App-of-apps is a root Application pointing at a Git path full of child Application CRs.
@@ -353,9 +353,9 @@ questions:
       When would you reach for `ApplicationSet` instead of hand-writing individual Applications?
     options:
       - "When you need to template many Applications from a generator (clusters, git dirs, PRs)"
-      - "When you only have one Application"
-      - "When you want to disable GitOps"
-      - "When you need to store secrets"
+      - "When you only ever deploy one Application and want its single sync policy managed for you"
+      - "When you want to temporarily disable GitOps reconciliation across every managed cluster at once"
+      - "When you need a place to store and encrypt the Secret objects your workloads consume"
     answer: 0
     explanation: |
       ApplicationSet templates many Applications from generators — list, cluster, git (per
@@ -387,10 +387,10 @@ questions:
     question: |
       What does the annotation `argocd.argoproj.io/sync-wave: "1"` control?
     options:
-      - "The number of replicas"
-      - "The image pull policy"
+      - "The desired replica count the Deployment should scale to once this sync completes"
+      - "The imagePullPolicy applied to every container created during this particular sync"
       - "The order in which resources are applied within a sync (lower waves first)"
-      - "The Git branch to track"
+      - "The Git branch or targetRevision the Application should track for this resource"
     answer: 2
     explanation: |
       Sync waves order resources within a sync phase. Argo CD applies lower waves first (default 0,
@@ -404,9 +404,9 @@ questions:
       You need a database schema migration to complete before the new application version rolls
       out. Which Argo CD mechanism is the canonical fit?
     options:
-      - "A PostSync hook Job"
-      - "Setting prune: true"
-      - "A SyncFail hook"
+      - "A PostSync hook Job (argocd.argoproj.io/hook: PostSync), which runs the migration after the new Pods are live"
+      - "Setting prune: true so the old schema resources are removed before the migration Job runs"
+      - "A SyncFail hook (argocd.argoproj.io/hook: SyncFail), which triggers the migration only if the sync fails"
       - "A PreSync hook Job (argocd.argoproj.io/hook: PreSync)"
     answer: 3
     explanation: |
@@ -436,10 +436,10 @@ questions:
     question: |
       What's the key distinction between sync waves and resource hooks in Argo CD?
     options:
-      - "They are the same feature with different names"
-      - "Hooks order resources; waves inject Jobs"
+      - "They are two names for the same feature; Argo CD internally translates every sync-wave annotation into an equivalent PreSync hook"
+      - "Hooks order the resources you're already applying by phase, while waves inject the extra migration and smoke-test Jobs around the sync"
       - "Waves order the resources you're already applying; hooks inject extra lifecycle Jobs at phases like PreSync/PostSync"
-      - "Waves only work with Helm; hooks only with Kustomize"
+      - "Waves are only honored for Helm-rendered manifests, whereas hooks are only honored for resources built by Kustomize overlays"
     answer: 2
     explanation: |
       Waves control the ordering of the resources included in your sync. Hooks add extra
@@ -453,10 +453,10 @@ questions:
     question: |
       What does `argocd.argoproj.io/hook-delete-policy: HookSucceeded` do?
     options:
-      - "Prevents the hook from ever running"
+      - "Prevents the hook from running at all until its parent resource reports HookSucceeded status"
       - "Deletes the hook resource (e.g. the migration Job) once it completes successfully"
-      - "Retries the hook until it succeeds"
-      - "Marks the whole Application as succeeded"
+      - "Automatically re-runs the hook resource on a backoff loop until the hook Job finally succeeds"
+      - "Marks the entire Application as Synced and Healthy the moment this hook resource succeeds"
     answer: 1
     explanation: |
       The hook-delete-policy controls when the hook resource is cleaned up. HookSucceeded deletes it
@@ -469,9 +469,9 @@ questions:
     question: |
       In Argo CD, how do "sync status" and "health status" differ?
     options:
-      - "They are identical"
-      - "Sync status = CPU usage; health = memory usage"
-      - "Sync status applies to Helm only; health to Kustomize only"
+      - "They are identical readouts; Argo CD shows the same value under two different column names in the UI"
+      - "Sync status reports the resource's live CPU utilization while health status reports its current memory consumption"
+      - "Sync status is only computed for Helm-sourced Applications, while health status is only computed for Kustomize ones"
       - "Sync status = does live match Git; health = is the resource actually working"
     answer: 3
     explanation: |
@@ -520,10 +520,10 @@ questions:
     question: |
       How is Flux (v2) structured compared to Argo CD's single Application CRD?
     options:
-      - "It uses one giant CRD too"
-      - "It has no CRDs at all"
+      - "It also centers on a single all-in-one CRD, a Flux 'Deployment' object that mirrors Argo CD's Application one-for-one"
+      - "It uses no CRDs at all, driving everything from a flat flux-system ConfigMap read by one monolithic controller"
       - "It is a set of composable controllers (the GitOps Toolkit), each with its own CRDs"
-      - "It only works via a web UI"
+      - "It is operated exclusively through a hosted web UI, with no CLI or custom resources exposed to users"
     answer: 2
     explanation: |
       Flux v2 is the GitOps Toolkit: source-controller, kustomize-controller, helm-controller,
@@ -602,10 +602,10 @@ questions:
     question: |
       A Flux `ImagePolicy` uses `semver: { range: ">=1.0.0 <2.0.0" }`. What does it select?
     options:
-      - "The oldest tag in the registry"
+      - "The oldest published tag in the registry repository"
       - "The newest tag matching that semver range"
-      - "Any tag containing the word 'latest'"
-      - "All tags simultaneously"
+      - "Only tags whose name literally contains the word 'latest'"
+      - "Every tag at once, deploying them as parallel canaries"
     answer: 1
     explanation: |
       An ImagePolicy with a semver range selects the newest tag satisfying the range. Other policy
@@ -618,10 +618,10 @@ questions:
     question: |
       How does Argo CD achieve automated image updates comparable to Flux's native feature?
     options:
-      - "It cannot; image updates are impossible with Argo CD"
-      - "By running Flux inside Argo CD"
+      - "It cannot; Argo CD deliberately has no image-update capability and delegates all tag bumps to CI"
+      - "By running an embedded Flux image-reflector controller inside the Argo CD application-controller pod"
       - "Via the separate Argo CD Image Updater add-on, which writes back to Git or annotates the Application"
-      - "Through the AppProject spec"
+      - "Through an imageUpdatePolicy field on the AppProject spec that scans registries on a fixed interval"
     answer: 2
     explanation: |
       Argo CD uses the separate Image Updater add-on, which can write new tags back to Git or set
@@ -636,9 +636,9 @@ questions:
       Which statement about Argo CD versus Flux is accurate?
     options:
       - "Argo CD ships a rich built-in web UI; Flux has no official UI and is CLI/CRD-first"
-      - "Flux has a web UI; Argo CD has none"
-      - "Neither is a CNCF project"
-      - "Only Flux supports Helm"
+      - "Flux ships the official dashboard while Argo CD offers only a headless CLI with no web UI"
+      - "Neither is a CNCF project; both remain vendor-owned tools outside the foundation's governance"
+      - "Only Flux supports Helm charts; Argo CD is restricted to plain Kustomize overlays exclusively"
     answer: 0
     explanation: |
       Argo CD provides a rich built-in web UI with SSO/RBAC. Flux is CLI/CRD-first with no official
@@ -670,9 +670,9 @@ questions:
       What is true of both Argo CD and Flux regarding CNCF maturity and delivery model?
     options:
       - "Both are CNCF graduated projects implementing pull-based GitOps"
-      - "Both are push-based CD tools"
-      - "Both are sandbox-only projects"
-      - "Both require a service mesh to function"
+      - "Both are push-based CD tools that run kubectl against the cluster from an external pipeline"
+      - "Both remain CNCF sandbox-only projects that have never advanced to incubating or graduated"
+      - "Both require an Istio or Linkerd service mesh to be installed before they can reconcile anything"
     answer: 0
     explanation: |
       Argo CD and Flux are both CNCF graduated projects, and both implement pull-based GitOps well.
@@ -685,9 +685,9 @@ questions:
     question: |
       Which environment-promotion structure is generally favored in modern GitOps and why?
     options:
-      - "Branch-per-environment, because merges are always clean"
-      - "One giant file with all environments concatenated"
-      - "No structure; edit prod directly"
+      - "Branch-per-environment, because long-lived env branches guarantee conflict-free fast-forward merges every time"
+      - "One giant concatenated file holding every environment's manifests, because a single diff shows all changes together"
+      - "No structure at all; you simply edit the prod manifests in place since overlays add needless indirection"
       - "Directory-per-environment (Kustomize overlays / Helm values), because all envs are visible in one diff and there's no branch drift"
     answer: 3
     explanation: |
@@ -704,9 +704,9 @@ questions:
       config?
     options:
       - "Config can drift between branches and merges get messy; the community has largely moved away from it for envs"
-      - "It cannot use Git at all"
-      - "It requires a service mesh"
-      - "It only works with Argo CD, never Flux"
+      - "It cannot use Git at all and forces you to track environment config in an external database instead"
+      - "It requires a fully configured service mesh before any environment branch can be reconciled to a cluster"
+      - "It only works with Argo CD and is completely unsupported by Flux's kustomize-controller reconciler"
     answer: 0
     explanation: |
       Branch-per-environment risks config drift between long-lived branches and painful merges.
@@ -721,10 +721,10 @@ questions:
       In a directory-per-environment GitOps repo, what is the actual mechanism of "promoting" a
       release from staging to prod?
     options:
-      - "SSH into the prod nodes and restart pods"
-      - "Deleting the staging namespace"
+      - "SSH into the prod nodes and manually restart every pod so they re-pull the newer image layers"
+      - "Deleting the staging namespace so its tested workloads are recreated automatically inside prod"
       - "A PR that bumps the image tag / values in the prod overlay to match staging"
-      - "Running helm rollback on prod"
+      - "Running helm rollback on prod to advance the release to the next tested chart revision"
     answer: 2
     explanation: |
       Promotion is a Git change — typically a reviewable PR that copies/bumps the tested image tag
@@ -737,10 +737,10 @@ questions:
     question: |
       Why can't a plain Kubernetes Deployment do a metric-gated canary with automatic rollback?
     options:
-      - "Deployments only support Recreate"
+      - "Deployments only support the Recreate strategy and cannot roll pods gradually one at a time"
       - "A Deployment only offers RollingUpdate/Recreate — no traffic-weighted canary, metric analysis, or auto-rollback"
-      - "Deployments cannot use readiness probes"
-      - "Deployments require a service mesh to start at all"
+      - "Deployments cannot use readiness probes, so they have no signal to gate a canary's progress on"
+      - "Deployments require a service mesh to be installed before any of their pods will start at all"
     answer: 1
     explanation: |
       A Deployment's built-in strategies are RollingUpdate and Recreate. Progressive delivery
@@ -754,9 +754,9 @@ questions:
     question: |
       What is the Argo Rollouts `Rollout` CRD best described as?
     options:
-      - "A replacement for the Service object"
-      - "A CRD that stores secrets"
-      - "A tool for building container images"
+      - "A replacement for the Service object that load-balances traffic across canary and stable pods"
+      - "A CRD that stores encrypted secrets and injects them into the canary pods during a rollout"
+      - "A tool for building container images from source and pushing them ahead of each canary step"
       - "A drop-in replacement for a Deployment that adds canary/blue-green with analysis and auto-rollback"
     answer: 3
     explanation: |
@@ -772,10 +772,10 @@ questions:
       During an Argo Rollouts canary, an `AnalysisRun` querying Prometheus finds the success rate
       has dropped below threshold. What happens?
     options:
-      - "The rollout continues to 100% anyway"
-      - "The AnalysisRun is ignored and a human is paged"
+      - "The rollout continues to 100% anyway and simply records the failed metric as a warning event"
+      - "The AnalysisRun result is ignored and a human is paged to decide whether to keep promoting"
       - "The rollout is aborted: traffic snaps back to the stable version and the canary Pods scale down"
-      - "Git is automatically reverted by the Rollout controller"
+      - "Git is automatically reverted to the prior commit by the Rollout controller to undo the change"
     answer: 2
     explanation: |
       A failing AnalysisRun aborts the rollout: traffic returns to the stable version and canary
@@ -790,10 +790,10 @@ questions:
       When Argo CD manages an Argo Rollouts `Rollout`, why does health assessment need special
       handling?
     options:
-      - "Rollouts cannot be stored in Git"
+      - "Rollouts cannot be stored in Git, so Argo CD has to poll the Rollouts controller API directly"
       - "A Rollout isn't a standard Deployment, so Argo CD relies on a Lua health check (bundled by default) to know when it's healthy"
-      - "Rollouts always report Unknown and can't be fixed"
-      - "Argo CD must be disabled to use Rollouts"
+      - "Rollouts always report Unknown health and there is no supported mechanism to teach Argo CD otherwise"
+      - "Argo CD self-heal must be disabled cluster-wide before any Rollout resource can be reconciled"
     answer: 1
     explanation: |
       Because a Rollout is a CRD, not a built-in Deployment, Argo CD uses a Lua health check to
@@ -807,9 +807,9 @@ questions:
       How does Flagger differ from Argo Rollouts in how it integrates with your workload?
     options:
       - "Flagger wraps an existing Deployment with a `Canary` CR and manages primary/canary copies"
-      - "Flagger replaces the Deployment with its own CRD, like Rollouts does"
-      - "Flagger only works with StatefulSets"
-      - "Flagger requires you to delete the Deployment first"
+      - "Flagger replaces the Deployment with its own Rollout-style CRD, exactly as Argo Rollouts does"
+      - "Flagger only works with StatefulSets and refuses to manage a plain Deployment workload at all"
+      - "Flagger requires you to delete the existing Deployment first and recreate it under its control"
     answer: 0
     explanation: |
       Flagger keeps your existing Deployment and wraps it with a Canary CR; it creates primary and
@@ -825,9 +825,9 @@ questions:
       canaries?
     options:
       - "A traffic router — a service mesh (Istio/Linkerd) or a compatible ingress/Gateway API"
-      - "A dedicated GPU node"
-      - "A second Kubernetes cluster"
-      - "A push-based CI pipeline"
+      - "A dedicated GPU node pool that the canary analysis controller schedules its metric queries onto"
+      - "A second standby Kubernetes cluster that receives the canary traffic split away from production"
+      - "A push-based CI pipeline that recalculates and reapplies the traffic weights on every commit"
     answer: 0
     explanation: |
       Percentage-based traffic shifting requires a traffic router: a service mesh (Istio, Linkerd,
@@ -841,9 +841,9 @@ questions:
     question: |
       In a GitOps workflow, what is the canonical way to roll back a bad release?
     options:
-      - "kubectl rollout undo on every affected Deployment"
-      - "Delete the namespace and recreate it"
-      - "SSH into nodes and restart containers"
+      - "Run kubectl rollout undo on every affected Deployment to step it back to the prior ReplicaSet"
+      - "Delete the whole namespace and recreate it so the previous known-good manifests are reapplied"
+      - "SSH into each node and restart the containers so they re-pull the last working image tag"
       - "git revert the bad commit and let the agent reconcile the cluster back"
     answer: 3
     explanation: |
@@ -859,10 +859,10 @@ questions:
       With Argo CD auto-sync and selfHeal enabled, an engineer runs `kubectl rollout undo` to
       revert a bad Deployment. What is the outcome?
     options:
-      - "The rollback is permanent"
+      - "The rollback is permanent because a manual rollout undo pins the ReplicaSet against reconciliation"
       - "Argo CD detects drift and re-applies the bad Git state — the manual undo is not durable"
-      - "Argo CD updates Git to the older revision automatically"
-      - "The Deployment is deleted"
+      - "Argo CD updates Git to the older revision automatically to match the engineer's manual rollback"
+      - "The Deployment is deleted outright because its live spec no longer matches the tracked source"
     answer: 1
     explanation: |
       selfHeal reverts anything that diverges from Git. A manual rollout undo diverges from the
@@ -875,10 +875,10 @@ questions:
     question: |
       Why is `git revert` preferred over `git reset --hard` / force-push for GitOps rollbacks?
     options:
-      - "revert is faster to type"
-      - "reset works only on private repos"
+      - "revert is faster to type and needs fewer flags than a hard reset with a force-push afterward"
+      - "reset works only on private repos, whereas revert is the only command allowed on shared remotes"
       - "revert preserves history with a new forward commit, keeping the rollback auditable and avoiding rewriting shared history"
-      - "revert automatically restores deleted PersistentVolumes"
+      - "revert automatically restores any PersistentVolumes that were deleted by the reverted change"
     answer: 2
     explanation: |
       git revert creates a new commit that undoes the change, keeping linear, auditable, forward-
@@ -892,10 +892,10 @@ questions:
     question: |
       Why is committing a raw Kubernetes `Secret` (as generated by kubectl) into a Git repo unsafe?
     options:
-      - "Secrets can't be stored as YAML"
+      - "Secrets can't be represented as YAML manifests, so they never round-trip cleanly through Git"
       - "A Secret's data is only base64-encoded, not encrypted — anyone with repo access can decode it"
-      - "Git cannot store binary data"
-      - "Secrets are always larger than Git's file size limit"
+      - "Git cannot store the binary data blocks that Secret objects hold, so the values get corrupted"
+      - "Secrets are always larger than Git's per-file size limit and get rejected on push to the remote"
     answer: 1
     explanation: |
       Kubernetes Secrets are base64-encoded, not encrypted. base64 is trivially reversible
@@ -926,9 +926,9 @@ questions:
       With the External Secrets Operator (ESO), what actually lives in Git?
     options:
       - "Only a reference (ExternalSecret) pointing at an external secrets manager; ESO fetches the value at runtime"
-      - "The encrypted secret value"
-      - "The plaintext secret, protected by RBAC"
-      - "Nothing related to secrets"
+      - "The full ciphertext of the secret value, encrypted client-side with the operator's key before commit"
+      - "The plaintext secret value in an ordinary Secret manifest, protected only by repository-level RBAC"
+      - "Nothing secret-related at all; ESO keeps every value out of Git and injects them via CLI flags instead"
     answer: 0
     explanation: |
       ESO puts only an ExternalSecret reference in Git, pointing at AWS Secrets Manager/Vault/etc.
@@ -942,9 +942,9 @@ questions:
       Regarding SOPS-encrypted manifests, which statement is correct?
     options:
       - "SOPS encrypts entire files including keys, making them unreadable"
-      - "SOPS only works with plaintext base64"
+      - "SOPS only operates on plaintext base64 blobs and cannot integrate with KMS, age, or PGP backends"
       - "Flux can decrypt SOPS natively, while Argo CD needs a plugin like ksops or helm-secrets"
-      - "Argo CD decrypts SOPS natively; Flux cannot"
+      - "Argo CD decrypts SOPS natively out of the box, whereas Flux has no support for SOPS at all"
     answer: 2
     explanation: |
       SOPS encrypts the values in a YAML/JSON file while keeping keys readable, using KMS/PGP/age.
@@ -959,9 +959,9 @@ questions:
       Where does this topic point you for the general GitOps principle and push-based CI/CD
       pipeline concepts (as opposed to K8s-specific application)?
     options:
-      - "The docker domain"
-      - "The observability domain"
-      - "The storage-volumes-pv-pvc topic"
+      - "The docker domain (image builds and registry push are where general CI/CD pipelines are covered)"
+      - "The observability domain (deployment pipelines are documented alongside metrics and tracing there)"
+      - "The storage-volumes-pv-pvc topic (persistent-volume rollout is where push-based CD concepts live)"
       - "The devops-cicd domain (gitops and deployment-strategies)"
     answer: 3
     explanation: |
@@ -976,10 +976,10 @@ questions:
       An Argo CD Application is perpetually OutOfSync on a field you never set in Git, and toggling
       selfHeal doesn't help. What is the most likely cause and remedy?
     options:
-      - "Git is corrupted; re-clone the repo"
+      - "The config repo's Git history is corrupted; delete the local cache and force a fresh re-clone to fix it"
       - "Another controller/webhook owns that field (e.g. HPA, a mutating admission webhook); use ignoreDifferences or remove the contested field from Git"
-      - "The cluster is out of disk; add nodes"
-      - "The Application CRD is the wrong version; downgrade Argo CD"
+      - "The cluster's nodes are out of disk, so the diff never completes; add capacity and the field will re-sync"
+      - "The installed Application CRD is a stale schema version; downgrade Argo CD until the field stops drifting"
     answer: 1
     explanation: |
       Perpetual OutOfSync on a field you don't manage usually means another actor writes it (HPA on
