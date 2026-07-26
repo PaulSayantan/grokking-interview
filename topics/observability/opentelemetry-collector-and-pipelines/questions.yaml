@@ -12,9 +12,9 @@ questions:
       app's SDK to the backend?
     options:
       - "It decouples instrumentation from the backend so you can change sampling, routing, or vendors without redeploying apps"
-      - "It converts all metrics into logs for cheaper storage"
-      - "It guarantees exactly-once delivery to any backend"
-      - "It reduces the number of spans an application must generate"
+      - "It transparently converts every metric into a compact log record, which observability vendors bill at a lower storage rate"
+      - "It provides an exactly-once delivery guarantee to any backend by writing each span to a durable write-ahead log first"
+      - "It automatically reduces the number of spans an application generates by merging sibling operations into one parent span"
     answer: 0
     explanation: |
       The Collector is an intermediary that lets you enforce policy (batching, sampling,
@@ -65,9 +65,9 @@ questions:
       ordering considered wrong?
     options:
       - "memory_limiter should be first so backpressure reaches receivers before memory is committed to batches"
-      - "batch must always be the only processor in a pipeline"
-      - "The two processors are mutually exclusive and cannot appear together"
-      - "memory_limiter only works in metrics pipelines, not with batch"
+      - "batch must always be the only processor in a pipeline because it acquires an exclusive lock on the shared consumer queue"
+      - "The two processors are mutually exclusive and cannot appear together, since batch overwrites the limiter's internal soft-limit counter"
+      - "memory_limiter only works in metrics pipelines and is silently ignored when placed anywhere alongside the batch processor"
     answer: 0
     explanation: |
       memory_limiter is the OOM guardrail: it refuses incoming data at a soft limit and
@@ -81,9 +81,9 @@ questions:
     question: |
       What distinguishes a connector from a processor in the Collector?
     options:
-      - "A connector can only be used in logs pipelines"
-      - "A connector is another name for an extension"
-      - "A connector runs faster because it skips the fan-out consumer"
+      - "A connector can only be used in logs pipelines, because the traces and metrics signal paths lack a connecting consumer interface"
+      - "A connector is another name for an extension that lives off the data path and exposes health and profiling endpoints"
+      - "A connector runs faster than a processor because it skips the fan-out consumer and writes directly to the exporter's socket"
       - "A connector is an exporter of one pipeline and a receiver of another, and can even change signal type"
     answer: 3
     explanation: |
@@ -100,10 +100,10 @@ questions:
       multiple replicas behind a round-robin load balancer. Sampling decisions look wrong —
       errored traces are sometimes dropped. What is the root cause?
     options:
-      - "The batch processor is deleting the error status before sampling"
+      - "The batch processor strips the span error status while grouping, so tail_sampling never sees the flag it keys on"
       - "Spans of a single trace are spread across replicas, so each replica only sees a fragment of the trace"
-      - "Round-robin load balancing is required for tail sampling to work"
-      - "tail_sampling only supports probabilistic policies"
+      - "Round-robin load balancing is a hard prerequisite for tail sampling, and any other scheme silently disables the sampler"
+      - "tail_sampling only supports probabilistic policies, so status-code and latency policies are quietly downgraded to random drops"
     answer: 1
     explanation: |
       Tail sampling decides on the *complete* trace, so all spans of a trace must reach the
@@ -118,10 +118,10 @@ questions:
       To make tail-based sampling correct across a scaled gateway pool, what must the
       first tier of collectors use, and how must it route?
     options:
-      - "The filter processor, routing by service name only"
-      - "The batch processor, routing by timestamp"
+      - "The filter processor, routing strictly by service name so that each service's traces land on a fixed downstream collector"
+      - "The batch processor, routing by span end timestamp so that traces closing in the same window reach the same collector"
       - "The loadbalancing exporter with routing_key traceID, consistently hashing each trace to one downstream collector"
-      - "The prometheusremotewrite exporter, routing by metric name"
+      - "The prometheusremotewrite exporter, routing by metric name so that all spans of a metric series converge downstream"
     answer: 2
     explanation: |
       Tier 1 runs the loadbalancing exporter with routing_key: traceID, which consistently
@@ -137,8 +137,8 @@ questions:
     options:
       - "All three (traces, metrics, logs) in a single pipeline"
       - "Exactly one signal type — traces, metrics, or logs"
-      - "Two: metrics plus one of traces or logs"
-      - "It depends on the exporter chosen"
+      - "Two signals at once: metrics plus either traces or logs, since those pair on a shared datapoint consumer"
+      - "It depends on the exporter chosen — a multi-signal exporter unlocks all three signals inside one pipeline"
     answer: 1
     explanation: |
       A pipeline is defined per signal type. Every component in it must support that signal,
@@ -189,9 +189,9 @@ questions:
       Where is the ideal place to strip PII (e.g. hash a user email) before telemetry
       leaves your trust boundary for a SaaS backend?
     options:
-      - "In the load balancer's TLS termination"
-      - "It cannot be done without changing every application"
-      - "In the backend's ingestion rules after it arrives"
+      - "In the load balancer's TLS termination step, which inspects and rewrites attribute payloads as it decrypts each connection"
+      - "It cannot be done at all without editing every application's instrumentation to hash the field before it is ever emitted"
+      - "In the backend's ingestion rules after it arrives, since that is the only stage with a full view of the attribute set"
       - "In an attributes or redaction processor in the Collector, before export"
     answer: 3
     explanation: |
@@ -206,10 +206,10 @@ questions:
     question: |
       What is OTTL in the context of the Collector?
     options:
-      - "A wire protocol competing with OTLP"
+      - "A binary wire protocol competing with OTLP, offering lower overhead by dropping the resource and scope envelopes"
       - "The OpenTelemetry Transformation Language used by processors like transform and filter to manipulate telemetry via path expressions"
-      - "A storage format for trace data"
-      - "The Collector's internal metrics namespace"
+      - "A columnar storage format for trace data that the Collector writes to disk before forwarding it to any backend"
+      - "The Collector's internal metrics namespace, under which all otelcol_ self-telemetry counters and gauges are published"
     answer: 1
     explanation: |
       OTTL (OpenTelemetry Transformation Language) is a small statement language used by the
@@ -240,9 +240,9 @@ questions:
     question: |
       What is the key advantage of tail-based sampling over head-based sampling?
     options:
-      - "It never requires spans of a trace to be co-located"
-      - "It happens entirely in the SDK with no Collector involvement"
-      - "It uses far less memory in the Collector"
+      - "It never requires spans of a trace to be co-located, because each span carries the full sampling verdict inline"
+      - "It happens entirely in the SDK with no Collector involvement, so the gateway tier can be removed to save cost"
+      - "It uses far less memory in the Collector, since it discards each span the instant it arrives at the receiver"
       - "It decides after the trace completes, so it can keep errored or slow traces and drop boring fast ones"
     answer: 3
     explanation: |
@@ -258,10 +258,10 @@ questions:
       Which exporter feature lets the Collector absorb a temporary backend outage without
       immediately dropping data?
     options:
-      - "A second receiver on a different port"
-      - "The memory_limiter processor"
+      - "A second receiver on a different port that transparently takes over export when the primary backend stops responding"
+      - "The memory_limiter processor, which spills overflow telemetry to a local ring buffer until the backend recovers"
       - "The sending_queue (optionally backed by file_storage for persistence)"
-      - "The zpages extension"
+      - "The zpages extension, whose in-process debug pages replay buffered spans to the backend once it comes back online"
     answer: 2
     explanation: |
       Exporters wrap a sending_queue that buffers data between the pipeline and a slow/failing
@@ -275,10 +275,10 @@ questions:
     question: |
       What is the main reason to include the batch processor in nearly every pipeline?
     options:
-      - "It encrypts telemetry in transit"
+      - "It encrypts telemetry in transit by wrapping each outbound batch in a TLS session negotiated with the backend"
       - "It groups telemetry into larger payloads, improving compression and throughput and reducing outbound request count"
-      - "It guarantees ordering of spans within a trace"
-      - "It deduplicates identical metrics"
+      - "It guarantees strict ordering of spans within a trace, sequencing them by start time before handing off to the exporter"
+      - "It deduplicates identical metrics by hashing each datapoint and dropping repeats seen within the batch window"
     answer: 1
     explanation: |
       Batching groups items by size and/or a timeout, which dramatically improves compression
@@ -293,9 +293,9 @@ questions:
       You want to derive RED metrics (rate, errors, duration) from trace data without
       instrumenting metrics separately. Which Collector construct do you use?
     options:
-      - "The memory_limiter processor with metrics mode enabled"
-      - "A second OTLP receiver bound to the traces port"
-      - "A resource processor in the metrics pipeline"
+      - "The memory_limiter processor with metrics mode enabled, which emits rate and error gauges as it inspects each span"
+      - "A second OTLP receiver bound to the traces port that re-reads the spans and republishes them as metric datapoints"
+      - "A resource processor in the metrics pipeline that reads span durations and upserts them as RED histogram attributes"
       - "The spanmetrics connector, exporting from the traces pipeline and receiving into the metrics pipeline"
     answer: 3
     explanation: |
@@ -311,9 +311,9 @@ questions:
       Which of these is a cost-related reason to run a Collector at the edge of your network?
     options:
       - "It batches and compresses once, and can drop/sample noisy data before it crosses a paid network boundary, reducing egress"
-      - "It stores all telemetry locally forever"
-      - "It removes the need for any backend"
-      - "It increases the number of backend connections for redundancy"
+      - "It stores all telemetry locally forever on the edge host, eliminating the recurring cost of any long-term backend storage"
+      - "It removes the need for any backend, since the edge Collector itself serves queries and dashboards directly to users"
+      - "It increases the number of backend connections for redundancy, which lowers per-gigabyte egress pricing through volume tiers"
     answer: 0
     explanation: |
       Running a Collector lets you batch, compress, and sample/drop noisy data before it crosses
@@ -329,10 +329,10 @@ questions:
       pipeline's exporter queue fills and applies backpressure. What is the likely effect
       on the traces pipeline?
     options:
-      - "The Collector silently drops the logs pipeline and keeps traces flowing"
-      - "No effect — pipelines are fully isolated"
+      - "The Collector silently drops the logs pipeline and keeps traces flowing, since each pipeline is given its own dedicated receiver goroutine"
+      - "No effect — pipelines are fully isolated because the receiver copies data into a separate bounded channel for each pipeline"
       - "The traces pipeline can also be blocked, because the shared receiver fans out synchronously and a blocking pipeline stalls the receiver"
-      - "The traces pipeline automatically spins up a new receiver instance"
+      - "The traces pipeline automatically spins up a new receiver instance on a fresh port to bypass the stalled shared consumer"
     answer: 2
     explanation: |
       A receiver shared across pipelines is a single instance feeding a synchronous fan-out.
@@ -346,10 +346,10 @@ questions:
     question: |
       OTLP payloads carry a "Resource". What does the Resource represent?
     options:
-      - "The CPU and memory limits of the Collector"
+      - "The CPU and memory limits the Collector process reserves for that pipeline"
       - "The entity producing the telemetry, e.g. service.name and k8s.pod.name"
-      - "The retry configuration for the exporter"
-      - "A single span's parent identifier"
+      - "The retry and backoff configuration the exporter applies on send failures"
+      - "A single span's parent identifier used to reconstruct the trace tree"
     answer: 1
     explanation: |
       In OTLP, Resource describes the entity producing telemetry (service.name, host, k8s.pod,
@@ -365,9 +365,9 @@ questions:
       `service::pipelines`. What happens?
     options:
       - "The exporter is not instantiated — only components referenced by a pipeline are activated"
-      - "The exporter runs but receives a copy of all signals automatically"
-      - "The exporter becomes a global default for every pipeline"
-      - "The Collector fails to start with a fatal error"
+      - "The exporter runs but receives a copy of all signals automatically via an implicit default pipeline"
+      - "The exporter becomes a global default that every pipeline exports to unless it declares its own"
+      - "The Collector fails to start with a fatal error about an unreferenced component definition"
     answer: 0
     explanation: |
       The service::pipelines block is what activates components. A receiver, processor, or
@@ -381,10 +381,10 @@ questions:
       Two pipelines both reference a processor by the same config key (e.g. `batch`). What
       is true about the processor instances?
     options:
-      - "The Collector merges the two pipelines into one"
-      - "They share a single instance and its internal buffers"
+      - "The Collector merges the two pipelines into one because they name an identical processor key"
+      - "They share a single instance and its internal buffers, so a flush in one pipeline empties the other"
       - "Each pipeline gets its own independent processor instance, so ordering and state are per-pipeline"
-      - "Only one pipeline is allowed to use it; the other is ignored"
+      - "Only one pipeline is allowed to use it; the other silently drops that processor at load time"
     answer: 2
     explanation: |
       Even when two pipelines reference the same config key, each pipeline gets its own processor
@@ -398,9 +398,9 @@ questions:
     question: |
       What does the memory_limiter processor do when memory exceeds its soft limit?
     options:
-      - "It deletes the oldest spans from the backend"
-      - "It disables all exporters permanently"
-      - "It restarts the Collector process"
+      - "It issues a delete request to purge the oldest spans already stored in the backend"
+      - "It permanently disables all exporters until an operator restarts the pipeline by hand"
+      - "It restarts the Collector process to reclaim heap and reset the batch buffers"
       - "It begins refusing incoming data (applying backpressure), and forces GC above the hard limit"
     answer: 3
     explanation: |
@@ -415,10 +415,10 @@ questions:
     question: |
       Which describes the typical production topology combining agents and gateways?
     options:
-      - "Apps export directly to the backend; agents and gateways are only for testing"
+      - "Apps export directly to the backend; agents and gateways exist only for local testing and are stripped out in production"
       - "Agents (DaemonSet) enrich with local metadata and forward OTLP to a horizontally-scaled gateway pool that batches, samples, and exports to backends"
-      - "Gateways run as sidecars and agents run centrally behind a load balancer"
-      - "Both agents and gateways must run on the same host as the backend"
+      - "Gateways run as per-pod sidecars while agents run centrally behind a load balancer doing local enrichment"
+      - "Both agents and gateways must be co-located on the same host as the backend to avoid any network hop"
     answer: 1
     explanation: |
       The common shape: an agent (sidecar or DaemonSet) does local enrichment/offload and forwards
@@ -432,9 +432,9 @@ questions:
     question: |
       Which cost is inherent to the tail_sampling processor that head sampling avoids?
     options:
-      - "It doubles the number of receivers needed"
-      - "It forces logs and metrics through the same pipeline"
-      - "It requires TLS on every exporter"
+      - "It doubles the number of receivers needed, since each replica must run a paired shadow receiver"
+      - "It forces logs and metrics through the same pipeline as traces to correlate the sampling verdict"
+      - "It requires mutual TLS on every exporter so the sampling decision can be signed end to end"
       - "It must buffer spans until the trace is complete, costing memory and adding latency to that trace's export"
     answer: 3
     explanation: |
@@ -451,9 +451,9 @@ questions:
       scaling in a way stateless ones do not?
     options:
       - "They hold per-trace state, so traffic must be made sticky by trace ID or a trace gets split across replicas"
-      - "They cannot run in Kubernetes"
-      - "They only support a single exporter"
-      - "They require a separate database cluster"
+      - "They cannot run in Kubernetes because per-trace buffers are incompatible with pod scheduling"
+      - "They only support a single exporter, so fan-out to multiple backends silently disables them"
+      - "They require a separate external database cluster to hold the per-trace state between replicas"
     answer: 0
     explanation: |
       Stateless components scale trivially behind any load balancer. Stateful ones buffer per-trace
@@ -468,10 +468,10 @@ questions:
       Which Collector self-telemetry metric most directly signals that exporters cannot keep
       up and data is being lost?
     options:
-      - "otelcol_exporter_sent_spans equal to zero at startup"
-      - "otelcol_receiver_accepted_spans steadily increasing"
+      - "otelcol_exporter_sent_spans equal to zero at startup before the first pipeline flush completes"
+      - "otelcol_receiver_accepted_spans steadily increasing in step with normal healthy ingest traffic"
       - "otelcol_exporter_send_failed_spans and otelcol_processor_dropped_spans rising, with queue_size near capacity"
-      - "otelcol_process_uptime increasing"
+      - "otelcol_process_uptime increasing steadily, showing the Collector has not crashed or restarted"
     answer: 2
     explanation: |
       Rising send_failed/dropped span counters together with the exporter queue near capacity
@@ -485,10 +485,10 @@ questions:
     question: |
       How does the prometheus receiver differ from the otlp receiver in how it obtains data?
     options:
-      - "It also listens passively for pushed OTLP data"
+      - "It also listens passively on a socket for pushed OTLP data, just like the otlp receiver does"
       - "It is pull-based — it scrapes /metrics endpoints on an interval, mirroring a Prometheus scrape_config"
-      - "It only accepts data over gRPC on port 4317"
-      - "It converts logs into metrics before ingesting"
+      - "It only accepts data pushed over gRPC on port 4317, identical to the default OTLP transport"
+      - "It converts inbound logs into metrics before ingesting them into the metrics pipeline"
     answer: 1
     explanation: |
       The prometheus receiver is pull-based: it scrapes target /metrics endpoints on an interval
@@ -503,9 +503,9 @@ questions:
       Why is the k8sattributesprocessor typically run in an *agent* (DaemonSet) rather than
       only in a central gateway?
     options:
-      - "It is faster to run processors in a sidecar than a gateway"
-      - "The gateway strips all resource attributes by default"
-      - "Gateways cannot run processors at all"
+      - "Processors always run faster in a node-local sidecar than in a horizontally scaled gateway pool"
+      - "The gateway strips all resource attributes by default, so pod metadata must be re-added upstream"
+      - "Gateways cannot run stateful processors at all, so any enrichment must happen in the agent tier"
       - "The agent runs on the node and can correlate the source pod's identity, enriching with k8s.pod.name, namespace, and labels"
     answer: 3
     explanation: |
@@ -523,9 +523,9 @@ questions:
       What is a correct approach?
     options:
       - "Use separate pipelines (or a routing connector) so different processing/filters feed each backend"
-      - "Set answer=true on the batch processor"
-      - "Configure the memory_limiter to drop non-error traces"
-      - "Use a single exporter and hope the backend filters"
+      - "Set a filter_errors=true flag on the batch processor so it splits the two backends itself"
+      - "Configure the memory_limiter to drop all non-error traces before they reach the second backend"
+      - "Use a single exporter to both backends and rely on each backend to filter what it keeps"
     answer: 0
     explanation: |
       Fan-out sends a copy to every exporter in the same pipeline, so it can't send different
@@ -540,10 +540,10 @@ questions:
       Two collectors chained together (agent forwarding to gateway) typically communicate
       using which protocol?
     options:
-      - "Raw syslog"
-      - "SNMP"
+      - "Raw syslog over UDP, with the gateway parsing each line back into structured spans"
+      - "SNMP traps, which the gateway polls from the agent on a fixed collection interval"
       - "OTLP (the agent's OTLP exporter to the gateway's OTLP receiver)"
-      - "Only Prometheus remote_write"
+      - "Only Prometheus remote_write, forcing traces and logs to be encoded as metric samples"
     answer: 2
     explanation: |
       Collectors chain naturally over OTLP: the agent runs an OTLP exporter that sends to the
@@ -558,10 +558,10 @@ questions:
       Your Collector uses an in-memory sending_queue. During a backend outage the Collector
       pod is rescheduled. What is the data-durability consequence, and the fix?
     options:
-      - "No data is lost; in-memory queues survive restarts by default"
+      - "No data is lost; in-memory queues survive restarts by default because the runtime checkpoints them to the pod's ephemeral volume"
       - "Queued data is lost on restart; back the queue with the file_storage extension for at-least-once durability across restarts"
-      - "The backend replays the data automatically"
-      - "memory_limiter persists the queue to disk automatically"
+      - "The backend replays the data automatically once it detects the reconnecting Collector's session id"
+      - "memory_limiter persists the queue to disk automatically whenever it detects the process is shutting down"
     answer: 1
     explanation: |
       A pure in-memory queue is lost when the process restarts. To survive restarts, configure
@@ -583,9 +583,9 @@ questions:
       ```
     options:
       - "Drops spans whose http.route attribute equals /healthz"
-      - "Renames the /healthz route to /health"
-      - "Adds a new attribute to every span"
-      - "Keeps only spans whose http.route is /healthz"
+      - "Renames the /healthz route attribute value to /health on each span"
+      - "Adds a new http.route attribute set to /healthz on every span"
+      - "Keeps only the spans whose http.route attribute equals /healthz"
     answer: 0
     explanation: |
       The filterprocessor drops telemetry matching its OTTL conditions. This config drops spans
@@ -600,10 +600,10 @@ questions:
       When tuning a gateway Collector, what is the recommended relationship between GOMEMLIMIT
       and the memory_limiter's hard limit?
     options:
-      - "Set GOMEMLIMIT to double the container memory limit"
-      - "Set GOMEMLIMIT to exactly the hard limit"
+      - "Set GOMEMLIMIT to double the container memory limit so the runtime never triggers GC early"
+      - "Set GOMEMLIMIT to exactly the hard limit so both guardrails fire at the same memory threshold"
       - "Set GOMEMLIMIT to about 80% of the hard memory limit, alongside the memory_limiter processor"
-      - "Disable GOMEMLIMIT entirely when using memory_limiter"
+      - "Disable GOMEMLIMIT entirely when using memory_limiter, since the two mechanisms conflict"
     answer: 2
     explanation: |
       The guidance is to set GOMEMLIMIT to roughly 80% of the hard memory limit and use it
@@ -635,10 +635,10 @@ questions:
     question: |
       What is the recommended baseline processor ordering for a production pipeline?
     options:
-      - "batch → memory_limiter → attributes → filter"
+      - "batch → memory_limiter → attributes/resource → sampling/filter/transform"
       - "memory_limiter → sampling/filter/transform → attributes/resource → batch"
-      - "attributes → batch → memory_limiter → filter"
-      - "batch → filter → memory_limiter → resource"
+      - "attributes/resource → batch → memory_limiter → sampling/filter/transform"
+      - "batch → sampling/filter/transform → memory_limiter → attributes/resource"
     answer: 1
     explanation: |
       memory_limiter goes first (protect the process, push backpressure to receivers), then
@@ -672,9 +672,9 @@ questions:
       from every service?
     options:
       - "The backend API key lives in the Collector config, not baked into every service"
-      - "It removes the need for any authentication"
-      - "It rotates TLS certificates for the backend automatically"
-      - "It encrypts the backend's database at rest"
+      - "It removes the need for backend authentication entirely, since traffic between internal apps is implicitly trusted"
+      - "It automatically rotates the backend's TLS certificates on a fixed schedule with no config change required"
+      - "It transparently encrypts the backend's database at rest using a key stored in the Collector config"
     answer: 0
     explanation: |
       With a Collector, the backend credential (API key) is centralized in one place instead of
@@ -689,10 +689,10 @@ questions:
       The loadbalancing exporter defaults to routing traces by traceID. In a setup that also
       computes span metrics downstream, why might you route by service (service.name) instead?
     options:
-      - "traceID routing sends every trace to every backend"
-      - "traceID routing is not supported for traces"
+      - "traceID routing broadcasts a copy of every trace to every backend, doubling egress in a span-metrics setup"
+      - "traceID routing is unsupported for trace signals and is silently downgraded to random per-span distribution"
       - "Routing solely by trace ID can cause label collisions in span-metrics setups; service-name routing groups a service's spans on one instance"
-      - "service routing is faster because it skips consistent hashing"
+      - "service routing is faster because it skips the consistent-hashing step and pins each service to a fixed replica index"
     answer: 2
     explanation: |
       Routing by traceID scatters a service's spans across instances, which can cause label
@@ -707,10 +707,10 @@ questions:
     question: |
       What is the difference between the resourceprocessor and the attributesprocessor?
     options:
-      - "resourceprocessor works only on logs; attributesprocessor only on traces"
+      - "resourceprocessor works only on logs while attributesprocessor works only on traces, so metrics need neither"
       - "resourceprocessor mutates resource attributes (the producing entity); attributesprocessor mutates span/metric/log attributes"
-      - "They are aliases for the same processor"
-      - "attributesprocessor can only delete keys, never insert"
+      - "They are aliases for the same underlying processor, so choosing one over the other has no functional effect"
+      - "attributesprocessor can only delete existing keys and never insert new ones, so enrichment requires resourceprocessor"
     answer: 1
     explanation: |
       resourceprocessor modifies Resource attributes describing the entity (service/host/pod),
@@ -724,9 +724,9 @@ questions:
     question: |
       Where does head-based sampling make its keep/drop decision?
     options:
-      - "In the backend after ingestion"
-      - "In the load balancer based on IP"
-      - "In the Collector's tail_sampling processor after the trace completes"
+      - "In the backend after ingestion, once every span of the trace has arrived"
+      - "In the load balancer, keyed on the client's source IP address block"
+      - "In the Collector's tail_sampling processor, once the whole trace completes"
       - "In the SDK at the start of the trace, before the outcome is known"
     answer: 3
     explanation: |
@@ -743,9 +743,9 @@ questions:
       backend outage, from first response to last resort?
     options:
       - "retry (transient) → queue (absorb) → persistent queue (survive restart) → memory_limiter (protect process) → drop"
-      - "memory_limiter → drop → retry → queue"
-      - "batch → fan-out → retry → drop"
-      - "drop → memory_limiter → queue → retry"
+      - "memory_limiter (refuse first) → drop immediately → retry the drops → queue whatever is left over"
+      - "batch (group first) → fan-out to exporters → retry on the copies → drop the unbatched remainder"
+      - "drop early → memory_limiter → queue the survivors → retry against the recovered backend"
     answer: 0
     explanation: |
       Transient failures are retried; a sending_queue absorbs sustained backpressure; a
@@ -759,10 +759,10 @@ questions:
     question: |
       How do agent collectors deployed as a DaemonSet scale with load?
     options:
-      - "They cannot scale and become a bottleneck"
-      - "They must be scaled manually one replica at a time"
+      - "They cannot scale at all and inevitably become a single fleet-wide bottleneck under load"
+      - "They must be scaled manually one replica at a time by an operator editing the DaemonSet"
       - "They scale with nodes — one per host — each handling only its node's telemetry"
-      - "They require a central load balancer to scale"
+      - "They require a central load balancer in front of them before they can add any capacity"
     answer: 2
     explanation: |
       A DaemonSet places one agent per node, so agents scale automatically with the cluster and
@@ -776,10 +776,10 @@ questions:
     question: |
       Can a Collector run two pipelines of the same signal type (e.g. two traces pipelines)?
     options:
-      - "No — only one pipeline per signal type is allowed"
+      - "No — the Collector permits exactly one pipeline per signal type and rejects a second at load"
       - "Yes — you can run multiple same-signal pipelines to apply different processing to different flows"
-      - "Only if they share all the same processors"
-      - "Only in gateway mode, never in agent mode"
+      - "Only if the two pipelines share an identical list of processors in the identical order"
+      - "Only when the Collector runs in gateway mode; agent mode is capped at one pipeline per signal"
     answer: 1
     explanation: |
       You can define multiple pipelines of the same signal type (e.g. traces and
@@ -795,9 +795,9 @@ questions:
       profile it without touching the telemetry data path. Which extensions help?
     options:
       - "zpages (in-process debug pages) and pprof (profiling)"
-      - "otlp and jaeger receivers"
-      - "spanmetrics and routing connectors"
-      - "batch and memory_limiter"
+      - "the otlp and jaeger receivers, read in passive inspect-only mode"
+      - "the spanmetrics and routing connectors, run in a read-only tap"
+      - "the batch and memory_limiter processors, queried out of band"
     answer: 0
     explanation: |
       zpages exposes in-process debug pages about pipelines and components, and pprof enables Go
@@ -812,10 +812,10 @@ questions:
       How does routing exports through a Collector protect application request latency when a
       backend becomes slow?
     options:
-      - "It reduces the app's CPU frequency to match the backend"
-      - "It caches HTTP responses for the app"
+      - "It throttles the app's CPU frequency down to match the backend's slower response rate"
+      - "It caches the app's outbound HTTP responses and serves them from the Collector on a miss"
       - "Batching, retry, compression, and queueing happen in the Collector, so a slow backend doesn't add latency or memory pressure to the app process"
-      - "It disables tracing in the app when the backend is slow"
+      - "It automatically disables all tracing in the app whenever the backend's latency climbs"
     answer: 2
     explanation: |
       Offloading batching/retry/compression/queueing to the Collector means the app's
@@ -830,9 +830,9 @@ questions:
       You accidentally place a metrics-only processor into a traces pipeline. When does the
       Collector surface the problem?
     options:
-      - "Only after the first trace is received"
-      - "Never — processors are signal-agnostic"
-      - "Silently at runtime — the processor is skipped"
+      - "Only after the first trace is received and routed into that broken pipeline"
+      - "Never — every processor is fully signal-agnostic and adapts to whatever it is given"
+      - "Silently at runtime — the mismatched processor is simply skipped for each span"
       - "At config load time, with a pipeline signal-not-supported error"
     answer: 3
     explanation: |
@@ -848,10 +848,10 @@ questions:
       Which set of knobs most directly controls a gateway exporter's outbound concurrency and
       buffering capacity?
     options:
-      - "receiver protocols and TLS ciphers"
+      - "the receiver's accepted protocols and its negotiated TLS cipher suite list"
       - "num_consumers (export concurrency) and queue_size (buffer capacity), plus batch size"
-      - "the number of extensions loaded"
-      - "the Collector's log level"
+      - "the total count of extensions loaded into the Collector at startup"
+      - "the Collector's configured log level and the verbosity of its debug exporter"
     answer: 1
     explanation: |
       num_consumers sets how many concurrent export workers drain the sending queue, and
