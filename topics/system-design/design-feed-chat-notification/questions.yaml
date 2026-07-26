@@ -55,11 +55,11 @@ questions:
       Why is a WebSocket (rather than a normal HTTP request/response) the standard
       choice for a chat application?
     options:
-      - It compresses messages automatically so they use less bandwidth
-      - It guarantees exactly-once delivery of every message
+      - It automatically gzip-compresses every frame so chat messages use far less bandwidth than plain HTTP
+      - It guarantees exactly-once, in-order delivery of every message even across reconnects and dropped packets
       - It provides a persistent, full-duplex channel so the server can push messages to the client without
         the client polling
-      - It removes the need for any server-side message storage
+      - It removes the need for any server-side message storage by buffering the full history in the client socket
     answer: 2
     explanation: |
       Chat needs server push: the recipient must receive a message without asking.
@@ -76,9 +76,9 @@ questions:
       Which set correctly lists common notification delivery channels a
       notification system must support?
     options:
-      - Only mobile push, because SMS and email are legacy
-      - Only email, because it is the most reliable
-      - Only in-app messages, since external channels are never used
+      - Only mobile push via APNs and FCM, because SMS and email are legacy channels nobody relies on anymore
+      - Only email, because it is by far the most reliable channel and the only one with guaranteed delivery
+      - Only in-app messages shown while the app is open, since external out-of-app channels are never used
       - Mobile push (APNs/FCM), SMS, email, and in-app/WebSocket
     answer: 3
     explanation: |
@@ -113,10 +113,10 @@ questions:
     question: |
       WhatsApp's message states progress in which order?
     options:
-      - read -> delivered -> sent
-      - delivered -> sent -> read
+      - read (recipient opened) -> delivered (device received) -> sent (server received)
+      - delivered (device received) -> sent (server received) -> read (recipient opened)
       - sent (server received) -> delivered (recipient device received) -> read (recipient opened)
-      - sent -> read -> delivered
+      - sent (server received) -> read (recipient opened) -> delivered (device received)
     answer: 2
     explanation: |
       The receipt state machine is sent (server accepted) then delivered (recipient
@@ -151,11 +151,11 @@ questions:
       What is the purpose of a deduplication (idempotency) key in a notification
       pipeline?
     options:
-      - To encrypt the notification payload end to end
+      - To encrypt the notification payload end to end so intermediate queue workers cannot read its contents
       - To ensure that even if the same logical notification is triggered or retried multiple times, the
         user receives it once
-      - To pick which channel (push vs SMS) is used
-      - To translate the notification into the user's language
+      - To pick which channel (push vs SMS) is used based on a hash of the user id and current device state
+      - To translate the notification into the user's preferred language before it is handed to the provider
     answer: 1
     explanation: |
       A dedup/idempotency key (e.g., hash of userId+eventId+channel) recorded in a
@@ -172,11 +172,11 @@ questions:
       Why does fanout-on-write become a problem for a celebrity with 100M
       followers?
     options:
-      - Because reads become impossibly slow for that celebrity's followers
-      - Because celebrities cannot be represented in a follow graph
+      - Because timeline reads become impossibly slow for that celebrity's 100M followers on every refresh
+      - Because a follow graph cannot represent accounts whose in-degree exceeds a few million edges
       - Because a single post triggers ~100M timeline inserts, a write storm that can overload the fanout
         system
-      - Because their tweets cannot be stored durably
+      - Because tweets from an account that large exceed the durable store's per-record size and cannot persist
     answer: 2
     explanation: |
       One celebrity post fans out to ~100M timelines, creating a massive write
@@ -196,9 +196,9 @@ questions:
     options:
       - Because the provider's latency and outages would otherwise directly become the caller's latency
         and failures
-      - Because third-party providers are free only when called asynchronously
-      - Because synchronous calls cannot format JSON payloads
-      - Because queues guarantee exactly-once delivery to the device
+      - Because third-party providers waive their per-message fees only when requests arrive off the request path
+      - Because synchronous HTTP calls cannot serialize the JSON payload format that APNs and FCM require
+      - Because queues by themselves guarantee exactly-once delivery all the way to the recipient's device
     answer: 0
     explanation: |
       Calling a third-party provider synchronously couples your request path to
@@ -215,9 +215,9 @@ questions:
     question: |
       What property of Snowflake IDs makes them useful as chat message ids?
     options:
-      - They are random UUIDs with no structure
-      - They are sequential integers generated by a single central counter
-      - They are hashes of the message content
+      - They are random version-4 UUIDs with no internal structure, guaranteeing uniqueness by entropy alone
+      - They are strictly sequential integers handed out one at a time by a single central counter service
+      - They are content hashes of the message body, so identical messages always collapse to the same id
       - They embed a timestamp in the high bits so they are globally unique and chronologically sortable
     answer: 3
     explanation: |
@@ -235,10 +235,10 @@ questions:
       Why is cursor-based pagination preferred over offset pagination for a
       mutating feed?
     options:
-      - Offset pagination is faster but uses more memory
+      - Offset pagination is inherently faster but consumes more server memory as the page number grows
       - Offset pagination duplicates and skips rows when items are inserted or deleted between page loads
-      - Cursor pagination allows random access to any page number instantly
-      - Cursor pagination requires no sort order
+      - Cursor pagination allows instant random access to any arbitrary page number without a full scan
+      - Cursor pagination works entirely without any defined sort order on the underlying result set
     answer: 1
     explanation: |
       When the feed mutates under the user, offset-based paging shifts rows, causing
@@ -257,9 +257,9 @@ questions:
       tweet bodies?
     options:
       - To save storage and keep a single source of truth, hydrating full content at read time
-      - Because IDs are encrypted and bodies are not
-      - Because tweet bodies cannot be stored in any database
-      - Because IDs sort alphabetically and bodies do not
+      - Because tweet IDs are stored encrypted at rest while bodies must remain plaintext for full-text search
+      - Because tweet bodies exceed the maximum value size of the timeline store and cannot be persisted there
+      - Because numeric IDs sort correctly in the timeline index while variable-length bodies break the ordering
     answer: 0
     explanation: |
       Storing ids keeps per-user timelines tiny and lets one tweet body be shared
@@ -275,11 +275,11 @@ questions:
       Why should a 2FA/OTP notification and a promotional "people you may know"
       notification be handled differently?
     options:
-      - They use the same priority, so no difference is needed
+      - They carry identical urgency, so a single shared queue and rate limit handles both with no distinction
       - The OTP is time-critical and must not be delayed behind bulk promotional traffic, so it needs
         a high-priority lane
-      - Promotional notifications are always more urgent than OTPs
-      - OTPs should only ever be sent by email
+      - Promotional "people you may know" pushes are always more urgent than OTPs and should preempt them
+      - OTPs should only ever be sent over email because SMS and push channels are considered insecure for codes
     answer: 1
     explanation: |
       Critical/transactional notifications (OTP, security) need a high-priority lane
@@ -319,9 +319,9 @@ questions:
     question: |
       What is the PRIMARY trade-off of choosing fanout-on-read over fanout-on-write?
     options:
-      - You gain fast reads but lose the ability to store tweets durably
-      - You gain lower storage but reads become impossible to cache at any layer
-      - You gain exactly-once delivery but lose chronological ordering
+      - You gain uniformly fast reads but forfeit the ability to store tweets durably in the source of truth
+      - You gain much lower storage but reads become impossible to cache at any layer, edge, or client tier
+      - You gain exactly-once cross-region delivery but permanently lose chronological ordering of the feed
       - You gain cheap writes and fresh data but pay with expensive, high-variance reads that fan in across
         all followees
     answer: 3
@@ -344,9 +344,9 @@ questions:
     options:
       - Cache the celebrity's recent tweets once and serve that cached copy to all readers, coalescing
         concurrent identical fetches
-      - Insert the tweet into all million timelines immediately at write time
-      - Disable the celebrity's account during peak hours
-      - Require each reader to compute the tweet from scratch with no caching
+      - Insert the tweet into all million follower timelines immediately at write time, before returning the post
+      - Disable the celebrity's account during peak traffic hours so no reads for it can arrive at once
+      - Require each reader to recompute the tweet from the source store on every load with no caching layer
     answer: 0
     explanation: |
       Not fanning out on write and instead caching the celebrity's recent tweets
@@ -365,11 +365,11 @@ questions:
       Why do systems cap each user's materialized timeline at, say, the most recent
       ~800 entries instead of storing it unbounded?
     options:
-      - Because Redis cannot store lists longer than 800 elements
-      - Because older tweets must be permanently deleted for compliance
+      - Because Redis enforces a hard limit of 800 elements per list and rejects inserts beyond that cap
+      - Because older tweets beyond the recent window must be permanently deleted to satisfy compliance rules
       - Because ~99% of reads only touch the first page, so bounding the list bounds memory while rare
         deep scrolls fall back to the pull path
-      - Because sorted sets lose ordering beyond 800 entries
+      - Because sorted sets silently drop their ordering guarantee once they grow beyond roughly 800 entries
     answer: 2
     explanation: |
       Nearly all reads hit the first page, so keeping only a bounded recent window
@@ -387,9 +387,12 @@ questions:
       What is the key architectural difference between a chat connection/gateway
       tier and a normal stateless web tier?
     options:
-      - The gateway tier is stateless and can be killed at any time with no impact
-      - The gateway tier stores all message history in memory permanently
-      - The gateway tier does not need load balancing
+      - The gateway tier is fully stateless, so any node can be killed or replaced at any moment with no
+        impact on active sessions
+      - The gateway tier permanently retains the entire message history for every conversation in local RAM
+        for fast lookups
+      - The gateway tier needs no load balancing because each client connects directly to a single well-known
+        node by DNS
       - 'The gateway tier is stateful: it holds long-lived connections and a session registry maps each
         user to the gateway holding their socket'
     answer: 3
@@ -409,11 +412,14 @@ questions:
       What ordering guarantee does a well-designed chat system actually need, and
       how is it achieved?
     options:
-      - Global total order across all conversations, via a single global sequencer
+      - Global total order across every conversation on the platform, enforced by routing all sends through
+        one central global sequencer
       - Per-conversation ordering, achieved by partitioning a conversation to one ordered log and using
         time-sortable ids
-      - No ordering at all; clients sort arbitrarily
-      - Ordering by message length, longest first
+      - No ordering guarantee at all; each client independently sorts whatever messages it happens to receive
+        in arbitrary order
+      - Ordering strictly by message payload length, always placing the longest messages first regardless of
+        send time
     answer: 1
     explanation: |
       Users only need consistent ordering within a conversation, achieved by keeping
@@ -432,11 +438,14 @@ questions:
       flaps. Naively broadcasting each change is a fan-out storm. Which mitigation
       is most appropriate?
     options:
-      - Broadcast every heartbeat to all friends for maximum accuracy
-      - Write each presence change to the durable database and query it per read
+      - Broadcast every single heartbeat to all 1M friends immediately, on the theory that maximum update
+        frequency yields the most accurate presence
+      - Write each presence change durably to the primary relational database and re-query that row on every
+        friend's page read
       - Compute presence on demand only for conversations currently on screen, debounce transitions, and
         broadcast only state changes
-      - Increase the heartbeat frequency to detect flapping faster
+      - Increase the client heartbeat frequency several-fold so the system detects the connection flapping
+        faster and reacts sooner
     answer: 2
     explanation: |
       Pull presence for the visible set, debounce flapping, and only emit real state
@@ -457,8 +466,10 @@ questions:
       - A shared per-conversation log (one ordered stream all members read), because per-member inbox
         fanout would explode write amplification
       - Fanout-on-write to a per-user inbox for every member, for fast per-user reads
-      - Store the message only on the sender's device
-      - Broadcast the message to every user on the platform
+      - Store the message only on the sender's own device and stream it peer-to-peer to each member when
+        they request it
+      - Broadcast the message to every user account on the entire platform and let non-members silently
+        discard what is not for them
     answer: 0
     explanation: |
       A shared conversation log stores each message once and lets all members read
@@ -476,9 +487,12 @@ questions:
       Discord partitions messages by (channel_id, bucket) where bucket is a static
       time window. What primary problem does the time bucket solve?
     options:
-      - It encrypts each partition separately
-      - It allows messages to be stored without ids
-      - It removes the need for replication
+      - It encrypts each time-bucketed partition with its own separate key so a compromise of one bucket
+        cannot expose the others
+      - It lets messages be stored without any per-message id, since the bucket boundary alone is enough to
+        locate and order them
+      - It removes the need for replication because each bucket is self-contained and can be rebuilt from the
+        channel on demand
       - It bounds partition size so a busy channel's partition does not grow unbounded and become a hot,
         oversized row
     answer: 3
@@ -497,11 +511,14 @@ questions:
       Why do mature notification systems use a separate queue per channel (push,
       SMS, email) rather than one shared queue?
     options:
-      - Because each channel requires a different programming language
+      - Because each delivery channel must be implemented in a different programming language and therefore
+        needs its own dedicated queue
       - So a slow or throttled provider on one channel does not head-of-line-block the others, and each
         channel scales and retries independently
-      - Because a single queue cannot store more than one message type
-      - To guarantee exactly-once delivery per channel
+      - Because a single message queue is physically incapable of holding more than one distinct message
+        type or payload schema at a time
+      - To guarantee strict exactly-once delivery on every individual channel by isolating each channel's
+        acknowledgements
     answer: 1
     explanation: |
       Channels differ wildly in latency, throughput, and reliability; isolating them
@@ -520,9 +537,12 @@ questions:
       rate limit. What is the distinct purpose of the per-user limit?
     options:
       - To protect the user experience and prevent notification fatigue that drives opt-outs
-      - To stay within APNs/FCM quota and avoid provider throttling
-      - To reduce database storage costs
-      - To ensure messages are delivered exactly once
+      - To stay within the aggregate APNs/FCM messages-per-second quota and avoid provider-side throttling
+        of the whole fleet
+      - To reduce database storage costs by capping how many notification rows are persisted per user each
+        day
+      - To ensure every notification reaches the device exactly once by capping retries at the per-user
+        boundary
     answer: 0
     explanation: |
       The per-user limit protects UX (don't spam a user into disabling
@@ -540,11 +560,14 @@ questions:
       Modern ML-ranked feeds use a two-stage funnel. What are the two stages, in
       order?
     options:
-      - Ranking first (score everything), then candidate generation (filter)
+      - Heavy ranking first (run the full model over every post in the system to score it), then candidate
+        generation to filter that ranked set down
       - Candidate generation/retrieval (gather a bounded set from in-network, out-of-network, trending),
         then a heavy ranking model that scores each candidate
-      - Encryption, then decryption
-      - Fanout-on-write, then fanout-on-read
+      - Payload encryption of every candidate post, then decryption of the winners just before they are
+        rendered into the timeline
+      - Fanout-on-write to materialize each follower's inbox first, then fanout-on-read to pull the
+        remaining posts at request time
     answer: 1
     explanation: |
       Stage 1 retrieves a bounded candidate set (in-network follows, out-of-network
@@ -562,11 +585,14 @@ questions:
       Read receipts in a large group are expensive because they scale O(members)
       per message. Which technique most reduces this traffic?
     options:
-      - Send one delivered event and one read event per member per message
-      - Disable message ids so receipts cannot be tracked
+      - Emit one separate delivered event and one separate read event for every member on every single
+        message, so the sender sees exact per-message status
+      - Disable message ids entirely so that receipts have nothing to attach to and therefore stop being
+        generated for the group
       - Coalesce receipts into a per-member 'read up to message id X' high-water-mark cursor instead of
         one event per message
-      - Store receipts only on the sender's device
+      - Store all receipt state only on the sender's device and never propagate it to the members or the
+        server at all
     answer: 2
     explanation: |
       Instead of a receipt per message, track a per-member high-water mark ("read up
@@ -584,9 +610,12 @@ questions:
       Which delivery semantics does a practical chat system use, and how does it
       avoid showing duplicates?
     options:
-      - Exactly-once delivery enforced end to end by the network
-      - At-most-once delivery, accepting that some messages are simply lost
-      - Best-effort with no ids and no dedup
+      - Exactly-once delivery enforced end to end directly by the network stack, so the application never
+        has to think about duplicates
+      - At-most-once delivery, simply accepting that some messages are silently lost whenever a connection
+        drops mid-send
+      - Best-effort delivery with no message ids and no deduplication, relying on users to notice and ignore
+        any repeats
       - At-least-once delivery, made safe by client-side deduplication using the unique message id
     answer: 3
     explanation: |
@@ -607,9 +636,12 @@ questions:
     options:
       - It hides each provider's API, auth, payload format, and error semantics so you can swap or add
         fallback providers without changing business logic
-      - It makes notifications free to send
-      - It guarantees the provider will never be throttled
-      - It removes the need for user preferences
+      - It makes notifications free to send by pooling all traffic under one vendor contract with no
+        per-message fees
+      - It guarantees the underlying provider can never be throttled because the adapter negotiates unlimited
+        quota on your behalf
+      - It removes the need for any user preference or opt-out management, since the adapter decides channels
+        automatically
     answer: 0
     explanation: |
       The adapter isolates provider-specific details, enabling vendor swaps and
@@ -627,11 +659,14 @@ questions:
       A message is sent to a recipient who is currently offline. What is the correct
       handling?
     options:
-      - Drop the message since the recipient is not connected
-      - Keep retrying the WebSocket push forever until they connect
+      - Drop the message entirely, since the recipient is not currently connected and there is no live
+        socket to write it to
+      - Keep retrying the WebSocket push in a tight loop forever until the recipient's connection finally
+        comes back online
       - Persist it to the recipient's inbox/log and trigger a push notification; deliver it on reconnect
         via their last-seen cursor
-      - Send it to a random online user instead
+      - Send the message to a randomly chosen online user instead and let them forward it to the intended
+        recipient later
     answer: 2
     explanation: |
       Offline recipients get the message persisted (store) plus a push notification,
@@ -671,11 +706,14 @@ questions:
       A subset of clients sit behind restrictive proxies that break WebSockets.
       What is the standard fallback?
     options:
-      - Abandon real-time features entirely for those clients
+      - Abandon real-time features entirely for those proxied clients and downgrade them to a manual refresh
+        button that reloads the whole page
       - Fall back to long polling (or SSE), which is more widely compatible at the cost of higher latency
         and overhead
-      - Force all clients platform-wide to use short polling
-      - Require those users to switch networks
+      - Force every client on the entire platform to switch to fixed-interval short polling so all clients
+        behave identically regardless of proxy
+      - Require the affected users to switch to a different ISP or mobile network that does not interfere
+        with WebSocket upgrade handshakes
     answer: 1
     explanation: |
       Long polling (or SSE for server-to-client) is the widely-compatible fallback
@@ -717,8 +755,10 @@ questions:
       - 'Eventual consistency (AP): a slightly stale feed is acceptable, and availability matters more
         than perfect freshness'
       - 'Strong consistency (CP): block the read until all fanout is confirmed globally'
-      - Linearizability across all timelines for every read
-      - No reads allowed during any write
+      - Full linearizability across every user's timeline for every read, so all followers observe a new post
+        at the exact same instant
+      - A read/write lock that forbids any timeline read while a write or fanout for that user is still in
+        flight anywhere in the system
     answer: 0
     explanation: |
       A feed can tolerate slight staleness; what users won't tolerate is a feed
@@ -736,9 +776,9 @@ questions:
       In the real-time delivery layer, what is the role of the session registry
       (userId -> gatewayId)?
     options:
-      - It stores the full message history for each user
-      - It ranks the user's feed
-      - It generates Snowflake ids
+      - It durably stores the complete message history for each user so gateways can replay it on reconnect
+      - It ranks each user's home feed by scoring candidate posts before they are pushed to the gateway
+      - It generates the globally-unique Snowflake ids that every new message is stamped with at send time
       - It lets a publishing service route a message to the specific gateway holding the recipient's live
         connection
     answer: 3
@@ -757,11 +797,14 @@ questions:
       A push send fails transiently. What is the standard, safe handling in a
       notification pipeline?
     options:
-      - Retry immediately in a tight loop until it succeeds
+      - Retry immediately in a tight, unthrottled loop until the provider finally accepts the send, however
+        long that takes
       - Retry with exponential backoff and jitter, and route to a dead-letter queue after N failures;
         dedup keys make retries safe
-      - Give up on the first failure to avoid duplicates
-      - Switch the entire system to synchronous sends
+      - Give up permanently on the very first transient failure, on the theory that not retrying is the only
+        way to avoid ever double-notifying the user
+      - Switch the entire notification system to synchronous provider sends so failures surface in the
+        request path and can be handled inline
     answer: 1
     explanation: |
       Exponential backoff with jitter plus a dead-letter queue after repeated
@@ -784,8 +827,10 @@ questions:
         personalization within the latency budget
       - At write time, precomputing a final score for every follower's copy, because it is cheapest per
         read
-      - Never; ranked feeds cannot use fanout-on-write
-      - On the client device only, with no server involvement
+      - Never on the server; ranked feeds are fundamentally incompatible with fanout-on-write and must fall
+        back to plain chronological order
+      - On the client device only, where each app locally scores every candidate post with an on-device
+        model and no server ever participates
     answer: 0
     explanation: |
       You fan out ids, then rank the top page per request at read time using fresh
@@ -804,11 +849,14 @@ questions:
       In an SSTable-based store like Cassandra/ScyllaDB used for messages, which
       statement about the read/write cost is correct and shapes the design?
     options:
-      - Writes are more expensive than reads, so you minimize writes
+      - Writes are more expensive than reads because every write must synchronously rewrite all existing
+        SSTables in place, so you minimize writes
       - Reads are more expensive than writes (must merge memtable and multiple SSTables), so hot channels
         can create hot-partition read latency
-      - Reads and writes cost the same
-      - Neither reads nor writes touch disk
+      - Reads and writes cost exactly the same because both always resolve to a single sequential seek
+        against one immutable on-disk file
+      - Neither reads nor writes ever touch disk, since the entire keyspace is pinned in RAM and SSTables
+        are purely a backup format
     answer: 1
     explanation: |
       In LSM/SSTable stores, writes append cheaply but reads may merge the memtable
@@ -826,11 +874,14 @@ questions:
       In a threshold-based hybrid feed, what breaks if the celebrity threshold is
       set too LOW (too many accounts treated as celebrities)?
     options:
-      - Write fanout storms return for the largest accounts
-      - The follow graph becomes inconsistent
+      - Write fanout storms return for the largest accounts, because a lower threshold pushes more of the
+        biggest accounts back onto the write-fanout path
+      - The follow graph becomes internally inconsistent, since reclassifying accounts as celebrities
+        silently rewrites the follower edges pointing at them
       - Too many accounts are pulled at read time, so timeline reads must merge many pulled sources and
         read cost/latency climbs
-      - Snowflake ids stop sorting chronologically
+      - Snowflake ids stop sorting chronologically, because the celebrity threshold controls how the
+        timestamp bits are packed into each generated id
     answer: 2
     explanation: |
       A too-low threshold classifies too many accounts as pull-only, so a typical
@@ -850,9 +901,12 @@ questions:
       graph). A cache-cluster failover leaves timelines cold. What is the best
       degradation strategy?
     options:
-      - Return empty feeds until the cache naturally refills
-      - Block all reads until every timeline is fully rebuilt
-      - Permanently switch to fanout-on-read for all users
+      - Return empty feeds to every user until the cache cluster naturally refills from organic write
+        traffic over the following hours
+      - Block all incoming reads behind a global lock until every user's timeline has been fully rebuilt
+        from the tweet store and follow graph
+      - Permanently switch the entire platform to fanout-on-read for all users, abandoning the precomputed
+        timeline design for good
       - Serve reads via the pull path (fetch-and-merge from followees) during warm-up while rebuilding,
         and coalesce rebuild work to avoid a stampede
     answer: 3
@@ -875,9 +929,12 @@ questions:
     options:
       - A reconnect thundering herd when connections drop at once; mitigate with connection draining,
         jittered client reconnect, and capacity headroom
-      - No risk; just restart all gateways simultaneously
-      - Loss of all message history, mitigated by disabling persistence
-      - Snowflake id collisions, mitigated by switching to UUIDs
+      - No meaningful risk at all; simply restart all gateway nodes simultaneously and let every client
+        reconnect at once, since modern load balancers absorb the spike transparently
+      - Permanent loss of all in-flight message history, mitigated by disabling persistence so the deploy
+        has no durable state left to corrupt during the restart
+      - Snowflake id collisions across the restarted nodes, mitigated by switching every message id from
+        Snowflake to random version-4 UUIDs before deploying
     answer: 0
     explanation: |
       Dropping millions of connections at once triggers a synchronized reconnect
@@ -896,11 +953,14 @@ questions:
       During a product-launch push blast, APNs begins throttling you. You must keep
       OTP/2FA delivery fast. Which design makes this possible?
     options:
-      - A single shared queue and rate limiter for all notifications
-      - Sending all notifications synchronously to detect failures sooner
+      - A single shared queue and one global rate limiter for all notifications, so the launch blast and
+        the OTP traffic drain through the exact same first-in-first-out pipe
+      - Sending all notifications synchronously in the request path to detect provider failures sooner,
+        so the launch blast surfaces its throttling errors before OTPs are affected
       - Separate priority lanes so critical (OTP) traffic is isolated from bulk, and load-shedding sheds
         low-priority notifications first
-      - Removing the dedup layer to push more messages through
+      - Removing the dedup layer entirely during the launch so more messages can be pushed through the
+        provider before its throttling threshold trips
     answer: 2
     explanation: |
       Priority lanes isolate critical OTP delivery from bulk, and shedding
@@ -920,9 +980,12 @@ questions:
       workers, what must the design guard against, and why not just use a global
       sequencer?
     options:
-      - Nothing; wall clocks are perfectly synchronized, and a global sequencer is trivial
-      - Disk failures only; a global sequencer scales infinitely
-      - Network partitions only; timestamps are irrelevant to ordering
+      - Nothing at all; NTP keeps every worker's wall clock perfectly synchronized to the nanosecond, and
+        a single global sequencer scales trivially to any throughput
+      - Only disk failures on the id workers; a global sequencer scales infinitely because id issuance is
+        purely in-memory and never contends on anything
+      - Only network partitions between workers; timestamps are entirely irrelevant to ordering because
+        Snowflake sorts solely on the worker-id bits
       - Clock skew and backward clock jumps (guard by refusing to emit ids that go backwards, coordinating
         worker ids); a global sequencer would be a scalability bottleneck
     answer: 3
@@ -943,11 +1006,14 @@ questions:
       What is the key trade-off in choosing the TTL for a notification
       deduplication store?
     options:
-      - Longer TTL always improves correctness with no downside
+      - A longer TTL always strictly improves correctness with no downside, since keeping dedup keys around
+        longer can only ever prevent more duplicates and never causes any problem
       - Too short a TTL lets delayed retries slip through as duplicates; too long wastes memory and can
         suppress legitimate repeat notifications
-      - TTL length only affects encryption strength
-      - TTL is irrelevant because dedup keys are permanent
+      - The TTL length only affects the encryption strength of the dedup keys and has no bearing on how
+        duplicates are detected or suppressed
+      - The TTL is irrelevant because dedup keys are written permanently and never expire, so retries are
+        always caught no matter how much time has passed
     answer: 1
     explanation: |
       The dedup TTL must cover the retry window: too short and a late retry
@@ -967,11 +1033,14 @@ questions:
       causing cascading read latency. Which combination of techniques best mitigates
       it, following Discord's approach?
     options:
-      - Increase the replication factor and hope reads spread out
-      - Delete old messages from the channel to shrink the partition
+      - Increase the replication factor for the channel's keyspace and hope the extra replicas cause the
+        concurrent quorum reads to spread evenly across more nodes
+      - Delete the channel's older messages on a rolling basis to shrink the partition so the hot row stays
+        small enough to serve quickly
       - Request coalescing for identical concurrent reads plus consistent-hash routing so requests for
         the same channel hit the same data-service instance
-      - Move the channel to a relational database with row locks
+      - Move just that channel's messages to a relational database and rely on row-level locks to serialize
+        the concurrent reads against the hot partition
     answer: 2
     explanation: |
       Discord's data services coalesce concurrent identical reads (query the DB once)
@@ -992,9 +1061,12 @@ questions:
       most significant downside?
     options:
       - Massive storage duplication, and every edit or delete must fan out again to update all copies
-      - Reads become slower because bodies are larger to parse
-      - Chronological ordering is lost
-      - It becomes impossible to rank the feed
+      - Reads become slower overall, because the larger inlined bodies take longer to parse and deserialize
+        than a compact list of tweet ids would
+      - Chronological ordering is lost, because storing variable-length bodies in the timeline breaks the
+        sort key that the id-based index relied on
+      - It becomes impossible to apply any ML ranking to the feed, since ranking can only score entries
+        that are stored as bare ids rather than full bodies
     answer: 0
     explanation: |
       Denormalizing full bodies into every timeline multiplies storage and turns any
@@ -1014,9 +1086,12 @@ questions:
       so new posts appear late in followers' timelines. Which response best preserves
       feed availability while managing the backlog?
     options:
-      - Stop accepting new posts until the queue drains
-      - Switch every user permanently to fanout-on-read
-      - Drop the backlog entirely and start fresh
+      - Stop accepting any new posts platform-wide until the fanout queue has fully drained back to zero
+        depth, so no further work piles up behind the spike
+      - Switch every user on the platform permanently to fanout-on-read, abandoning the precomputed
+        timeline design so the backed-up write queue is never used again
+      - Drop the entire fanout backlog immediately and start fresh from the next incoming post, accepting
+        that the queued posts simply never reach their followers
       - Prioritize fanout to active users, fall back to the pull path for users experiencing lag, and
         alarm on queue depth
     answer: 3
@@ -1036,11 +1111,14 @@ questions:
       Why is it a design mistake to store presence with strong consistency and
       durable writes?
     options:
-      - Because presence data is legally required to be eventually consistent
+      - Because data-protection regulations explicitly mandate that online/offline presence be stored only
+        under eventual consistency and never under a strongly consistent write path
       - Because presence is high-churn, low-value, and inherently racy; durability/consensus adds cost
         and latency for data that is stale the instant it is written
-      - Because durable stores cannot represent boolean online/offline states
-      - Because strong consistency would make presence too accurate for users to handle
+      - Because durable relational and log-structured stores are technically unable to represent a simple
+        boolean online/offline state and would corrupt the value on write
+      - Because strong consistency would make presence indicators so precise that users would find the
+        constantly-flipping green dot confusing and unusable
     answer: 1
     explanation: |
       Presence changes constantly and is low-stakes; spending durable writes or
@@ -1061,9 +1139,12 @@ questions:
     options:
       - The client optimistically renders the message with a temporary local id, then reconciles to the
         server-assigned id/order when the ack arrives
-      - The client blocks the UI until the server ack returns the id
-      - The client generates the final Snowflake id itself and the server trusts it
-      - The message is not shown to the sender at all until the recipient reads it
+      - The client freezes the compose box and blocks the entire chat UI until the server ack returns the
+        authoritative id, so nothing is rendered before ordering is known
+      - The client generates the final authoritative Snowflake id itself and the server unconditionally
+        trusts it, skipping any server-side id assignment entirely
+      - The message is not shown to the sender at all until the recipient has opened the chat and a read
+        receipt has flowed all the way back to the sender's device
     answer: 0
     explanation: |
       Optimistic rendering with a temporary id gives instant feedback; on ack the
@@ -1083,11 +1164,14 @@ questions:
       acknowledged within T seconds. What must accompany this escalation to avoid a
       new problem?
     options:
-      - Nothing; double delivery across channels is always fine
+      - Nothing extra is needed; receiving both the push and the SMS for the same alert is always fine and
+        is even preferable because it maximizes the odds the user sees it
       - Deduplication and an ack window, so the user is not double-notified when both the push and the
         SMS land
-      - Disabling the push channel entirely
-      - Forcing all users to receive both channels always
+      - Disabling the push channel entirely and routing every critical alert straight to SMS, so there is
+        only ever one channel that can possibly fire
+      - Forcing all users to always receive both the push and the SMS for every alert, so the escalation
+        timer can be removed and the behavior is uniform
     answer: 1
     explanation: |
       Channel escalation risks double-delivery (push arrives late after SMS fired),
@@ -1106,11 +1190,14 @@ questions:
       Where does a vector database / embeddings + ANN search fit in a modern feed,
       and what does it primarily enable?
     options:
-      - It replaces the message store for chat history
-      - It generates Snowflake ids faster than a counter
+      - It replaces the Cassandra/ScyllaDB message store as the durable home for chat history, indexing
+        each message by its embedding instead of by channel and time
+      - It generates globally-unique Snowflake ids faster than a monotonic counter by deriving them from
+        the nearest-neighbor distance between message embeddings
       - It powers out-of-network candidate retrieval (content/users similar to your interests) during
         the candidate-generation stage, improving discovery and cold-start
-      - It is the durable source of truth for follow-graph edges
+      - It is the durable source of truth for the follow-graph edges, storing each follower relationship
+        as a vector so adjacency can be queried by similarity search
     answer: 2
     explanation: |
       Embeddings + approximate-nearest-neighbor search retrieve out-of-network
@@ -1129,9 +1216,12 @@ questions:
       Your real-time pub/sub bus for pushing updates to gateways is becoming a
       bottleneck. What is the standard scaling move and its cost?
     options:
-      - Keep one central bus but add more consumers; there is no downside
-      - Remove the bus and have gateways poll the database directly
-      - Route all traffic through a single leader node for ordering
+      - Keep one central bus and simply add more consumer processes to it; there is no downside, since the
+        single bus itself can absorb unlimited publish throughput no matter how many consumers attach
+      - Remove the pub/sub bus entirely and have every gateway poll the primary database directly on a
+        fixed interval to discover updates destined for its connected users
+      - Route all publish traffic through one single elected leader node to preserve a strict global order,
+        keeping every update serialized through that one coordinator
       - Shard/partition the bus by userId so load spreads, accepting harder rebalancing and more complex
         cross-shard broadcasts
     answer: 3
@@ -1154,9 +1244,12 @@ questions:
     options:
       - Because deletes/edits create tombstones/new versions, and many tombstones degrade read performance,
         so an append-heavy model reads far better
-      - Because updates are physically impossible in these stores
-      - Because appends require row-level locks that deletes avoid
-      - Because these stores cannot store timestamps
+      - Because in-place updates and edits are physically impossible in these stores, so an append-mostly
+        model is the only workload the engine will accept at all
+      - Because appends acquire row-level locks that block concurrent readers, whereas deletes take no
+        locks, so an append-heavy design must minimize the appends
+      - Because these LSM-based stores cannot persist timestamps, so ordering only works if every row is a
+        fresh append and no prior row is ever modified
     answer: 0
     explanation: |
       LSM-based stores handle deletes via tombstones and edits via new versions;
@@ -1177,11 +1270,14 @@ questions:
       twice is acceptable if the client hides duplicates." Which design satisfies
       this best?
     options:
-      - Ack the sender before persisting, to minimize latency
-      - Use at-most-once delivery to guarantee no duplicates ever reach the client
+      - Ack the sender before the message is persisted anywhere, to minimize send latency, and rely on the
+        gateway to write it to durable storage lazily in the background afterwards
+      - Use at-most-once delivery so that no duplicate can ever reach the client, accepting that a message
+        dropped mid-send during a connection failure is simply never redelivered
       - Persist the message durably before acking the sender, use at-least-once delivery, and dedup by
         message id on the client
-      - Store messages only in the gateway's memory for speed
+      - Store messages only in the connection gateway's local memory for speed, flushing to a durable store
+        only once the recipient has come online and acknowledged receipt
     answer: 2
     explanation: |
       Durability-before-ack guarantees no loss; at-least-once plus client dedup by id
@@ -1201,9 +1297,12 @@ questions:
       can trigger the same logical alert. What delivery guarantee should the
       notification system target, and how?
     options:
-      - Exactly-once end to end, by coordinating with APNs/FCM transactions
-      - At-most-once, dropping any notification that might be a duplicate
-      - No guarantee; rely on users to ignore duplicates
+      - Exactly-once end to end, achieved by wrapping every APNs and FCM call in a distributed
+        two-phase-commit transaction so no logical notification can ever be sent twice
+      - At-most-once, sending each notification a single time with no retries and dropping any that
+        might be a duplicate, accepting that genuine alerts are silently lost on transient failure
+      - No delivery guarantee at all; emit best-effort and rely on end users to notice and mentally
+        ignore whatever duplicate notifications they happen to receive
       - 'At-least-once with idempotency: assign a stable dedup key per logical notification and check-and-set
         before sending so the user is notified once'
     answer: 3
@@ -1225,11 +1324,14 @@ questions:
       their timelines, causing a thundering herd on the message store. Which set of
       mitigations directly addresses this?
     options:
-      - Shorten the cache TTL so it refreshes more often
+      - Shorten the cache TTL to a few seconds so the hot key refreshes far more often and each reader
+        is more likely to hit an already-warm entry
       - Request coalescing on the hot key, longer TTL for hot keys, and probabilistic early refresh before
         expiry
-      - Fan the celebrity's tweet out to all 100M timelines on write
-      - Serve stale-forever content and never refresh
+      - Fan the celebrity's tweet out to all 100M follower timelines on write, so the read path never
+        needs to touch the message store for that key at all
+      - Serve the last-cached copy stale forever and never refresh it again, so the message store is
+        never queried for that celebrity key after the first load
     answer: 1
     explanation: |
       Coalescing concurrent misses into one fetch, giving hot keys longer TTLs, and
@@ -1248,11 +1350,14 @@ questions:
       content, and the product values trust over marginal engagement. Which feed
       ordering is the better fit, and what is given up?
     options:
-      - ML ranking, giving up transparency for higher engagement
-      - Random ordering, to maximize fairness
+      - ML ranking, giving up transparency and predictability in exchange for the higher engagement that
+        a personalized relevance model reliably produces
+      - Random ordering, on the theory that shuffling posts unpredictably each load maximizes fairness by
+        giving every author an equal chance of appearing first
       - Reverse-chronological, giving up some engagement and out-of-network discovery for transparency,
         predictability, and lower infra cost
-      - Alphabetical ordering, for determinism
+      - Alphabetical ordering by author handle, chosen because sorting on a fixed key makes the feed fully
+        deterministic and trivial for a regulator to audit
     answer: 2
     explanation: |
       Reverse-chronological is transparent and predictable ("newest first"), fitting a
@@ -1273,9 +1378,12 @@ questions:
     options:
       - Persist once to the shared channel log and have members pull recent messages (fanout-on-read),
         since pushing to millions per message is a fanout storm
-      - Push the message to all 5M gateways/inboxes immediately via fanout-on-write
-      - Send the message only to the 100 most recently active members
-      - Store it on the sender's device and let others request it peer-to-peer
+      - Push the message to all 5M members' gateways and per-user inboxes immediately via fanout-on-write,
+        so every online member's read is a single precomputed lookup
+      - Send the message only to the 100 most recently active members and skip everyone else, on the
+        assumption that inactive members will never scroll back to read it
+      - Store the message solely on the sender's own device and let each of the other members fetch it
+        peer-to-peer directly from the sender when they open the channel
     answer: 0
     explanation: |
       For very large channels, writing once to the shared log and letting members
@@ -1315,11 +1423,14 @@ questions:
       Under a rate-limit breach, when is it better to DROP notifications versus
       DELAY (queue) them?
     options:
-      - Always delay everything; dropping is never acceptable
+      - Always delay and queue everything regardless of priority; dropping any notification is never
+        acceptable, so the queue simply absorbs the entire over-limit burst until it drains
       - Drop/collapse low-priority notifications (protecting UX and providers) but delay high-priority
         ones to preserve their delivery
-      - Always drop everything to protect providers
-      - Drop high-priority and delay low-priority, since low-priority is more valuable
+      - Always drop every notification uniformly the moment the limit is breached, since shedding all
+        traffic equally is the only way to fully protect the downstream providers
+      - Drop the high-priority notifications and delay the low-priority ones, on the reasoning that
+        low-priority traffic is the more valuable and must therefore be preserved
     answer: 1
     explanation: |
       Low-priority over-limit notifications are best dropped or collapsed (they add
@@ -1341,9 +1452,12 @@ questions:
     options:
       - It reduces user-perceived latency and isolates failures per cell, but adds cross-cell/cross-region
         routing and deployment complexity
-      - It eliminates all cross-region communication with no added complexity
-      - It forces strong global consistency on presence
-      - It removes the need for a session registry
+      - It eliminates all cross-region communication entirely and adds no new complexity, because each
+        cell becomes fully self-contained and never needs to talk to any other cell
+      - It forces strong global consistency on presence, requiring every cell to agree on each user's
+        online/offline state through a synchronous cross-cell consensus round
+      - It removes the need for a session registry altogether, since edge cells can locate any recipient's
+        live socket purely from the client's source IP address
     answer: 0
     explanation: |
       Edge/cell gateways cut latency and contain failures to a cell, but you pay with
@@ -1363,11 +1477,14 @@ questions:
       freshly pulled celebrity tweets. What is the subtle correctness/performance
       risk introduced by this merge, and how is it bounded?
     options:
-      - The merge always loses chronological order and cannot be fixed
+      - The merge always destroys chronological order because interleaving two independently sorted
+        sources is mathematically impossible to re-sort, and no known technique can recover it
       - The merge can duplicate a tweet if a borderline account is both pushed and pulled; bound it by
         a clear threshold and dedup by tweet id at merge time
-      - The merge requires strong consistency across all shards or it returns nothing
-      - The merge makes writes O(followers) again
+      - The merge demands strong linearizable consistency across every timeline shard, and if any shard
+        lags even slightly the entire read returns an empty feed rather than partial results
+      - The merge silently restores O(followers) write amplification on the push path, because pulling
+        celebrity tweets at read time forces a re-fanout of every earlier post on write
     answer: 1
     explanation: |
       If an account straddles the threshold (or reclassifies), a tweet could appear
@@ -1389,11 +1506,14 @@ questions:
       influence ranking within seconds, without blowing the read latency budget.
       Which architecture fits best?
     options:
-      - Recompute all features synchronously inside each feed read request
-      - Store engagement only in the primary OLTP database and JOIN at read time
+      - Recompute all engagement features synchronously inside each feed read request, scanning the raw
+        like and dwell logs on the fly so every read reflects the absolute latest signal
+      - Store engagement only in the primary OLTP database and run a multi-table JOIN across likes and
+        dwell at read time to assemble each post's features on demand
       - Stream engagement events (Kafka/Flink) to update a low-latency feature store, which the read-time
         ranker queries for precomputed features
-      - Batch-recompute features once per day
+      - Batch-recompute the full feature set once per day in an offline job and serve yesterday's values
+        to the ranker until the next nightly run completes
     answer: 2
     explanation: |
       Streaming engagement into a low-latency feature store lets the read-time ranker
@@ -1415,9 +1535,12 @@ questions:
       main benefit and the main cost of this pattern versus calling the fanout
       service inline from the write API?
     options:
-      - 'Benefit: synchronous consistency; cost: none'
-      - 'Benefit: eliminates the need to store tweets; cost: higher read latency'
-      - 'Benefit: exactly-once fanout guaranteed; cost: loss of ordering'
+      - 'Benefit: fully synchronous end-to-end consistency where every follower timeline reflects the
+        write the instant the API returns; cost: no downside whatsoever compared to the inline call'
+      - 'Benefit: it removes the need to durably store tweets at all because the CDC log becomes the sole
+        copy; cost: materially higher read latency on every timeline fetch'
+      - 'Benefit: it guarantees exactly-once fanout so no follower ever sees a duplicate insert; cost:
+        the log path permanently loses the chronological ordering of posts'
       - 'Benefit: decoupled, replayable, ordered fanout and read models that can be rebuilt from the log;
         cost: added eventual-consistency lag and operational complexity of the streaming pipeline'
     answer: 3
@@ -1441,9 +1564,12 @@ questions:
     options:
       - Compute presence only for the subset of friends currently visible/in an open conversation (pull-on-view),
         trading a small amount of staleness for eliminating the O(friends) fan-out storm
-      - Push every presence change to all friends; trade nothing
-      - Persist presence to disk and query per page load; trade latency for durability
-      - Broadcast presence over the feed fanout pipeline; trade storage for freshness
+      - Push every presence change to all friends the instant it happens; trade nothing away, since a
+        larger friend list simply means the push reaches more people with no added cost
+      - Persist every presence change durably to disk and re-query that row on each page load; trade
+        read latency for the durability of a permanently recorded online/offline history
+      - Broadcast presence updates over the same feed fanout pipeline used for posts; trade storage for
+        freshness by materializing each status change into every friend's timeline
     answer: 0
     explanation: |
       Pulling presence only for the visible set (open conversations/on-screen
@@ -1461,11 +1587,14 @@ questions:
       A product must support 100,000-member groups. Per-member read receipts are
       O(members) per message. Which decision is the most defensible at this scale?
     options:
-      - Keep full per-member receipts; storage is cheap so it does not matter
-      - Compute receipts synchronously on the sender's device
+      - Keep full per-member read receipts for every message even in 100,000-member groups; storage is
+        cheap enough that the O(members) write and read amplification simply does not matter
+      - Compute all per-member receipts synchronously on the sender's own device, having it poll each of
+        the 100,000 members for their read state before displaying the aggregate
       - Aggregate or disable per-member receipts for very large groups (e.g., show only counts or nothing),
         because O(members) receipt writes/reads per message do not scale
-      - Route receipts through the notification system as high-priority pushes
+      - Route every per-member read receipt through the notification system as a high-priority push, so
+        the existing notification fanout absorbs the O(members) receipt traffic per message
     answer: 2
     explanation: |
       At 100K members, emitting and storing a receipt per member per message is
@@ -1485,9 +1614,12 @@ questions:
       A subtle danger of moving feed fanout fully async (queue-based) is the loss of
       natural backpressure. What is the specific failure mode and mitigation?
     options:
-      - There is no failure mode; queues have infinite capacity
-      - The queue enforces synchronous backpressure automatically, blocking writers
-      - Async fanout guarantees the reader always sees the latest tweet immediately
+      - There is no failure mode to worry about, because message queues have effectively infinite
+        capacity and will buffer any write burst indefinitely without ever running out of room
+      - The queue automatically enforces synchronous backpressure, blocking each writer inline the moment
+        consumers fall behind, so producers can never outrun fanout in the first place
+      - Async fanout guarantees the reader always sees the very latest tweet immediately, because moving
+        fanout off the write path makes the read side strongly consistent by construction
       - You can accept far more writes than you can fan out; the queue silently grows and only surfaces
         via lag, so you must alarm on queue depth and apply backpressure or shed load
     answer: 3
@@ -1509,11 +1641,14 @@ questions:
       A chat user has phone, tablet, and web open simultaneously. What is the correct
       model for delivering and syncing messages across all their devices?
     options:
-      - Deliver to whichever single device was most recently active and ignore the others
+      - Deliver each message only to whichever single device was most recently active and ignore the
+        phone, tablet, and web sessions that were not the last one to send or foreground
       - Treat each device as a separate endpoint with its own last-seen cursor; deliver/sync per device
         and reconcile read state across devices via high-water marks
-      - Require the user to pick one primary device that receives all messages
-      - Store no per-device state and let each device re-download all history on every open
+      - Require the user to nominate one primary device up front that receives every message, with the
+        other two devices left to display nothing until that primary forwards to them
+      - Store no per-device cursor or state at all and instead have each device re-download the entire
+        conversation history from scratch every single time the app is opened
     answer: 1
     explanation: |
       Multi-device requires per-device endpoints and cursors so each syncs what it
@@ -1533,11 +1668,14 @@ questions:
       A "goal scored" event must notify 50M subscribers within seconds. Which fanout
       design best balances speed, provider limits, and reliability?
     options:
-      - One worker iterates all 50M users and calls the provider once per user synchronously
-      - Send all 50M through a single provider connection to preserve ordering
+      - One worker iterates through all 50M subscribers sequentially and makes a separate synchronous
+        provider call per user, waiting for each response before moving to the next recipient
+      - Send all 50M notifications through a single shared provider connection, on the reasoning that one
+        serialized pipe preserves a strict global delivery order across every subscriber
       - Fan out from the topic to sharded worker queues by userId, batch provider multicast calls, and
         apply per-provider rate limiting with backpressure
-      - Store the notification and let users poll for it to avoid provider load
+      - Store the notification once and have every one of the 50M users poll the server for it on an
+        interval, so the provider is never called and its rate limits are never approached
     answer: 2
     explanation: |
       Sharding the fanout by userId across workers, using provider batch/multicast
@@ -1559,9 +1697,12 @@ questions:
       - Recognize the account exceeds the celebrity threshold, skip write-fanout, store the tweet in the
         author's own list/cache, and let followers merge it in at read time from the pulled celebrity
         set
-      - Immediately insert the tweet into all 50M follower timelines, then rank each copy
-      - Reject the post because 50M followers exceeds the fanout capacity
-      - Fan out synchronously and block the author's request until all 50M inserts complete
+      - Immediately insert the tweet into all 50M follower timelines at write time, then run the ranking
+        model separately over each of the 50M materialized copies
+      - Reject the post outright and return an error to the author, because 50M followers exceeds the
+        maximum fanout capacity the write pipeline is provisioned to handle
+      - Fan out synchronously to every follower and hold the author's post request open, blocking the
+        response until all 50M timeline inserts have fully completed
     answer: 0
     explanation: |
       Above the threshold you avoid the 50M-insert storm entirely: store the tweet in

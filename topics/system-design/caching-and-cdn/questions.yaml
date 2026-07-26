@@ -16,9 +16,11 @@ questions:
   options:
   - A CDN places content in Points of Presence physically close to the user, defeating speed-of-light
     round-trip time
-  - A CDN uses faster RAM than Redis, so lookups are quicker
-  - A CDN never expires content, so hit ratios are always 100%
-  - A CDN compresses data more aggressively than an in-memory cache
+  - A CDN uses faster DDR5 RAM than Redis nodes ship with, so each individual key lookup completes in fewer
+    nanoseconds
+  - A CDN never expires cached content, so its edge hit ratio stays pinned at 100% for every object it serves
+  - A CDN compresses payloads with Brotli far more aggressively than any in-memory cache can, shrinking
+    transfer size
   answer: 0
   explanation: |
     A CDN's core win is geographic proximity: serving bytes from a nearby PoP
@@ -63,8 +65,10 @@ questions:
     and is the framing sound?
   options:
   - From ~3.45 ms to ~3.40 ms — negligible, because 95% is already near optimal
-  - From ~50 ms to ~1 ms — the average tracks the miss latency directly
-  - No change, because hit ratio does not affect average latency
+  - From ~50 ms to ~1 ms — the effective average tracks the miss latency directly, so raising hits simply
+    replaces the 50 ms miss cost with the 1 ms hit cost
+  - No change, because at these hit ratios the average is dominated by the fixed hit latency and is effectively
+    insensitive to the last few points of hit ratio
   - From ~3.45 ms to ~1.49 ms — misses dominate, so the last few points of hit ratio more than halve effective
     latency
   answer: 3
@@ -84,10 +88,10 @@ questions:
     Which sequence correctly orders cache layers from closest-to-user to
     closest-to-source-of-truth?
   options:
-  - Database buffer pool -> application cache -> CDN -> browser cache
+  - Database buffer pool -> application (distributed) cache -> CDN/edge -> browser cache
   - Browser cache -> CDN/edge -> application (distributed) cache -> database buffer pool
-  - CDN -> browser cache -> database buffer pool -> application cache
-  - Application cache -> browser cache -> CDN -> database buffer pool
+  - CDN/edge -> browser cache -> database buffer pool -> application (distributed) cache
+  - Application (distributed) cache -> browser cache -> CDN/edge -> database buffer pool
   answer: 1
   explanation: |
     From the user inward: browser (zero network) -> CDN/edge (nearby PoP) ->
@@ -105,11 +109,14 @@ questions:
     Why is it generally HARDER to invalidate a cache the closer it sits to the
     end user (e.g. a browser cache vs a database buffer pool)?
   options:
-  - Browser caches use slower storage that cannot be updated quickly
-  - Database buffer pools are immutable and never need invalidation
+  - Browser caches persist to slow disk-backed storage that the OS refuses to update until the tab closes,
+    so purges cannot land promptly
+  - Database buffer pools are immutable snapshots that are rebuilt only on restart and therefore never
+    require any invalidation at all
   - You cannot reach out and purge a copy already handed to a client; you can only cache-bust future fetches,
     whereas server-side layers you control directly
-  - Browsers ignore all Cache-Control headers, making invalidation impossible
+  - Browsers ignore all Cache-Control headers by default for security reasons, making any server-driven
+    invalidation fundamentally impossible
   answer: 2
   explanation: |
     A copy already delivered to a client is out of your control — you cannot
@@ -132,9 +139,12 @@ questions:
   options:
   - 'Cross-instance incoherence: 200 independent copies can hold different/stale values, so a single Redis
     invalidation no longer updates all readers'
-  - Higher network latency to reach cached data
-  - Loss of durability, because in-process caches must be persisted to disk
-  - Reduced hit ratio, because local caches always miss more than shared caches
+  - Higher network latency to reach cached data, because every L1 read now has to make an extra hop through
+    the shared Redis tier first
+  - Loss of durability, because in-process L1 caches are required to be persisted to local disk and that
+    fsync path can fail on each instance
+  - Reduced hit ratio, because per-instance local caches structurally miss far more often than a single
+    shared cache serving the whole fleet
   answer: 0
   explanation: |
     An L1 cache is per-instance, so each of the 200 processes holds its own
@@ -153,9 +163,12 @@ questions:
     In the cache-aside (lazy loading) pattern, what happens on a cache MISS
     during a read?
   options:
-  - The cache automatically loads from the database using a configured loader
-  - The request fails and the client must retry
-  - The database pushes the value to the cache proactively
+  - The cache layer automatically loads the value from the database using a configured read-through loader
+    function, transparently to the application
+  - The request immediately returns a miss error and the client is expected to retry until the entry has
+    been warmed
+  - The database detects the absent key and proactively pushes the freshly written value into the cache
+    on the application's behalf
   - The application reads from the database, populates the cache, and returns the value
   answer: 3
   explanation: |
@@ -174,11 +187,14 @@ questions:
     With cache-aside, why is the recommended action on a write to DELETE the
     cache entry rather than UPDATE it with the new value?
   options:
-  - Deleting is faster than setting in Redis
+  - Deleting a key is a constant-time O(1) operation in Redis whereas setting a value must re-serialize
+    and re-hash the payload, so deletes are measurably faster
   - Deleting is idempotent and self-healing; setting on write creates a race where interleaved concurrent
     writers can leave a stale value pinned in cache
-  - Updating would double memory usage
-  - Redis does not support updating existing keys
+  - Updating the entry in place would keep both the old and new serialized copies resident until compaction,
+    roughly doubling memory usage for the key
+  - Redis does not support overwriting an existing key with a new value; you must delete it first and then
+    re-insert under the same name
   answer: 1
   explanation: |
     If two writers set the cache after their DB writes, the operations can
@@ -199,9 +215,12 @@ questions:
     cache tier goes down, what is the expected behavior?
   options:
   - The system degrades gracefully to slower reads served directly from the DB, rather than erroring
-  - Reads and writes fail until the cache is restored
-  - The database automatically becomes read-only
-  - All writes are silently dropped
+  - Both reads and writes immediately begin failing and stay unavailable until the cache tier is fully
+    restored and re-warmed
+  - The database automatically flips into a read-only protective mode until the cache tier reconnects and
+    confirms it is healthy again
+  - All incoming writes are silently dropped on the floor until the cache comes back, since there is nowhere
+    to record them meanwhile
   answer: 0
   explanation: |
     Because the cache is a look-aside buffer the DB doesn't depend on, a cache
@@ -223,11 +242,14 @@ questions:
     DB to V2 and deletes the (empty) cache key. R then writes V1. What is the
     result and the standard mitigation?
   options:
-  - Cache holds V2 correctly; no mitigation needed
-  - The DB is corrupted to V1; mitigate with a transaction
+  - Cache correctly ends up holding V2 because R's write is automatically discarded once the key was deleted,
+    so no mitigation is needed
+  - The DB itself is corrupted back to V1 by R's late write, so you must wrap the read-and-populate in a
+    serializable transaction to prevent it
   - Cache holds stale V1 until TTL expiry or next write; mitigate with a short TTL backstop, CAS, or Facebook-style
     leases
-  - The write W is lost; mitigate with write-through
+  - The writer W's update to V2 is silently lost and the DB reverts, so you must switch to write-through
+    so writes never bypass the cache
   answer: 2
   explanation: |
     This is the classic cache-aside repopulation race: R's late write pins the
@@ -246,9 +268,12 @@ questions:
   options:
   - In read-through the application queries only the cache, and the cache itself loads from the DB on
     a miss via a loader function
-  - Read-through writes to the database synchronously on every read
-  - Read-through never caches misses
-  - Read-through requires the application to manage all DB fallback logic
+  - Read-through issues a synchronous write back to the database on every single read to refresh the row's
+    last-accessed timestamp before returning it
+  - Read-through deliberately never stores a value fetched on a miss, so an identical follow-up read for
+    the same key always goes back to the database
+  - Read-through requires the application code itself to own and manage all of the database fallback and
+    cache-population logic on every miss
   answer: 0
   explanation: |
     Read-through centralizes miss-handling in the cache layer: the app calls the
@@ -266,11 +291,14 @@ questions:
   question: |
     What is the PRIMARY trade-off of write-through caching?
   options:
-  - Reads become stale immediately after writes
-  - The cache can lose acknowledged writes if it crashes
+  - Reads become stale immediately after every write because the cache copy is only refreshed lazily on
+    the next miss rather than at write time
+  - The cache can lose acknowledged writes if it crashes before the buffered update has been flushed through
+    to the backing database
   - Every write pays the latency of writing both cache and DB synchronously, and you cache data that may
     never be read again
-  - Writes bypass the cache entirely, causing read misses
+  - Writes bypass the cache entirely and land only in the database, so the very next read for that key
+    is a guaranteed miss
   answer: 2
   explanation: |
     Write-through updates cache and DB synchronously, so reads are fresh (A is
@@ -289,9 +317,12 @@ questions:
     A team uses write-through so reads are always consistent with the DB. Why
     is it still wise to also set a TTL on write-through entries?
   options:
-  - TTL increases the hit ratio for write-through caches
-  - TTL is required for write-through to function at all
-  - TTL reduces write latency
+  - TTL directly increases the cache hit ratio for write-through entries by keeping the hottest keys resident
+    and shielding them from eviction under memory pressure
+  - TTL is a mandatory configuration parameter without which the write-through path cannot synchronize the
+    cache and database at all
+  - TTL shortens the synchronous write latency by letting the cache acknowledge the write before the paired
+    database write has fully committed
   - 'As a safety net: if a bug or out-of-band write bypasses the write-through path, the TTL ensures stale
     data eventually self-corrects instead of being pinned forever'
   answer: 3
@@ -312,11 +343,14 @@ questions:
     they hit the cache and are flushed to the DB asynchronously later. What is
     the biggest risk this introduces?
   options:
-  - Higher write latency than write-through
+  - Higher per-write latency than write-through, because each buffered write must wait for the asynchronous
+    flush queue to drain before it can be acknowledged
   - 'Durability loss: acknowledged writes can be lost if the cache node dies before flushing, and the
     DB is temporarily behind'
-  - The cache cannot coalesce repeated writes to the same key
-  - Reads always miss after a write
+  - The cache is structurally unable to coalesce repeated writes to the same key, so every increment is
+    flushed to the database as its own separate operation
+  - Reads always miss immediately after a write, since the value is not considered readable until the
+    asynchronous flush to the database has completed
   answer: 1
   explanation: |
     Write-back's async flush means a crash before flush loses acked writes and
@@ -337,11 +371,14 @@ questions:
     for hot videos, and it is acceptable to lose a few seconds of counts on a
     rare crash. Which approach is most appropriate?
   options:
-  - Write-through to the DB on every increment for maximum consistency
-  - Cache-aside with delete-on-write for each increment
+  - Write-through to the DB synchronously on every single increment, so the persisted counter is always
+    perfectly consistent with what readers see in the cache
+  - Cache-aside with delete-on-write on each increment, so the next reader recomputes the fresh total by
+    re-reading the authoritative count from the database
   - 'Write-back: increment in the cache and asynchronously/batched-flush coalesced totals to the DB, ideally
     backed by a durable log'
-  - Write-around so every increment goes straight to the DB, bypassing the cache
+  - Write-around so every increment goes straight to the DB and bypasses the cache, keeping the persisted
+    view authoritative while the cache is populated only on reads
   answer: 2
   explanation: |
     Write-back coalesces thousands of increments into a single periodic DB write,
@@ -363,9 +400,12 @@ questions:
   options:
   - For write-once/read-rarely or bulk-import data; downside is that a read right after a write is a guaranteed
     cache miss
-  - For read-your-writes workloads; downside is high write latency
-  - For hot counters; downside is lost writes on crash
-  - For read-heavy shared data; downside is memory waste
+  - For read-your-writes workloads where the writer immediately re-reads; downside is the high write latency
+    of updating both the cache and the database on every write
+  - For high-frequency hot counters that must absorb bursts; downside is losing the most recent unflushed
+    increments if the cache node crashes before persisting
+  - For read-heavy shared data accessed by the whole fleet; downside is memory waste from caching large
+    values that only a few clients ever request
   answer: 0
   explanation: |
     Write-around avoids polluting the cache with data that is written far more
@@ -387,9 +427,12 @@ questions:
     after every edit and must reflect edits instantly. Which combined strategy
     best fits?
   options:
-  - Write-back for all items to minimize write latency
-  - Write-through for every item to guarantee global consistency
-  - Cache-aside with no TTL and no invalidation
+  - Write-back for every item across the whole catalog to minimize write latency and coalesce the rare
+    edits into batched asynchronous flushes to the database
+  - Write-through for every item on every write to guarantee globally consistent reads, even for the bulk
+    import data that is written once and then read constantly
+  - Cache-aside with no TTL and no explicit invalidation, relying on natural eviction under memory pressure
+    to eventually clear out any items that were edited
   - Write-around plus cache-aside reads for the bulk catalog, and write-through for the small edit-and-immediately-reread
     subset
   answer: 3
@@ -412,8 +455,8 @@ questions:
   options:
   - Evicts the item that has been accessed the fewest times
   - Evicts the item that has gone unused for the longest time
-  - Evicts the oldest-inserted item regardless of access
-  - Evicts a randomly chosen item
+  - Evicts the item that was inserted earliest, regardless of how recently it was accessed
+  - Evicts a uniformly random item chosen from the whole keyspace, ignoring access history entirely
   answer: 1
   explanation: |
     LRU evicts the least-recently-accessed item, betting on temporal locality
@@ -434,9 +477,9 @@ questions:
   options:
   - Switch to LFU or a modern W-TinyLFU policy, which resist one-time scans by favoring frequently-accessed
     items
-  - Switch to FIFO eviction
-  - Increase the TTL on all entries
-  - Switch to allkeys-random eviction
+  - Switch to FIFO eviction, which discards oldest-inserted entries and so keeps the scanned items resident
+  - Increase the TTL on all entries so the hot working set is guaranteed to survive each nightly full scan
+  - Switch to allkeys-random eviction so scanned entries get evicted statistically before any hot key does
   answer: 0
   explanation: |
     Plain LRU treats the one-time scan's items as 'recently used' and evicts the
@@ -456,11 +499,11 @@ questions:
     What is the classic weakness of a naive LFU policy, and how do real
     implementations (e.g. Redis LFU) address it?
   options:
-  - It is too memory-heavy; solved by using FIFO instead
-  - It cannot track frequency at all; solved by adding timestamps
+  - It consumes far too much memory per entry; solved by switching to a lightweight FIFO queue that drops oldest items
+  - It cannot track access frequency at all; solved by attaching a last-access timestamp to every key for recency
   - Items popular in the past keep high counts and won't leave even after going cold; solved with aging/decay
     of frequency counters
-  - It evicts hot items too eagerly; solved by disabling eviction
+  - It evicts genuinely hot items far too eagerly; solved by disabling eviction and letting the cache grow unbounded
   answer: 2
   explanation: |
     Naive LFU never forgets: a formerly-hot item retains a high count and
@@ -482,9 +525,9 @@ questions:
   options:
   - An age bound for staleness; short TTL means fresher data but lower hit ratio and more origin load,
     long TTL means higher hit ratio but staler data
-  - A pressure-based eviction policy; long TTL wastes CPU
-  - A replication strategy; short TTL improves durability
-  - A sharding policy; long TTL improves key distribution
+  - A memory-pressure eviction policy triggered only when the cache is full; long TTL wastes CPU on scanning
+  - A cross-node replication strategy for high availability; short TTL improves durability of replicated copies
+  - A key-distribution sharding policy across the cluster; long TTL improves how evenly keys spread over nodes
   answer: 0
   explanation: |
     TTL is an age/staleness bound (often combined with LRU/LFU), not a
@@ -504,11 +547,11 @@ questions:
     Redis implements 'approximate' LRU/LFU rather than exact tracking. Why is
     this a deliberate and reasonable engineering choice?
   options:
-  - Exact LRU is impossible to implement in any system
-  - Approximate LRU gives strictly better hit ratios than exact LRU
+  - Exact LRU is mathematically impossible to implement in any key-value system regardless of resources spent
+  - Approximate LRU always yields strictly better hit ratios than exact LRU because sampling avoids stale ordering
   - Exact tracking would require per-key metadata and list maintenance that costs significant memory and
     CPU; sampling a few keys yields near-optimal eviction far more cheaply
-  - Redis cannot store timestamps, so approximation is forced
+  - Redis has no way to store per-key timestamps or counters, so approximate sampling is the only option available
   answer: 2
   explanation: |
     Exact LRU/LFU needs a maintained ordering structure and per-key bookkeeping;
@@ -528,9 +571,9 @@ questions:
     Modern cache research (Caffeine's W-TinyLFU, and S3-FIFO from SOSP 2023)
     challenges plain LRU. What is a key insight these designs exploit?
   options:
-  - That eviction policy no longer matters on modern hardware
-  - That caches should never evict, only expire by TTL
-  - That random eviction is always optimal for skewed workloads
+  - That eviction policy no longer matters on modern hardware because RAM is now cheap enough to never evict
+  - That caches should never evict under memory pressure and should only ever remove entries via TTL expiry
+  - That uniformly random eviction is provably optimal for skewed, heavy-tailed workloads at any cache size
   - That FIFO and frequency-sketch-based admission can match or beat LRU hit ratios while avoiding costly
     per-hit list surgery and resisting scans
   answer: 3
@@ -571,11 +614,11 @@ questions:
     Write-time (explicit delete/purge) invalidation reacts to changes quickly.
     What is its fundamental weakness at scale?
   options:
-  - It always causes cache stampedes
-  - It requires the database to be read-only during writes
+  - It always triggers a cache stampede on every write because the deleted key is immediately re-requested by many clients
+  - It requires the database to be placed in read-only mode for the duration of each write so purges stay ordered
   - The write path must know every cache key derived from the changed data (hard for aggregates, query
     results, and fan-outs); a missed key silently serves stale data
-  - It doubles storage requirements
+  - It roughly doubles total storage requirements because each purged entry must be retained as a tombstone for auditing
   answer: 2
   explanation: |
     Explicit invalidation only works if the writer can enumerate all affected
@@ -598,9 +641,9 @@ questions:
   options:
   - 'CDC-based invalidation: tail the DB write-ahead log/binlog (e.g. Debezium) and emit invalidation
     events, so ANY writer triggers cache invalidation without needing cache-aware code'
-  - Increase TTL so entries live longer
-  - Switch every reader to write-through caching
-  - Disable the cache entirely
+  - Increase TTL so entries live longer, giving the out-of-band writers more time to eventually issue their delete calls
+  - Switch every reader to write-through caching so each read synchronously refreshes the entry from the shared database
+  - Disable the cache entirely and instead scale the database vertically to absorb the full uncached read load
   answer: 0
   explanation: |
     The root problem is that invalidation depends on every writer remembering to
@@ -621,9 +664,9 @@ questions:
     app.a1b2c3.js) invalidate WITHOUT a coordinated purge. How does it work and
     what is the cost?
   options:
-  - It locks all readers during a write; cost is contention
-  - It flushes the entire cache on each write; cost is a stampede
-  - It replicates the key to every node; cost is write amplification
+  - It takes an exclusive lock over all readers of the key during each write; cost is the read contention this creates
+  - It flushes the entire cache to force a clean reload on every write; cost is a full stampede against the origin
+  - It eagerly replicates the new key to every node in the cluster synchronously; cost is heavy write amplification
   - A write bumps the version so old entries are simply never referenced again and age out naturally;
     cost is tracking/propagating the version and old entries lingering in memory until evicted
   answer: 3
@@ -644,11 +687,11 @@ questions:
     Why is a pub/sub invalidation channel (e.g. Redis pub/sub or a Kafka topic)
     especially important when you use per-instance in-process (L1) caches?
   options:
-  - It reduces network bandwidth to the database
+  - It reduces the network bandwidth consumed between the application fleet and the backing database on reads
   - It lets a write broadcast an invalidation message so every instance purges its own local copy, which
     a single shared-cache delete cannot do
-  - It guarantees exactly-once delivery of all cache reads
-  - It replaces the need for any TTL
+  - It guarantees exactly-once delivery of every cache read so no two instances can observe a value twice
+  - It fully replaces the need for any TTL because the channel keeps every local copy perfectly in sync forever
   answer: 1
   explanation: |
     Local L1 caches are invisible to a shared-cache delete, so you need a
@@ -667,9 +710,9 @@ questions:
   options:
   - When a popular key expires and many concurrent requests all miss and hit the backend for the same
     key simultaneously, overloading it
-  - When the cache runs out of memory and evicts everything at once
-  - When network partitions split the cache cluster
-  - When the CDN serves stale content to users
+  - When the cache node runs out of memory and synchronously evicts every stored entry at once, emptying the tier
+  - When a network partition splits the cache cluster into halves that each reject the other's key ownership
+  - When the CDN edge serves slightly-stale cached content to users after the origin object has already changed
   answer: 0
   explanation: |
     A stampede happens when a hot key expires (or a cache node restarts) and a
@@ -687,11 +730,11 @@ questions:
   question: |
     Request coalescing / single-flight mitigates stampedes by doing what?
   options:
-  - Precomputing all possible cache values at startup
-  - Sharding the key across multiple nodes
+  - Precomputing and warming every possible cache value at process startup so no request ever triggers a miss
+  - Sharding the missing key across multiple nodes so its recomputation load is spread evenly over the cluster
   - Allowing only the first requester of a missing key to recompute it while concurrent requesters wait
     and share that single result
-  - Serving an error to all but the first requester
+  - Serving an immediate error to all requesters except the first one, forcing the rest to retry after a backoff
   answer: 2
   explanation: |
     Single-flight ensures only one recompute happens per missing key; concurrent
@@ -711,9 +754,9 @@ questions:
   options:
   - Add randomized jitter to TTLs (e.g. base +/- random) so expirations spread out instead of all firing
     at the same instant
-  - Set all TTLs to infinity
-  - Switch from Redis to Memcached
-  - Increase the database connection pool to absorb the spike
+  - Set all TTLs to infinity so the warmed keys never expire and can therefore never trigger a synchronized miss
+  - Switch the cache engine from Redis to Memcached, whose eviction model spreads expirations out automatically
+  - Increase the database connection pool so the backend can absorb the synchronized expiry spike when it fires
   answer: 0
   explanation: |
     Identical TTLs cause synchronized mass expiry — every key expires at once,
@@ -732,11 +775,11 @@ questions:
     Probabilistic early recomputation (XFetch) prevents stampedes elegantly. How
     does it avoid both the miss latency AND the lock overhead?
   options:
-  - It recomputes every key on every read
-  - It disables TTL and relies only on LRU
+  - It recomputes every key on every single read so the cached value is always maximally fresh for the next caller
+  - It disables TTL entirely and relies only on LRU eviction to decide when a stale value should be refreshed
   - It refreshes a key BEFORE it expires, with probability rising as expiry nears, so one request refreshes
     early while others keep serving the still-valid cached value — no synchronized cliff and no lock
-  - It queues all reads behind a single writer
+  - It queues all concurrent reads behind a single designated writer that recomputes and serves them in order
   answer: 2
   explanation: |
     XFetch uses a probability that increases as expiry approaches (based on the
@@ -756,9 +799,9 @@ questions:
     Stale-while-revalidate (SWR) offers the best miss latency of the stampede
     mitigations. What is the trade-off it accepts to achieve this?
   options:
-  - It requires strong consistency and slows writes
-  - It blocks all readers until the refresh completes
-  - It permanently disables TTL
+  - It requires strong consistency across the tier and therefore measurably slows down every write on the path
+  - It blocks all readers behind the refresh until the new value is fully recomputed and written back to cache
+  - It permanently disables TTL and instead pins entries until they are explicitly purged by the write path
   - It serves the slightly-stale cached value immediately while refreshing in the background, so users
     briefly receive stale data during the refresh window
   answer: 3
@@ -781,11 +824,11 @@ questions:
     bypassing the cache and hammering the DB ("cache penetration"). Which pair of
     techniques best mitigates this?
   options:
-  - Increase TTL and add more cache memory
+  - Increase the TTL on all entries and add more cache memory so absent-key lookups have somewhere to be stored
   - Negative caching (cache 'not found' briefly) plus a Bloom filter to reject known-absent keys before
     they reach the DB
-  - Switch to write-through caching
-  - Shard the missing keys across more nodes
+  - Switch to write-through caching so that every lookup synchronously populates the cache before returning
+  - Shard the nonexistent keys across more cache nodes so the wasted lookups are distributed over the cluster
   answer: 1
   explanation: |
     Penetration is about keys with no value, so normal caching never populates
@@ -805,11 +848,11 @@ questions:
     Facebook's memcache "leases" address multiple problems at once. Besides
     thundering herd, which additional problem do leases help solve?
   options:
-  - Network bandwidth between PoPs
-  - Slab memory fragmentation
+  - Network bandwidth consumed replicating cached objects between distant points of presence across regions
+  - Slab memory fragmentation that wastes RAM when many differently-sized objects share fixed allocation classes
   - 'The stale-set race: a lease token lets only the designated miss-filler set the value and is invalidated
     by concurrent writes, preventing a slow reader from pinning stale data'
-  - Cross-region DNS routing
+  - Cross-region DNS routing that directs each client to the geographically nearest available cache cluster
   answer: 2
   explanation: |
     A lease is a token granted on a miss; only its holder may set the value, and a
@@ -830,9 +873,9 @@ questions:
   options:
   - Because a single key hashes to one shard/node, so all its traffic concentrates on that one node regardless
     of how many nodes exist
-  - Because more nodes increase network latency
-  - Because sharding disables replication
-  - Because hot keys always exceed the maximum value size
+  - Because adding more nodes increases the average network round-trip latency to reach any cached value
+  - Because sharding the keyspace across nodes structurally disables per-shard replication and failover
+  - Because a hot key always grows to exceed the cache's maximum allowed value size and is rejected outright
   answer: 0
   explanation: |
     Key-based sharding maps each key to exactly one node (e.g. via a hash slot),
@@ -852,9 +895,9 @@ questions:
     (hotkey:0..N-1) and reads a random one. What is the trade-off of this key
     splitting?
   options:
-  - Reads slow down because clients must read all N copies
-  - It only works with Memcached, not Redis
-  - It permanently increases the DB load
+  - Reads slow down because each client must read and reconcile all N copies before returning a single value
+  - It only works on Memcached because Redis refuses to store one logical value under several distinct keys
+  - It permanently increases DB load since every one of the N replicas is refilled from the database per read
   - Writes must fan out to all N copies, adding write amplification and a consistency window across copies
   answer: 3
   explanation: |
@@ -876,11 +919,11 @@ questions:
     profile changes at most once per minute and slightly-stale reads are
     acceptable. Which mitigation gives the most read offload?
   options:
-  - Switch the whole cluster from modulo hashing to consistent hashing
+  - Switch the whole cluster from modulo hashing to consistent hashing so the hot key remaps onto a less busy node
   - Add a per-instance L1 cache for the hot key with a short TTL, so most reads never reach the shared
     Redis node at all
-  - Increase the Redis maxmemory so the key never evicts
-  - Move the key to a Memcached cluster
+  - Increase the Redis maxmemory so the hot key never evicts and can therefore absorb all the concurrent reads itself
+  - Move the hot key to a dedicated Memcached cluster whose multithreaded core can serve the concurrent reads from one node
   answer: 1
   explanation: |
     An L1 cache on each app instance means each box serves the hot key locally,
@@ -901,9 +944,9 @@ questions:
   options:
   - Adding/removing a node with modulo hashing remaps almost every key (a mass miss storm), whereas consistent
     hashing moves only about K/N keys
-  - Modulo hashing cannot distribute keys evenly at all
-  - Consistent hashing guarantees no hot keys ever occur
-  - Modulo hashing requires a central coordinator
+  - Modulo hashing spreads keys so unevenly that one node always ends up owning the majority of the keyspace
+  - Consistent hashing guarantees that no single key can ever become a hot spot regardless of its request rate
+  - Modulo hashing requires a central coordinator node to compute and hand out each key's shard assignment
   answer: 0
   explanation: |
     With hash % N, changing N changes the mapping for nearly all keys, invalidating
@@ -923,11 +966,11 @@ questions:
     of the ring, causing uneven load. What technique evens this out, and what
     does it NOT fix?
   options:
-  - Sharding by modulo evens it out; and it also fixes hot keys
-  - Increasing TTL evens it out; but it does not fix eviction
+  - Switching to modulo hashing evens out the arc distribution; and as a bonus it also fixes single hot keys
+  - Increasing the TTL on entries evens out the arc distribution; but it does not fix memory-pressure eviction
   - Virtual nodes even out the distribution; but they still do not fix a single hot key concentrating
     on one node
-  - Adding replicas evens it out; but it does not fix network latency
+  - Adding more replica nodes evens out the arc distribution; but it does not fix cross-region network latency
   answer: 2
   explanation: |
     Virtual nodes assign each physical node many small arcs across the ring, so
@@ -949,9 +992,9 @@ questions:
   options:
   - 16384 slots (CRC16(key) mod 16384); multi-key operations require all involved keys to reside in the
     same slot, achievable with hash tags {...}
-  - 1024 slots; multi-key ops always work across any keys
-  - 65536 slots; multi-key operations are never supported
-  - 256 slots; multi-key operations require a coordinator node
+  - 1024 slots (CRC32(key) mod 1024); multi-key operations always work across any keys on any nodes
+  - 65536 slots (SHA1(key) mod 65536); multi-key operations are never supported under any configuration
+  - 256 slots (CRC16(key) mod 256); multi-key operations require routing through a central coordinator node
   answer: 0
   explanation: |
     Redis Cluster uses 16384 hash slots and routes each key by CRC16(key) mod
@@ -968,11 +1011,11 @@ questions:
   question: |
     Which statement correctly distinguishes Redis from Memcached?
   options:
-  - Memcached supports rich data structures (lists, sorted sets, streams) while Redis stores only strings
-  - Both provide identical feature sets; the choice is purely cosmetic
+  - Memcached supports rich data structures (lists, sorted sets, streams) while Redis stores only opaque strings
+  - Both expose an identical feature set including persistence and data structures, so the choice between them is purely cosmetic
   - Redis supports rich data structures, persistence, and replication/failover, whereas Memcached is a
     simpler multithreaded pure key-value/blob cache
-  - Memcached provides built-in replication and automatic failover; Redis does not
+  - Memcached provides built-in replication and automatic failover across nodes, whereas Redis offers no replication at all
   answer: 2
   explanation: |
     Redis offers hashes, lists, sets, sorted sets, streams, pub/sub, persistence
@@ -993,9 +1036,9 @@ questions:
     very high throughput, with no need for persistence or data structures, which
     engine has a natural architectural advantage and why?
   options:
-  - Redis, because its single-threaded core avoids lock contention on many cores
-  - Redis, because it supports sorted sets
-  - Neither; both are single-threaded and identical in throughput
+  - Redis, because its single-threaded event loop avoids all lock contention and therefore scales linearly across every core
+  - Redis, because its sorted-set and hash data structures let it pack uniform blobs more densely than Memcached can
+  - Neither, because both engines are strictly single-threaded and deliver identical raw throughput on any core count
   - Memcached, because it is natively multithreaded and its slab allocator is memory-efficient for uniform
     objects, maximizing raw throughput on many cores
   answer: 3
@@ -1019,11 +1062,11 @@ questions:
     ephemeral pub/sub notifications — all in the cache tier. Which engine fits
     with the least custom infrastructure, and why?
   options:
-  - Memcached, because its simplicity makes everything easier
+  - Memcached, because its minimalist blob store makes building leaderboards, limiters, and pub/sub simpler than Redis
   - Redis, because sorted sets power leaderboards, atomic ops/Lua power rate limiters, and native pub/sub
     handles notifications — all server-side
-  - Either works identically since both support sorted sets
-  - Neither; leaderboards must be built in the database
+  - Either engine works identically here since both provide native sorted sets, atomic counters, and pub/sub channels
+  - Neither, because leaderboards and rate limiters must be built in the relational database, not a cache tier
   answer: 1
   explanation: |
     Redis's sorted sets give O(log n) ranked leaderboards, its atomic
@@ -1043,11 +1086,11 @@ questions:
     Netflix built EVCache on top of Memcached rather than Redis for a huge,
     mostly-read, multi-AZ workload. What does this design choice illustrate?
   options:
-  - That Redis cannot handle read-heavy workloads
-  - That EVCache does not need any replication
+  - That Redis is architecturally incapable of serving read-heavy workloads at Netflix's scale and had to be avoided
+  - That a global mostly-read cache like EVCache needs no replication because reads never mutate any state
   - That Memcached's simplicity and multithreaded efficiency can be the right base when you add your own
     replication/zone-awareness layer for a large mostly-read cache
-  - That Memcached has better data structures than Redis
+  - That Memcached ships richer built-in data structures than Redis, which is why Netflix chose it as the base
   answer: 2
   explanation: |
     EVCache wraps Memcached with Netflix's own multi-AZ, zone-aware replication —
@@ -1065,9 +1108,9 @@ questions:
     In CDN terminology, what is a "Point of Presence" (PoP)?
   options:
   - A geographically distributed edge location that caches content close to users
-  - The single origin server that holds authoritative content
-  - The database that stores cache invalidation logs
-  - The client's browser cache
+  - The single centralized origin server that holds the authoritative copy of all content the CDN serves
+  - The backend database that durably stores the CDN's cache invalidation and purge event logs for auditing
+  - The end user's own browser cache, which the CDN provisions and controls on each client device
   answer: 0
   explanation: |
     A PoP is an edge location in the CDN's global network that caches and serves
@@ -1085,9 +1128,9 @@ questions:
     What is the defining difference between a pull (origin-pull) CDN and a push
     CDN?
   options:
-  - A pull CDN stores content forever; a push CDN never caches
-  - A push CDN is always faster for long-tail catalogs
-  - A pull CDN cannot cache static assets
+  - A pull CDN retains content permanently and ignores TTLs, whereas a push CDN never caches anything at the edge
+  - A push CDN is always faster than a pull CDN for long-tail catalogs of millions of rarely-requested objects
+  - A pull CDN can only cache dynamic API responses and is structurally unable to cache static assets like images
   - A pull CDN caches content lazily on first request from origin; a push CDN has you proactively upload
     content to the CDN ahead of demand
   answer: 3
@@ -1111,11 +1154,11 @@ questions:
     will download in the first hours, AND you also serve a long-tail catalog of
     50 million user-uploaded images. What CDN strategy fits best?
   options:
-  - Push everything (game update and all 50M images) to every PoP
+  - Push everything (the game update and all 50M user images) proactively to every PoP ahead of the launch window
   - Push the known, large, high-demand game update ahead of launch; pull (origin-pull) the long-tail image
     catalog on demand
-  - Pull for everything, including the game update, to avoid pre-upload cost
-  - Cache neither; serve both from origin to guarantee freshness
+  - Pull everything, including the day-one game update, on first request so you never pay any pre-upload cost
+  - Cache neither the update nor the images; serve both straight from origin every time to guarantee freshness
   answer: 1
   explanation: |
     The game update is large, known in advance, and will see a massive demand
@@ -1158,11 +1201,11 @@ questions:
     What does an ETag combined with an If-None-Match conditional request
     accomplish?
   options:
-  - It encrypts the response body end-to-end
-  - It forces the CDN to purge the object immediately
+  - It encrypts the response body end-to-end using the ETag value as a per-object symmetric decryption key
+  - It forces every CDN PoP to purge and re-fetch the object from origin immediately on the next request
   - 'It lets the cache revalidate freshness cheaply: if unchanged, the origin returns 304 Not Modified
     without resending the body'
-  - It compresses the response to reduce bandwidth
+  - It compresses the response body with the ETag-negotiated codec to reduce the transferred bandwidth
   answer: 2
   explanation: |
     The ETag is a version fingerprint; the client/CDN sends it back via
@@ -1183,9 +1226,9 @@ questions:
   options:
   - The CDN now stores a separate cached variant per unique cookie/user-agent value, fragmenting the cache
     into near-per-user copies with almost no reuse
-  - Vary disables caching entirely
-  - Vary forces every response through the origin
-  - Vary headers are ignored by all CDNs, so this cannot happen
+  - Vary is a directive that disables edge caching entirely for any response on which it appears
+  - Vary forces every single response to skip the edge and be revalidated against the origin server
+  - Vary headers are silently ignored by all major CDNs, so adding them cannot affect the hit ratio at all
   answer: 0
   explanation: |
     Vary tells the cache to key separate copies per listed header value. Cookies
@@ -1207,11 +1250,11 @@ questions:
     when you deploy a new version, and why is it preferred over calling the purge
     API?
   options:
-  - Set no-store so assets are never cached
-  - Lower max-age to 1 second so changes appear quickly
+  - Set Cache-Control: no-store on every asset so nothing is ever cached and each deploy is always current
+  - Lower max-age to 1 second on all assets so post-deploy changes propagate to clients almost immediately
   - 'Use fingerprinted/versioned filenames (app.9f3a1c.js) with Cache-Control: immutable, max-age=1year,
     so new deploys reference new URLs and old ones age out — no purge needed and maximum hit ratio'
-  - Purge the entire CDN cache on every deploy
+  - Call the CDN purge API to flush the entire edge cache on every single deploy so stale assets are removed
   answer: 2
   explanation: |
     Content-hash filenames mean a new build produces new URLs; old URLs are simply
@@ -1231,9 +1274,9 @@ questions:
     simultaneously, overloading it. Which CDN feature directly reduces this
     origin load?
   options:
-  - Disabling ETags
-  - Increasing the browser TTL
-  - Switching from HTTPS to HTTP
+  - Disabling ETags on the object so edge PoPs stop revalidating it against the origin on each request
+  - Increasing the browser TTL so end-user devices cache the viral object longer and re-request it less often
+  - Switching the object's delivery from HTTPS to plain HTTP to cut per-request handshake load on the origin
   - 'Tiered caching / origin shield: edge PoPs pull from a regional parent (shield), so only parent misses
     reach the origin, collapsing many origin fetches into few'
   answer: 3
@@ -1255,11 +1298,11 @@ questions:
     Workers, Lambda@Edge, Fastly Compute). What capability does this add that
     pure static caching cannot?
   options:
-  - It eliminates the need for an origin server entirely
+  - It eliminates the need for an origin server entirely by permanently hosting the full application at each PoP
   - It runs logic at the PoP to compose, personalize, or cache dynamic/assembled responses (and even API/RAG
     results) close to the user
-  - It guarantees strong consistency across all PoPs
-  - It removes the need for any cache invalidation
+  - It guarantees strong, linearizable consistency of cached objects across every PoP in the global network
+  - It removes the need for any cache invalidation because edge-computed responses are recomputed on every request
   answer: 1
   explanation: |
     Edge compute executes code at the PoP, enabling composition (e.g. ESI),
@@ -1278,11 +1321,14 @@ questions:
     A CDN purge/invalidation API is powerful, but what important limitation must
     you account for?
   options:
-  - Purges are instantaneous and globally atomic
-  - Purges permanently disable caching for the purged path
+  - Purges take effect instantaneously and atomically across every PoP worldwide the moment the API call
+    returns a success status
+  - Purges permanently disable edge caching for the purged path, forcing every future request for that
+    URL to go straight to origin
   - Purges are eventually consistent — they propagate to all PoPs over seconds — and can be rate-limited
     or costly at scale
-  - Purges only work on push CDNs
+  - Purges are only supported on push CDNs, since pull CDNs expose no API to remove already-fetched objects
+    from their edges
   answer: 2
   explanation: |
     Invalidations propagate across a global network, so there is a window where
@@ -1303,9 +1349,12 @@ questions:
   options:
   - A crash between the two writes leaves DB and cache inconsistent; prefer a single-source pattern —
     write DB then invalidate, or drive cache updates from the DB log via CDC
-  - It is perfectly safe because both writes are atomic
-  - It doubles read latency; prefer disabling the cache
-  - It only affects Memcached, not Redis
+  - It is perfectly safe because the client library wraps both writes in a two-phase commit that guarantees
+    they either both succeed or both roll back
+  - It roughly doubles read latency because each read must now consult both stores and reconcile them;
+    prefer disabling the cache and reading only the DB
+  - It only affects Memcached because its lack of transactions permits partial writes, whereas Redis MULTI
+    makes the dual-write fully atomic
   answer: 0
   explanation: |
     Two separate writes aren't atomic, so a failure between them desyncs cache and
@@ -1325,9 +1374,12 @@ questions:
     The cache is replicated across zones with async replication. What is the
     likely cause and a targeted fix?
   options:
-  - The DB is corrupt; restore from backup
-  - The TTL is too short; increase it
-  - The cache is out of memory; add nodes
+  - The primary database is corrupt and silently returning a pre-write snapshot; restore it from the most
+    recent backup and replay the write-ahead log
+  - The entry's TTL is too short, so it expired and was refilled from a stale source between the write and
+    the reload; increase the TTL to keep the fresh value resident
+  - The cache is out of memory and evicted the just-written entry under pressure; add more nodes so the
+    updated profile is not evicted before the reload
   - The reload hit a lagging cache replica (read-your-writes violation); route read-your-writes to the
     primary or use session stickiness until replication catches up
   answer: 3
@@ -1349,11 +1401,14 @@ questions:
     Memcached's gets/cas (compare-and-set) operations help prevent which
     caching problem?
   options:
-  - Cache stampede on expiry
+  - Cache stampede on expiry, by letting the first requester of an expired key block all others until it
+    has recomputed and re-stored the value
   - 'The lost-update / stale-set race: a client''s set fails if the value changed since it was read, so
     a slow reader can''t overwrite fresher data'
-  - Hot-key load concentration
-  - CDN purge propagation delay
+  - Hot-key load concentration, by transparently splitting a single popular key's reads across multiple
+    replica nodes so no one node is overwhelmed
+  - CDN purge propagation delay, by attaching a version token that forces every edge PoP to revalidate the
+    object against origin before serving it
   answer: 1
   explanation: |
     CAS attaches a version token to a value; a set only succeeds if the token is
@@ -1375,9 +1430,12 @@ questions:
   options:
   - Option 1 gives lowest latency but accepts cross-region divergence; option 2 (CDC/Kafka global fan-out)
     is more consistent but adds infra and cross-region coordination
-  - Option 1 is strongly consistent; option 2 is eventually consistent
-  - Both options give identical latency and consistency
-  - Option 2 has lower latency because it uses a single global cache
+  - Option 1 is strongly consistent because each region reads its own local copy, while option 2 is only
+    eventually consistent because the invalidation bus fans out asynchronously
+  - Both options give identical latency and consistency, so the choice is purely a matter of operational
+    preference and existing team tooling
+  - Option 2 has lower read latency than option 1 because it consolidates everything into a single global
+    cache cluster that every region queries directly
   answer: 0
   explanation: |
     Local per-region caches minimize read latency but let regions diverge until
@@ -1397,11 +1455,14 @@ questions:
     Why do most distributed caches deliberately offer only EVENTUAL consistency
     rather than strong consistency?
   options:
-  - Because strong consistency is impossible in software
-  - Because eventual consistency guarantees zero staleness
+  - Because strong consistency is mathematically impossible to implement in any distributed software system
+    regardless of how much coordination you add
+  - Because eventual consistency actually guarantees zero staleness the instant a write commits, making it
+    strictly superior to strong consistency for reads
   - Because strong consistency requires coordination/synchronization that adds latency and reduces throughput
     — defeating the cache's purpose of being fast
-  - Because caches cannot store recent data
+  - Because caches are architecturally unable to store recently-written data and can only serve values that
+    are already minutes old by the time they land
   answer: 2
   explanation: |
     A cache exists to be fast; enforcing strong consistency (sync replication,
@@ -1421,9 +1482,11 @@ questions:
     layer (like a CDN or proxy) without strict controls?
   options:
   - Authenticated, per-user personalized responses containing private data
-  - Public static images and CSS
-  - A public homepage's HTML
-  - Fingerprinted JavaScript bundles
+  - Public product images and shared CSS stylesheets that are identical for every visitor and change only
+    on deploy
+  - A public marketing homepage's fully-rendered HTML that contains no per-user or session-specific content
+  - Fingerprinted JavaScript bundles whose content-hashed filenames change on every new build and are safe
+    to cache for a year
   answer: 0
   explanation: |
     Caching authenticated per-user data in a SHARED cache risks one user being
@@ -1441,10 +1504,10 @@ questions:
     Which data is the WORST candidate for caching due to strict freshness
     requirements where a stale read causes wrong business outcomes?
   options:
-  - A product's static description text
-  - A blog post's rendered HTML
+  - A product's static description text that is edited by merchandisers a few times a year at most
+  - A blog post's rendered HTML that only changes when an author publishes an edit through the CMS
   - A user's real-time account balance or live trading price used to authorize a transaction
-  - A company's logo image
+  - A company's logo image that is versioned by filename and only replaced during a brand refresh
   answer: 2
   explanation: |
     Serving a stale account balance or trading price can authorize an invalid
@@ -1463,9 +1526,12 @@ questions:
     Why is caching data with very low reuse (e.g. per-request-unique search
     results with huge cardinality) usually a net negative?
   options:
-  - Because it is always sensitive data
-  - Because low-reuse data cannot be serialized
-  - Because it always causes stampedes
+  - Because per-request-unique search results are always classified as sensitive personal data that a
+    shared cache is forbidden to store
+  - Because high-cardinality result payloads cannot be serialized into the flat byte format that cache
+    engines require for storage
+  - Because near-unique keys always trigger a thundering-herd stampede against the backend the moment any
+    one of them happens to expire
   - Because the hit ratio approaches zero, so you pay memory and complexity costs for essentially no benefit
   answer: 3
   explanation: |
@@ -1484,11 +1550,14 @@ questions:
     What is the danger of caching 5xx error responses with a long TTL, and what
     is the safer approach?
   options:
-  - There is no danger; caching errors always helps
+  - There is no danger at all; caching 5xx responses always helps because it shields the backend from the
+    retries that caused the error in the first place
   - A transient backend blip gets cached and served for the whole TTL, turning a brief error into a prolonged
     outage; if you negative-cache, use a very short TTL
-  - Caching errors corrupts the database
-  - Errors cannot be cached by any system
+  - Caching a 5xx response silently corrupts the backing database, because the cached error body gets written
+    back through the write-through path on the next flush
+  - Error responses cannot be stored by any cache system, since HTTP forbids caching any status code outside
+    the 2xx success range
   answer: 1
   explanation: |
     Long-TTL caching of a 5xx pins a momentary failure so that even after the
@@ -1530,9 +1599,12 @@ questions:
   options:
   - Longer TTL raises hit ratio and lowers origin load but reduces freshness; shorter TTL is fresher but
     lowers hit ratio and increases origin load
-  - Longer TTL improves both freshness and hit ratio simultaneously
-  - TTL has no effect on hit ratio
-  - Shorter TTL improves both freshness and hit ratio simultaneously
+  - Longer TTL improves both freshness and hit ratio simultaneously, because entries stay resident longer
+    and are also re-fetched from origin more often
+  - TTL has no effect on hit ratio whatsoever; hit ratio is determined solely by the eviction policy and
+    the total memory allocated to the cache
+  - Shorter TTL improves both freshness and hit ratio simultaneously, since more frequent expiry keeps the
+    hottest keys pinned and prevents them from ever being evicted
   answer: 0
   explanation: |
     TTL trades freshness against hit ratio/origin load: long TTL keeps entries
@@ -1551,9 +1623,12 @@ questions:
     When adding a cache in front of a database, which failure mode should you
     proactively design against so the cache doesn't make an outage WORSE?
   options:
-  - The cache serving too many hits
-  - The cache using too little memory
-  - The cache having too high a hit ratio
+  - The cache serving too many hits, so the database becomes idle and its connection pool times out from
+    lack of use during normal operation
+  - The cache using too little of its allocated memory, leaving expensive RAM unused while the working set
+    could have been kept far larger
+  - The cache having too high a hit ratio, which starves the database of the query traffic it needs to keep
+    its query planner statistics warm
   - A cache outage or mass expiry causing all traffic to stampede the DB; mitigate with request coalescing,
     jittered TTLs, SWR, circuit breakers, and load shedding
   answer: 3
@@ -1576,11 +1651,14 @@ questions:
     zero-coordination, and cheap all at once — pick two." Which mapping of the
     three common approaches to this tension is correct?
   options:
-  - TTL = fresh + cheap; write-time purge = zero-coordination; CDC = free and instant
+  - TTL delivers always-fresh and cheap at once; write-time purge is the zero-coordination option; and CDC
+    manages to be free, instant, and coordination-free all together
   - TTL = cheap + zero-coordination but stale; write-time purge = fresh but needs coordination and is
     fragile; CDC = robust + decoupled but adds infra and lag
-  - All three are always-fresh, zero-coordination, and cheap
-  - TTL requires the most infrastructure of the three
+  - All three approaches simultaneously deliver always-fresh, zero-coordination, and cheap, so the senior
+    engineer's pick-two framing does not actually apply to caching
+  - TTL requires by far the most infrastructure of the three, since passive expiry depends on a dedicated
+    background scanner plus a coordination service to fire evictions
   answer: 1
   explanation: |
     TTL is cheap and coordination-free but tolerates staleness; explicit write-time
@@ -1601,9 +1679,12 @@ questions:
     growth. Roughly how much total RAM should you provision?
   options:
   - About 520 GB (data ~200 GB, x2 for replicas = ~400 GB, +30% headroom)
-  - About 200 GB
-  - About 100 GB
-  - About 2 TB
+  - About 200 GB (100M * 2 KB of raw data, since Redis replicas share the primary's memory rather than
+    holding a full copy)
+  - About 100 GB (100M * 2 KB halved, because Redis compresses values roughly 2:1 on the wire before storing
+    them in RAM)
+  - About 2 TB (200 GB of data multiplied by a 10x factor for replication, indexing overhead, and worst-case
+    fragmentation growth)
   answer: 0
   explanation: |
     Raw data = 100M * 2 KB = 200 GB. With a replica per shard, double to ~400 GB.
@@ -1649,9 +1730,12 @@ questions:
   options:
   - A crashed lock holder never releasing the lock, plus the lock TTL expiring before recompute finishes
     (letting a second node also recompute) — so you need a TTL AND must handle expiry/renewal safely
-  - The lock making reads faster than expected
-  - The lock permanently preventing all future writes
-  - The lock forcing write-through behavior
+  - The lock making reads faster than expected, so downstream clients receive the recomputed value before
+    their retry timers fire and flood the system with duplicate requests
+  - The lock permanently preventing all future writes to the key, because SET NX leaves the key owned by
+    the first holder until the entire cache is manually flushed
+  - The lock silently forcing every subsequent read of that key into synchronous write-through behavior,
+    doubling the latency of the hot path for as long as the lock exists
   answer: 0
   explanation: |
     A distributed lock must have a TTL so a crashed holder doesn't deadlock the
@@ -1672,11 +1756,14 @@ questions:
     60 seconds stale, reads vastly outnumber writes, and the cache must survive a
     node crash without wrong prices persisting. Which design best satisfies this?
   options:
-  - Write-back with a 1-hour flush interval and no TTL
-  - Cache everything with no TTL and rely solely on explicit purges
+  - Write-back with a 1-hour flush interval and no TTL, so price edits are coalesced and flushed to the DB
+    once an hour while reads always hit the cached value
+  - Cache everything with no TTL and rely solely on explicit purge calls fired by the pricing service every
+    time a product price is updated in the catalog
   - Cache-aside with delete-on-write plus a 60-second TTL backstop, so any missed invalidation self-corrects
     within the staleness bound
-  - Disable caching to guarantee zero staleness
+  - Disable caching entirely and read every price straight from the primary database to guarantee zero
+    staleness on every transaction
   answer: 2
   explanation: |
     Cache-aside with delete-on-write gives fast invalidation for normal writes,
@@ -1718,11 +1805,11 @@ questions:
     dynamic-ish responses for ~1 second. What is the benefit and the acceptable
     cost?
   options:
-  - 'Benefit: permanent freshness; cost: none'
+  - 'Benefit: guaranteeing every response is permanently fresh by revalidating with the origin on each hit; cost: none, since a 1-second window adds no staleness'
   - 'Benefit: absorbing bursts by collapsing many identical requests within a 1-second window into one
     origin hit; cost: responses may be up to ~1 second stale'
-  - 'Benefit: eliminating the origin entirely; cost: higher latency'
-  - 'Benefit: per-user personalization; cost: doubled storage'
+  - 'Benefit: eliminating the origin server entirely by serving every dynamic response from proxy RAM; cost: higher end-to-end latency because the proxy recomputes on each request'
+  - 'Benefit: delivering fully per-user personalized responses from the shared proxy cache; cost: roughly doubled storage from keeping a variant per session'
   answer: 1
   explanation: |
     Microcaching serves one computed response to everyone for a very short window
@@ -1743,11 +1830,14 @@ questions:
     exact counters (too expensive for millions of keys). Which technique is
     appropriate?
   options:
-  - Store an exact counter for every key in a relational table
-  - Disable the cache and read the DB access logs
+  - Store an exact per-key hit counter for every one of the millions of keys in a relational table and
+    ORDER BY count each minute to surface the hottest
+  - Disable the cache tier entirely and parse the database's slow-query and access logs offline to reconstruct
+    which keys were requested most
   - Use a probabilistic frequency structure like a Count-Min sketch (or Redis --hotkeys/OBJECT FREQ sampling)
     to identify the top-N hottest keys cheaply
-  - Increase TTL until hot keys appear
+  - Progressively increase the TTL on all keys until the hottest ones reveal themselves by surviving eviction
+    the longest under memory pressure
   answer: 2
   explanation: |
     A Count-Min sketch estimates key frequencies in sublinear memory, letting you
@@ -1768,9 +1858,12 @@ questions:
   options:
   - allkeys-lru evicts using LRU among ALL keys; volatile-lru evicts using LRU only among keys that have
     a TTL set
-  - They are identical
-  - allkeys-lru never evicts; volatile-lru always evicts everything
-  - volatile-lru evicts among all keys; allkeys-lru only among keys with a TTL
+  - They are functionally identical aliases that both evict using LRU across the entire keyspace regardless
+    of whether keys have a TTL set
+  - allkeys-lru never evicts anything and returns an OOM error when full; volatile-lru unconditionally flushes
+    every key in the keyspace at once
+  - volatile-lru evicts using LRU among all keys, while allkeys-lru evicts using LRU only among keys that
+    were given an explicit TTL
   answer: 0
   explanation: |
     allkeys-lru considers every key for LRU eviction, while volatile-lru only
@@ -1789,9 +1882,12 @@ questions:
     DROPS messages. Reads must not stay stale indefinitely. What combination keeps
     the system correct despite dropped invalidations?
   options:
-  - Rely solely on the message bus and retry forever
-  - Increase the TTL so fewer refreshes are needed
-  - Switch to a larger cache
+  - Rely solely on the message bus and configure consumers to retry each invalidation forever until an ack
+    is received, so no invalidation is ever ultimately lost
+  - Increase the TTL on all entries so the cache refreshes less often and thereby depends on fewer of the
+    occasionally-dropped invalidation messages
+  - Switch to a larger cache with more memory so entries are evicted less often and stale copies have more
+    room to be overwritten by newer reads
   - Add a short TTL backstop and use versioned/idempotent keys, reconciling via CDC so a dropped invalidation
     self-corrects within the TTL and version bumps prevent stale reads
   answer: 3
@@ -1813,10 +1909,10 @@ questions:
     For a content-hashed asset like app.9f3a1c.js whose contents never change for
     that URL, which Cache-Control setting maximizes cache efficiency?
   options:
-  - no-store
+  - no-store, private (never store the fingerprinted bundle in any cache tier)
   - immutable, max-age=31536000 (one year)
-  - max-age=1 (one second)
-  - private, no-cache
+  - max-age=1, must-revalidate (revalidate the bundle against origin every second)
+  - private, no-cache, max-age=0 (browser-only, revalidate on every single request)
   answer: 1
   explanation: |
     Because the content is fingerprinted, the URL's bytes never change, so you can
@@ -1837,9 +1933,12 @@ questions:
   options:
   - Higher layers (near the client) give the biggest latency/cost win but weakest invalidation control,
     while lower layers give more control and consistency but a smaller win
-  - Lower layers (near the DB) give the biggest latency win but weakest invalidation control
-  - All layers offer identical trade-offs, so pick any one
-  - You should only ever cache at a single layer to avoid duplication
+  - Lower layers (near the DB) give the biggest latency and bandwidth win but the weakest invalidation control,
+    while higher layers near the client offer tighter consistency for a smaller win
+  - All layers offer identical latency, cost, and invalidation trade-offs, so you can pick any single one
+    of them arbitrarily without consequence
+  - You should only ever cache at exactly one layer to avoid duplicating copies, since stacking caches at
+    multiple layers is always a correctness anti-pattern
   answer: 0
   explanation: |
     The higher you cache (browser/CDN), the more you save latency and bandwidth,
@@ -1861,11 +1960,14 @@ questions:
     counter, but the business now says NO acknowledged reaction may be lost. How do
     you reconcile these?
   options:
-  - Abandon write-back and use write-through per reaction, accepting the DB write load
-  - Increase the cache node's RAM so it never crashes
+  - Abandon write-back entirely and use synchronous write-through on every individual reaction, accepting
+    the full per-event DB write load in exchange for durability
+  - Increase the cache node's RAM and CPU allocation so it is powerful enough that it effectively never
+    crashes and therefore never loses an un-flushed reaction
   - Keep write-back for coalescing but make the write path durable first — append each reaction to a replicated
     durable log (e.g. Kafka) before acking, then coalesce/flush to the DB asynchronously from the log
-  - Store the counter only in the browser cache
+  - Store the counter only in the end user's browser cache and periodically upload the totals, so the crash-prone
+    server-side cache node is never in the durability path at all
   answer: 2
   explanation: |
     The durability risk of write-back is losing un-flushed writes on a crash. By

@@ -12,8 +12,8 @@ questions:
     options:
       - "Tenant onboarding, SaaS identity, tiering configuration, metering aggregation, and cost rollups"
       - "Serving tenant product traffic and enforcing per-layer isolation for each request"
-      - "The pooled compute stack that runs basic-tier business logic"
-      - "The siloed VPC and database that a single enterprise tenant runs in"
+      - "The pooled compute stack that runs basic-tier business logic and serves each tenant's live product requests"
+      - "The siloed VPC and database that a single enterprise tenant runs its dedicated production workload inside"
     answer: 0
     explanation: |
       The control plane is the shared, multi-tenant management layer: onboarding/provisioning,
@@ -30,10 +30,10 @@ questions:
       An interviewer asks: "Does the metering design change between a siloed
       (account-per-tenant) and a pooled application plane?" What is the sharpest answer?
     options:
-      - "Yes — siloed tenants cannot emit usage events, so metering must be rebuilt per account"
-      - "Yes — pooled tenants require synchronous metering while siloed tenants can meter asynchronously"
+      - "Yes — siloed tenants cannot emit usage events, so the metering pipeline must be rebuilt from scratch per account"
+      - "Yes — pooled tenants require synchronous metering on the hot path while siloed tenants can safely meter asynchronously"
       - "No — metering is a control-plane concern and identical in shape; what differs is cost attribution (trivial in silo, apportioned in pool)"
-      - "No — both metering and cost attribution are identical because AWS bills per tenant automatically"
+      - "No — both metering and cost attribution are identical because AWS automatically itemizes the bill per tenant"
     answer: 2
     explanation: |
       Metering (capturing per-tenant usage events) is a control-plane capability whose shape does
@@ -50,8 +50,8 @@ questions:
       Which statement about the SaaS control plane is correct?
     options:
       - "There is one control plane per tenant, siloed alongside each tenant's stack"
-      - "The control plane only exists in fully pooled architectures"
-      - "The control plane is the same thing as the API Gateway edge tier"
+      - "The control plane only exists in fully pooled architectures and is dropped entirely once any tenant is siloed"
+      - "The control plane is simply another name for the API Gateway edge tier that fronts and routes all tenant traffic"
       - "The control plane is itself multi-tenant and operates on all tenants at once, regardless of whether the application plane is siloed or pooled"
     answer: 3
     explanation: |
@@ -69,9 +69,9 @@ questions:
       to grow?
     options:
       - "Without it you cannot onboard tenants self-serve, bill on usage, or answer 'which tenant is unprofitable?' — you lose the operational leverage that justified SaaS"
-      - "A control plane is legally required by AWS before you can host more than one tenant"
-      - "The control plane is the only place tenant data can be stored securely"
-      - "A control plane is what physically isolates tenant compute, so skipping it causes cross-tenant leaks"
+      - "A control plane is legally required by the AWS customer agreement before you may host more than one paying tenant"
+      - "The control plane is the only component where tenant application data can be stored durably and securely at rest"
+      - "A control plane is what physically isolates tenant compute at the hypervisor, so skipping it directly causes cross-tenant data leaks"
     answer: 0
     explanation: |
       The control plane is upfront investment an MVP can defer, but it delivers self-serve
@@ -86,10 +86,10 @@ questions:
     question: |
       What is "tenant context" in an AWS SaaS system, and where does it canonically originate?
     options:
-      - "A client-supplied HTTP header (X-Tenant-Id) trusted by all services"
-      - "An IAM role name that each tenant assumes at login"
+      - "A client-supplied HTTP header (X-Tenant-Id) that all downstream services read and implicitly trust"
+      - "An IAM role name that each tenant assumes at login and passes along on every subsequent request"
       - "The set of attributes (tenantId, tier, sometimes role) derived from a validated SaaS identity JWT minted at sign-in"
-      - "A DynamoDB partition key generated randomly per request"
+      - "A DynamoDB partition key generated randomly per request to spread writes across partitions"
     answer: 2
     explanation: |
       Tenant context is the identity attributes (tenantId, tier, role) that say which tenant a
@@ -107,8 +107,8 @@ questions:
     options:
       - "A Pre Token Generation Lambda trigger injects/augments the claims at sign-in so they are baked into the JWT"
       - "Each service calls the Cognito AdminGetUser API on every request to fetch the tenant"
-      - "The client adds the claims to the token before sending the request"
-      - "API Gateway rewrites the JWT to add tenant claims at the edge"
+      - "The client SDK adds the custom claims to the token payload before sending each request upstream"
+      - "API Gateway rewrites and re-signs the JWT to inject the tenant claims at the edge before forwarding"
     answer: 0
     explanation: |
       Cognito's Pre Token Generation Lambda trigger injects or augments custom claims when the
@@ -125,9 +125,9 @@ questions:
       seeing errors under load. Cognito's UserRead category quota is 120 RPS per account per
       Region. What is the correct fix?
     options:
-      - "Request a Cognito pool-per-tenant so each tenant gets its own 120 RPS"
-      - "Move the user pool to a Region with a higher UserRead quota"
-      - "Increase token validity to 3,650 days so tokens never need re-validation"
+      - "Request a Cognito pool-per-tenant so each tenant gets its own dedicated 120 RPS UserRead budget"
+      - "Move the user pool to a Region with a higher UserRead category quota so the shared limit no longer binds"
+      - "Increase refresh-token validity to 3,650 days so tokens never need server-side re-validation on requests"
       - "Validate the JWT locally at the edge (verify signature/claims) and cache it, instead of calling Cognito per request"
     answer: 3
     explanation: |
@@ -164,10 +164,10 @@ questions:
       Why does AWS guidance warn against storing frequently-changing tenant attributes in Cognito
       custom attributes and instead recommend an external store like DynamoDB?
     options:
-      - "Custom attributes are encrypted and cannot be read by application code"
-      - "Cognito custom attributes cost extra per read, unlike DynamoDB"
+      - "Custom attributes are stored encrypted at rest and therefore cannot be read back by application code at all"
+      - "Cognito bills a per-read charge each time a custom attribute is accessed, unlike DynamoDB which reads them for free"
       - "Custom-attribute changes are rate-limited and attribute values are baked into tokens at mint time, so they go stale until the token is refreshed"
-      - "DynamoDB is the only store that can be referenced by a Pre Token Generation Lambda"
+      - "DynamoDB is the only external store that a Pre Token Generation Lambda is permitted to read from at mint time"
     answer: 2
     explanation: |
       Custom-attribute writes are rate-limited, and whatever value existed at mint time is frozen
@@ -183,9 +183,9 @@ questions:
       When is siloing identity (a dedicated Cognito user pool per tenant) the right choice despite
       its scaling ceiling?
     options:
-      - "For every basic-tier tenant, to minimize the shared auth surface"
-      - "Whenever the product exceeds 40 million total users"
-      - "Only when the application plane is fully pooled"
+      - "For every basic-tier tenant, to minimize the shared authentication surface and blast radius across the fleet"
+      - "Whenever the product exceeds 40 million total users, since one pool cannot hold more identities than that"
+      - "Only when the application plane is fully pooled, so identity isolation compensates for shared compute and data"
       - "For enterprise tenants that need their own IdP/SAML federation and per-tenant blast radius, where tenant counts are low"
     answer: 3
     explanation: |
@@ -203,9 +203,9 @@ questions:
       CloudFront+Lambda@Edge) typically do with it?
     options:
       - "Extract it and use it to route the request and enforce tenant scope downstream"
-      - "Store it permanently in the client's browser cookie"
-      - "Discard it because backends re-derive tenant identity themselves"
-      - "Convert it into an IAM user for the tenant"
+      - "Store it permanently in the client's browser cookie so the edge need not re-read the JWT next time"
+      - "Discard it at the edge because each backend independently re-derives tenant identity from the raw token"
+      - "Convert it into a dedicated IAM user for the tenant that downstream services then authenticate as"
     answer: 0
     explanation: |
       The edge tier extracts tenant context and routes accordingly (pooled to a shared backend, or
@@ -221,10 +221,10 @@ questions:
       (tenant.app.com). Which AWS building blocks does the EKS SaaS reference use to create the
       per-tenant DNS automatically?
     options:
-      - "CloudFront distributions manually created per tenant"
-      - "A separate Cognito pool that resolves DNS for each tenant"
+      - "CloudFront distributions manually created per tenant with a hand-added alternate domain name each time"
+      - "A separate Cognito user pool per tenant whose hosted-UI domain resolves the tenant's DNS record"
       - "NGINX ingress + ExternalDNS to Route 53 (or the AWS Load Balancer Controller) for host-based routing"
-      - "DynamoDB Streams triggering Route 53 health checks"
+      - "DynamoDB Streams triggering Route 53 health checks that publish each tenant's subdomain on failover"
     answer: 2
     explanation: |
       The EKS SaaS reference uses NGINX ingress with ExternalDNS (or the AWS Load Balancer
@@ -241,9 +241,9 @@ questions:
       What is the recommended way to make it structurally hard for any single service to forget
       to scope by tenant?
     options:
-      - "Ask each team to code-review their own service's tenant filtering"
-      - "Route every tenant to its own account so scoping is unnecessary"
-      - "Store tenantId only in CloudWatch logs, not in the request path"
+      - "Ask each team to code-review their own service's tenant filtering on every pull request going forward"
+      - "Route every tenant to its own dedicated AWS account so per-request tenant scoping becomes unnecessary"
+      - "Store the tenantId only in CloudWatch logs for audit, keeping it out of the live request path entirely"
       - "Centralize tenant-context extraction/injection in one place (shared authorizer or a middleware in a shared data-access layer)"
     answer: 3
     explanation: |
@@ -260,9 +260,9 @@ questions:
       What is the core trade-off between pooled routing and host/path-based routing to dedicated
       per-tenant stacks?
     options:
-      - "Pooled routing gives physical isolation; dedicated-stack routing gives none"
-      - "Both offer identical isolation; the only difference is cost"
-      - "Pooled routing requires Route 53 subdomains per tenant; dedicated routing does not"
+      - "Pooled routing gives each tenant physical isolation, while dedicated-stack routing gives none at all"
+      - "Both offer identical isolation guarantees; the only real difference between them is monthly infrastructure cost"
+      - "Pooled routing requires a Route 53 subdomain provisioned per tenant, whereas dedicated-stack routing needs none"
       - "Dedicated-stack routing buys isolation and predictable capacity but adds DNS/routing config and per-tenant deployment surface; pooled routing is one target with zero per-tenant routing state but no physical isolation"
     answer: 3
     explanation: |
@@ -278,10 +278,10 @@ questions:
     question: |
       Why can a new pooled-tenant onboarding be described as "a new tenant is a database row"?
     options:
-      - "Because pooled tenants share a single row in a global table"
-      - "Because AWS charges per row of tenant data"
+      - "Because all pooled tenants literally share one single row in a global cross-tenant table"
+      - "Because AWS meters and charges you a fixed fee per row of tenant data written to the store"
       - "Because pooled onboarding is just a metadata insert plus a Cognito user — milliseconds and near-zero marginal cost"
-      - "Because pooled tenants cannot have any dedicated infrastructure ever"
+      - "Because pooled tenants are permanently barred from ever being promoted to any dedicated infrastructure"
     answer: 2
     explanation: |
       Pooled onboarding is a cheap metadata insert (register the tenant in a DynamoDB store) plus
@@ -300,8 +300,8 @@ questions:
     options:
       - "Provision all per-tenant resources synchronously inside the sign-up HTTP call so the tenant is fully ready on response"
       - "Provision per-tenant resources asynchronously — queue the request, do the work in the background, and flip the tenant to active when ready"
-      - "Pre-create 50,000 accounts in advance so onboarding never calls the provisioning APIs"
-      - "Retry the CreateAccount call in a tight loop until it succeeds"
+      - "Pre-create 50,000 empty accounts far in advance so live onboarding never has to call the provisioning APIs"
+      - "Retry the throttled CreateAccount call in a tight synchronous loop within the sign-up request until it finally succeeds"
     answer: 1
     explanation: |
       Because provisioning APIs are rate-limited, per-tenant resource creation should be asynchronous:
@@ -317,10 +317,10 @@ questions:
     question: |
       In the EKS SaaS reference, how is siloed tenant onboarding automated?
     options:
-      - "A manual runbook that an operator follows for each tenant"
-      - "A single DynamoDB PutItem that instantly creates the namespace"
+      - "A manual runbook that an operator steps through by hand to provision each new tenant"
+      - "A single DynamoDB PutItem whose stream event instantly materializes the tenant's Kubernetes namespace"
       - "CodePipeline/CodeBuild creates the namespace, deploys the microservices, and applies isolation policies"
-      - "Cognito automatically provisions a Kubernetes namespace on user creation"
+      - "Cognito automatically provisions a dedicated Kubernetes namespace whenever a tenant's first user is created"
     answer: 2
     explanation: |
       The EKS reference uses CodePipeline/CodeBuild to create the tenant namespace, deploy
@@ -336,9 +336,9 @@ questions:
       How does onboarding cost tie into the tiering decision?
     options:
       - "Slow, expensive per-tenant provisioning is affordable for a few high-ARPU enterprise tenants but not for thousands of basic-tier tenants — which is exactly why basic tier must be pooled"
-      - "Onboarding cost is identical for pooled and siloed tenants, so it never affects tiering"
-      - "Basic tier should be siloed because it has the most tenants"
-      - "Enterprise tenants should be pooled to amortize provisioning cost"
+      - "Onboarding cost is identical for pooled and siloed tenants, so it never has any bearing on the tiering decision"
+      - "Basic tier should be siloed precisely because it has the most tenants and therefore the largest total footprint"
+      - "Enterprise tenants should be pooled together so their high provisioning cost is amortized across the shared fleet"
     answer: 0
     explanation: |
       You can afford slow, expensive siloed provisioning for a handful of high-ARPU enterprise tenants
@@ -354,9 +354,9 @@ questions:
       In this architecture, what does the tier (e.g., custom:tier claim) primarily control at
       runtime?
     options:
-      - "Only the monthly price shown on the invoice, with no technical effect"
-      - "The AWS Region the tenant is deployed to, and nothing else"
-      - "The encryption algorithm used for the tenant's data"
+      - "Only the monthly invoice price and billing-cycle length, with no effect on runtime behavior, routing, or capacity at all"
+      - "The single AWS Region the tenant is deployed into, chosen for data-residency reasons, with no bearing on throttles or routing"
+      - "The encryption algorithm and KMS key-rotation schedule applied to the tenant's data at rest, and nothing about capacity"
       - "Cross-cutting behavior: which throttle limits apply, which isolation/capacity model backs the tenant, which features are on, which SLA, and which routing target"
     answer: 3
     explanation: |
@@ -372,10 +372,10 @@ questions:
       An interviewer says "just silo everything for isolation." What nuance should you raise about
       how isolation is actually chosen?
     options:
-      - "Isolation must be all-or-nothing across the whole system"
+      - "Isolation must be applied all-or-nothing across the entire system, so every layer is either fully pooled or fully siloed together"
       - "Isolation is chosen per LAYER (compute, network, data, identity), so a tenant can be pooled at compute but siloed at data — that is the bridge model"
-      - "Only the data layer can ever be siloed; compute is always pooled"
-      - "Per-layer isolation is impossible on AWS, so silo-everything is the only option"
+      - "Only the data layer can ever be siloed on AWS; compute, network, and identity are always forced to remain pooled together"
+      - "Per-layer isolation is impossible on AWS because layers provision as one unit, so silo-everything is the only supported option"
     answer: 1
     explanation: |
       Isolation is decided per layer/axis (compute, network, data, identity); pooling compute while
@@ -390,10 +390,10 @@ questions:
       What is the counter-intuitive economic result that makes metering and cost attribution core
       product economics rather than accounting chores?
     options:
-      - "Enterprise tenants always cost the least to serve"
-      - "All tenants cost exactly in proportion to their price"
+      - "Enterprise tenants always cost the least to serve because their dedicated infrastructure is more efficient than any shared pool"
+      - "All tenants cost to serve exactly in proportion to the price they pay, so revenue and infrastructure cost always stay aligned"
       - "Basic-tier tenants frequently cost the MOST to serve relative to the revenue they generate — a fact you only discover with per-tenant cost data"
-      - "Pooled tenants are always profitable because they share infrastructure"
+      - "Pooled tenants are always profitable because sharing infrastructure spreads fixed cost too thin for any tenant to lose money"
     answer: 2
     explanation: |
       The key insight is that basic-tier tenants often cost the most relative to the revenue they
@@ -408,10 +408,10 @@ questions:
     question: |
       What is the recommended starting point for the number of tiers, and why?
     options:
-      - "Start with as many tiers as competitors offer to maximize price points immediately"
-      - "Start with a single tier and never add more"
+      - "Start with as many tiers as your closest competitors publish so you can match every one of their price points from day one"
+      - "Start with exactly one tier and never add more, since a single fixed isolation and capacity configuration is cheapest to operate"
       - "Start with two (pooled basic + siloed enterprise) and add tiers only when the business case is clear, because each tier is a distinct isolation/capacity config to build, test, and operate"
-      - "Start with one tier per tenant so each gets bespoke capacity"
+      - "Start with one dedicated tier per tenant so each customer gets a bespoke isolation and capacity configuration for their workload"
     answer: 2
     explanation: |
       More tiers capture more revenue but each is a distinct isolation/capacity configuration to build,
@@ -427,9 +427,9 @@ questions:
       For a premium tier described as "bridge" (pooled compute, siloed data), why is cost
       attribution easier than for basic tier?
     options:
-      - "Because premium tenants generate fewer requests"
-      - "Because pooled compute is always free"
-      - "Because premium tenants are billed by AWS directly"
+      - "Because premium tenants generate far fewer requests per month, so their share of the shared compute bill is small enough to ignore"
+      - "Because pooled compute is effectively free once it is shared, leaving only the data layer left to account for per tenant"
+      - "Because premium tenants are billed by AWS directly through their own linked accounts, so you never attribute their cost yourself"
       - "Because siloed data resources (DB/table per tenant) are taggable, so their cost maps cleanly to the tenant, unlike a shared pool"
     answer: 3
     explanation: |
@@ -445,9 +445,9 @@ questions:
       What is the "noisy neighbor" problem in a pooled SaaS model?
     options:
       - "A tenant whose burst or abuse consumes shared capacity and degrades everyone else's latency/availability"
-      - "A tenant whose data is stored physically near another tenant's data on disk"
-      - "A tenant who uses a different AWS Region than the others"
-      - "A tenant who refuses to upgrade to a higher tier"
+      - "A tenant whose data happens to be stored on the same physical disk sectors as another tenant's data, risking bleed-through"
+      - "A tenant who is deployed into a different AWS Region than everyone else, adding cross-Region latency to shared calls"
+      - "A tenant who repeatedly refuses to upgrade to a higher tier despite exceeding the usage their current tier allows"
     answer: 0
     explanation: |
       In pooling, tenants share compute, connections, queues, and data partitions; a noisy neighbor is
@@ -463,9 +463,9 @@ questions:
       Which of these is a "bulkhead" mitigation for the noisy-neighbor problem?
     options:
       - "Separate SQS queues per tenant/tier, separate Lambda concurrency pools, and separate connection pools so one tenant's spike is contained"
-      - "Increasing token validity in Cognito so users re-auth less often"
-      - "Storing all tenants in a single DynamoDB partition to simplify keys"
-      - "Removing all per-tenant quotas to maximize elasticity"
+      - "Increasing Cognito refresh-token validity so users re-authenticate far less often and the auth tier sees less concurrent load"
+      - "Storing all tenants under a single DynamoDB partition key to simplify key design and keep related items physically together"
+      - "Removing all per-tenant quotas and concurrency caps so the shared pool can flex freely and maximize overall elasticity"
     answer: 0
     explanation: |
       Bulkheads compartmentalize shared resources — separate SQS queues, Lambda concurrency pools, and
@@ -481,9 +481,9 @@ questions:
       In an interview, why is it important to name mitigations at multiple layers (edge, compute,
       data) rather than a single control?
     options:
-      - "Because AWS bills you less if you use more services"
-      - "Because only the data layer actually matters for noisy neighbors"
-      - "Because edge controls make compute and data controls unnecessary"
+      - "Because AWS gives a multi-service usage discount, so spreading controls across edge, compute, and data lowers your bill"
+      - "Because only the data layer actually matters for noisy neighbors, so the edge and compute controls are just defense-in-depth extras"
+      - "Because a properly configured edge control (WAF/API Gateway) fully absorbs the load, making compute and data controls unnecessary"
       - "Because a single throttle only protects one choke point; edge (WAF/API GW), compute (bulkhead concurrency), and data (hot-partition/RDS Proxy) each guard a different failure surface and the mitigations compose"
     answer: 3
     explanation: |
@@ -499,10 +499,10 @@ questions:
       Why can a single hot tenant throttle a shared DynamoDB partition even when the table has huge
       provisioned capacity?
     options:
-      - "Because DynamoDB caps every table at 400 KB of throughput"
+      - "Because DynamoDB caps every table's aggregate throughput at 400 KB per second regardless of how many partitions it holds"
       - "Because a single partition has a hard ceiling of 3,000 RCU/sec and 1,000 WCU/sec regardless of table capacity, so a hot tenantId key concentrates load on one partition"
-      - "Because DynamoDB throttles any table that has more than one tenant"
-      - "Because on-demand mode disables per-partition limits entirely"
+      - "Because DynamoDB automatically throttles any table that stores rows for more than one tenant as a fairness safeguard"
+      - "Because on-demand capacity mode disables the per-partition limits entirely and lets a single key absorb unbounded traffic"
     answer: 1
     explanation: |
       Each DynamoDB partition is bounded at 3,000 RCU/sec and 1,000 WCU/sec; a hot tenantId key focuses
@@ -518,10 +518,10 @@ questions:
     question: |
       What is the fundamental tension in every noisy-neighbor control?
     options:
-      - "They trade encryption strength for latency"
-      - "They only work in siloed architectures, never pooled ones"
+      - "They trade encryption strength for latency, forcing weaker ciphers whenever a per-tenant limit is actively enforced"
+      - "They only function correctly in siloed architectures and cannot be applied to pooled ones, where resources are shared"
       - "They trade some pooling efficiency or elasticity for fairness: strict per-tenant quotas cap a tenant even when the fleet has spare capacity, while loose quotas maximize elasticity but risk one tenant hurting all"
-      - "They eliminate the need for tiering entirely"
+      - "They eliminate the need for tiering entirely, since per-tenant quotas already give every customer the exact capacity they paid for"
     answer: 2
     explanation: |
       Every noisy-neighbor control trades pooling efficiency/elasticity for fairness — strict quotas
@@ -537,10 +537,10 @@ questions:
       Amazon API Gateway throttles requests with a token bucket. What do the "rate" and "burst"
       parameters mean, and what happens when the bucket is exceeded?
     options:
-      - "rate = total monthly requests; burst = requests per day; exceeding returns HTTP 403"
+      - "rate = the total requests allowed per month; burst = the requests allowed per day; exceeding either returns HTTP 403 Forbidden"
       - "rate = tokens added per second (steady-state); burst = bucket capacity (max concurrent); exceeding returns HTTP 429 Too Many Requests"
-      - "rate = latency budget; burst = payload size; exceeding returns HTTP 500"
-      - "rate = number of API keys; burst = number of usage plans; exceeding returns HTTP 404"
+      - "rate = the per-request latency budget in ms; burst = the max payload size in KB; exceeding either returns HTTP 500 Internal Server Error"
+      - "rate = the number of API keys issued; burst = the number of usage plans defined; exceeding either returns HTTP 404 Not Found"
     answer: 1
     explanation: |
       API Gateway's token bucket: rate is the steady-state tokens/second, burst is the bucket capacity
@@ -558,7 +558,7 @@ questions:
       - "One usage plan per tenant, with all tenants sharing a single API key"
       - "One API key per tier, shared by all tenants in that tier, with no usage plans"
       - "One usage plan per tier (with that tier's rate + burst + quota), and an API key per tenant attached to the appropriate plan"
-      - "A Lambda authorizer that rewrites the account-level limit per request"
+      - "A Lambda authorizer that dynamically rewrites the account-level RPS limit on every request based on the caller's tier claim"
     answer: 2
     explanation: |
       Create one usage plan per tier (encoding that tier's rate, burst, and quota) and attach a
@@ -595,10 +595,10 @@ questions:
       Where do AWS WAF rate-based rules fit relative to API Gateway usage plans in a tenant
       throttling design?
     options:
-      - "They replace usage plans entirely because WAF is cheaper"
+      - "They fully replace usage plans because WAF is cheaper per request and enforces the very same per-tenant rate and quota limits"
       - "They mitigate volumetric abuse at the edge before it reaches API Gateway, and can aggregate on IP or a custom key (e.g., a tenant header) to rate-limit a single tenant/IP cheaply at L7"
-      - "They only apply to WebSocket APIs"
-      - "They enforce business-metric quotas like '500 exports/day'"
+      - "They only apply to WebSocket APIs and cannot be attached to the REST or HTTP APIs most tenant traffic flows through"
+      - "They enforce business-metric quotas like '500 exports/day' by counting domain actions rather than raw HTTP requests"
     answer: 1
     explanation: |
       WAF rate-based rules are a complementary edge layer: they stop volumetric abuse before traffic
@@ -617,7 +617,7 @@ questions:
       - "AWS Regional limit > account-level > stage > per-client usage-plan"
       - "Stage limits > per-client limits > Regional limits > account-level limits"
       - "Per-client (per-API-key)/per-method usage-plan limits > per-method stage limits > account-level per-Region limits > the AWS Regional limit"
-      - "There is no precedence; whichever limit is configured last wins"
+      - "There is no defined precedence; whichever throttle limit was configured most recently overrides all the others at request time"
     answer: 2
     explanation: |
       The precedence runs from most specific to least: per-client (usage-plan) / per-method, then
@@ -633,10 +633,10 @@ questions:
       A product manager wants to enforce "500 report generations/day for basic tier." Why can't
       API Gateway usage plans do this, and what does it imply?
     options:
-      - "They can — set the quota to 500 requests/day on the basic usage plan"
+      - "They can — simply set the usage-plan quota to 500 requests/day on the basic tier and each report generation counts as exactly one request"
       - "Usage plans only express request-rate / request-count quotas, not business-metric quotas like report generations, so you need application-level counters"
-      - "API Gateway does not support any quotas at all"
-      - "You must silo the basic tier into its own account to enforce this"
+      - "API Gateway does not support any quotas at all, so every request-count or rate limit must be built in the application layer"
+      - "You must silo the basic tier into its own dedicated AWS account, because business-metric quotas can only be enforced per account"
     answer: 1
     explanation: |
       Usage plans express request-rate and request-count quotas, not domain/business metrics like
@@ -692,10 +692,10 @@ questions:
       A durable DynamoDB per-tenant counter is checked on every request for a very active tenant.
       What is the main risk, and why?
     options:
-      - "The counter item cannot exceed 400 KB, so it overflows"
-      - "DynamoDB conditional writes are eventually consistent, so the count drifts"
+      - "The counter item gradually approaches the 400 KB maximum item size as increments accumulate, so writes eventually overflow and fail"
+      - "DynamoDB conditional writes are only eventually consistent, so the running count drifts away from the true value over time"
       - "Every check is a write to a single tenant-keyed item, creating cost and a shared-partition hot-spot risk on that key"
-      - "The counter automatically resets every 24 hours regardless of configuration"
+      - "The counter item is automatically reset to zero every 24 hours by DynamoDB TTL regardless of how the quota window is configured"
     answer: 2
     explanation: |
       Because each quota check is a conditional write to one tenant-keyed item, a very active tenant
@@ -728,10 +728,10 @@ questions:
     question: |
       How does Lambda reserved concurrency act as a bulkhead in a pooled SaaS backend?
     options:
-      - "It gives every tenant unlimited concurrency"
-      - "It disables throttling entirely for that function"
+      - "It grants every tenant unlimited concurrency by exempting the function from the account concurrency ceiling entirely"
+      - "It disables throttling entirely for that function so invocations are never rejected under load or burst"
       - "It caps a tier's function to a bounded pool so basic-tier functions cannot consume all account concurrency and starve premium"
-      - "It routes overflow requests to a different Region automatically"
+      - "It automatically routes overflow invocations to an identical function in a secondary Region once the pool is full"
     answer: 2
     explanation: |
       Reserved concurrency per tier caps how much of the account concurrency a tier's functions can use,
@@ -745,10 +745,10 @@ questions:
     question: |
       What does "tier-based load shedding" mean when a pooled system is under pressure?
     options:
-      - "Randomly dropping requests across all tiers equally (uniform brownout)"
-      - "Shedding premium traffic first because premium tenants have retries"
+      - "Randomly dropping the same fixed percentage of requests across every tier at once, applying a uniform brownout that ignores tier value"
+      - "Shedding premium-tier traffic first on the assumption that premium clients have aggressive client-side retries and can absorb the drops"
       - "Deliberately shedding basic-tier traffic first to preserve premium/enterprise SLAs — tier-aware degradation rather than uniform brownout"
-      - "Shutting down the entire service until pressure subsides"
+      - "Shutting the entire service down completely until the pressure subsides, then cold-starting every tier back at once when load clears"
     answer: 2
     explanation: |
       Tier-based load shedding sheds basic-tier traffic first under pressure (queue depth, latency, error
@@ -764,9 +764,9 @@ questions:
       How does RDS Proxy function as a connection-level bulkhead for a Lambda + relational
       workload?
     options:
-      - "It replicates the database across Regions to spread connections"
-      - "It caches query results so the database is never contacted"
-      - "It shards the database automatically by tenantId"
+      - "It replicates the database into every Region so incoming connections are spread evenly across the read replicas it maintains"
+      - "It caches the result set of each query in memory so the underlying database is never contacted on repeat reads"
+      - "It automatically shards the database by tenantId so each tenant's connections land on a separate backend instance"
       - "It pools and multiplexes DB connections, queues/throttles new connections, and sheds load beyond the configured max, preserving the database for the load it can actually serve"
     answer: 3
     explanation: |
@@ -782,9 +782,9 @@ questions:
       Which RDS Proxy behavior can silently defeat the connection multiplexing you deployed it for?
     options:
       - "Statements larger than 16 KB (and certain SQL) cause session pinning, dedicating the connection to one session and killing the pooling benefit"
-      - "It caps you at 40,000 connections per proxy"
-      - "It automatically closes idle connections after 5 minutes"
-      - "It only works with DynamoDB, not relational databases"
+      - "It silently caps the proxy at 40,000 total client connections, rejecting every new session once that hard limit is reached"
+      - "It automatically closes any connection idle for more than 5 minutes, forcing a fresh handshake that defeats reuse"
+      - "It only works in front of DynamoDB tables and cannot pool connections to relational engines like Aurora or MySQL"
     answer: 0
     explanation: |
       Session pinning — triggered by statements over 16 KB and certain SQL constructs — dedicates a
@@ -800,10 +800,10 @@ questions:
       What is the utilization trade-off of using reserved concurrency (or dedicated pools) as
       bulkheads?
     options:
-      - "Bulkheads increase overall utilization because capacity is never idle"
+      - "Bulkheads raise overall utilization because each tier's reserved slice is continuously repacked so no reserved capacity is ever left sitting idle"
       - "Bulkheads guarantee isolation but fragment capacity — reserved concurrency for basic sits idle when basic is quiet yet premium is busy, hurting overall utilization"
-      - "Bulkheads have no downside; they are strictly better than a shared pool"
-      - "A single shared pool guarantees isolation but wastes money"
+      - "Bulkheads carry no downside at all and are strictly better than a shared pool on both isolation and utilization simultaneously"
+      - "A single undivided shared pool actually guarantees per-tenant isolation while wasting money on capacity that no tenant ends up using"
     answer: 1
     explanation: |
       Bulkheads guarantee containment but fragment capacity: a tier's reserved slice sits idle when that
@@ -818,10 +818,10 @@ questions:
     question: |
       What is "metering" in this SaaS context, and what should a usage event always carry?
     options:
-      - "Measuring CPU temperature; events carry hardware IDs"
-      - "Counting AWS accounts in the organization; events carry account emails"
+      - "Measuring physical CPU temperature and fan speed on the host fleet; each event carries the hardware serial and rack IDs"
+      - "Counting the number of AWS member accounts in your organization; each event carries the account's root email and OU path"
       - "Capturing per-tenant consumption events (to bill on usage and understand load), always stamped with tenant context such as {tenantId, tier, resource, quantity, timestamp}"
-      - "Recording user passwords; events carry credentials"
+      - "Recording each user's login password and session secret so support can replay requests; every event carries the raw credentials"
     answer: 2
     explanation: |
       Metering captures per-tenant consumption events for billing and load insight, with each event
@@ -837,9 +837,9 @@ questions:
       Firehose or EventBridge) rather than synchronously into the billing system?
     options:
       - "So application request latency and availability never depend on billing logic — decoupling metering from billing"
-      - "Because synchronous events are more expensive per API call"
-      - "Because Kinesis is the only service that can store tenantId"
-      - "Because billing systems reject synchronous writes by policy"
+      - "Because each synchronous billing write costs several times more per API call than an asynchronous stream put, so async is chosen purely to cut per-event cost"
+      - "Because Kinesis and Firehose are the only AWS services capable of persisting a tenantId field alongside a usage event record"
+      - "Because commercial billing systems categorically reject synchronous inline writes by policy and accept only batched, queued submissions"
     answer: 0
     explanation: |
       Emitting asynchronously decouples the hot path from billing so request latency/availability never
@@ -855,9 +855,9 @@ questions:
       For the billing-integration step of the metering pipeline, what does AWS guidance generally
       recommend?
     options:
-      - "Build your own billing engine from scratch for full control"
-      - "Bill directly from CloudWatch metrics with no aggregation"
-      - "Charge tenants through their own AWS accounts using consolidated billing"
+      - "Build your own full billing engine from scratch, including invoicing, taxes, and dunning, for maximum control over every pricing rule"
+      - "Bill tenants directly off raw CloudWatch metrics with no aggregation step, treating each datapoint as a line item on the invoice"
+      - "Charge each tenant through their own AWS account and roll the charges up to you via Organizations consolidated billing"
       - "Usually do not build billing — integrate a third party (Stripe, Zuora) or the AWS Marketplace Metering Service for Marketplace-listed metered SaaS"
     answer: 3
     explanation: |
@@ -875,9 +875,9 @@ questions:
       usage store -> billing), what does the aggregation step (Lambda/Athena/KDA/EMR) actually
       produce?
     options:
-      - "Raw per-request events replayed verbatim into the billing system"
-      - "A single global counter across all tenants"
-      - "Cognito tokens for each tenant"
+      - "Raw per-request events replayed verbatim, one billing line item per original event, straight into the downstream billing system"
+      - "A single global usage counter summed across every tenant, with no per-tenant or per-period breakdown retained"
+      - "Freshly minted Cognito access tokens for each tenant, refreshed once per aggregation window from the usage data"
       - "Billable units — API calls, GB-stored, jobs-run, active users — rolled up per tenant per period"
     answer: 3
     explanation: |
@@ -892,10 +892,10 @@ questions:
     question: |
       What is AWS guidance on metering granularity, and why?
     options:
-      - "Always meter at the finest per-request granularity to maximize accuracy"
-      - "Never meter more than once per day regardless of pricing model"
+      - "Always meter at the finest possible per-request granularity to maximize billing accuracy, since more detailed events are strictly better whatever the pricing model"
+      - "Never emit metering events more than once per day for any tenant, batching everything into a fixed daily rollup regardless of the pricing model"
       - "Meter only at the granularity your pricing model and cost decisions actually require, because fine-grained events cost real money in ingestion/storage/processing plus hot-path overhead"
-      - "Granularity does not matter because storage is free"
+      - "Granularity does not matter for cost because event ingestion and storage are effectively free at any volume you will reach"
     answer: 2
     explanation: |
       Fine-grained per-request events give accurate billing and rich insight but cost money in ingestion,
@@ -911,9 +911,9 @@ questions:
       For an account-per-tenant (siloed) model, what is the cleanest way to attribute cost per
       tenant?
     options:
-      - "Manually estimate each tenant's share of a shared bill each month"
-      - "Cost allocation tags on a single shared resource"
-      - "Proxy metrics apportioned from request counts"
+      - "Manually estimate each tenant's share of one shared monthly bill by eyeballing usage dashboards and splitting the total by hand"
+      - "Apply cost allocation tags to the single shared resource and let AWS split that resource's line item across tenants by tag"
+      - "Derive each tenant's cost from proxy metrics apportioned from request counts, then reconcile the estimate against the bill"
       - "AWS Organizations consolidated/linked billing — each member account is a clean per-tenant cost boundary rolling up to the management account"
     answer: 3
     explanation: |
@@ -931,9 +931,9 @@ questions:
       attribute cost, and what is the authoritative dataset?
     options:
       - "Put a tenantId cost allocation tag on every resource; the AWS Cost and Usage Report (CUR) is the authoritative, most granular billing dataset, with activated tags appearing as columns"
-      - "Use CloudTrail events as the billing source of truth"
-      - "Read per-tenant cost directly from the DynamoDB metering table"
-      - "Rely on the AWS Free Tier dashboard"
+      - "Use CloudTrail management and data events as the authoritative billing source of truth, summing the API activity per tenant into dollar figures"
+      - "Read each tenant's actual AWS dollar cost directly out of the DynamoDB metering table where usage events are already stored per tenant"
+      - "Rely on the AWS Free Tier usage dashboard, which breaks down spend per tagged resource once a tenant crosses the free allowance"
     answer: 0
     explanation: |
       Within one account you attribute via a tenantId cost allocation tag on every resource, and CUR is
@@ -950,9 +950,9 @@ questions:
       most likely causes?
     options:
       - "The tag was never activated in the management account, and/or you are within the up-to-24-hour propagation delay (and tags only apply from activation forward, not retroactively)"
-      - "The tags exceeded 400 KB and the tag names contained uppercase letters"
-      - "Cost Explorer does not support user-defined tags at all"
-      - "You must create a new AWS account for tags to appear"
+      - "The combined tag set on each resource exceeded the 400 KB payload limit and the tag keys contained uppercase letters, both of which cause Cost Explorer to drop the tag"
+      - "Cost Explorer does not support user-defined resource tags at all and can only group spend by AWS-generated service and Region dimensions"
+      - "A brand-new AWS member account must be created and the resources migrated into it before any user-defined tag becomes visible in billing"
     answer: 0
     explanation: |
       Cost allocation tags must be activated in the Billing console (management account) before appearing
@@ -967,10 +967,10 @@ questions:
     question: |
       Which statement about AWS cost allocation tags is correct?
     options:
-      - "There is one type of tag and it activates automatically"
-      - "Tags are managed by any member account in the organization"
+      - "There is only a single type of cost allocation tag and it is activated automatically the moment you attach it to any resource"
+      - "Cost allocation tags can be activated and managed by any member account in the organization, not just the management account"
       - "There are two types (user-defined with a user: prefix and AWS-generated with an aws: prefix), a max of 50 tags per resource, and they must be activated before appearing in CUR/Cost Explorer"
-      - "You may safely store secrets and PII in tags for convenience"
+      - "You may safely store secrets, access keys, and customer PII in tag values for convenience since tag data is encrypted and never exposed"
     answer: 2
     explanation: |
       Tags come in two types (user-defined user: and AWS-generated aws:), resources allow max 50 tags,
@@ -985,9 +985,9 @@ questions:
     question: |
       What is the core trade-off of siloed cost attribution?
     options:
-      - "It is inaccurate but cheap"
-      - "It requires complex proxy-metric apportionment"
-      - "It only works if all tenants are in the same account"
+      - "It is inaccurate but cheap, giving only a rough directional split of cost while running on inexpensive shared infrastructure"
+      - "It requires the same complex proxy-metric apportionment and custom consumption instrumentation that pooled attribution needs"
+      - "It only works when every tenant is packed into the same shared AWS account rather than separate accounts or VPCs"
       - "It is trivially accurate but rides on expensive infrastructure (an account or VPC per tenant, with its own limits) — you pay for isolation and get accounting for free"
     answer: 3
     explanation: |
@@ -1004,10 +1004,10 @@ questions:
       For a shared resource (one Lambda fleet, one DynamoDB table, one Aurora cluster), why can't
       you just read per-tenant cost from AWS, and what must you do instead?
     options:
-      - "AWS provides per-tenant cost automatically; no work is needed"
+      - "AWS breaks the shared resource's bill down per tenant automatically once it is tagged, so no consumption instrumentation is needed on your side"
       - "AWS gives no native per-tenant breakdown — the bill is for the whole resource — so you must apportion it using tenant-stamped consumption metrics and proxy metrics"
-      - "You must delete the shared resource and silo everything"
-      - "You must move the resource to AWS Marketplace to get per-tenant cost"
+      - "You must delete the shared resource and silo every tenant into its own account or table so the billing boundary lines up with the tenant boundary"
+      - "You must relist and route the resource through the AWS Marketplace Metering Service, which is the only way to obtain a per-tenant cost figure for shared infrastructure"
     answer: 1
     explanation: |
       For a shared resource AWS bills the whole resource with no per-tenant breakdown, so you apportion it
@@ -1023,10 +1023,10 @@ questions:
       For apportioning a shared compute bill (e.g., a Lambda fleet) across tenants, which approach
       does AWS guidance (Tod Golding) recommend?
     options:
-      - "Divide the bill equally among all tenants regardless of usage"
-      - "Charge the tenant with the most data all of the compute cost"
+      - "Divide the shared compute bill into equal per-tenant shares each month regardless of usage, since AWS provides no native way to tell tenants apart on a pooled fleet"
+      - "Attribute the entire shared compute bill to whichever tenant stores the most data, on the assumption that storage volume tracks compute consumption closely enough to bill on"
       - "Instrument entry points with tenant-stamped metrics and use proxy metrics (share of request count, CPU-time, or Lambda GB-seconds) to apportion the shared compute bill by that percentage, then correlate with CUR"
-      - "Use only DynamoDB item counts as the compute proxy"
+      - "Use only each tenant's DynamoDB item count as the compute proxy, converting stored-item totals directly into that tenant's share of the pooled Lambda bill"
     answer: 2
     explanation: |
       Compute is apportioned with proxy metrics — each tenant's share of request count, CPU-time, or
@@ -1042,10 +1042,10 @@ questions:
       AWS guidance says pooled storage attribution has two dimensions. What are they, and how is
       each captured?
     options:
-      - "Encryption and compression, both read from KMS"
+      - "Encryption strength and compression ratio, both read from the KMS key policy that protects each tenant's stored data and translated into a per-tenant storage charge"
       - "Size (a periodic job analyzes per-tenant data distribution — S3 per-prefix bytes, DynamoDB per-partition-key item sizes) and IOPS/throughput (route all data ops through a common data-access layer that records per-tenant read/write activity)"
-      - "Region and Availability Zone, read from the CUR"
-      - "Backup frequency and retention, read from AWS Backup"
+      - "The Region and Availability Zone each tenant's data lives in, read from the Cost and Usage Report and used to split the shared storage bill by location"
+      - "Backup frequency and snapshot retention window, read from AWS Backup vault policies and used as the two axes of per-tenant storage cost"
     answer: 1
     explanation: |
       Pooled storage is apportioned on two dimensions: size (a periodic job measuring per-tenant data
@@ -1060,9 +1060,9 @@ questions:
     question: |
       What is the "good enough" principle for per-tenant cost attribution on pooled resources?
     options:
-      - "Always pursue 100% accounting precision on every shared resource"
-      - "Never attempt to attribute pooled cost; it is impossible"
-      - "Only premium tenants deserve any cost attribution effort"
+      - "Always pursue 100% accounting precision on every shared resource, instrumenting every code path so each tenant's cost is reconstructed to the cent before any business decision is made"
+      - "Never attempt to attribute pooled cost at all, because a shared fleet leaves no signal to apportion by and any estimate is guesswork that will mislead the business"
+      - "Reserve all cost-attribution effort for premium tenants only, on the view that basic-tier consumption is too small to matter to profitability analysis"
       - "Unless the number directly drives an invoice, aim for a model that captures the general distribution of tenant consumption, not perfect accounting — start coarse and refine where the money is"
     answer: 3
     explanation: |
@@ -1080,10 +1080,10 @@ questions:
       Which statement best captures the accuracy-vs-effort trade-off across siloed and pooled cost
       attribution?
     options:
-      - "Pooled attribution is both cheaper in infra and more accurate than siloed"
+      - "Pooled attribution is both cheaper in infrastructure and more accurate than siloed, because a shared fleet is billed as one line item that maps exactly to tenant consumption"
       - "Silo is trivially accurate but on expensive infra; pool is cheap infra but attribution needs custom instrumentation + apportionment and is never 100% precise — and the apportionment itself has cost that must not exceed the value of the insight"
-      - "Both approaches are equally accurate and equally cheap"
-      - "Siloed attribution requires apportionment while pooled does not"
+      - "Both approaches are equally accurate and equally cheap, so the choice between silo and pool has no bearing on how you attribute cost per tenant"
+      - "Siloed attribution requires custom apportionment across a shared bill while pooled attribution reads a clean per-tenant figure straight from the AWS invoice"
     answer: 1
     explanation: |
       Silo = trivially accurate but expensive infra; pool = cheap infra but attribution needs custom
@@ -1099,9 +1099,9 @@ questions:
       Beyond billing, what operational visibility do tenant-aware CloudWatch metrics provide?
     options:
       - "Per-tenant/per-tier latency, error rate, throttle counts, quota consumption, and cost — so operators can spot a noisy neighbor or an unprofitable tenant"
-      - "The AWS account root credentials for each tenant"
-      - "The physical server serial numbers hosting each tenant"
-      - "Each tenant's source code repository status"
+      - "The AWS account root credentials for each tenant, surfaced on the dashboard so operators can log in as the tenant to reproduce issues directly"
+      - "The physical server serial numbers and rack locations of the hosts running each tenant's pooled workload at any given moment"
+      - "Each tenant's source-code repository build status and open pull requests, streamed onto the operational dashboard alongside runtime health"
     answer: 0
     explanation: |
       Emitting metrics with tenantId/tier dimensions (or via EMF) surfaces per-tenant latency, error rate,
@@ -1117,10 +1117,10 @@ questions:
       At thousands of tenants, why can a distinct CloudWatch custom metric per tenant blow up cost,
       and what mitigates it?
     options:
-      - "Custom metrics are free, so there is no cost issue"
+      - "Custom metrics are free of charge at any dimension cardinality, so a distinct metric per tenant adds no billing cost no matter how many tenants you onboard"
       - "Each unique dimension combination is a separate custom metric billed individually; mitigate with EMF (query high-cardinality dimensions from logs without paying per-metric), aggregation, or per-tenant metrics only for top-N/premium tenants"
-      - "CloudWatch caps metrics at 50 per account, so extra tenants are dropped silently"
-      - "The fix is to store all metrics in DynamoDB instead"
+      - "CloudWatch caps custom metrics at 50 per account per Region, so beyond 50 tenants the extra per-tenant metrics are silently dropped and never billed"
+      - "The fix is to store all per-tenant metrics in a DynamoDB table instead of CloudWatch, since DynamoDB writes are cheaper than custom-metric ingestion at high cardinality"
     answer: 1
     explanation: |
       Each unique dimension combination is a separate, individually-billed custom metric, so a metric per
@@ -1136,10 +1136,10 @@ questions:
       What is CloudWatch Embedded Metric Format (EMF) and why is it useful for tenant-aware
       metrics?
     options:
-      - "A billing report that lists per-tenant cost"
-      - "A Cognito feature that embeds tenantId into JWTs"
+      - "A billing report format that lists each tenant's monthly AWS cost as line items, generated from CloudWatch usage data on a fixed schedule"
+      - "A Cognito Pre Token Generation feature that embeds the tenantId claim into JWTs so downstream metrics inherit the tenant dimension automatically"
       - "A way to emit metrics-as-logs so high-cardinality dimensions (like tenantId) are extracted during ingestion without paying per-metric for every dimension combination"
-      - "An API Gateway throttling mode"
+      - "An API Gateway throttling mode that rate-limits requests per tenant dimension before they reach the backend, emitting the counts as metrics"
     answer: 2
     explanation: |
       EMF emits structured metrics-as-logs, letting CloudWatch extract high-cardinality dimensions such as
@@ -1153,10 +1153,10 @@ questions:
     question: |
       What is the trade-off between per-tenant metrics and aggregate/tier-level metrics?
     options:
-      - "Per-tenant metrics are cheaper and more scalable than aggregate metrics"
+      - "Per-tenant metrics are cheaper and more scalable than aggregate metrics, because emitting one metric per tenant lets CloudWatch compress the dimension and bill less as tenant count grows"
       - "Per-tenant metrics give precise operational insight but scale cost with tenant count; aggregate/tier-level metrics are cheap but hide individual noisy neighbors — use EMF or reserve per-tenant metrics for premium tenants and alerting-worthy signals"
-      - "Aggregate metrics reveal individual noisy neighbors better than per-tenant metrics"
-      - "There is no difference in cost or insight between the two"
+      - "Aggregate metrics reveal individual noisy neighbors better than per-tenant metrics, since rolling all tenants into one series makes a single tenant's spike stand out more clearly"
+      - "There is no difference in cost or insight between the two, so the choice of per-tenant versus tier-level aggregation is purely a matter of dashboard preference"
     answer: 1
     explanation: |
       Per-tenant metrics give precise insight but their cost scales with tenant count; aggregate/tier-level
@@ -1173,9 +1173,9 @@ questions:
       strategy?
     options:
       - "Accounts per org default 10 (adjustable to 50,000 with qualification) and CreateAccount throttled at ~0.1/sec with 5 concurrent creates"
-      - "Accounts per org are unlimited and CreateAccount runs at 1,000/sec"
-      - "OUs per org cap at 10, which limits accounts"
-      - "SCP documents are limited to 10 characters"
+      - "Accounts per organization are effectively unlimited and CreateAccount sustains roughly 1,000 new accounts per second, so account-per-tenant provisions almost instantly at any scale"
+      - "Organizational units per org cap at 10, and since each account must sit in its own OU that ceiling is what bounds the number of tenant accounts"
+      - "Service control policy documents are limited to 10 characters of JSON, which is what makes per-tenant account governance impractical at scale"
     answer: 0
     explanation: |
       Accounts per org default to 10 (adjustable to 50,000 with qualification) and CreateAccount is
@@ -1191,10 +1191,10 @@ questions:
       A team wants VPC-per-tenant in a single account. Which VPC limit will bite first and force a
       rethink?
     options:
-      - "Subnets per VPC: 200 — too few subnets"
+      - "Subnets per VPC: 200 — you exhaust the per-VPC subnet allocation before you can carve out one subnet per tenant, which is what caps tenant count first"
       - "VPCs per Region: 5 default (raisable to hundreds) — VPC-per-tenant hits limits fast, and raising VPCs also raises internet gateways"
-      - "IPv4 CIDR blocks per VPC: 5 — too few CIDRs"
-      - "Route tables per VPC: 200 — too few route tables"
+      - "IPv4 CIDR blocks per VPC: 5 — you run out of address space to assign each tenant its own CIDR range long before any other VPC limit binds"
+      - "Route tables per VPC: 200 — you cannot create a dedicated route table per tenant past that ceiling, which is the constraint that forces the rethink"
     answer: 1
     explanation: |
       VPCs per Region default to 5 and only raise to "hundreds," so VPC-per-tenant caps out fast (and each
@@ -1208,10 +1208,10 @@ questions:
     question: |
       Which DynamoDB limits are correctly stated for a pooled shared-table design?
     options:
-      - "Item size max 4 MB; per-partition 30,000 RCU / 10,000 WCU"
+      - "Item size max 4 MB (hard); per-partition ceiling 30,000 RCU/sec and 10,000 WCU/sec, so a single hot tenant key rarely throttles a well-provisioned shared table"
       - "Item size max 400 KB (hard); per-partition ceiling 3,000 RCU/sec and 1,000 WCU/sec (hard); 2,500 tables/Region default rising to 10,000"
-      - "Item size max 400 KB; per-partition unlimited if the table is on-demand"
-      - "Item size max 1 MB; per-partition 1,000 RCU / 3,000 WCU"
+      - "Item size max 400 KB; per-partition throughput becomes unlimited once the table is switched to on-demand capacity mode, removing the hot-partition ceiling entirely"
+      - "Item size max 1 MB; per-partition ceiling 1,000 RCU/sec and 3,000 WCU/sec, with reads capped tighter than writes on any single partition"
     answer: 1
     explanation: |
       Correct DynamoDB facts: 400 KB max item size (hard), 3,000 RCU/sec and 1,000 WCU/sec per-partition
@@ -1226,10 +1226,10 @@ questions:
       Why does table-per-tenant (silo) cap out at roughly 2,500-10,000 tenants per account per
       Region, while a pooled shared table scales far higher?
     options:
-      - "Because a shared table has no partition-key requirement"
+      - "Because a shared table has no partition-key requirement, so it can hold unlimited tenants while a silo table must define a key that consumes one of a fixed per-account allocation"
       - "Because the DynamoDB tables-per-Region limit (2,500 default, 10,000 max) bounds table-per-tenant, whereas a pooled shared table scales higher but needs IAM dynamodb:LeadingKeys = ${tenantId} and hot-partition management"
-      - "Because pooled tables are exempt from all DynamoDB quotas"
-      - "Because silo tables cannot use GSIs"
+      - "Because pooled shared tables are exempt from all DynamoDB quotas, so once you consolidate tenants into one table no service ceiling applies to it at all"
+      - "Because silo tables per tenant cannot use global secondary indexes, forcing full scans that make table-per-tenant collapse well before the 2,500-table ceiling"
     answer: 1
     explanation: |
       Table-per-tenant is bounded by the tables-per-Region limit (2,500 default, 10,000 max); a pooled
@@ -1245,10 +1245,10 @@ questions:
       An interviewer asks "which limit does this design hit first?" What general shape should your
       answer take?
     options:
-      - "Pool strategies always hit limits before silo strategies"
+      - "Pool strategies always hit AWS service limits before silo strategies, because concentrating every tenant onto shared resources exhausts per-resource quotas faster than spreading them out"
       - "Silo strategies have low, hard-ish ceilings (Orgs 10->50k accounts, DynamoDB 2.5k->10k tables, VPC 5->hundreds, Cognito 1k->10k pools); pool strategies scale far higher but push the problem into isolation (LeadingKeys/RLS) and noisy-neighbor management"
-      - "There are no meaningful AWS limits; everything is soft and instantly raisable"
-      - "The item size limit (400 KB) is always the first limit hit"
+      - "There are no meaningful AWS limits to reason about; every quota is soft and can be raised instantly on request, so no design ever hits a real ceiling"
+      - "The DynamoDB item-size limit (400 KB) is always the first limit any SaaS design hits, so the answer should focus on payload size regardless of isolation model"
     answer: 1
     explanation: |
       The memorable shape: silo strategies have low, hard-ish ceilings tied to the dimension you multiplied
@@ -1265,9 +1265,9 @@ questions:
       stated limits reflect that pain?
     options:
       - "NACLs per VPC: 200, rules per NACL: 20 (max 40); security groups per Region: 2,500 with 60 in / 60 out rules per SG"
-      - "NACLs per VPC: unlimited; rules per NACL: 1,000"
-      - "Security groups per Region: 10; rules per SG: 5"
-      - "There are no limits on NACLs or security groups"
+      - "NACLs per VPC: unlimited; rules per NACL: 1,000 in and 1,000 out, so per-subnet rule sprawl is never actually a constraint you hit"
+      - "Security groups per Region: 10 with just 5 rules per SG, which is the tight ceiling that makes per-subnet isolation tedious"
+      - "There are no limits on NACLs or security groups per VPC, so subnet-level isolation scales freely without any rule-count pressure"
     answer: 0
     explanation: |
       The concepts cite NACLs per VPC 200 with 20 (max 40) rules each, plus 2,500 security groups/Region
@@ -1301,10 +1301,10 @@ questions:
       A startup targets a high volume of low-ARPU, cost-sensitive tenants and cannot afford
       dedicated infrastructure per tenant. Which decision guide applies?
     options:
-      - "Silo everything (account or VPC per tenant) and accept the cost"
-      - "Give every tenant a dedicated Cognito pool and Aurora cluster"
+      - "Silo everything with an account or VPC per tenant and pass the dedicated-infrastructure cost through to these price-sensitive customers as a premium fee"
+      - "Give every tenant its own dedicated Cognito user pool and Aurora cluster, since per-tenant identity and database isolation is the cheapest way to serve high volume"
       - "Pool (shared compute + shared DB with tenantId + RLS/LeadingKeys) and invest in noisy-neighbor controls plus apportioned cost attribution"
-      - "Refuse to onboard tenants until each can pay for a silo"
+      - "Refuse to onboard any tenant until it can pay for a fully siloed stack, keeping the fleet small enough that noisy-neighbor controls are never needed"
     answer: 2
     explanation: |
       For cost efficiency, high tenant count, and low ARPU, the guide is to pool (shared compute + shared
@@ -1320,10 +1320,10 @@ questions:
       A SaaS has thousands of small tenants plus a handful of large regulated enterprises demanding
       hard isolation. What does the decision guide recommend, and what stays shared?
     options:
-      - "Silo every tenant to satisfy the enterprises; run a separate control plane per tier"
+      - "Silo every tenant, including the thousands of small ones, to satisfy the enterprises, and run a separate dedicated control plane for each tier to keep them fully independent"
       - "Use a bridge/tiered approach — pool basic/standard, silo premium/enterprise — while ONE control plane serves all tenants"
-      - "Pool everyone including the regulated enterprises to maximize efficiency"
-      - "Run two entirely separate products with duplicated control planes"
+      - "Pool everyone, including the regulated enterprises, onto shared infrastructure to maximize cost efficiency and rely on logical isolation to meet the enterprise compliance demands"
+      - "Run two entirely separate products with fully duplicated control planes, one for the small tenants and one for the regulated enterprise customers"
     answer: 1
     explanation: |
       For a mixed base the guide is bridge/tiered: pool basic/standard and silo premium/enterprise, while a
@@ -1338,10 +1338,10 @@ questions:
     question: |
       Which of the following correctly names one of the "three standing tensions" in this topic?
     options:
-      - "Encryption strength vs key rotation frequency"
-      - "Region choice vs Availability Zone choice"
+      - "Encryption strength vs key-rotation frequency — stronger ciphers force slower rotation and weaker ciphers allow faster rotation, and balancing the two is a core tension of the topic"
+      - "Region choice vs Availability Zone choice — picking a Region trades against picking an AZ for tenant placement, and this placement dilemma is one of the three standing tensions"
       - "Strict quotas vs elasticity — hard caps guarantee fairness but leave spare capacity unused, while loose caps maximize elasticity but risk noisy neighbors"
-      - "IAM roles vs IAM users for tenant access"
+      - "IAM roles vs IAM users for tenant access — choosing assumed roles over long-lived users for each tenant is framed as one of the three standing tensions of the topic"
     answer: 2
     explanation: |
       The three standing tensions are: metering granularity vs cost/overhead, strict quotas vs elasticity,
@@ -1356,10 +1356,10 @@ questions:
       Per the throttling decision guide, which mechanism fits "backpressure / isolation" (keeping
       one tenant's load from sinking shared resources)?
     options:
-      - "API Gateway usage plans + API keys"
-      - "AWS WAF rate-based rules"
+      - "API Gateway usage plans + API keys enforcing a fixed per-tenant requests-per-second rate limit"
+      - "AWS WAF rate-based rules that block volumetric abuse at the CloudFront edge keyed on source IP"
       - "SQS-per-tier bulkheads + Lambda reserved concurrency + RDS Proxy load-shedding"
-      - "Application-level token bucket in DynamoDB"
+      - "Application-level token bucket in DynamoDB counting business-metric quotas like reports-per-day"
     answer: 2
     explanation: |
       Backpressure/isolation is handled by SQS-per-tier bulkheads, Lambda reserved concurrency, and RDS
@@ -1373,10 +1373,10 @@ questions:
     question: |
       Which is a listed anti-pattern that invites cross-tenant access?
     options:
-      - "Deriving tenant context from a validated JWT claim in a shared authorizer"
+      - "Deriving tenant context from a validated JWT claim inside one shared Lambda authorizer at the edge"
       - "Trusting a client-supplied tenantId header instead of deriving tenant context from a validated JWT claim"
-      - "Caching a validated JWT at the edge"
-      - "Scoping DynamoDB access with dynamodb:LeadingKeys"
+      - "Caching a validated JWT at the edge to avoid a Cognito API call on every single incoming request"
+      - "Scoping DynamoDB access with dynamodb:LeadingKeys so each tenant reads only its own partition"
     answer: 1
     explanation: |
       Trusting a client-supplied tenantId header is a classic anti-pattern — tenant context must be derived
@@ -1390,10 +1390,10 @@ questions:
     question: |
       Which is described as a failure mode/anti-pattern in the metering design?
     options:
-      - "Emitting usage events to Kinesis/Firehose and aggregating out of band"
+      - "Emitting usage events asynchronously to Kinesis/Firehose and aggregating them out of band"
       - "Synchronous metering on the hot path that couples app latency/availability to the billing system"
-      - "Rolling raw events into billable units per tenant per period"
-      - "Stamping each usage event with tenant context"
+      - "Rolling raw events into billable units per tenant per period in the out-of-band aggregation step"
+      - "Stamping each usage event with tenant context such as tenantId, tier, quantity, and timestamp"
     answer: 1
     explanation: |
       Synchronous metering on the hot path is an anti-pattern because it couples request latency and
@@ -1408,10 +1408,10 @@ questions:
       Why is "pool-per-tenant identity / table / VPC / account beyond limits" listed as a failure
       mode, and what is the remedy?
     options:
-      - "It improves scalability, so it is not really a failure mode"
-      - "It only fails in newer/smaller Regions"
+      - "It actually improves scalability by giving each tenant its own dedicated pool, table, VPC, or account, so it is not really a failure mode at all"
+      - "It only fails in newer or smaller Regions where the per-account pool, table, and VPC quotas start at a fraction of the standard defaults"
       - "It silently caps growth (Cognito 1k-10k pools, DynamoDB 2.5k-10k tables, VPC 5->hundreds, Orgs 10->50k accounts); the remedy is to choose pooling early if you will scale to many tenants"
-      - "The remedy is to request unlimited quotas from AWS"
+      - "The remedy is to file a Service Quotas request for unlimited pools, tables, VPCs, and accounts so per-tenant provisioning never hits a ceiling"
     answer: 2
     explanation: |
       Creating a dedicated pool/table/VPC/account per tenant silently caps growth at the corresponding

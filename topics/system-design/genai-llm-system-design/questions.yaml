@@ -15,9 +15,12 @@ questions:
   options:
   - It lets the model answer using fresh, private, or domain-specific knowledge that was not in its training
     data by retrieving relevant text at query time
-  - It permanently increases the model's parameter count so it becomes smarter
-  - It removes the need for a context window because facts are stored in the weights
-  - It guarantees the model will never produce an incorrect token
+  - It permanently increases the model's parameter count by adding billions of new weights at query
+    time, so the network physically grows larger and becomes smarter
+  - It removes the need for a context window entirely because all retrieved facts are permanently
+    written into the model's weights during inference
+  - It guarantees the model will never produce an incorrect token because each retrieved passage is
+    formally verified as true before any generation begins
   answer: 0
   explanation: |
     A base LLM only knows its (frozen) training data plus what fits in the prompt.
@@ -36,10 +39,12 @@ questions:
     In a RAG system, which steps belong to the OFFLINE ingestion path rather than
     the online query path?
   options:
-  - Embedding the user's question and streaming tokens back
-  - Re-ranking candidates and assembling the final prompt
+  - Embedding the user's incoming question, running the ANN lookup, and streaming generated tokens
+    back to the client
+  - Re-ranking the retrieved candidates with a cross-encoder and assembling the final grounded prompt
+    for the model
   - Loading documents, chunking them, embedding the chunks, and writing vectors to the index
-  - Running output guardrails and inserting citations
+  - Running the output moderation guardrails, inserting inline citations, and formatting the response
   answer: 2
   explanation: |
     Ingestion is the batch/offline path: load → chunk → embed → index. The others
@@ -58,9 +63,12 @@ questions:
     into a 1M-token context window on every request. What is the strongest argument
     AGAINST this approach?
   options:
-  - 1M-token models don't exist, so it's technically impossible
-  - Vector databases are always cheaper than any LLM call regardless of scale
-  - Long context windows always produce lower-quality grammar
+  - Models with a 1M-token context window do not exist in production yet, so pasting the full corpus
+    is technically impossible on any available API today
+  - Vector databases are always strictly cheaper than any LLM call regardless of corpus scale, so
+    retrieval is mandated purely on cost grounds
+  - Long context windows always produce answers with measurably lower-quality grammar and sentence
+    structure once the prompt exceeds a few thousand tokens
   - Cost scales linearly with tokens on every call, latency grows with context, per-user access control
     is unenforceable, and 'lost in the middle' degrades recall
   answer: 3
@@ -81,11 +89,14 @@ questions:
     A principle repeated throughout RAG design is that "retrieval quality is the
     ceiling." What does this mean for where you invest debugging effort?
   options:
-  - The LLM can always reconstruct missing facts from partial context, so retrieval barely matters
+  - The LLM can always reconstruct any missing facts from partial context using its parametric memory,
+    so the retrieval stage barely matters to final quality
   - If the correct chunk is not in the top-N passed to the LLM, no prompt engineering can make the model
     ground on it, so most quality wins come from improving retrieval
-  - Only the generation temperature affects answer quality
-  - Increasing the context window size always fixes retrieval misses
+  - Only the generation temperature setting meaningfully affects answer quality, so tuning it is where
+    debugging effort should be concentrated
+  - Increasing the context window size always fixes retrieval misses because a bigger window eventually
+    captures every relevant chunk in the corpus
   answer: 1
   explanation: |
     If the right passage never reaches the model, it cannot ground on it and will
@@ -102,11 +113,14 @@ questions:
   question: |
     Why does chunk size matter when embedding documents for retrieval?
   options:
-  - Larger chunks are always better because they contain more information
-  - Chunk size only affects storage cost, never retrieval quality
+  - Larger chunks are always strictly better because they pack more information into each vector and
+    therefore raise retrieval precision at every size
+  - Chunk size only affects downstream storage cost and index size, and has no measurable effect on
+    retrieval quality or ranking
   - A single vector represents a fixed-size text unit; too-large chunks blur multiple topics into one
     vector (low precision), too-small chunks lack enough context to be meaningful
-  - Chunk size must always equal the LLM's context window
+  - Chunk size must always be set exactly equal to the LLM's context window so each chunk fills one
+    complete generation prompt
   answer: 2
   explanation: |
     Each chunk becomes one embedding. Oversized chunks average many topics into a blurry
@@ -125,9 +139,12 @@ questions:
   options:
   - So that a sentence or idea split across a chunk boundary still appears whole within at least one chunk,
     improving recall
-  - To increase the total number of vectors and inflate storage on purpose
-  - Because embedding models require overlapping input
-  - To make chunks the same size as the context window
+  - To deliberately increase the total number of vectors and inflate the index storage footprint,
+    which is the primary design goal of overlapping
+  - Because modern embedding models technically require overlapping input windows and will reject
+    non-overlapping chunks at encoding time
+  - To force every chunk to be exactly the same size as the model's context window so a single chunk
+    can fill one generation prompt
   answer: 0
   explanation: |
     Overlap ensures content straddling a boundary isn't fragmented, so the full idea
@@ -146,9 +163,12 @@ questions:
     256-token chunks for retrieval but, on a hit, return the larger surrounding section
     to the LLM. What pattern is this and what is its main benefit?
   options:
-  - Fixed-size chunking; it minimizes storage
-  - Contextual retrieval; it eliminates the vector index
-  - Semantic chunking; it removes the need for embeddings
+  - Fixed-size chunking; its main benefit is minimizing total storage by cutting every document into
+    identical uniform blocks with no overlap
+  - Contextual retrieval; its main benefit is that it eliminates the vector index entirely and lets
+    you search documents with plain keyword lookup instead
+  - Semantic chunking; its main benefit is that it removes the need for embeddings by splitting text
+    on topic boundaries that the LLM can read directly
   - Parent-document / sentence-window retrieval; it decouples the retrieval unit (small, precise) from
     the generation unit (large, context-rich)
   answer: 3
@@ -170,11 +190,14 @@ questions:
     document to each chunk before embedding. Given a high accuracy budget, what is the
     correct trade-off statement?
   options:
-  - It has no cost and should always be used regardless of budget
+  - It has essentially no cost and should therefore always be applied to every corpus regardless of
+    the accuracy budget or ingest volume
   - It reduces retrieval failures by giving each chunk global context, at the cost of an LLM call per
     chunk at ingest time
-  - It reduces ingest cost because summaries are shorter than chunks
-  - It only helps generation quality and has no effect on retrieval
+  - It actually reduces total ingest cost because the generated summaries are shorter than the chunks
+    themselves and replace them in the index
+  - It only improves final generation quality and has no measurable effect on retrieval recall or the
+    ranking of candidate chunks
   answer: 1
   explanation: |
     Contextual retrieval makes each chunk carry global context so it matches better,
@@ -193,9 +216,12 @@ questions:
   options:
   - A point in high-dimensional space where semantic similarity corresponds to geometric closeness, so
     paraphrases land near each other
-  - The exact tokens of the text, losslessly compressed
-  - A keyword index of the document
-  - The model's confidence that the text is factually true
+  - The exact tokens of the original text, losslessly compressed so the full string can be perfectly
+    reconstructed from the vector on demand
+  - A sparse keyword index of the document that records term frequencies for every distinct word the
+    text contains
+  - A single scalar score capturing the model's confidence that the text is factually true and free of
+    any hallucinated claims
   answer: 0
   explanation: |
     An embedding maps text to a dense vector such that semantically similar texts are
@@ -213,11 +239,14 @@ questions:
     Six months after launch you swap to a better embedding model but only re-embed newly
     uploaded documents, leaving old vectors as-is. Retrieval quality collapses. Why?
   options:
-  - The new model produces larger files that overflow the disk
-  - Embedding models can only be changed by retraining the LLM
+  - The newer, higher-quality model produces much larger vector files that overflow the available disk
+    and silently corrupt the older stored embeddings
+  - Embedding models can only be swapped by fully retraining the underlying generation LLM first, and
+    skipping that step breaks retrieval
   - Query and document vectors must live in the same vector space; the old docs and new queries are now
     embedded by different models, so distances are meaningless
-  - The vector database automatically deletes old vectors when the model changes
+  - The vector database automatically deletes all previously stored vectors the moment the configured
+    embedding model changes, emptying the index
   answer: 2
   explanation: |
     Query and document embeddings must come from the same model/space to be comparable.
@@ -237,9 +266,12 @@ questions:
     model supports Matryoshka Representation Learning (MRL). What is the best use of MRL
     here?
   options:
-  - Store each vector twice to improve redundancy
-  - Increase dimensions to 8192 for better recall
-  - Switch to keyword search since embeddings can't be shrunk
+  - Store each full 3072-dim vector twice in the index to improve redundancy and thereby lower average
+    query latency across the shards
+  - Increase the embedding dimension from 3072 to 8192 so that recall improves enough to offset the
+    storage and latency pressure
+  - Abandon dense embeddings and switch entirely to keyword search, since MRL vectors cannot be shrunk
+    once they have been generated
   - Truncate vectors to a smaller dimension (e.g., 256-768) for cheap storage and fast search, accepting
     a graceful, tunable quality loss and optionally re-scoring top candidates at full dimension
   answer: 3
@@ -260,11 +292,14 @@ questions:
     What is the primary trade-off of choosing a higher embedding dimensionality
     (e.g., 3072 vs 768)?
   options:
-  - Higher dims are strictly worse in every dimension of cost and quality
+  - Higher dims are strictly worse along every axis of cost and quality at once, so a 768-dim model
+    always dominates a 3072-dim model on every metric
   - Higher dims can capture more nuance and improve recall, but linearly increase storage, memory bandwidth
     per comparison, ANN latency, and cost
-  - Higher dims reduce storage because vectors compress better
-  - Dimensionality has no effect on search latency
+  - Higher dims actually reduce total storage because longer vectors compress far better under standard
+    quantization than short ones do
+  - Dimensionality has no effect on search latency because the ANN index examines the same number of
+    candidates regardless of vector width
   answer: 1
   explanation: |
     More dimensions can improve representational nuance/recall but scale storage, per-
@@ -280,11 +315,14 @@ questions:
   question: |
     What does a vector database provide beyond a raw ANN library like FAISS used alone?
   options:
-  - Nothing; they are identical
-  - It removes the need for embeddings
+  - Nothing meaningful; a vector database and a raw ANN library are functionally identical wrappers
+    around the same index code
+  - It removes the need for embeddings entirely by indexing the raw document text directly instead of
+    storing any dense vectors
   - Persistence, CRUD operations, metadata filtering, replication/sharding, and horizontal scale around
     the ANN index
-  - It guarantees exact nearest-neighbor results only
+  - It guarantees exact, brute-force nearest-neighbor results only and never uses any approximate search
+    to answer a query
   answer: 2
   explanation: |
     A vector DB wraps an ANN index with persistence, CRUD, metadata filtering, HA/
@@ -306,9 +344,12 @@ questions:
   options:
   - 'Use pgvector: at this scale it avoids a new system and gives you joins plus transactional consistency
     with your source data'
-  - Adopt a separate managed vector DB immediately for the elasticity
-  - Build your own ANN library from scratch for full control
-  - Store vectors as JSON blobs and scan them linearly on every query
+  - Adopt a separate managed vector DB immediately for the elasticity, since Postgres cannot hold more
+    than a million vectors and offers no way to join embeddings to source rows
+  - Build your own custom ANN library from scratch for full control, because off-the-shelf indexes
+    cannot preserve transactional consistency with the source data
+  - Store the vectors as JSON blobs in a text column and scan them linearly on every query, since exact
+    linear scans are the only way to guarantee correct nearest neighbors
   answer: 0
   explanation: |
     At single-digit-millions of vectors and moderate QPS, pgvector reuses your existing
@@ -327,9 +368,12 @@ questions:
     You need ANN search restricted to documents a user is allowed to see. What is the
     trade-off between pre-filtering and post-filtering?
   options:
-  - Filtering is impossible with ANN indexes
-  - Pre-filter and post-filter always return identical results and performance
-  - Post-filtering is always more accurate and never returns fewer results
+  - Metadata filtering is fundamentally impossible with any ANN index, so access control must be
+    enforced by a separate relational query run entirely outside the vector store
+  - Pre-filtering and post-filtering always return byte-identical result sets with the same latency, so
+    the choice between them is purely a matter of coding style
+  - Post-filtering is always strictly more accurate than pre-filtering and can never return fewer than
+    K results after the non-matching documents are discarded
   - Pre-filter restricts the candidate set before ANN (precise but can be slow or break graph connectivity);
     post-filter runs ANN then drops non-matches (simple but may return fewer than K after filtering)
   answer: 3
@@ -374,9 +418,12 @@ questions:
   options:
   - Most vector DB indexes are eventually consistent — the just-inserted vector isn't searchable yet,
     breaking read-your-writes UX
-  - The embedding model deleted the document
-  - The LLM refuses to read any uploaded document by policy
-  - Cosine similarity cannot represent new documents
+  - The embedding model deleted the source document during encoding because freshly uploaded files are
+    treated as temporary scratch input and purged after ingestion
+  - The LLM refuses to read any document uploaded within the current session by a built-in safety policy
+    that quarantines new files for manual review
+  - Cosine similarity mathematically cannot represent documents added after the index was first built,
+    so newly ingested vectors are unreachable by any query
   answer: 0
   explanation: |
     Vector indexes are typically eventually consistent: a freshly upserted vector may take
@@ -395,11 +442,14 @@ questions:
     Why do production systems use Approximate Nearest Neighbor (ANN) search instead of
     exact brute-force search over millions of vectors?
   options:
-  - ANN is always 100% accurate and brute force is not
-  - ANN uses no memory at all
+  - ANN search is always 100% accurate while brute-force search is not, so ANN both improves recall
+    and runs faster with no downside whatsoever
+  - ANN indexes use no memory at all because they discard the original vectors and keep only a tiny
+    lookup table of document identifiers
   - Brute force compares the query to every vector (O(N)), which is too slow at scale; ANN trades a little
     recall for large speedups by only examining a promising subset
-  - Brute force cannot compute cosine similarity
+  - Brute-force search is mathematically incapable of computing cosine similarity, so exact retrieval
+    over large vector sets is simply not possible
   answer: 2
   explanation: |
     Exact search is O(N) per query — comparing against every vector — which is too slow for
@@ -417,9 +467,9 @@ questions:
     In an HNSW index, which parameter is the primary RUNTIME knob for trading recall
     against query latency?
   options:
-  - efConstruction, set only at build time
-  - M, the number of edges per node
-  - The embedding dimensionality
+  - efConstruction, retuned live on each incoming query to widen the search beam and trade recall for latency
+  - M, the per-node edge count, raised at query time to scan more candidates for better recall
+  - The embedding dimensionality, shrunk per query to explore more neighbors and lift recall on demand
   - efSearch, the query-time candidate list size — higher gives better recall but slower queries
   answer: 3
   explanation: |
@@ -440,11 +490,11 @@ questions:
     You must index 2 billion vectors on RAM-constrained hardware, tolerate somewhat higher
     query latency, and handle periodic bulk updates. Which index family is most appropriate?
   options:
-  - Flat (brute force) for guaranteed exact results
+  - Flat (brute-force) indexing, which scans every one of the 2 billion vectors per query yet still fits comfortably within the limited RAM budget
   - 'IVF-PQ: product quantization compresses vectors for huge memory savings at billion scale, rebuilds/updates
     more gracefully, at somewhat higher latency'
-  - HNSW for the lowest possible latency
-  - A single-node in-memory hash map keyed by document ID
+  - HNSW for the lowest possible latency, since its proximity graph compresses vectors enough to hold all 2 billion of them within the constrained memory
+  - A single-node in-memory hash map keyed by document ID that returns approximate nearest neighbors through constant-time key lookups
   answer: 1
   explanation: |
     IVF-PQ compresses vectors into codes, drastically cutting memory to fit billions on
@@ -465,11 +515,11 @@ questions:
     deletes and re-inserts). Over months, recall and latency degrade. What is happening and
     what's the standard remedy?
   options:
-  - HNSW cannot perform inserts at all; switch to a relational DB
-  - The embeddings expire after 90 days and must be repurchased
+  - HNSW is a read-only structure that cannot perform inserts at all after the initial build; the standard remedy is to migrate the vectors into a relational database
+  - The stored embeddings silently expire 90 days after insertion and must be repurchased from the embedding provider to restore recall
   - Deletes and heavy churn degrade the proximity graph's structure over time; the standard remedy is
     periodic index rebuilds
-  - Cosine similarity becomes invalid after 1 million queries
+  - Cosine similarity accumulates floating-point drift and becomes mathematically invalid once the index has served roughly 1 million queries
   answer: 2
   explanation: |
     HNSW supports inserts but deletes and heavy mutation degrade graph connectivity over
@@ -488,9 +538,9 @@ questions:
   options:
   - It shrinks memory and speeds distance computation while trading away some recall; often paired with
     a full-precision re-score of top candidates to recover quality
-  - It increases both memory usage and recall
-  - It has no effect on recall or memory
-  - It only works with exact brute-force search
+  - It increases both memory usage and recall by storing extra full-precision copies of each vector alongside the compressed codes
+  - It has no measurable effect on either recall or memory footprint, since the codes are decompressed back to full precision before every distance computation
+  - It only works with exact brute-force search and is incompatible with graph or inverted-file ANN indexes like HNSW or IVF
   answer: 0
   explanation: |
     Quantization compresses vectors (int8 ~4×, binary ~32×) and speeds distance math, at
@@ -509,9 +559,9 @@ questions:
     In an IVF index with nlist cells, increasing nprobe from 8 to 64 has what effect, and
     what is the underlying trade-off?
   options:
-  - It has no measurable effect because IVF ignores nprobe
-  - It reduces the number of cells searched, lowering both recall and latency
-  - It changes the embedding model used at query time
+  - It has no measurable effect because IVF fixes the number of probed cells at build time and ignores the runtime nprobe value entirely
+  - It reduces the number of nearest cells scanned per query, simultaneously lowering both recall and end-to-end query latency
+  - It swaps the query-time embedding model for a higher-dimensional one so that more nuanced vectors are compared against each cell
   - It searches more of the nearest cells, raising recall but increasing latency — the classic recall
     vs latency dial
   answer: 3
@@ -531,11 +581,11 @@ questions:
     Why does dense (vector) retrieval sometimes miss queries that keyword (BM25) search
     would catch?
   options:
-  - Dense retrieval is always worse than keyword search
+  - Dense retrieval is always strictly worse than keyword search on every query type, so BM25 dominates it across all corpora
   - Dense retrieval captures meaning but can miss exact terms like product IDs, error codes, or rare acronyms,
     which lexical search matches precisely
-  - Keyword search understands paraphrase better than embeddings
-  - Dense retrieval only works on images
+  - Keyword search understands paraphrase and synonymy far better than embeddings because it maps every term to its semantic neighbors
+  - Dense retrieval only operates on image inputs and cannot embed or match plain text at all
   answer: 1
   explanation: |
     Dense embeddings excel at semantic/paraphrase matching but can miss exact rare tokens
@@ -556,9 +606,9 @@ questions:
   options:
   - A cross-encoder jointly encodes each (query, chunk) pair for high accuracy but is too slow to run
     over the whole corpus, so it re-ranks only the top-K candidates from a fast bi-encoder
-  - Cross-encoders are less accurate than bi-encoders
-  - Cross-encoders cannot score relevance
-  - Bi-encoders must be run after cross-encoders
+  - Cross-encoders are inherently less accurate than bi-encoders because encoding the query and passage together loses information
+  - Cross-encoders can only classify text and are architecturally unable to produce a relevance score for a (query, chunk) pair
+  - Bi-encoders must always be run after cross-encoders because their embeddings depend on the cross-encoder's relevance output
   answer: 0
   explanation: |
     Cross-encoders read query and passage together for high accuracy but can't be
@@ -576,11 +626,11 @@ questions:
   question: |
     Reciprocal Rank Fusion (RRF) is popular for combining dense and sparse results because:
   options:
-  - It requires carefully normalizing the raw scores of both systems to the same scale
-  - It only works when both systems return identical results
+  - It requires carefully normalizing the raw cosine and BM25 scores of both systems onto one shared scale before they can be summed
+  - It only produces meaningful output when the dense and sparse systems happen to return exactly identical result lists
   - It fuses results using rank positions rather than raw scores, so it's robust without needing to normalize
     incomparable score scales
-  - It replaces the need for any retrieval by generating answers directly
+  - It replaces the retrieval stage entirely by having the LLM generate fused answers directly from the query without any index lookup
   answer: 2
   explanation: |
     RRF combines rankings by position, sidestepping the hard problem of normalizing BM25
@@ -600,9 +650,9 @@ questions:
     Adding a cross-encoder re-ranker over the top-100 candidates markedly improved answer
     precision, but p99 TTFT rose. What is the correct way to reason about this trade-off?
   options:
-  - Remove retrieval entirely to save time
-  - Re-ranking never affects latency, so the p99 rise must be unrelated
-  - Always feed all 100 re-ranked candidates to the LLM to maximize recall
+  - Remove the retrieval stage entirely and let the model answer from parametric memory to eliminate the added re-ranking latency
+  - Re-ranking runs on a separate GPU pool off the critical path, so it never affects latency and the p99 rise must be unrelated
+  - Always feed all 100 re-ranked candidates straight into the LLM prompt to maximize recall regardless of the token and latency cost
   - Re-ranking is often the single biggest precision win after retrieval but adds latency; cap the candidate
     K, batch the pairs, and balance top-K recall against the added latency budget
   answer: 3
@@ -623,11 +673,11 @@ questions:
     Increasing the retrieval K that you pass directly into the LLM's prompt has what
     combined effect?
   options:
-  - It always improves answer quality with no downside
+  - It always improves final answer quality with no downside, because more retrieved context can only ever add useful grounding
   - It can raise recall of the right fact but dilutes the prompt, costs more tokens, adds latency, and
     beyond a point lowers accuracy — which is why re-ranking to a small top-N is preferred
-  - It reduces token cost because fewer LLM calls are needed
-  - It has no effect on cost or latency
+  - It reduces overall token cost because packing more context lets the system answer in fewer total LLM calls
+  - It has no effect on either cost or latency because the extra chunks are processed in parallel at no marginal price
   answer: 1
   explanation: |
     Larger K improves the chance the right chunk is present but dilutes the prompt, costs
@@ -644,11 +694,11 @@ questions:
   question: |
     Which prompt-assembly technique most directly reduces hallucination in RAG?
   options:
-  - Raising the temperature to encourage creativity
-  - Removing the retrieved context to keep the prompt short
+  - Raising the sampling temperature to encourage more creative, free-form phrasing in the generated answer
+  - Removing the retrieved context from the prompt to keep it short and reduce the model's chance of confusion
   - Instructing the model to answer only from the provided context and to say 'I don't know' if the answer
     isn't there (grounding + abstention)
-  - Asking the model to ignore the retrieved documents
+  - Asking the model to ignore the retrieved documents and rely on its own pretrained knowledge instead
   answer: 2
   explanation: |
     Grounding instructions plus an abstention option ("say I don't know") directly curb
@@ -670,9 +720,9 @@ questions:
   options:
   - Prompt injection via retrieved content; mitigate by treating retrieved text as data (not instructions),
     using delimiters and instruction hierarchy, and not granting untrusted content authority over behavior
-  - A hardware fault; add more RAM
-  - A vector index corruption; rebuild the index
-  - An embedding dimensionality mismatch; re-embed the corpus
+  - A GPU hardware fault triggered by the malicious text; mitigate by adding more RAM and rebooting the inference host
+  - A vector index corruption caused by the adversarial passage; mitigate by rebuilding the ANN index from the source corpus
+  - An embedding dimensionality mismatch introduced by the injected text; mitigate by re-embedding the entire corpus with the same model
   answer: 0
   explanation: |
     Untrusted retrieved (or user) content that hijacks the model's behavior is prompt
@@ -690,9 +740,9 @@ questions:
     Enforcing and verifying citations (mapping each claim to a retrieved span) is valuable
     in enterprise RAG. What is the trade-off?
   options:
-  - It is free and instantaneous
-  - It eliminates the need for retrieval
-  - It reduces answer quality by removing context
+  - It is completely free and instantaneous, adding no prompt tokens, latency, or engineering overhead to the pipeline
+  - It eliminates the need for a retrieval stage because the citations themselves supply all the grounding evidence
+  - It reduces final answer quality by stripping useful context out of the prompt to make room for the citation markers
   - It adds prompt complexity and sometimes a verification pass (extra latency/cost), but provides trust
     and auditability essential in regulated domains
   answer: 3
@@ -712,11 +762,11 @@ questions:
     Why do experienced RAG designers place the most relevant chunks at the start or end of
     the context rather than the middle?
   options:
-  - Because models read only the first and last tokens
+  - Because transformer models literally read only the first and last tokens of the prompt and skip everything in between
   - To counter 'lost in the middle' — models tend to recall facts placed at the beginning or end of long
     contexts better than those buried in the middle
-  - Because the middle of the context is encrypted
-  - Because ordering has no effect and it's just convention
+  - Because the middle region of the context window is stored encrypted and cannot be attended to until decrypted
+  - Because chunk ordering has no measurable effect on answers and placing them at the ends is purely arbitrary convention
   answer: 1
   explanation: |
     Empirically, LLMs recall information at the extremes of a long context better than in
@@ -737,9 +787,9 @@ questions:
   options:
   - Prefill processes the whole prompt in parallel (compute-bound); decode generates tokens one at a time
     autoregressively (memory-bandwidth-bound)
-  - Prefill and decode are identical and both compute-bound
-  - Prefill generates output; decode reads the prompt
-  - Decode processes the prompt in parallel and prefill is autoregressive
+  - Prefill and decode are identical phases and both are equally compute-bound, differing only in the number of tokens they touch
+  - Prefill is the phase that generates the output tokens, while decode is the phase that reads and ingests the input prompt
+  - Decode processes the entire prompt in parallel and is compute-bound, while prefill emits tokens one at a time autoregressively
   answer: 0
   explanation: |
     Prefill ingests the prompt in parallel and is compute-bound; decode emits tokens
@@ -755,11 +805,11 @@ questions:
   question: |
     Which statement best captures the master trade-off in LLM inference serving?
   options:
-  - You can simultaneously maximize latency, throughput, and cost-efficiency with no compromise
-  - Latency and throughput are unrelated to batch size
+  - You can simultaneously maximize latency, throughput, and cost-efficiency with no compromise by simply provisioning a larger GPU fleet
+  - Latency and throughput are both fixed properties of the model architecture and are completely unrelated to the serving batch size
   - Bigger batches raise throughput (lower $/token) but increase per-request latency; small batches give
     snappy latency but poor GPU utilization and high $/token — you optimize for a target, not all three
-  - Cost per token is independent of GPU utilization
+  - Cost per token is set purely by the provider's price list and is independent of how fully the GPU is utilized
   answer: 2
   explanation: |
     Batch size trades throughput/cost against latency: large batches amortize weight loads
@@ -779,9 +829,9 @@ questions:
     A startup has bursty, low-volume LLM traffic and wants to ship fast, with no strict
     data-residency requirement. What serving choice is most appropriate and why?
   options:
-  - Self-host a 70B model on a reserved GPU cluster to minimize per-token cost
-  - Run the model on the client's browser CPU
-  - Buy a data center to guarantee lowest latency
+  - Self-host a 70B model on a reserved 24/7 GPU cluster to minimize per-token cost, even though traffic is bursty and low-volume
+  - Run the full 70B model on the client's browser CPU via WebAssembly to offload all inference cost to the user's device
+  - Buy and build out a dedicated data center up front to guarantee the lowest possible tail latency from day one
   - 'Use a hosted LLM API (e.g., Bedrock/OpenAI/Anthropic): fastest to ship, elastic, no GPU ops — accepting
     per-token cost and rate limits until volume justifies self-hosting'
   answer: 3
@@ -802,11 +852,11 @@ questions:
     Roughly how much GPU memory do the WEIGHTS of a 70B-parameter model occupy in FP16
     (2 bytes/param), and what does that imply?
   options:
-  - ~7 GB, fits on any GPU
+  - ~7 GB, comfortably fitting on any consumer GPU because FP16 stores each parameter in a single packed byte
   - ~140 GB, so it needs multiple 80 GB GPUs (e.g., 2× H100) just for weights, plus additional room for
     the KV cache
-  - ~14 GB, fits on a single small GPU
-  - ~700 GB, requiring a supercomputer
+  - ~14 GB, fitting on one small GPU since only about a fifth of the 70B parameters are actually resident at inference time
+  - ~700 GB, requiring a multi-rack supercomputer because FP16 reserves roughly ten bytes of overhead per parameter
   answer: 1
   explanation: |
     70B × 2 bytes ≈ 140 GB just for weights, exceeding one 80 GB GPU, so you need multiple
@@ -824,11 +874,14 @@ questions:
     Scaling a 70B model from 4 to 8 GPUs with tensor parallelism only reduces latency by
     about 0.7× at small batch sizes. What does this illustrate?
   options:
-  - Tensor parallelism always halves latency per GPU added
-  - The model is broken and should be retrained
+  - Tensor parallelism always halves single-request latency for each GPU you add, so moving from 4 to
+    8 GPUs is guaranteed to deliver a clean 2x speedup with no communication penalty
+  - The sub-linear speedup proves the model weights are corrupted, and the only remedy is to retrain the
+    70B model from scratch on more data before sharding it across GPUs again
   - 'Diminishing returns: tensor parallelism reduces single-request latency but needs high-bandwidth interconnect
     and adds communication overhead, so beyond a point more GPUs yield little latency benefit'
-  - Latency is independent of the number of GPUs
+  - Single-request latency is a fixed property of the 70B architecture and is completely independent of
+    how many GPUs you shard the tensors across, so 4 and 8 GPUs perform identically
   answer: 2
   explanation: |
     Splitting layers across more GPUs adds cross-GPU communication that eventually dominates,
@@ -846,9 +899,12 @@ questions:
   options:
   - Cached attention keys/values for previously generated tokens, avoiding recomputation each decode step;
     it's a major GPU-memory consumer and limits batch size and context length
-  - A disk cache of past prompts for billing
-  - A cache of model weights on the CPU
-  - A user-facing response cache
+  - A disk-based cache of previously submitted prompts kept purely for billing and usage-metering purposes,
+    with no role in speeding up attention during decoding
+  - A staging cache that holds a copy of the model's frozen weights in CPU RAM so they can be reloaded
+    into the GPU faster after an eviction under memory pressure
+  - A user-facing cache of final generated responses that returns a previously stored answer whenever the
+    same question is asked again by any client
   answer: 0
   explanation: |
     During decode, attention needs the keys/values of all prior tokens; caching them avoids
@@ -866,9 +922,12 @@ questions:
     Why does continuous (in-flight, iteration-level) batching outperform static batching for
     LLM serving?
   options:
-  - It waits for every sequence in a batch to finish before starting new ones
-  - It only works when all requests have identical length
-  - It disables batching entirely to reduce latency
+  - It waits for every sequence in the current batch to fully finish generating before admitting any new
+    requests, which is precisely what makes it faster than iteration-level scheduling
+  - It only functions correctly when every incoming request has an identical prompt and output length,
+    so it batches uniform sequences together and avoids any ragged-tensor padding overhead
+  - It disables batching entirely and serves each request on its own dedicated GPU stream, which is how
+    it removes head-of-line blocking and drives up total serving throughput
   - At each decode step, finished sequences leave and new requests join, eliminating the head-of-line
     blocking where fast requests wait for the slowest — yielding roughly 10-20× higher throughput
   answer: 3
@@ -889,11 +948,14 @@ questions:
     PagedAttention (vLLM) manages the KV cache in non-contiguous "pages" like OS virtual
     memory. What is its primary benefit?
   options:
-  - It increases model accuracy by changing the attention math
+  - It increases the model's output accuracy by rewriting the softmax attention computation to attend over
+    non-contiguous memory pages more precisely than standard contiguous attention
   - It eliminates KV-cache memory fragmentation and enables much larger effective batch sizes plus prefix
     sharing, improving GPU utilization
-  - It stores the KV cache on disk to save GPU memory
-  - It removes the need for a KV cache entirely
+  - It transparently pages the KV cache out to local NVMe disk whenever GPU memory fills up, swapping the
+    pages back in on demand so the server can serve far longer contexts
+  - It removes the need for a KV cache entirely by recomputing every prior token's keys and values from
+    scratch at each decode step instead of storing any of them
   answer: 1
   explanation: |
     PagedAttention allocates KV cache in fixed pages, removing fragmentation waste, enabling
@@ -914,9 +976,12 @@ questions:
   options:
   - 'Prefix (KV) caching: reuse the cached KV state of the shared prefix to skip its prefill on every
     call; invalidated if the prefix changes by even one token'
-  - Semantic response caching; invalidated by any GPU restart
-  - Increasing temperature; invalidated by low top-p
-  - Sharding the vector DB; invalidated by adding replicas
+  - Semantic response caching of the whole answer; invalidated whenever the inference server GPU restarts
+    and flushes the in-memory embedding index of cached questions
+  - Raising the decode temperature so the shared prefix is processed faster; invalidated whenever the
+    configured top-p sampling value is set below about 0.9
+  - Sharding the vector database across more nodes so prefix lookups parallelize; invalidated as soon as
+    you add read replicas and the shard map is rebalanced
   answer: 0
   explanation: |
     Prefix/KV caching reuses the computed KV state of a shared prompt prefix so prefill is
@@ -937,11 +1002,14 @@ questions:
     Under long-context load your GPUs OOM because the KV cache grows too large. Which set of
     levers directly reduces KV-cache memory (accepting small quality/complexity costs)?
   options:
-  - Increase batch size and context length further
-  - Raise the sampling temperature and top-k
+  - Increase the serving batch size and the maximum context length further, since packing more sequences
+    per GPU is what frees up the memory the KV cache is competing for
+  - Raise the sampling temperature and top-k values, because more diverse token sampling produces shorter
+    generations that occupy fewer KV-cache entries per request
   - Grouped/Multi-Query Attention (share KV heads), KV-cache quantization (FP16→INT8), and PagedAttention
     to eliminate fragmentation
-  - Switch the embedding model to higher dimensionality
+  - Switch the retrieval embedding model to a higher dimensionality so each cached vector is denser and
+    the attention keys and values compress into less GPU memory per token
   answer: 2
   explanation: |
     KV cache scales with batch × sequence length × layers × hidden × 2. GQA/MQA shrink it by
@@ -958,9 +1026,12 @@ questions:
   question: |
     What does TTFT (Time To First Token) measure and why does it matter for chat UX?
   options:
-  - The total time to generate the full answer
-  - The total tokens per second across all users
-  - The time per output token during steady-state generation
+  - The total wall-clock time to generate the complete answer from the request arriving until the final
+    token is emitted, including the entire decode phase
+  - The aggregate throughput of the whole fleet measured as total output tokens generated per second
+    summed across every concurrent user and request
+  - The average time spent producing each individual output token during the steady-state decode phase,
+    once generation is already under way
   - The time from request until the first token appears; it dominates perceived responsiveness because
     users judge a chat by how quickly it starts replying
   answer: 3
@@ -999,11 +1070,14 @@ questions:
   question: |
     What is a key trade-off introduced by streaming tokens to the user as they are generated?
   options:
-  - Streaming makes generation slower overall
-  - Streaming eliminates the need for any guardrails
+  - Streaming makes the underlying generation meaningfully slower overall because emitting each token to
+    the client individually adds network round-trips between every decode step
+  - Streaming eliminates the need for any output guardrails because the model self-corrects unsafe content
+    mid-stream before those tokens are ever sent to the user
   - Streaming improves perceived latency but complicates output validation/moderation and citation insertion,
     because you can't inspect the full answer before the user sees its beginning
-  - Streaming increases TTFT
+  - Streaming increases TTFT because the server must set up an incremental server-sent-events channel and
+    buffer the opening tokens before it can release the first one to the client
   answer: 2
   explanation: |
     Streaming greatly improves perceived latency but you can't moderate/validate or insert
@@ -1024,9 +1098,12 @@ questions:
   options:
   - It lowers per-token latency (TPOT) with an output distribution identical to the target model, at the
     cost of extra compute/complexity; it wins when the draft model's proposals are frequently accepted
-  - It increases throughput at the cost of changing the output distribution
-  - It reduces GPU memory by removing the KV cache
-  - It only helps prefill, not decode
+  - It increases aggregate serving throughput but does so by subtly shifting the target model's output
+    distribution toward the smaller draft model's preferred tokens
+  - It reduces GPU memory footprint by letting the draft model's cache replace the target model's KV
+    cache entirely, so no per-token keys and values are stored
+  - It only accelerates the parallel prefill phase where the whole prompt is ingested, and provides no
+    benefit to the sequential token-by-token decode phase
   answer: 0
   explanation: |
     Speculative decoding accelerates decode (lower TPOT/latency) while preserving the target
@@ -1044,9 +1121,12 @@ questions:
   question: |
     What distinguishes a semantic cache from an exact-match response cache for LLM calls?
   options:
-  - A semantic cache only stores byte-identical prompts
-  - There is no difference
-  - A semantic cache never returns wrong answers
+  - A semantic cache only stores and matches byte-identical prompts, so it behaves exactly like an
+    exact-match cache and never fires on reworded or paraphrased questions
+  - There is no meaningful difference between the two; the terms describe the same lookup mechanism using
+    different names for the same hash-based key comparison
+  - A semantic cache is guaranteed never to return a wrong answer because it validates each hit against
+    the retrieved documents before serving the stored response
   - A semantic cache embeds the incoming query and returns a cached answer if a past query is within a
     similarity threshold, so paraphrases can hit — whereas exact-match hits only on identical requests
   answer: 3
@@ -1067,11 +1147,14 @@ questions:
   question: |
     When tuning a semantic cache's similarity threshold, what is the core risk trade-off?
   options:
-  - There is no risk; looser is always better because it saves more money
+  - There is essentially no risk involved; a looser threshold is always the better choice because it
+    maximizes the hit rate and therefore saves the most money on LLM calls
   - A looser threshold yields more hits (cheaper/faster) but risks returning a subtly wrong answer for
     a differently-intended question; a tighter threshold is safer but has a low hit rate
-  - A tighter threshold increases the chance of false hits
-  - The threshold has no effect on hit rate
+  - A tighter similarity threshold increases the chance of false hits, because narrowing the acceptance
+    band forces more loosely-related questions to collide onto the same cached answer
+  - The similarity threshold has no measurable effect on the cache hit rate, since hits are ultimately
+    determined by how frequently identical queries recur rather than by the cutoff value
   answer: 1
   explanation: |
     The threshold is a precision/recall dial: loose → more (possibly false) hits and bigger
@@ -1091,9 +1174,12 @@ questions:
   options:
   - Personalized or time-sensitive queries such as 'what is MY current account balance?' — caching risks
     stale or cross-user-leaked answers
-  - A stable FAQ like 'what are your business hours?'
-  - A definition of a fixed technical term
-  - A frequently repeated policy question
+  - A stable, non-personalized FAQ such as 'what are your standard business hours?' whose answer is the
+    same for every user and rarely changes over time
+  - A definition of a fixed technical term that has one canonical answer identical for all users and is
+    safe to reuse across sessions indefinitely
+  - A frequently repeated general policy question whose answer is public, non-personalized, and stable
+    enough that a cached response stays correct for everyone
   answer: 0
   explanation: |
     Personalized or real-time answers (account balance, order status) must not be semantically
@@ -1109,11 +1195,14 @@ questions:
   question: |
     Provider "prompt caching" (Anthropic/OpenAI/Bedrock) primarily reduces cost and TTFT by:
   options:
-  - Caching the final answer for identical questions
-  - Compressing the output tokens
+  - Caching the model's final generated answer keyed on identical questions, so a repeated whole query
+    returns the stored completion without any new generation
+  - Compressing the generated output tokens with an entropy coder before returning them, so fewer billed
+    tokens leave the server on each response
   - Reusing the KV state of a shared prompt prefix so its prefill is skipped, billing cached input tokens
     at a large discount (commonly ~90% off)
-  - Training a smaller model on your prompts
+  - Continuously training a smaller distilled model on your recurring prompts so cheaper inference gradually
+    replaces the large model for those requests
   answer: 2
   explanation: |
     Provider prompt caching reuses the KV state of a repeated prefix, skipping prefill and
@@ -1130,9 +1219,12 @@ questions:
   question: |
     Which of the following is an example of an OUTPUT guardrail in a GenAI system?
   options:
-  - Detecting and redacting PII in the user's incoming message
-  - Embedding the query for ANN search
-  - Rewriting the user's query for better retrieval
+  - Detecting and redacting personally identifiable information contained in the user's incoming message
+    before that request is ever passed along to the model
+  - Embedding the incoming user query into a dense vector so it can be used for the ANN similarity search
+    against the document index
+  - Rewriting or expanding the user's raw query into a cleaner form so the downstream retrieval step
+    surfaces more relevant candidate chunks
   - Checking the generated answer for toxicity, PII leakage, schema validity, and grounding/citation before
     returning it
   answer: 3
@@ -1158,8 +1250,10 @@ questions:
   - 'Prioritize guardrails by risk: run cheap deterministic checks inline, enforce strong grounding +
     abstention + citation verification, and run expensive judge/verification passes where the risk justifies
     (or sampled)'
-  - Disable guardrails to keep latency low, since medical users are experts
-  - Only apply guardrails to the input, never the output
+  - Disable the guardrails entirely to keep latency and cost low, on the assumption that medical users are
+    domain experts who can catch any hallucinated or unsafe output themselves
+  - Apply guardrails only to the incoming user input and never inspect the generated output, trusting the
+    model to remain safe once the request has passed the input checks
   answer: 1
   explanation: |
     In high-risk domains you want strong grounding, abstention, and citation verification, but
@@ -1177,11 +1271,14 @@ questions:
   question: |
     Which combination most effectively reduces hallucination in a RAG answer?
   options:
-  - High temperature + no grounding + no citations
-  - Larger output token limit only
+  - A high sampling temperature combined with no grounding in retrieved context and no citation
+    requirement, letting the model answer freely from its own memory
+  - Simply raising the maximum output token limit so the model has more room to fully explain its answer
+    without truncation, with no other changes
   - Strong grounding in retrieved context + an abstention option + lower temperature + verifying claims
     against sources (e.g., an LLM judge or attribution check)
-  - Removing retrieval and relying on the model's parametric memory
+  - Removing the retrieval step entirely and relying solely on the model's parametric memory from
+    pretraining to supply all the facts in the answer
   answer: 2
   explanation: |
     Grounding + abstention + lower temperature + claim verification against sources together
@@ -1200,9 +1297,12 @@ questions:
   options:
   - When you need fast, cheap, predictable checks (e.g., regex PII, schema validation); LLM judges catch
     nuance but add latency, cost, and their own error rate
-  - Never; LLM judges are always better
-  - Only when the input is empty
-  - LLM judges are deterministic and rules are not
+  - Never; an LLM-as-judge is always the superior choice because it understands context and nuance that
+    rigid rule-based classifiers can never capture on any check
+  - Only in the narrow case when the input happens to be empty, since there is then nothing for the
+    deterministic rule to match against and the judge must take over
+  - Deterministic rules are the non-deterministic option here, while LLM judges produce identical,
+    perfectly repeatable verdicts on the same input every time
   answer: 0
   explanation: |
     Deterministic checks (regex, classifiers, schema validators) are fast, cheap, and
@@ -1220,9 +1320,12 @@ questions:
     To evaluate a RAG system, why is it important to measure retrieval quality (e.g.,
     recall@K, nDCG) separately from generation quality (e.g., faithfulness)?
   options:
-  - Because retrieval and generation always fail together
-  - Because retrieval metrics require no ground truth
-  - Because generation metrics are meaningless
+  - Because retrieval and generation always fail together, so one combined end-to-end score fully localizes
+    any defect and separate per-stage metrics add no diagnostic value at all
+  - Because retrieval metrics like recall@K need no labeled ground-truth relevant documents, so measuring
+    them separately is effectively free and should always be the first thing you check
+  - Because generation metrics such as faithfulness are inherently meaningless, and only retrieval scores
+    like nDCG carry any real signal about the end-to-end quality of an answer
   - Because a bad answer can come from either half; separating them tells you whether to fix retrieval
     (right chunk missing) or generation/prompt (right context, wrong answer)
   answer: 3
@@ -1242,11 +1345,14 @@ questions:
     Your team uses an LLM-as-judge to score answer faithfulness at scale. What is the correct
     way to account for its limitations?
   options:
-  - Trust it completely; LLM judges are unbiased
+  - Trust its scores completely without any human oversight, since a capable LLM judge is fundamentally
+    unbiased and its faithfulness verdicts match expert human labels essentially every time
   - Use it for scalable scoring but calibrate against human labels and watch for known biases (position,
     verbosity, self-preference); human-audit a sample
-  - Replace it entirely with BLEU/ROUGE, which correlate perfectly with quality
-  - Only evaluate offline and never look at production data
+  - Replace it entirely with n-gram overlap metrics like BLEU and ROUGE, which correlate almost perfectly
+    with open-ended answer quality and remove the judge's bias at no measurable accuracy cost
+  - Only evaluate on a fixed offline golden set and never inspect live production data, since production
+    traffic is too noisy to yield any trustworthy quality signal about the judge
   answer: 1
   explanation: |
     LLM judges scale evaluation cheaply but carry biases (position, verbosity, self-
@@ -1264,9 +1370,12 @@ questions:
     In RAG evaluation, "faithfulness" (groundedness) measures:
   options:
   - Whether every claim in the answer is actually supported by the retrieved context, rather than fabricated
-  - Whether the answer is grammatically correct
-  - How fast the answer was generated
-  - How many documents are in the corpus
+  - Whether the answer is grammatically correct and fluent, scoring its sentence structure and readability
+    independently of whether the retrieved context actually supports the claims it makes
+  - How fast the answer was generated end to end, combining time-to-first-token and per-token decode
+    latency into a single groundedness score for the response
+  - How many documents are present in the underlying corpus, on the assumption that a larger indexed
+    document count directly raises the groundedness of every generated answer
   answer: 0
   explanation: |
     Faithfulness/groundedness checks that each claim in the answer is supported by the
@@ -1282,11 +1391,14 @@ questions:
   question: |
     Why do mature teams use BOTH offline eval sets and online A/B tests rather than just one?
   options:
-  - Offline eval captures the real production query distribution perfectly
-  - Online tests are faster and cheaper than offline eval in every case
+  - Offline eval on a curated golden set captures the real production query distribution perfectly, so an
+    online A/B test can only ever confirm what the offline numbers already showed
+  - Online A/B tests are strictly faster and cheaper to run than offline eval in every case, so offline
+    golden sets are a legacy practice that mature teams have entirely retired
   - Offline eval catches regressions before deploy but can't fully capture real query distribution; online
     tests are truthful but slow and risky — so you use offline for gating and online for ground truth
-  - There is no difference between them
+  - There is no meaningful difference between the two approaches, since both sample from the identical
+    query distribution and always produce the same regression verdict on any given model change
   answer: 2
   explanation: |
     Offline golden sets gate regressions cheaply pre-deploy but may not match real traffic;
@@ -1327,10 +1439,13 @@ questions:
     You need the model to reliably output a specific JSON format and a consistent brand tone,
     and prompt engineering alone is inconsistent. Which approach fits best?
   options:
-  - RAG, because it changes the model's output format
+  - RAG, because retrieving more grounding passages at query time is what reshapes the model's output
+    format and locks in a consistent brand tone across every response
   - Fine-tuning (e.g., LoRA), because it teaches consistent behavior, format, and tone by updating weights/adapters
-  - A larger vector database
-  - Increasing retrieval K
+  - A larger vector database with more indexed chunks, since a bigger index is what forces the model to
+    emit valid structured JSON and hold a steady brand voice on every call
+  - Increasing the retrieval K passed into the prompt, because feeding the model more candidate chunks is
+    what standardizes its output schema and enforces the desired consistent tone
   answer: 1
   explanation: |
     Consistent format/tone/behavior is a skill/style problem best solved by fine-tuning
@@ -1348,12 +1463,15 @@ questions:
     What is the primary trade-off of baking knowledge into a model via fine-tuning versus
     keeping it in a RAG index?
   options:
-  - Fine-tuning keeps knowledge fresher and easier to update than RAG
-  - RAG cannot provide citations while fine-tuning can
+  - Fine-tuning keeps knowledge fresher and far easier to update than RAG, because retraining adapters
+    on new facts is quicker and cheaper than re-indexing documents in a vector store
+  - RAG fundamentally cannot provide citations because retrieved chunks lose their source identity once
+    embedded, whereas a fine-tuned model can always attribute each fact to its origin
   - Fine-tuning gives fast inference with no retrieval infra but the knowledge goes stale, can't be cited,
     and risks memorization/hallucination; RAG keeps knowledge fresh (update the index), auditable, and
     cheaper to maintain
-  - There is no difference for dynamic facts
+  - There is no practical difference for dynamic facts, since both fine-tuning and a RAG index update at
+    the same cadence and stay equally fresh as the underlying knowledge changes over time
   answer: 2
   explanation: |
     Fine-tuned knowledge is fast at inference (no retrieval) but static, un-citable, and prone
@@ -1373,9 +1491,12 @@ questions:
   options:
   - It trains small adapter matrices instead of all weights, cutting compute/memory cost by orders of
     magnitude while still adapting behavior — though it still needs curated data and evaluation
-  - It requires no training data at all
-  - It permanently adds fresh facts that never go stale
-  - It eliminates the need for any GPUs
+  - It requires no training data at all, since the low-rank adapters learn the target behavior directly
+    from the base model's frozen weights without any curated task-specific examples
+  - It permanently bakes in fresh facts that never go stale, so the adapter-tuned model stays current
+    without any index updates and fully replaces a RAG retrieval layer for changing knowledge
+  - It eliminates the need for any GPUs by training the small adapter matrices entirely on commodity CPUs,
+    which is what makes it the practical default for teams without accelerator budgets
   answer: 0
   explanation: |
     LoRA/QLoRA updates small low-rank adapters rather than all parameters, slashing
@@ -1395,9 +1516,12 @@ questions:
     A support assistant must (a) follow a strict response format, (b) answer from a rapidly
     changing knowledge base, and (c) cite sources. What is the strongest architecture?
   options:
-  - Fine-tune the model on the entire knowledge base and rely on its memory
-  - Only RAG, ignoring the formatting requirement
-  - Only prompt engineering, since it's the cheapest
+  - Fine-tune the model on the entire knowledge base and rely purely on its parametric memory to answer,
+    formatting, and citing, retraining nightly whenever the underlying knowledge base changes
+  - Only RAG for the changing knowledge and citations, ignoring the strict response-format requirement on
+    the assumption that retrieval alone will keep the output structure consistent enough
+  - Only prompt engineering, since it is the cheapest option and a sufficiently detailed system prompt can
+    reliably enforce the format, supply the changing knowledge, and generate accurate citations
   - 'Combine all three: fine-tune (or LoRA) for the format/tone/skill, use RAG for the changing knowledge
     and citations, and prompt-engineer to orchestrate'
   answer: 3
@@ -1416,11 +1540,14 @@ questions:
   question: |
     What distinguishes an LLM "agent" from a single prompt-response call?
   options:
-  - An agent uses a larger model
+  - An agent is simply a single call routed to a larger, higher-parameter model, and that bigger backbone
+    is the only thing that separates it from an ordinary one-shot prompt-response
   - An agent can plan, call tools (search, APIs, code, RAG retrieval), observe results, and iterate over
     multiple steps until a task is solved
-  - An agent never uses the LLM
-  - An agent only works offline
+  - An agent never invokes an LLM at all and instead runs a fixed rule-based script, which is precisely
+    what lets it complete multi-step tasks without any model inference
+  - An agent only works offline in batch mode and cannot respond to live requests, unlike a single
+    prompt-response call which is the only truly interactive online option
   answer: 1
   explanation: |
     An agent runs a loop: reason, call tools, observe, and iterate toward a goal — versus a
@@ -1441,9 +1568,12 @@ questions:
   options:
   - More autonomy solves harder open-ended tasks, but each step is an LLM call so latency and cost multiply,
     and errors compound (a wrong early step derails later ones), reducing reliability
-  - Autonomous agents are always cheaper and faster
-  - Fixed pipelines can never call tools
-  - Agents are fully deterministic and trivial to test
+  - Autonomous agents are always cheaper and faster than a fixed pipeline, because collapsing many stages
+    into one adaptive loop reduces the total number of LLM calls the system has to make
+  - Fixed pipelines can never call external tools or APIs, so choosing an autonomous agent is the only way
+    to give a system access to search, code execution, or retrieval at all
+  - Agents are fully deterministic and trivial to test, since the reasoning loop always follows the exact
+    same tool sequence for a given input and never varies between runs
   answer: 0
   explanation: |
     Greater autonomy tackles harder tasks but multiplies cost/latency (many LLM calls) and lets
@@ -1460,11 +1590,14 @@ questions:
   question: |
     In the ReAct pattern and function/tool calling, how does the loop typically proceed?
   options:
-  - The model outputs the final answer immediately with no intermediate steps
-  - The runtime calls the model exactly once and ignores tool outputs
+  - The model outputs the final answer immediately in one shot with no intermediate reasoning or tool
+    steps, which is exactly what defines the ReAct pattern and separates it from plain prompting
+  - The runtime calls the model exactly once and deliberately discards any tool outputs, since ReAct
+    forbids feeding observations back into the model on subsequent turns
   - The model reasons, emits a structured tool call, the runtime executes it and feeds the observation
     back, and the model repeats until it can answer
-  - Tools call the model instead of the model calling tools
+  - Tools autonomously invoke the model rather than the model invoking tools, so each registered function
+    triggers the LLM whenever it decides the reasoning loop should continue
   answer: 2
   explanation: |
     ReAct/tool-calling interleaves reasoning and acting: the model emits a structured tool call,
@@ -1484,9 +1617,12 @@ questions:
     An agent needs a tool that can execute database writes and shell commands. Which design
     best manages the risk, and when is multi-agent justified?
   options:
-  - Grant full unrestricted access so the agent can act freely; use multi-agent by default for everything
-  - Always prefer an open-ended agent over a fixed workflow even for well-defined flows
-  - Disable all guardrails to reduce latency
+  - Grant the agent full unrestricted database and shell access so it can act freely without approval
+    friction, and adopt a multi-agent architecture by default for every task to maximize capability
+  - Always prefer an open-ended autonomous agent over a fixed deterministic workflow, even for well-defined
+    flows, because more autonomy is the surest way to keep write and exec operations safe
+  - Disable all input and output guardrails to reduce latency, trusting the model's own judgment to avoid
+    destructive database writes and dangerous shell commands on every step
   - Sandbox tools with least-privilege scopes, require confirmations for irreversible actions, and bound
     steps/budgets; reserve multi-agent for when a single agent plus tools is genuinely insufficient, since
     it adds coordination overhead and tokens
@@ -1509,11 +1645,14 @@ questions:
     To improve a RAG product over time you want to log full request traces (query, retrieved
     chunks, prompt, output, feedback). What is the key trade-off to manage?
   options:
-  - Logging is free and has no downsides, so log everything forever
+  - Logging full traces is effectively free and carries no privacy or storage downsides, so the right move
+    is to retain every query, chunk, prompt, and output indefinitely with no redaction or sampling
   - Rich traces power evaluation, retrieval improvement, and fine-tune data, but store sensitive data
     and cost money — so redact PII, sample, and set retention
-  - Traces are useless for improving retrieval
-  - You must never log anything to protect privacy
+  - Request traces are useless for improving retrieval quality, since the retrieved chunks and their
+    rankings reveal nothing actionable about why the wrong passages were surfaced
+  - You must never log anything at all to protect user privacy, and any request-level tracing inevitably
+    violates data-protection rules regardless of redaction, sampling, or retention controls
   answer: 1
   explanation: |
     Detailed traces are the fuel for improvement (evals, hard-negative mining, fine-tune data)
@@ -1531,11 +1670,14 @@ questions:
     What is a subtle failure mode of naively curating fine-tuning data from your own model's
     thumbs-up outputs?
   options:
-  - It always improves the model with no risk
-  - It permanently fixes all hallucinations
+  - It always improves the model with no risk, because thumbs-up outputs are by definition high-quality
+    examples and reinforcing them can only push the model toward more of its best behavior
+  - It permanently fixes all hallucinations, since training on the answers users approved teaches the
+    model to reproduce only verified, factually grounded responses from then on
   - Training repeatedly on your own model's outputs can amplify biases and cause 'model collapse'; noisy
     auto-mined feedback also degrades quality without human curation
-  - It reduces the corpus size
+  - It reduces the effective corpus size by pruning documents that never appear in thumbs-up answers,
+    gradually shrinking the retrievable knowledge base with each round of curation
   answer: 2
   explanation: |
     Feeding a model its own outputs back as training data can amplify biases and lead to model
@@ -1576,9 +1718,12 @@ questions:
     Your chat product's LLM bill is dominated by many easy queries mixed with a few hard ones,
     all sent to a large expensive model. Which lever cuts cost most while protecting quality?
   options:
-  - Send everything to an even larger model to reduce retries
-  - Increase the context window on every request
-  - Disable streaming to save tokens
+  - Send every query to an even larger and more expensive model, on the theory that its higher accuracy
+    reduces retries and follow-up calls enough to more than offset the higher per-token price
+  - Increase the context window on every request so more retrieved grounding fits in the prompt, which
+    lowers the total number of billed calls and therefore cuts the overall LLM spend
+  - Disable token streaming for all responses, since delivering the full answer in one payload sends
+    fewer billed output tokens per request than emitting them incrementally to the client
   - 'Model routing/cascading: send easy queries to a small cheap model and escalate only hard ones to
     the large model, optimizing cost per quality'
   answer: 3
@@ -1600,13 +1745,16 @@ questions:
     An interviewer says "optimize latency, throughput, and cost simultaneously." What is the
     principal-engineer-level answer?
   options:
-  - Agree it's achievable by simply buying more GPUs
+  - Agree it is fully achievable at once by simply provisioning more GPUs, since enough hardware capacity
+    drives latency, throughput, and cost per token all to their optimum with no remaining tension
   - 'Explain that these trade off against each other — you typically get two at the expense of the third
     — then pick priorities from the use case: interactive chat favors TTFT (smaller batch, streaming,
     prefix cache); batch/offline favors throughput (huge batches); budget-bound favors caching, routing
     to small models, and prompt compression'
-  - State that quantization removes all trade-offs
-  - Claim latency and cost are unrelated to batch size
+  - State that applying quantization removes all trade-offs at once, since compressing the weights makes
+    the model simultaneously faster, higher-throughput, and cheaper with no accuracy or latency cost
+  - Claim that latency and cost per token are unrelated to serving batch size, so tuning batching has no
+    bearing on the three-way tension the interviewer is asking you to reason about
   answer: 1
   explanation: |
     The senior answer names the fundamental tension (you get two of three) and then reasons from

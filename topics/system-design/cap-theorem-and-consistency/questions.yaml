@@ -15,8 +15,10 @@ questions:
   - Every read receives the most recent successful write or an error, as if there is a single copy of
     the data
   - Every transaction moves the database from one valid state to another (the ACID 'C')
-  - Data is durably persisted to disk before acknowledging a write
-  - All replicas store exactly the same number of records
+  - Data is durably persisted to disk and flushed via fsync on a majority of nodes before the write is
+    acknowledged to the client
+  - All replicas store exactly the same number of records at all times, verified by a periodic row-count
+    reconciliation job
   answer: 0
   explanation: |
     CAP's C is linearizability: reads reflect the latest write or fail. It is NOT
@@ -32,11 +34,14 @@ questions:
     Why do most practitioners say partition tolerance (P) is not really optional in a
     distributed system?
   options:
-  - Because databases legally require it for compliance
+  - Because data-protection regulations such as GDPR and SOC 2 explicitly mandate partition tolerance
+    for any certified production database
   - Because network failures, dropped packets, and latency spikes are inevitable, so a multi-node system
     must keep functioning through them
-  - Because partition tolerance makes the system faster
-  - Because without P you cannot store more than one copy of the data
+  - Because partition tolerance adds a fast-path network route that lets the system skip acknowledgements
+    and respond to clients faster
+  - Because without partition tolerance a distributed store is mathematically limited to a single replica
+    and cannot fan out additional copies
   answer: 1
   explanation: |
     Networks are unreliable; partitions will happen. So the real CAP choice is between
@@ -52,10 +57,10 @@ questions:
   question: |
     Which set correctly pairs systems with their typical CAP behavior?
   options:
-  - Cassandra = CP; ZooKeeper = AP
-  - etcd = AP; DynamoDB = CP
+  - Cassandra = CP; ZooKeeper = AP; Redis Cluster = CP; Consul = AP
+  - etcd = AP; DynamoDB = CP; ZooKeeper = AP; Cassandra (default) = CP
   - ZooKeeper/etcd = CP; Cassandra/DynamoDB (default) = AP
-  - PostgreSQL sync replication = AP; Riak = CP
+  - PostgreSQL sync replication = AP; Riak = CP; etcd = AP; DynamoDB (default) = CP
   answer: 2
   explanation: |
     Consensus-based coordination stores (ZooKeeper, etcd) are CP; Dynamo-style stores
@@ -72,9 +77,12 @@ questions:
     A candidate says "I'll build a CA system for our multi-datacenter store." Why is
     this the wrong thing to say in a distributed-systems interview?
   options:
-  - CA is only strictly slower than CP, so it is never optimal
-  - CA systems cannot use replication at all
-  - CA is a proprietary term owned by a specific vendor
+  - CA is only ever strictly slower than CP because it must synchronously flush to every replica, so it
+    is never the optimal choice for a latency-sensitive store
+  - CA systems are architecturally forbidden from using replication at all and are limited to a single
+    authoritative copy of every record
+  - CA is a proprietary trademark owned by a specific database vendor and cannot be used to describe
+    open-source systems
   - CA is meaningful only for a single node or a system that assumes partitions never happen; a real multi-node
     store must tolerate partitions and therefore trade C against A
   answer: 3
@@ -96,9 +104,12 @@ questions:
   options:
   - The leader steps down / rejects writes (errors or blocks) because it can no longer confirm it holds
     the latest committed state, preventing split-brain
-  - The leader keeps accepting writes to stay available and reconciles later
-  - The leader silently promotes a follower on the minority side
-  - The leader serves reads from cache but blocks all reads from disk
+  - The leader keeps accepting writes to stay available and reconciles the divergent history with the
+    majority side once the partition heals
+  - The leader silently promotes one of its minority-side followers to co-leader so the smaller partition
+    can continue committing writes independently
+  - The leader serves reads from its in-memory cache but blocks all reads that would fall through to disk
+    until the partition is resolved
   answer: 0
   explanation: |
     CP sacrifices availability during a partition: a leader that lost majority contact
@@ -116,11 +127,14 @@ questions:
     Your team runs a single-region, 3-node quorum database. In steady state (no
     partition), which statement about CAP is MOST accurate?
   options:
-  - CAP forces you to give up either consistency or availability even with no partition
+  - CAP forces you to permanently give up either consistency or availability at all times, even in steady
+    state with every node healthy and no partition present
   - With no partition you can have both consistency and availability; CAP's trade-off only bites during
     a partition
-  - CAP guarantees the system is linearizable as long as all three nodes are up
-  - CAP is irrelevant because single-region systems never partition
+  - CAP guarantees the system is fully linearizable as long as all three nodes are up and reachable, regardless
+    of the configured quorum settings
+  - CAP is entirely irrelevant to single-region deployments because nodes within one region are physically
+    incapable of partitioning from each other
   answer: 1
   explanation: |
     CAP's C-vs-A choice only applies during a partition; in steady state you can offer
@@ -135,10 +149,10 @@ questions:
   question: |
     PACELC extends CAP by additionally describing system behavior when...
   options:
-  - there is a hardware failure on a single disk
-  - the database runs out of storage
+  - there is a hardware failure on a single disk, forcing a choice between rebuild speed and read integrity
+  - the database exhausts its provisioned storage and must choose between rejecting writes or evicting data
   - there is no partition (normal operation), where the trade-off is between Latency and Consistency
-  - a new node joins the cluster
+  - a new node joins the cluster and the system must balance rebalancing speed against serving live traffic
   answer: 2
   explanation: |
     PACELC: if Partition then A vs C, Else (normal operation) Latency vs Consistency.
@@ -154,9 +168,12 @@ questions:
     Under PACELC, DynamoDB and Cassandra in their default configuration are classified
     as PA/EL. What does that mean?
   options:
-  - During a partition they favor Consistency; otherwise they favor Latency
-  - They always favor Consistency in both cases
-  - They favor Availability during partition and Consistency otherwise
+  - During a partition they favor Consistency by blocking writes, and in normal operation they favor Latency
+    by serving from the nearest replica
+  - They always favor Consistency in both cases, running synchronous quorum reads whether or not a partition
+    is currently active
+  - They favor Availability during a partition and switch to strict Consistency the moment normal operation
+    resumes
   - During a partition they favor Availability; in normal operation they favor Latency (over consistency)
   answer: 3
   explanation: |
@@ -176,9 +193,12 @@ questions:
   options:
   - 'Because it names the everyday cost: even with no partition, Spanner chooses consistency over latency,
     paying TrueTime commit-wait on every write for global external consistency'
-  - Because PC/EC means Spanner never needs consensus
-  - Because PC/EC means Spanner is actually an AP system
-  - Because CP and PC/EC are contradictory classifications
+  - Because the PC/EC label indicates Spanner replaced Paxos consensus with a coordination-free gossip
+    protocol and therefore never needs to run an agreement round
+  - Because PC/EC is the formal notation for an AP system, meaning Spanner actually favors availability
+    over consistency during a partition
+  - Because CP and PC/EC are mutually contradictory classifications, so labeling Spanner PC/EC corrects
+    a factual error in calling it CP
   answer: 0
   explanation: |
     PC/EC surfaces the steady-state price: commit-wait latency for external consistency.
@@ -200,8 +220,10 @@ questions:
     linearizability
   - PA/EL with regional replicas serving local reads (e.g., LOCAL_ONE / eventual reads); accept temporary
     staleness in exchange for low latency and high availability
-  - PC/EL with a single global leader; accept that all regions read from one datacenter
-  - CA with no replication; accept a single point of failure
+  - PC/EL with a single global leader owning all writes; accept that every region's reads must cross the
+    network to that one datacenter, adding tens of milliseconds
+  - CA with no replication and a single primary node; accept a single point of failure and total data
+    loss if that node's disk fails
   answer: 1
   explanation: |
     Latency budget and tolerance for staleness point to PA/EL: serve local eventual reads.
@@ -217,10 +239,12 @@ questions:
   question: |
     What does "eventual consistency" guarantee?
   options:
-  - Every read always returns the latest write
-  - Writes are never lost under any circumstance
+  - Every read always returns the latest committed write in real time, regardless of which replica serves
+    the request
+  - Writes are never lost under any circumstance, because each write is journaled to durable storage on
+    every replica before acknowledgement
   - If no new writes are made, all replicas will eventually converge to the same value
-  - All replicas are updated synchronously before a write is acknowledged
+  - All replicas are updated synchronously in lockstep before a write is acknowledged back to the client
   answer: 2
   explanation: |
     Eventual consistency only promises convergence in the absence of new writes; it makes
@@ -236,9 +260,9 @@ questions:
     Which real-world example is the classic illustration of an eventually consistent
     system?
   options:
-  - A distributed lock service
-  - A bank's core ledger
-  - A Raft-based configuration store
+  - A distributed lock service that serializes access to a shared resource across nodes
+  - A bank's core ledger that must reflect every debit and credit immediately and exactly
+  - A Raft-based configuration store that commits changes through a majority quorum
   - DNS, where record changes propagate over time bounded by TTLs
   answer: 3
   explanation: |
@@ -258,9 +282,12 @@ questions:
   options:
   - Consistency level is a deliberate design choice that can be tightened when the business need justifies
     the added coordination cost
-  - Eventual consistency is always a bug that must be fixed
-  - Strong consistency is free once you scale enough
-  - Object stores cannot be eventually consistent
+  - Eventual consistency is always a latent bug that must be fixed, so any system exposing it should be
+    migrated to strong consistency
+  - Strong consistency becomes essentially free once you scale past a few hundred nodes, because the coordination
+    cost amortizes away
+  - Object stores are architecturally incapable of being eventually consistent and can only ever offer
+    strong read-after-write semantics
   answer: 0
   explanation: |
     S3's evolution shows consistency is a choice, not a fixed limitation; it was tightened
@@ -276,10 +303,11 @@ questions:
     What is the fundamental resource you "spend" to move from eventual toward strong
     consistency?
   options:
-  - Disk space
+  - Disk space, since each stronger level keeps additional historical versions of every record on every
+    replica
   - Coordination — more round trips and more nodes that must agree, which costs latency and availability
-  - CPU cycles only
-  - Developer headcount
+  - CPU cycles only, spent hashing and comparing replica states on every read and write path
+  - Developer headcount, because stronger models require dedicated engineers to hand-tune replication lag
   answer: 1
   explanation: |
     Stronger consistency requires more coordination (leader/quorum/sync replication),
@@ -295,11 +323,14 @@ questions:
     A payments company wants one storage strategy for both the money ledger and the
     "recent transactions" activity feed shown in the app. What is the best approach?
   options:
-  - Make the entire system strongly consistent so nothing is ever stale
-  - Make the entire system eventually consistent for maximum availability
+  - Make the entire system strongly consistent so nothing is ever stale, routing both the ledger and the
+    activity feed through the same synchronous quorum path
+  - Make the entire system eventually consistent for maximum availability, including the money ledger,
+    and reconcile any divergence with a nightly batch job
   - 'Decompose by data class: keep the ledger strongly consistent and make the recent-transactions feed
     eventually consistent'
-  - Use a single cache in front of everything and disable the database
+  - Use a single in-memory cache in front of everything and disable the backing database entirely so all
+    reads and writes hit one fast tier
   answer: 2
   explanation: |
     The senior move is to apply different consistency to different data classes: strong for
@@ -315,9 +346,9 @@ questions:
     A user updates their profile photo, reloads the page, and still sees the old photo.
     Which consistency guarantee is being violated?
   options:
-  - Monotonic writes
-  - Linearizability across all clients
-  - Serializability
+  - Monotonic writes, which requires each client's successive writes to apply in the order they were issued
+  - Linearizability across all clients, which makes every read observe the single most recent global write
+  - Serializability, which requires concurrent transactions to be equivalent to some serial execution order
   - Read-your-writes (read-after-write) consistency
   answer: 3
   explanation: |
@@ -337,9 +368,12 @@ questions:
   options:
   - Monotonic reads, implemented by pinning the session to one replica (sticky routing) or carrying a
     minimum-version token
-  - Read-your-writes, implemented by always writing to cache
-  - Serializability, implemented by two-phase locking
-  - Causal consistency, implemented by consensus
+  - Read-your-writes, implemented by always routing a client's reads through a write-through cache that
+    it populated on its last write
+  - Serializability, implemented by two-phase locking that holds read and write locks until each transaction
+    commits
+  - Causal consistency, implemented by a global consensus round that totally orders every read before it
+    is served
   answer: 0
   explanation: |
     Seeing newer then older data is a monotonic-reads violation, caused by hitting different
@@ -356,11 +390,14 @@ questions:
     Your app uses an eventually consistent store but wants read-your-writes via sticky
     routing (pin each session to one replica). What is the main downside you must plan for?
   options:
-  - Sticky routing makes writes strongly consistent globally, which is too slow
+  - Sticky routing silently upgrades every write to be strongly consistent across all replicas globally,
+    which is far too slow for an eventually consistent store
   - It reduces load-balancing freedom and, if the pinned replica fails, you must fail over and may briefly
     break the guarantee
-  - It requires a consensus protocol on every read
-  - It eliminates the need for any conflict resolution
+  - It requires running a full consensus protocol round on every single read before the pinned replica
+    can return a value
+  - It eliminates the need for any conflict resolution, because pinning a session guarantees no two replicas
+    ever hold divergent versions
   answer: 1
   explanation: |
     Sticky routing trades load-balancing flexibility and adds a failure edge case: when the
@@ -376,10 +413,11 @@ questions:
     Why are session guarantees (read-your-writes, monotonic reads) often called the
     "sweet spot" for user-facing apps built on eventually consistent stores?
   options:
-  - They provide full global linearizability at no cost
-  - They make the database serializable
+  - They provide full global linearizability across all replicas at no added latency or coordination
+    cost
+  - They upgrade the database to full serializable transaction isolation for every concurrent operation
   - They eliminate the most jarring user-visible anomalies without paying for global strong consistency
-  - They remove the need for replication
+  - They remove the need for replication by keeping all session state on a single authoritative node
   answer: 2
   explanation: |
     Session guarantees remove the anomalies a single user notices (own edits vanishing,
@@ -394,9 +432,12 @@ questions:
   question: |
     Causal consistency guarantees that...
   options:
-  - all operations are seen in the same total order by every replica
-  - every read returns the latest write in real time
-  - writes are never lost
+  - all operations, whether causally related or not, are seen in exactly the same single total order
+    by every replica across the cluster
+  - every read returns the latest committed write in real time, exactly as a single-copy linearizable
+    register would
+  - writes are never lost, because each update is synchronously journaled to a majority of replicas
+    before it is acknowledged
   - operations that are causally related (one could have influenced the other) are seen in that order
     by everyone, while concurrent operations may be seen in different orders
   answer: 3
@@ -417,9 +458,12 @@ questions:
   options:
   - By tracking causal dependencies with logical/vector clocks and delaying visibility of a write until
     its dependencies are applied — no consensus or blocking quorum needed
-  - By electing a global leader that totally orders all writes
-  - By using two-phase commit across all replicas
-  - By synchronously replicating every write to all nodes
+  - By electing a single global leader that totally orders all writes and streams that ordered log to
+    every follower
+  - By using two-phase commit across all replicas so that every write is atomically applied everywhere
+    before it returns
+  - By synchronously replicating every write to all nodes and blocking the client until the slowest replica
+    confirms
   answer: 0
   explanation: |
     Causal consistency uses logical/vector clocks to enforce dependency ordering locally,
@@ -436,11 +480,14 @@ questions:
     A well-known result states that causal consistency (specifically "causal+") is
     significant because it is...
   options:
-  - the weakest consistency model that any database can offer
+  - the weakest consistency model that any database can offer, sitting just above returning arbitrary
+    garbage values
   - the strongest consistency model achievable by a system that remains fully available under network
     partitions
-  - equivalent to linearizability but cheaper
-  - only achievable with a single-node database
+  - provably equivalent to full linearizability while costing far fewer coordination round trips per
+    operation
+  - only achievable on a single-node database, since any replication at all makes causal ordering impossible
+    to maintain
   answer: 1
   explanation: |
     Causal+ is the ceiling for always-available (AP) systems: you cannot get stronger while
@@ -455,10 +502,13 @@ questions:
   question: |
     What does causal consistency NOT give you that you must still handle separately?
   options:
-  - Ordering of causally related operations
-  - Read-your-writes within a session
+  - Ordering of operations that are causally related, so cause always precedes effect for every observer
+    in the system
+  - Read-your-writes within a single client session, so a client is guaranteed to observe its own prior
+    updates
   - Ordering/resolution of concurrent writes to the same key, and real-time recency across clients (linearizability)
-  - The ability to run without a global leader
+  - The ability to run without a global leader or any central coordination point during normal steady-state
+    operation
   answer: 2
   explanation: |
     Causal consistency orders causally related ops but leaves concurrent writes unordered
@@ -475,9 +525,12 @@ questions:
   question: |
     Which statement correctly distinguishes linearizability from serializability?
   options:
-  - Linearizability is about multi-object transactions; serializability is about single objects
-  - They are two names for the same guarantee
-  - Serializability guarantees real-time order; linearizability does not
+  - Linearizability is about multi-object transactions; serializability is about single-object reads
+    and writes
+  - They are two interchangeable names for the exact same underlying guarantee, differing only by academic
+    tradition
+  - Serializability guarantees real-time wall-clock order across clients; linearizability makes no ordering
+    promise at all
   - Linearizability is a real-time recency/ordering guarantee on single objects; serializability is an
     isolation guarantee that concurrent transactions produce a result equal to some serial order
   answer: 3
@@ -497,9 +550,10 @@ questions:
   options:
   - 'serializability PLUS linearizability: transactions appear to run one at a time AND that order respects
     real (wall-clock) time'
-  - serializability without any real-time guarantee
-  - linearizability applied to single keys only
-  - snapshot isolation with read locks
+  - plain serializability with no real-time ordering constraint, so a stale-but-serial commit order is
+    permitted
+  - linearizability applied to single keys only, with no multi-object transaction isolation whatsoever
+  - snapshot isolation augmented with shared read locks held until each transaction commits
   answer: 0
   explanation: |
     Strict serializability combines transaction serializability with a real-time order
@@ -517,11 +571,14 @@ questions:
     A team claims their PostgreSQL app is "serializable" because it uses REPEATABLE READ.
     What is the subtle problem?
   options:
-  - REPEATABLE READ is stronger than serializable, so they are over-provisioning
+  - REPEATABLE READ is strictly stronger than the SERIALIZABLE level, so the team is over-provisioning
+    isolation and wasting throughput
   - REPEATABLE READ in Postgres is actually snapshot isolation, which allows write skew — it is not truly
     serializable; SERIALIZABLE (SSI) is needed to prevent it
-  - REPEATABLE READ disables MVCC and causes lock contention
-  - There is no problem; REPEATABLE READ and SERIALIZABLE are identical
+  - REPEATABLE READ disables MVCC and falls back to table-level locking, causing severe lock contention
+    under load
+  - There is no problem at all; in PostgreSQL the REPEATABLE READ and SERIALIZABLE levels are implemented
+    identically
   answer: 1
   explanation: |
     Postgres REPEATABLE READ = snapshot isolation, which permits write skew (a multi-object
@@ -537,11 +594,14 @@ questions:
   question: |
     Which pairing of workload to guarantee is MOST appropriate?
   options:
-  - Distributed lock / leader election -> serializability but not linearizability
-  - Bank transfer between two accounts -> linearizability of a single key only
+  - Distributed lock / leader election -> transaction serializability but explicitly not single-object
+    linearizability
+  - Bank transfer between two accounts -> linearizability of a single account key only, ignoring the second
+    account
   - Bank transfer between two accounts -> strict serializability; distributed lock / leader election ->
     linearizability
-  - Analytics dashboard query -> strict serializability
+  - Analytics dashboard query over historical data -> strict serializability enforced on every aggregate
+    read
   answer: 2
   explanation: |
     A transfer touches multiple rows with real-time expectations -> strict serializability;
@@ -559,9 +619,9 @@ questions:
     What is the primary throughput cost of enforcing serializable isolation via two-phase
     locking (2PL) under contention?
   options:
-  - It requires more disk space per row
-  - It disables replication
-  - It forces eventual consistency
+  - It requires substantially more disk space per row to store the extra lock-bookkeeping metadata inline
+  - It silently disables replication, forcing the isolated primary to serve every read and write alone
+  - It quietly downgrades the store to eventual consistency once the lock table exceeds its budget
   - Lock contention and deadlocks that serialize or stall conflicting transactions
   answer: 3
   explanation: |
@@ -580,9 +640,11 @@ questions:
   options:
   - That the set of replicas read overlaps the set written by at least one node, so a read can observe
     the most recent write
-  - That reads are always faster than writes
-  - That all N replicas are always contacted
-  - That writes are asynchronous
+  - That reads are always faster than writes because the read set is guaranteed to be the smaller of
+    the two quorums
+  - That all N replicas are contacted on every single operation, guaranteeing every node stays fully
+    up to date
+  - That writes are applied asynchronously in the background after the client has already been acknowledged
   answer: 0
   explanation: |
     R + W > N forces overlap between read and write sets, so at least one read replica has
@@ -619,11 +681,13 @@ questions:
     A team sets write=QUORUM and read=QUORUM in Cassandra (so R+W>N) but still occasionally
     reads stale data during a partition. What is the most likely explanation?
   options:
-  - Quorum math is broken in Cassandra
-  - They forgot to enable TLS
+  - The R+W>N quorum arithmetic is implemented incorrectly in Cassandra's coordinator and silently under-counts
+    acknowledgements
+  - They forgot to enable TLS between nodes, so replication traffic is being dropped by the network layer
   - Sloppy quorums with hinted handoff route writes to reachable (non-home) nodes during a partition,
     breaking the R+W>N overlap guarantee to preserve availability
-  - Read repair permanently corrupts data
+  - Read repair permanently corrupts data whenever it runs concurrently with a quorum read during the
+    partition
   answer: 2
   explanation: |
     To stay available (AP), Dynamo/Cassandra use sloppy quorums + hinted handoff during
@@ -639,9 +703,9 @@ questions:
   question: |
     Is a strict quorum (R + W > N) equivalent to linearizability?
   options:
-  - Yes, R+W>N is exactly linearizability
-  - No, because quorums cannot guarantee any overlap
-  - Yes, as long as N is odd
+  - Yes, R+W>N is mathematically identical to linearizability for every possible interleaving of operations
+  - No, because a strict quorum can never actually guarantee any overlap between the read and write sets
+  - Yes, provided N is an odd number so that a clean majority always exists for both reads and writes
   - No — concurrent writes, sloppy quorums, and read-repair races can still expose anomalies, so strict
     quorum is 'strong-ish' but not full linearizability
   answer: 3
@@ -661,9 +725,11 @@ questions:
   options:
   - LOCAL_QUORUM keeps the quorum within a single datacenter to avoid cross-region round-trip latency,
     trading some cross-region freshness for lower latency
-  - LOCAL_QUORUM is more consistent globally
-  - QUORUM is deprecated
-  - LOCAL_QUORUM disables replication to other datacenters
+  - LOCAL_QUORUM is strictly more consistent globally because it always waits for a majority in every
+    datacenter simultaneously
+  - The plain QUORUM consistency level has been deprecated and removed in modern Cassandra releases
+  - LOCAL_QUORUM disables asynchronous replication to the other datacenters, keeping data confined to
+    the local one
   answer: 0
   explanation: |
     LOCAL_QUORUM confines the quorum to one DC for low latency, accepting that a full-region
@@ -679,10 +745,11 @@ questions:
     In Last-Write-Wins (LWW) conflict resolution, how is a conflict between two concurrent
     writes resolved?
   options:
-  - Both values are kept as siblings for the application to merge
+  - Both conflicting values are retained as siblings and handed to the application layer to merge deterministically
   - The write with the highest timestamp is kept and the others are discarded
-  - The write from the node with the lowest ID wins
-  - The system blocks until an operator resolves it
+  - The write originating from the node with the numerically lowest node ID always wins the tiebreak
+  - The system blocks the key and stalls all further writes until a human operator manually resolves
+    the conflict
   answer: 1
   explanation: |
     LWW keeps the highest-timestamp write and discards the rest. Keeping siblings is the
@@ -697,11 +764,12 @@ questions:
   question: |
     What is the key danger of using LWW for a shopping cart (a set of items)?
   options:
-  - It uses too much metadata
-  - It requires a consensus protocol
+  - It uses too much per-item metadata, bloating each cart entry with version vectors that grow unbounded
+  - It requires a full consensus protocol round across replicas before any item can be added to the cart
   - It can silently lose concurrent writes (dropped items) and depends on clock synchronization to pick
     the 'winner'
-  - It makes reads slower than writes
+  - It makes cart reads dramatically slower than writes because every read must reconcile all historical
+    versions
   answer: 2
   explanation: |
     LWW silently discards the losing write, so concurrent 'add item' operations can vanish;
@@ -716,9 +784,9 @@ questions:
   question: |
     What do vector clocks let a system determine that simple timestamps cannot?
   options:
-  - The exact wall-clock time of every write
-  - Which node has the most storage
-  - The network latency between replicas
+  - The exact wall-clock time at which every individual write was issued across the cluster
+  - Which replica node currently holds the most stored data and should therefore win conflicts
+  - The precise network latency between replicas so writes can be routed to the closest node
   - Whether one write causally happened-before another or whether the two are concurrent (a genuine conflict)
   answer: 3
   explanation: |
@@ -737,9 +805,12 @@ questions:
   options:
   - They detect conflicts but do not resolve them (pushing merge logic to the app), and the clock size
     grows with the number of writers
-  - They silently lose data
-  - They require perfectly synchronized wall clocks
-  - They cannot detect concurrent writes
+  - They silently drop the losing side of every concurrent write, exactly like Last-Write-Wins, so conflicting
+    updates vanish without a trace
+  - They depend on tightly NTP-synchronized wall clocks and produce incorrect orderings the moment clock
+    skew exceeds a few milliseconds
+  - They are unable to distinguish concurrent writes from causally ordered ones, so genuine conflicts pass
+    through completely undetected
   answer: 0
   explanation: |
     Vector clocks correctly detect conflicts (no silent loss) but leave resolution to the
@@ -755,11 +826,14 @@ questions:
     What property makes CRDTs (Conflict-free Replicated Data Types) converge automatically
     without coordination?
   options:
-  - They elect a leader to resolve every conflict
+  - They elect a single coordinating leader that arbitrates and resolves every conflicting update before
+    it becomes visible to the other replicas
   - Their merge operation is commutative, associative, and idempotent, so replicas reach the same state
     regardless of message order or duplication
-  - They use two-phase commit on every update
-  - They discard all but the newest write
+  - They run a synchronous two-phase commit across every replica on each update so that divergence can
+    never arise in the first place
+  - They keep only the write bearing the newest timestamp and discard all older concurrent updates, letting
+    the latest one overwrite the rest
   answer: 1
   explanation: |
     CRDT merges are commutative, associative, and idempotent, guaranteeing convergence
@@ -776,12 +850,14 @@ questions:
     You are designing a globally distributed "like" counter that must never lose a like and
     needs no central coordination. Which approach fits best and what is the trade-off?
   options:
-  - LWW register; trade-off is occasional lost likes under concurrency
+  - An LWW register holding the running count; trade-off is that concurrent likes from different regions
+    overwrite each other, so a fraction are silently lost
   - A single Raft-replicated counter; trade-off is that all increments funnel through one leader, limiting
     throughput and global availability
   - A PN-Counter / G-Counter CRDT aggregated per region; trade-off is metadata overhead and that the model
     must fit CRDT semantics
-  - A cache-only counter with TTL; trade-off is that counts reset on expiry
+  - A cache-only counter with a short TTL that recomputes on miss; trade-off is that the count resets to
+    zero whenever the entry expires or is evicted
   answer: 2
   explanation: |
     A counter CRDT converges without coordination and loses no increments — ideal for a
@@ -798,9 +874,12 @@ questions:
     Even though CRDTs guarantee replicas converge to the SAME value, why can the merged
     result still be semantically surprising (e.g., a deleted item reappearing)?
   options:
-  - Because CRDTs are not actually deterministic
-  - Because CRDTs require synchronized clocks that drift
-  - Because CRDTs silently drop the losing write like LWW
+  - Because CRDT merge functions are secretly non-deterministic, so two replicas applying the same set
+    of updates can settle on genuinely different final values
+  - Because CRDTs depend on tightly synchronized physical clocks whose inevitable drift reorders operations
+    and corrupts the merged result over time
+  - Because CRDTs silently discard the losing side of a concurrent update exactly the way Last-Write-Wins
+    does, quietly dropping one user's change
   - Because convergence guarantees agreement on a value, but the merge policy (e.g., an OR-Set's add-wins
     bias) may not match user intent, resurrecting a concurrently-deleted element
   answer: 3
@@ -837,10 +916,13 @@ questions:
   question: |
     What is the core purpose of a consensus algorithm like Paxos or Raft?
   options:
-  - To compress data before storage
+  - To compress the replicated log with a dictionary coder before it is flushed to durable storage on each
+    node
   - To make a set of nodes agree on a single value or an ordered log of operations despite failures
-  - To balance load across replicas
-  - To encrypt traffic between nodes
+  - To distribute incoming client requests evenly across all healthy replicas using a round-robin balancing
+    policy
+  - To encrypt inter-node traffic with a rotating session key so replication data cannot be read on the
+    wire
   answer: 1
   explanation: |
     Consensus produces agreement on a value / ordered log among nodes despite failures — the
@@ -875,9 +957,12 @@ questions:
   question: |
     Why do consensus clusters typically use an odd number of nodes (3 or 5)?
   options:
-  - Odd numbers are faster to hash
-  - Raft cannot run on an even number of nodes
-  - Odd numbers reduce disk usage
+  - Odd cluster sizes hash more evenly across the consistent-hashing ring, so partitions of keys stay
+    balanced across the nodes
+  - Raft's election protocol is mathematically undefined for an even number of nodes and simply refuses
+    to start the cluster
+  - Odd numbers of nodes let the storage engine pack replicas more tightly, measurably reducing total disk
+    usage per cluster
   - An even count does not improve fault tolerance over the next-lower odd count (e.g., 6 tolerates the
     same 2 failures as 5) while costing more latency and resources
   answer: 3
@@ -899,9 +984,12 @@ questions:
   options:
   - Raft was designed for understandability and operability (clear leader election, log replication, safety),
     reducing implementation bugs
-  - Raft is Byzantine fault tolerant while Paxos is not
-  - Raft avoids needing a majority quorum
-  - Raft has unbounded write throughput
+  - Raft is Byzantine fault tolerant and keeps agreeing correctly even when some nodes lie or send conflicting
+    messages, whereas Multi-Paxos cannot
+  - Raft commits writes without ever needing a majority quorum, so it stays available even when most of
+    the cluster is unreachable
+  - Raft delivers effectively unbounded write throughput because followers can commit entries in parallel
+    without waiting on the leader
   answer: 0
   explanation: |
     Raft's explicit design goal was understandability/operability, which lowers
@@ -918,11 +1006,14 @@ questions:
     A team wants to store a high-throughput data plane (millions of writes/sec) in a single
     Raft group for "strong consistency." What is the flaw and the better pattern?
   options:
-  - No flaw; a single Raft leader scales writes linearly
+  - There is no flaw; a single Raft leader scales writes linearly because followers replicate the log in
+    parallel with no shared bottleneck
   - All writes funnel through one leader, which bottlenecks throughput; shard the data into many per-partition
     Raft groups (as CockroachDB/TiKV do)
-  - Raft cannot provide strong consistency, so use LWW
-  - Raft loses data at high throughput, so disable replication
+  - Raft cannot actually provide strong consistency under load, so replace it with Last-Write-Wins timestamp
+    resolution on the data plane
+  - Raft begins silently dropping committed entries once throughput is high, so the fix is to disable replication
+    and run a single unreplicated node
   answer: 1
   explanation: |
     Consensus writes bottleneck at the single leader; the fix is to shard into many Raft
@@ -940,11 +1031,14 @@ questions:
     organizations where some nodes might send conflicting/false messages. Why is Raft the
     wrong tool?
   options:
-  - Raft cannot elect a leader across organizations
-  - Raft only works with exactly 3 nodes
+  - Raft is structurally unable to elect a leader when the voting nodes span more than one organization
+    or administrative domain
+  - Raft only works with exactly 3 nodes and cannot be configured for the larger clusters that multiple
+    organizations would require
   - Raft assumes crash-stop (non-Byzantine) failures; it does not tolerate nodes that lie or send conflicting
     messages — that requires BFT protocols like PBFT or blockchain-style consensus
-  - Raft requires all nodes to trust a central certificate authority
+  - Raft mandates that every participating node trust one central certificate authority, which mutually
+    distrusting organizations would never agree to share
   answer: 2
   explanation: |
     Raft (and Paxos) tolerate crash failures, not Byzantine (malicious/lying) nodes. Mutual
@@ -959,9 +1053,11 @@ questions:
   question: |
     What does "tunable consistency" in Cassandra/DynamoDB refer to?
   options:
-  - Automatically choosing the fastest replica
-  - A background process that repairs data nightly
-  - Encrypting data at rest with a tunable key size
+  - The coordinator automatically routing each request to whichever replica currently reports the lowest
+    latency, with no application involvement
+  - A scheduled background process that walks the keyspace nightly and repairs divergent replicas to a
+    single agreed value
+  - Encrypting data at rest using an operator-selectable key size (128, 192, or 256 bits) per column family
   - Letting the application choose a consistency level per operation, trading freshness against latency
     and availability
   answer: 3
@@ -981,9 +1077,12 @@ questions:
   options:
   - Higher latency and cost, they cannot be served from all availability zones, and they are not available
     for cross-region strong reads in global tables
-  - Nothing; strong reads are always better
-  - You lose durability
-  - You must disable transactions
+  - Nothing at all; strongly consistent reads are strictly better and carry no additional cost or latency
+    over eventual reads
+  - You lose durability, because strongly consistent reads bypass the commit log and read directly from
+    an unflushed memory buffer
+  - You must disable DynamoDB transactions, since TransactWriteItems is incompatible with strongly consistent
+    read requests
   answer: 0
   explanation: |
     Strongly consistent reads cost more, have higher latency, can't be served from every AZ,
@@ -1000,11 +1099,14 @@ questions:
     What is the primary downside of tunable consistency from an engineering-organization
     perspective?
   options:
-  - It makes the database slower for every query
+  - It makes the database measurably slower for every query, because the engine must evaluate the requested
+    consistency level on each operation before serving it
   - It shifts correctness decisions onto developers — every query's consistency level is a potential subtle
     bug, and reasoning becomes non-local
-  - It prevents horizontal scaling
-  - It forces linearizability everywhere
+  - It prevents horizontal scaling, because per-operation consistency levels pin the entire keyspace to
+    a single coordinating node
+  - It forces linearizability on every read and write, removing the ability to opt into cheaper eventual
+    reads anywhere in the system
   answer: 1
   explanation: |
     Flexibility moves the burden to developers: choosing the wrong CL (e.g., read ONE after
@@ -1022,11 +1124,14 @@ questions:
     unique username only if unclaimed"). Why is QUORUM/QUORUM insufficient, and what is
     the correct mechanism plus its cost?
   options:
-  - QUORUM/QUORUM is sufficient; no change needed
-  - Switch to LWW timestamps for the username
+  - QUORUM/QUORUM is fully sufficient for linearizable compare-and-set; no change is needed because the
+    read/write overlap already serializes concurrent claims
+  - Switch the username column to LWW timestamp resolution, letting the write with the highest timestamp
+    win the claim deterministically
   - QUORUM is not linearizable for concurrent CAS; use Lightweight Transactions (LWT) which run Paxos,
     at the cost of roughly 4 round trips and much higher latency
-  - Increase replication factor to 9 to force linearizability
+  - Increase the replication factor to 9 so the larger quorum overlap forces linearizable compare-and-set
+    on concurrent username claims
   answer: 2
   explanation: |
     Quorum reads/writes don't linearize concurrent compare-and-set; Cassandra's LWT uses
@@ -1044,9 +1149,12 @@ questions:
     datacenters before returning. Which Cassandra consistency level matches, and what is
     the cost?
   options:
-  - LOCAL_ONE; cost is possible data loss
-  - ONE; cost is nothing
-  - LOCAL_QUORUM; cost is nothing
+  - LOCAL_ONE; cost is possible data loss because the write is acknowledged after a single local replica
+    stores it and never reaches the other datacenter synchronously
+  - ONE; cost is effectively nothing, since a single acknowledgement anywhere in the cluster already satisfies
+    the both-datacenters durability requirement
+  - LOCAL_QUORUM; cost is effectively nothing, because a quorum in the local datacenter is automatically
+    mirrored as a quorum in the remote one
   - EACH_QUORUM; cost is cross-region round-trip latency and reduced availability (a single DC losing
     quorum blocks writes)
   answer: 3
@@ -1065,9 +1173,12 @@ questions:
   options:
   - Strong consistency (strict serializability / CP), accepting higher latency and write failures during
     partitions to prevent lost or double-spent money
-  - Eventual consistency for maximum availability
-  - Causal consistency only
-  - No consistency guarantees; reconcile nightly
+  - Eventual consistency for maximum availability, letting balances converge in the background and accepting
+    brief windows where a debit may not yet be visible everywhere
+  - Causal consistency only, ordering each account's operations by happens-before while leaving concurrent
+    transfers to different accounts unordered
+  - No consistency guarantees during writes at all, relying on a nightly batch reconciliation job to detect
+    and correct any lost or double-spent money
   answer: 0
   explanation: |
     Money movement cannot tolerate lost/double writes, so strong/strict-serializable CP is
@@ -1083,11 +1194,14 @@ questions:
     For a social media "like count" and timeline feed at massive scale, which posture is
     usually best?
   options:
-  - Strict serializability for every like
+  - Strict serializability for every like, running each increment as a real-time-ordered transaction so
+    the count is exact at every instant
   - Eventual consistency (AP), since a like count briefly off by a few is harmless and availability/latency
     dominate
-  - Linearizable reads from a single global leader
-  - Two-phase commit across all regions
+  - Linearizable reads from a single global leader, funneling every like and every timeline fetch through
+    one authoritative region
+  - Two-phase commit across all regions on each like, so every replica agrees on the new count before the
+    write returns
   answer: 1
   explanation: |
     Feeds/like counts are human-tolerant, so eventual/AP maximizes availability and latency
@@ -1102,11 +1216,14 @@ questions:
   question: |
     Which statement about consistency and caches is correct?
   options:
-  - A cache should always be the strongly consistent source of truth
-  - Caches guarantee linearizability by default
+  - A cache should always be treated as the strongly consistent source of truth, with the backing database
+    kept only as a cold backup that is read exclusively on a cache miss
+  - Caches guarantee linearizability by default, because every read and write is funneled through a single
+    in-memory node that serializes all operations strictly in their arrival order
   - Caches are intentionally eventually consistent; the design work is the invalidation/expiry strategy
     and tolerating the staleness window — never treat a cache as the source of truth for strong data
-  - Caches make eventual consistency impossible
+  - Caches make eventual consistency impossible, since a cached entry must be invalidated synchronously
+    across every replica before any subsequent write is permitted to return to the client
   answer: 2
   explanation: |
     Caches are stale by design; you manage TTL/invalidation and accept a staleness window,
@@ -1123,9 +1240,12 @@ questions:
     A ticketing site sells limited-seat events and must avoid overselling. Which design for
     the seat-decrement operation is most appropriate?
   options:
-  - Eventual consistency with LWW on the seat count for maximum availability
-  - Cache the seat count with a 60s TTL and decrement in the cache
-  - Use causal consistency on the seat count
+  - Eventual consistency with last-write-wins on the seat count for maximum availability, letting concurrent
+    regional decrements converge in the background and reconciling any oversell after the sale closes
+  - Cache the seat count with a 60s TTL and decrement in the cache, flushing the running total back to the
+    durable store asynchronously once the TTL window expires or the entry is evicted
+  - Use causal consistency on the seat count so each buyer's decrement is ordered after the reads they
+    observed, while concurrent decrements from different buyers are allowed to apply in any order
   - A strongly consistent conditional decrement (e.g., DynamoDB conditional UpdateItem or a consensus-backed
     CAS) on the critical count, with eventual consistency acceptable for the browse/catalog view
   answer: 3
@@ -1144,9 +1264,12 @@ questions:
   options:
   - Causal ordering within each conversation (messages appear in cause-effect order) plus read-your-writes
     so the sender sees their own message; different conversations are independent
-  - Global linearizability across all conversations
-  - Eventual consistency with no ordering at all
-  - Strict serializability across the entire message store
+  - Global linearizability across all conversations, so every participant everywhere observes one single
+    real-time-ordered stream that interleaves the messages of every unrelated chat room together
+  - Eventual consistency with no ordering at all, letting each device display messages in whatever arrival
+    order it happens to receive them and relying on the user to mentally re-sort the conversation
+  - Strict serializability across the entire message store, running every send as a globally serialized
+    transaction so that no two messages anywhere can ever commit in overlapping real time
   answer: 0
   explanation: |
     Chat needs per-conversation causal order and read-your-writes for the sender, while
@@ -1163,11 +1286,14 @@ questions:
     Why are service discovery, distributed locks, and leader election classic use cases for
     linearizable, CP stores like etcd/ZooKeeper?
   options:
-  - Because they involve huge data volumes that need sharding
+  - Because they involve huge multi-terabyte data volumes that must be horizontally sharded across hundreds
+    of nodes, which only a linearizable CP store like etcd or ZooKeeper is able to coordinate
   - Because they are small, low-write-rate, critical state where a stale read or two simultaneous leaders
     (split-brain) is catastrophic
-  - Because they require sub-millisecond global writes
-  - Because eventual consistency is illegal for configuration
+  - Because they require sub-millisecond globally-replicated writes that only a synchronous consensus quorum
+    spanning every region can deliver reliably at that latency
+  - Because eventual consistency is explicitly forbidden by configuration-management standards, which mandate
+    a linearizable CP store for any shared cluster coordination data
   answer: 1
   explanation: |
     These are small, critical control-plane states where correctness (no split-brain, no
@@ -1184,11 +1310,14 @@ questions:
   question: |
     In a CQRS architecture, what consistency trade-off are you explicitly accepting?
   options:
-  - That writes become eventually consistent while reads are strongly consistent
-  - That you can no longer use a database
+  - That writes become eventually consistent while reads are strongly consistent, because each command is
+    queued and applied asynchronously behind synchronously-served linearizable query projections
+  - That you can no longer use a relational database at all, since CQRS mandates an append-only event log
+    as the only permitted primary store for both the command and query sides
   - That the read model (materialized projections) is eventually consistent relative to the write model,
     in exchange for independently scalable, optimized reads
-  - That all queries must go through the write model
+  - That all queries must go through the write model, funneling every read back through the same command
+    handlers and transaction boundary that process the writes
   answer: 2
   explanation: |
     CQRS separates write and read models; the read-side projections lag (eventual
@@ -1207,8 +1336,10 @@ questions:
     dual-write inconsistency (DB commits but event publish fails, or vice versa), which
     pattern is correct?
   options:
-  - Publish to Kafka first, then write to the DB, and hope both succeed
-  - Use LWW to reconcile the DB and Kafka later
+  - Publish to Kafka first, then write to the DB, and roll back the already-delivered event by emitting a
+    compensating tombstone message if the subsequent database commit happens to fail
+  - Use last-write-wins timestamps to reconcile the DB and Kafka later, letting a background job compare the
+    two systems and replay whichever side holds the newer version of each record
   - Wrap the DB write and Kafka publish in a distributed two-phase commit across both systems for every
     request
   - 'The transactional outbox pattern: write the event to an outbox table in the SAME DB transaction as
@@ -1234,9 +1365,12 @@ questions:
   - Event-sourced append-only ledger behind a strongly-consistent core (e.g., Spanner/CockroachDB) with
     idempotency keys for safe retries, and eventually-consistent derived read/reporting views updated
     via CDC
-  - Store everything in one eventually consistent Cassandra table with LWW
+  - Store the entire ledger and every reporting query in one eventually consistent Cassandra table using
+    last-write-wins, relying on a nightly repair job to reconcile any balances that diverged
   - A single Raft group holding all ledger and reporting data with strict serializability for every read
-  - Cache the ledger in Redis and treat the cache as the source of truth
+    and every analytical scan, funneling all reporting traffic through the one consensus leader
+  - Cache the ledger in Redis and treat the cache as the source of truth, persisting to a durable store
+    only as an occasional asynchronous snapshot taken when the cache node is idle
   answer: 0
   explanation: |
     The strong pattern: immutable event-sourced ledger on a strongly-consistent core,
@@ -1253,11 +1387,14 @@ questions:
   question: |
     In a cell-based architecture, how is consistency typically handled to bound blast radius?
   options:
-  - Global strong consistency across all cells for every operation
+  - Global strong consistency across all cells for every operation, running one cluster-wide synchronous
+    quorum that every cell must join before any write in any cell can be acknowledged
   - Strong consistency within a cell and eventual consistency across cells, limiting the scope where expensive
     coordination is needed and containing failures
-  - No consistency guarantees anywhere
-  - Every cell shares one global leader
+  - No consistency guarantees anywhere, letting every cell accept conflicting writes freely and leaving all
+    reconciliation entirely to the client applications reading from them
+  - Every cell shares one global leader that serializes all writes for the whole fleet, so a failure of
+    that leader stalls coordination across every cell simultaneously
   answer: 1
   explanation: |
     Cells isolate failure domains: keep coordination (strong consistency) within a cell and
@@ -1275,11 +1412,14 @@ questions:
     A RAG system serves globally-replicated vector-DB reads for LLM context. What is the
     inherent consistency trade-off you are managing?
   options:
-  - Linearizability of embeddings across regions on every write
-  - Strict serializability of all similarity queries
+  - Linearizability of embeddings across regions on every write, so each newly indexed vector is visible to
+    every region's similarity search the instant the write returns to the ingesting client
+  - Strict serializability of all similarity queries, running each nearest-neighbor lookup as a globally
+    real-time-ordered transaction against a single serialized view of the entire index
   - Embeddings/index replicas are eventually consistent; you accept index/embedding lag (stale retrieval
     context) in exchange for low-latency global reads
-  - That vector databases cannot be replicated
+  - That vector databases cannot be replicated at all and must run as a single authoritative node, forcing
+    every region's retrieval request to cross the network to that one instance
   answer: 2
   explanation: |
     Globally replicated embedding indexes are eventually consistent; the managed trade-off is
@@ -1295,9 +1435,12 @@ questions:
     According to the trade-off heuristic, which single question most directly decides
     whether a data class should be strong/CP versus eventual/AP?
   options:
-  - How many engineers are on the team?
-  - Which cloud provider is used?
-  - What programming language is the service written in?
+  - How many engineers are on the team, since a larger headcount is what unlocks the operational capacity
+    to run a strongly consistent CP store rather than a simpler eventual one?
+  - Which cloud provider is used, given that each provider's managed databases fix the consistency posture
+    and effectively make the strong-versus-eventual decision for you?
+  - What programming language the service is written in, because a language's concurrency and memory model
+    dictates whether it can safely consume strong versus eventual reads?
   - What is the cost of a stale or lost read/write — high cost pushes toward strong/CP, low cost toward
     eventual/AP?
   answer: 3
@@ -1316,9 +1459,9 @@ questions:
     reads/writes cost round trips." This sentence combines which two trade-off axes?
   options:
   - Consistency-vs-Availability (CAP partition branch) and Consistency-vs-Latency (PACELC else branch)
-  - Durability-vs-Cost and Simplicity-vs-Flexibility
-  - Throughput-vs-Storage and Security-vs-Latency
-  - Consistency-vs-Storage and Availability-vs-CPU
+  - Durability-vs-Cost (the partition branch) and Simplicity-vs-Flexibility (the normal-operation branch)
+  - Throughput-vs-Storage (during a partition) and Security-vs-Latency (during normal operation)
+  - Consistency-vs-Storage (the partition branch) and Availability-vs-CPU (the normal-operation branch)
   answer: 0
   explanation: |
     The first clause is CAP's C-vs-A during partition; the second is PACELC's C-vs-L in
@@ -1334,13 +1477,16 @@ questions:
     An interviewer asks for your overall philosophy on consistency for a large product.
     Which answer demonstrates the strongest senior judgment?
   options:
-  - Make the whole system CP so it's always correct
+  - Make the whole system uniformly CP so it is always correct, routing every read and write — even likes,
+    view counts, and feed items — through a single synchronous consensus quorum for guaranteed correctness
   - 'Decompose by data class: keep the small critical core strongly consistent (CP/consensus), make the
     large tolerant surface eventually consistent (AP) with session guarantees for UX, use CRDTs where
     conflicts auto-merge and transactions where they can''t, and name the latency/availability price of
     each'
-  - Make the whole system AP so it's always fast and available
-  - Pick whichever database is most popular and use its defaults everywhere
+  - Make the whole system uniformly AP so it is always fast and available, serving even money movement and
+    unique-constraint claims from eventually consistent replicas and reconciling any conflicts afterward
+  - Pick whichever database is currently most popular and apply its out-of-the-box default consistency level
+    uniformly everywhere, letting the vendor's defaults stand in for any per-data-class design decision
   answer: 1
   explanation: |
     The senior answer decomposes by data class and matches each to the right point on the
@@ -1356,11 +1502,14 @@ questions:
     Why does the "Coordination-vs-Throughput" axis favor leaderless/eventual designs for
     extreme write scale?
   options:
-  - Because leaderless systems never lose data
-  - Because eventual consistency uses less disk
+  - Because leaderless systems never lose data, since every write is synchronously mirrored to all replicas
+    before acknowledgement, which is precisely what lets them absorb extreme write volume
+  - Because eventual consistency uses less disk per record, and that smaller storage footprint is what
+    directly raises the sustainable write throughput of a leaderless cluster
   - Because leaders and quorums funnel writes through a coordination point that bottlenecks throughput,
     whereas leaderless/eventual designs let any node accept writes and scale flatter
-  - Because consensus is illegal at scale
+  - Because running a formal consensus protocol is disallowed above a certain cluster size, forcing any
+    high-scale write path onto a leaderless eventual design by rule
   answer: 2
   explanation: |
     Coordination points (leaders, quorums) cap throughput; leaderless writes parallelize
@@ -1375,9 +1524,12 @@ questions:
   question: |
     Linearizability is best summarized as which of the following?
   options:
-  - Transactions produce a result equal to some serial order
-  - Replicas eventually converge if writes stop
-  - Causally related operations are ordered consistently
+  - Multi-object transactions produce a result equal to some serial order of those transactions, though
+    that order need not line up with the real wall-clock time at which they actually executed
+  - Replicas eventually converge to the same value once writes stop, with no promise about recency or
+    ordering during the window while updates are still propagating between nodes
+  - Causally related operations are ordered consistently for every observer, while operations with no
+    causal link may be seen in different orders by different replicas
   - Each operation appears to take effect atomically at a single instant between its start and completion,
     consistent with real (wall-clock) time
   answer: 3
@@ -1416,12 +1568,15 @@ questions:
     gets network-isolated from the rest of the fleet. What happens to each, and why is this
     an acceptable design?
   options:
-  - Both keep serving normally; the partition has no effect
+  - Both services keep serving reads and writes exactly as normal, because a network isolation inside one
+    datacenter never affects consistency and the partition therefore has no observable effect on either
   - The CP inventory rejects writes (unavailable) to avoid overselling, while the AP recommendations keep
     serving possibly-stale suggestions — acceptable because correctness matters for inventory but staleness
     is harmless for recommendations
-  - Both stop serving to be safe
-  - The AP service rejects writes and the CP service keeps serving stale data
+  - Both services immediately stop serving all reads and writes to be safe, because any partition forces a
+    fail-closed posture on every service in the affected datacenter regardless of its CAP classification
+  - The AP recommendations service rejects writes to stay correct while the CP inventory service keeps
+    serving possibly-stale reads and writes to remain available through the partition
   answer: 1
   explanation: |
     Correct CAP-aware degradation: CP inventory sacrifices availability to protect
@@ -1439,11 +1594,14 @@ questions:
     post but other users can tolerate a short delay. Which implementation best achieves this
     with minimal added coordination?
   options:
-  - Make all feed reads linearizable via a global leader
-  - Use strict serializability for the entire feed table
+  - Make all feed reads linearizable by routing every fetch through a single global leader, so the author
+    and every other reader worldwide observe each new post at the same real-time instant it commits
+  - Use strict serializability for the entire feed table, running every post insertion and every timeline
+    read as a globally real-time-ordered transaction across all regions
   - Provide read-your-writes only for the author (e.g., sticky-route the author to a replica that has
     their write, or serve the author's own post from their local cache), while everyone else reads eventually
-  - Disable caching so all reads hit the primary
+  - Disable caching everywhere so that all feed reads, from the author and every other user alike, bypass
+    the replicas and hit the primary directly for guaranteed freshness
   answer: 2
   explanation: |
     Scoping read-your-writes to the author (sticky routing or local write-through) gives the
@@ -1461,9 +1619,12 @@ questions:
     you must never lose a user's concurrent change and want automatic convergence without
     app-side merge code. Which approach fits best?
   options:
-  - LWW timestamps on both
-  - A single global leader with 2PC for every keystroke
-  - Vector clocks that surface siblings for the app to merge manually
+  - Last-write-wins timestamps on both, keeping only the edit with the highest clock value on each key so
+    the two replicas deterministically converge to a single surviving version
+  - A single global leader with two-phase commit on every keystroke and every cart mutation, so all replicas
+    agree on each change synchronously before it becomes visible to any user
+  - Vector clocks that detect concurrency and surface the conflicting siblings for the application's own
+    merge code to reconcile whenever two replicas diverge on the same key
   - CRDTs (e.g., a sequence CRDT for the document and an OR-Set for the cart), which auto-merge without
     coordination and without losing concurrent changes
   answer: 3
@@ -1483,9 +1644,12 @@ questions:
   options:
   - The leader appends the entry to its log, replicates it to followers via AppendEntries, and commits
     once a majority (including itself) has stored it
-  - Any follower can commit a write independently
-  - The client writes directly to all replicas simultaneously
-  - A random node is chosen per write to accept it
+  - Any follower that receives an AppendEntries can commit the write independently once its own log fsync
+    completes, without waiting on the leader or a majority
+  - The client broadcasts the write directly to all replicas simultaneously and treats it as committed as
+    soon as the single fastest replica acknowledges receipt
+  - A random node is chosen as the accept-coordinator for each individual write, so leadership rotates on
+    every entry to spread the write load evenly
   answer: 0
   explanation: |
     Raft routes writes through the leader, which replicates to followers and commits after a
@@ -1504,12 +1668,15 @@ questions:
     users intermittently fail to see data they just wrote. Under PACELC framing, what is
     happening and what is the minimal fix?
   options:
-  - The cluster is partitioned; nothing can be done
+  - The cluster is silently partitioned between the two racks, and because Cassandra fails closed under
+    partition there is nothing an operator can change until the network heals on its own
   - You chose EL (latency over consistency) so a read at ONE can miss a write acknowledged at ONE; the
     minimal fix is to make R+W>N for that path (e.g., write and read at LOCAL_QUORUM) or route the user's
     read to reflect their write
-  - You must switch the whole database to Spanner
-  - Increase replication factor to fix it without changing consistency levels
+  - You must migrate the whole database to Google Spanner, since only a TrueTime-backed store can ever
+    return a write immediately after it is acknowledged
+  - Increase the replication factor from 3 to 5 without touching the LOCAL_ONE consistency levels, so the
+    extra replicas make the just-written value available on the read path
   answer: 1
   explanation: |
     LOCAL_ONE/LOCAL_ONE is the EL (latency) choice and doesn't satisfy R+W>N, so reads can
@@ -1529,11 +1696,14 @@ questions:
     observer to never see a later transfer commit before an earlier one that finished first.
     Which guarantee is required, and which real system exemplifies providing it?
   options:
-  - Snapshot isolation; exemplified by default PostgreSQL REPEATABLE READ
-  - Causal consistency; exemplified by Cassandra QUORUM
+  - Snapshot isolation, which already forbids any transaction from observing a commit ordering that
+    contradicts wall-clock time; exemplified by default PostgreSQL REPEATABLE READ
+  - Causal consistency, which orders each transfer after the reads that influenced it across regions;
+    exemplified by a Cassandra QUORUM read/write path
   - Strict serializability (serializability + real-time order); exemplified by Google Spanner's external
     consistency using TrueTime
-  - Eventual consistency; exemplified by DynamoDB global tables
+  - Eventual consistency, which converges every region to the same balances once transfers stop;
+    exemplified by DynamoDB global tables
   answer: 2
   explanation: |
     Needing multi-object transaction isolation AND real-time ordering across regions is
@@ -1553,10 +1723,12 @@ questions:
   - Sequential consistency requires a single total order that respects each client's program order but
     NOT real (wall-clock) time across clients; linearizability additionally requires that order to respect
     real time
-  - Sequential consistency is weaker than eventual consistency because it drops program order
+  - Sequential consistency is weaker than eventual consistency because it discards per-client program
+    order entirely, allowing a client's own writes to be reordered before they converge
   - Sequential consistency allows different replicas to observe concurrent operations in different orders,
     whereas linearizability forces one order
-  - They are identical; "sequential" is just the older name for linearizability
+  - They are identical guarantees; "sequential consistency" is simply the older Lamport-era name that the
+    literature later rebranded as linearizability
   answer: 0
   explanation: |
     Both give a single agreed total order respecting per-client program order; only linearizability adds
@@ -1592,12 +1764,15 @@ questions:
   question: |
     Why do real distributed databases rarely target sequential consistency as their headline guarantee?
   options:
-  - Because sequential consistency is impossible to implement on any real network
-  - Because it is strictly weaker than eventual consistency and therefore useless
+  - Because sequential consistency is provably impossible to implement on any asynchronous network, being
+    ruled out by the same FLP result that forbids deterministic consensus
+  - Because it is strictly weaker than eventual consistency and therefore useless — it converges more
+    slowly while offering none of eventual consistency's availability under partition
   - Because it still needs a single global total order (so it is a CP-class model, unavailable under partition)
     yet lacks the real-time recency that makes linearizability useful for locks and leader election —
     most of the cost with less of the benefit
-  - Because sequential consistency requires atomic clocks like TrueTime
+  - Because sequential consistency can only be achieved with TrueTime-style atomic clocks and GPS
+    receivers in every datacenter, which most operators are unwilling to deploy
   answer: 2
   explanation: |
     Sequential consistency pays the coordination cost of a global total order (CP-class, blocks under partition)
@@ -1614,9 +1789,12 @@ questions:
     A Jepsen-style checker records each operation's invocation and response wall-clock times and searches
     for a valid ordering. What history most clearly proves a linearizability violation?
   options:
-  - A read returns a value written by a concurrent (still in-flight) write
-  - Replicas still disagree immediately after a write, before propagation completes
-  - Two clients observe two concurrent writes in different orders
+  - A read returns a value written by a concurrent (still in-flight) write whose response had not yet been
+    delivered when the read was invoked, so their operation intervals overlap in the recorded history
+  - Replicas still disagree immediately after a write completes, before the asynchronous propagation of
+    that value to every follower has finished converging across the cluster
+  - Two clients each observe two concurrent (interval-overlapping) writes in the opposite relative order
+    from one another, with no completed-before edge linking the two writes
   - A read returns a value that was already overwritten by a write which COMPLETED before the read began
     (a stale read that no valid real-time-respecting order can explain)
   answer: 3
@@ -1635,11 +1813,14 @@ questions:
   question: |
     Why is eventual consistency described as impossible to "violate" within a bounded, finite execution?
   options:
-  - Because eventual consistency is actually a strong safety property checked on every read
+  - Because eventual consistency is actually a strong safety property that a checker evaluates on every
+    single read, flagging any stale value the instant it is returned to a client
   - Because it is a liveness property (convergence only guaranteed after writes stop); in any finite prefix
     replicas are allowed to disagree, so non-convergence can only be observed after quiescence
-  - Because eventually consistent systems never actually diverge
-  - Because bounded histories are too short for any checker to run
+  - Because eventually consistent systems never actually diverge in practice, since each write is applied
+    to every replica synchronously the moment the coordinator receives it
+  - Because bounded finite histories are always too short for any linearizability or convergence checker
+    to explore the full space of valid orderings before it times out
   answer: 1
   explanation: |
     Eventual consistency is a liveness guarantee: it only promises convergence given quiescence, so temporary
@@ -1660,10 +1841,12 @@ questions:
   options:
   - A linearizability failure shows up as a stale or reordered read of a SINGLE object; a serializability
     failure shows up as a cross-object anomaly like write skew, lost update, or a phantom
-  - Both always manifest identically, so you cannot tell them apart from a history
+  - Both always manifest as the exact same stale-read signature in a recorded history, so no checker can
+    ever distinguish a linearizability failure from a serializability failure after the fact
   - A linearizability failure only appears under partition; a serializability failure only appears in
     steady state
-  - Serializability failures affect single objects while linearizability failures affect transactions
+  - Serializability failures affect single-key reads and writes, while linearizability failures affect
+    only multi-object transactions that span more than one key
   answer: 0
   explanation: |
     Linearizability is single-object real-time recency, so its failures are stale/reordered single-key reads;
@@ -1683,9 +1866,12 @@ questions:
   options:
   - Cold keys that are rarely or never read never get repaired by read repair; background anti-entropy
     repair (e.g., Merkle-tree comparison / nodetool repair) is needed to converge them
-  - Hot, frequently-read keys will diverge; a bigger cache fixes it
-  - All keys diverge equally; only stronger consistency levels help
-  - Only keys written during a partition diverge; hinted handoff always fixes them
+  - Hot, frequently-read keys are the ones that silently stay divergent; adding a larger read cache in
+    front of the store closes the gap by absorbing the repeated reads
+  - Every key diverges at the same steady rate regardless of read frequency, so only raising the read and
+    write consistency levels to QUORUM can bring them back into agreement
+  - Only keys that were written during an active partition can diverge, and hinted handoff always replays
+    those missed writes in full once the downed replica rejoins the ring
   answer: 0
   explanation: |
     Read repair only fixes keys that are actually read, so cold data can stay stale indefinitely; scheduled
@@ -1702,13 +1888,15 @@ questions:
     In Cassandra, a replica node is down for 8 hours (well past the default hint window). When it returns,
     why might it still hold stale data, and what closes the gap?
   options:
-  - Hinted handoff replays every missed write regardless of how long the node was down, so there is no
-    gap
-  - Read repair instantly fixes all of the node's data the moment it rejoins
+  - Hinted handoff durably queues and replays every missed write regardless of how long the node was down,
+    so a returning replica is always fully caught up and no gap can exist
+  - Read repair instantly reconciles the entire keyspace on the returning node the moment it rejoins the
+    ring, comparing all of its stored data against the other replicas in one sweep
   - Hints have a bounded TTL (e.g., max_hint_window_ms, ~3h by default); hints generated after that window
     are dropped, so the node stays divergent until an anti-entropy repair (Merkle-tree comparison) reconciles
     it
-  - The node must be fully rebuilt from scratch; no incremental mechanism exists
+  - The node must be decommissioned and streamed a full copy of every partition it owns from scratch,
+    because Cassandra provides no incremental mechanism to reconcile a long-absent replica
   answer: 2
   explanation: |
     Hints are only retained for a bounded window; a node down longer than that loses coverage and must be
@@ -1725,9 +1913,12 @@ questions:
     Why do Dynamo-style systems compare Merkle (hash) trees to synchronize two replicas instead of scanning
     and shipping the full dataset?
   options:
-  - Merkle trees encrypt the data during transfer
-  - Because hashing the whole dataset is faster than reading it
-  - Because Merkle trees make every key strongly consistent
+  - Because the Merkle tree encrypts each range with its hash during transfer, so replicas can exchange
+    data over untrusted links without a separate TLS layer protecting the replication stream
+  - Because computing a hash over the whole dataset is inherently faster than reading those same bytes off
+    disk, so the tree lets a replica skip the expensive full scan entirely
+  - Because building the Merkle tree over a range promotes every key in that range to strong consistency,
+    so a matching root hash certifies the two replicas are linearizable
   - Because matching root hashes prove entire ranges are identical with no transfer, and mismatches let
     the replicas recurse only into differing subtrees — locating differences in about O(log N) hash exchanges
     and shipping only the divergent leaves
@@ -1747,11 +1938,14 @@ questions:
   question: |
     When tuning Merkle-tree granularity (leaf size) for anti-entropy repair, what is the core trade-off?
   options:
-  - Finer leaves always strictly dominate coarser leaves with no downside
+  - Finer leaves always strictly dominate coarser leaves with no downside, since a deeper tree locates
+    every difference precisely while somehow shrinking the memory needed to hold all those extra nodes
   - Coarser leaves cover more keys per hash so they use less memory but force transferring larger ranges
     when any single key differs; finer leaves pinpoint differences but cost more memory to hold the tree
-  - Leaf size only affects encryption strength, not transfer volume
-  - Leaf size determines the replication factor
+  - Leaf size only changes the strength of the hash used to encrypt each range during transfer and has no
+    bearing on how many bytes of divergent data actually get shipped between the replicas
+  - Leaf size directly determines the cluster's replication factor, so choosing finer leaves forces the
+    system to keep more copies of every key across the ring
   answer: 1
   explanation: |
     Granularity trades precision against memory: coarse leaves are cheap in RAM but over-transfer (one changed
@@ -1769,9 +1963,12 @@ questions:
   options:
   - It keeps two G-Counters, P (increments) and N (decrements), each merged element-wise by max, and reports
     value = sum(P) - sum(N)
-  - It stores a single integer and applies LWW on concurrent updates
-  - It uses a Raft group to serialize every increment and decrement
-  - It keeps only the latest delta from each replica and sums them
+  - It stores a single signed integer per replica and applies last-write-wins by timestamp whenever two
+    concurrent increments or decrements collide on the same counter
+  - It routes every increment and decrement through a per-counter Raft group so the consensus leader can
+    serialize the operations into one agreed order before applying them
+  - It keeps only the single most recent delta received from each replica and sums those latest deltas,
+    discarding any earlier increments or decrements that replica had reported
   answer: 0
   explanation: |
     A PN-Counter composes two grow-only counters (one for increments, one for decrements), each converging
@@ -1789,12 +1986,15 @@ questions:
     A team wants to track remaining inventory (must never go below zero) using a PN-Counter CRDT for
     coordination-free decrements across regions. Why is this unsafe, and what is the correct approach?
   options:
-  - It is perfectly safe; PN-Counters enforce non-negativity automatically
-  - The fix is to switch to a G-Counter, which prevents negatives
+  - It is perfectly safe; a PN-Counter automatically clamps its merged value at zero and rejects any
+    decrement that would otherwise drive the total negative on any replica
+  - The fix is to switch to a G-Counter, which only ever grows and therefore structurally prevents the
+    remaining-inventory value from ever dropping below zero
   - A PN-Counter cannot enforce the global invariant "value >= 0" because concurrent decrements on different
     replicas can each look valid locally yet drive the merged total negative; enforcing the bound needs
     an escrow/bounded counter or coordination (single-writer/consensus)
-  - The fix is to use an OR-Set of remaining items
+  - The fix is to model the stock as an OR-Set of remaining item tokens, since its add-wins merge will
+    keep the set from ever emptying below the reserved floor
   answer: 2
   explanation: |
     CRDTs give strong eventual consistency but cannot enforce a global invariant that requires seeing all
@@ -1811,9 +2011,12 @@ questions:
     Compared with a 2P-Set, what does an OR-Set (Observed-Remove Set) provide that makes it the practical
     choice for collaborative sets?
   options:
-  - It guarantees removals are permanent and elements can never be re-added
-  - It requires a central coordinator to resolve removals
-  - It eliminates all metadata overhead
+  - It guarantees every removal is permanent by tombstoning the element forever, so a removed member can
+    never be re-added even if another replica tries to insert it again
+  - It requires a central coordinator to arbitrate every removal, funneling delete operations through a
+    single node so that no two replicas can disagree about a member's presence
+  - It eliminates all per-element metadata overhead, storing each member as a bare value with no tags or
+    tombstones, which is what makes it lighter than a 2P-Set
   - It attaches a unique tag per add and removes only observed tags, so an element CAN be re-added after
     removal and concurrent add/remove resolves add-wins - unlike a 2P-Set where a removed element is tombstoned
     forever
@@ -1834,11 +2037,14 @@ questions:
     Two replicas concurrently operate on an OR-Set: replica A removes item X (having observed its add),
     replica B adds X again. After merge, X is present. Is this a bug?
   options:
-  - Yes, it is a convergence bug; the replicas will never agree
+  - 'Yes, it is a genuine convergence bug: because A and B applied the add and remove in different orders,
+    the two replicas will settle on permanently different contents and never agree on whether X is present'
   - 'No, it is the defined add-wins semantics: B''s add carries a tag A''s remove never observed, so it
     survives, and both replicas converge to X-present, though this "resurrection" may surprise users'
-  - Yes, OR-Sets are non-deterministic so results are undefined
-  - No, because OR-Sets always prefer removes over adds
+  - Yes, OR-Sets are inherently non-deterministic, so the merged result is undefined and depends on the
+    arbitrary order in which A's remove and B's add happen to reach each replica
+  - No, because OR-Sets resolve every concurrent add/remove as remove-wins, so A's remove suppresses B's
+    concurrent re-add and the merged set correctly ends up without X
   answer: 1
   explanation: |
     OR-Sets resolve concurrent add/remove as add-wins: an add tagged with an id the remove never saw survives,
@@ -1855,12 +2061,15 @@ questions:
   question: |
     What is the key operational difference between state-based (CvRDT) and operation-based (CmRDT) CRDTs?
   options:
-  - State-based CRDTs need exactly-once causal delivery; op-based CRDTs ship whole state
+  - State-based CRDTs require an exactly-once causal-delivery layer to merge safely, while op-based CRDTs
+    simply ship their whole state and re-merge, tolerating duplicated and reordered messages
   - State-based CRDTs ship full state and merge via an idempotent/commutative/associative join, tolerating
     duplicate/reordered/lost messages; op-based CRDTs ship operations that must be commutative and delivered
     exactly-once in causal order
-  - Op-based CRDTs cannot converge without a leader
-  - There is no difference; the terms are interchangeable
+  - Op-based CRDTs cannot converge without electing a single leader to totally order every operation before
+    broadcasting it, whereas state-based CRDTs merge peer-to-peer with no leader at all
+  - There is no operational difference between them; state-based and op-based are interchangeable names for
+    the same construction and compile to identical merge logic
   answer: 1
   explanation: |
     State-based CRDTs merge whole states with a semilattice join (idempotent, so robust to re-delivery) at
@@ -1879,9 +2088,12 @@ questions:
   options:
   - Enforcing a global invariant that requires observing all replicas at once, such as "usernames are
     globally unique" or "total inventory never negative"
-  - Converging a distributed counter without coordination
-  - Merging concurrent set additions without losing any
-  - Providing strong eventual consistency for collaborative text
+  - Converging a distributed counter without coordination, since a PN-Counter merges each replica's
+    counts by element-wise max
+  - Merging concurrent set additions without losing any, which an OR-Set handles by tagging every add
+    with a unique id
+  - Providing strong eventual consistency for collaborative text, which sequence CRDTs such as RGA or
+    LSEQ deliver
   answer: 0
   explanation: |
     CRDTs give coordination-free strong eventual consistency but cannot enforce invariants that require a
@@ -1897,11 +2109,14 @@ questions:
   question: |
     For a single-valued field, when would you choose an MV-Register (multi-value) over an LWW-Register?
   options:
-  - When you want the smallest possible metadata and trust clocks completely
-  - When you need the field to be strongly consistent across replicas
+  - When you want the smallest possible metadata footprint and trust every replica's wall clock completely,
+    so the highest-timestamp write can always be treated as the definitive winner
+  - When you need the field to be strongly consistent and linearizable across all replicas, so every read
+    reflects the single most recent write in real time
   - When losing a concurrent write is unacceptable and you are willing to surface concurrent siblings
     for the application to merge, rather than silently keeping only the highest-timestamp value
-  - When the field must never have more than one writer
+  - When the field must never have more than one writer, so a single-owner replica can serialize every
+    update and eliminate the possibility of any concurrent conflict
   answer: 2
   explanation: |
     An MV-Register keeps all concurrent values as siblings (no silent loss) but requires app-side merge; an
@@ -1917,9 +2132,13 @@ questions:
   question: |
     Why does Kleppmann argue that labeling a database simply "CP" or "AP" is misleading?
   options:
-  - Because all databases are actually CA in practice
-  - Because modern networks never partition, so the labels are obsolete
-  - Because CAP was mathematically disproven and no trade-off exists
+  - Because all databases are actually CA in practice, since dropping partition tolerance is what lets
+    them deliver both consistency and availability simultaneously in the real world
+  - Because modern datacenter networks never partition thanks to redundant links, dual top-of-rack
+    switches, and sub-second failover, so the C-vs-A labels describe an obsolete failure mode that
+    simply no longer occurs in production
+  - Because CAP was mathematically disproven by later academic work and no genuine consistency-versus-availability
+    trade-off actually exists once the original proof's synchronous-network assumptions are relaxed
   - Because the C-vs-A choice only applies during an active partition, a system's behavior depends on
     configuration and even on the specific operation, and CAP's binary C (linearizability) and A (total
     availability) cannot even name useful models like causal or serializable
@@ -1939,12 +2158,17 @@ questions:
     In everyday operation (no clean partition), which "omitted variable" actually dominates the CP/AP
     discussion, and why?
   options:
-  - Disk capacity, because full disks reject writes
+  - Disk capacity, because a node whose volume fills up begins rejecting writes and that storage exhaustion
+    is what forces the everyday consistency-versus-availability decision
   - 'Latency: real failures usually appear as slowness, and within a timeout a merely-slow node is indistinguishable
     from a partitioned one - so the practical trade-off is consistency vs latency (PACELC''s else-branch),
     not a clean C-vs-A partition choice'
-  - CPU utilization, because busy nodes cannot run consensus
-  - Number of replicas, because more replicas always mean stronger consistency
+  - CPU utilization, because a saturated node cannot complete its consensus rounds in time, and that
+    processing bottleneck is the real omitted variable driving the everyday CP-versus-AP outcome once
+    the network itself is healthy
+  - Number of replicas, because adding more copies of the data automatically strengthens consistency,
+    and that replica count is therefore the dominant hidden factor in the day-to-day trade-off rather
+    than any timing concern
   answer: 1
   explanation: |
     Clean partitions are rare; slowness is common, and a slow node looks partitioned within a timeout, so the
@@ -1963,9 +2187,12 @@ questions:
   - 'MongoDB''s posture depends on configuration: with w:majority and readConcern majority/linearizable
     it is CP-leaning, but with w:1 and reads from secondaries it behaves AP-ish - so the label describes
     a chosen configuration, not an invariant of the system'
-  - MongoDB is actually always AP
-  - MongoDB is CA because it uses a single primary
-  - The label is correct because all document databases are CP
+  - MongoDB is actually always AP, because a replica set keeps serving reads from any reachable secondary
+    even after the primary has been partitioned away from the majority, so it never sacrifices availability
+  - MongoDB is CA because it uses a single elected primary per replica set, so it sidesteps partition
+    tolerance entirely and never has to trade consistency against availability during a network split
+  - The label is correct because all document databases store each record as one self-contained document
+    and are therefore fundamentally CP regardless of how their read and write concerns are configured
   answer: 0
   explanation: |
     MongoDB exposes write/read concerns that move it along the spectrum; it is CP-leaning with majority
@@ -1981,12 +2208,15 @@ questions:
   question: |
     Why is a long garbage-collection pause or a stalled disk relevant to the CAP/CP-vs-AP discussion?
   options:
-  - It has no relevance; only network cable cuts count as partitions
-  - Because GC pauses make the system strongly consistent
+  - It has no relevance whatsoever; only a physical severing of network links between datacenters counts
+    as a partition, so a purely local stall can never trigger partition-time behavior
+  - Because a garbage-collection pause temporarily freezes all mutation on a node, which forces every
+    replica into a strongly consistent quiescent state until the pause ends
   - Because a process frozen by a GC pause or blocked on slow I/O stops responding and is indistinguishable
     from a partitioned node to its peers, so "partition-time" behavior can be triggered by purely local
     stalls, not just network faults
-  - Because disk stalls only affect durability, never availability
+  - Because a stalled disk only delays the fsync that guarantees durability and has no effect at all on
+    whether the node can keep answering its peers and remain available
   answer: 2
   explanation: |
     From peers' perspective a GC-frozen or I/O-blocked node is silent - functionally the same as being
@@ -2003,9 +2233,12 @@ questions:
   question: |
     Which statement about DynamoDB (the AWS service, not the 2007 Dynamo paper) is correct?
   options:
-  - It is a leaderless, sloppy-quorum, vector-clock store that surfaces siblings to clients
-  - It resolves all conflicts using vector clocks like the original paper
-  - It provides strongly consistent reads across regions in Global Tables
+  - It is a leaderless, sloppy-quorum, vector-clock store that surfaces conflicting siblings to clients
+    and expects the application to reconcile them on read, exactly as the 2007 Dynamo paper described
+  - It resolves all write conflicts using vector clocks and read-repair just like the original paper,
+    returning multiple divergent versions whenever concurrent updates touch the same item
+  - It provides strongly consistent, linearizable reads across every region in Global Tables, so a write
+    in one region is immediately visible to a strong read in any other region
   - It uses a single leader per partition replicated across 3 AZs, offers eventually consistent reads
     by default and strongly consistent reads on request (same-region), and supports ACID transactions
     and conditional writes
@@ -2026,11 +2259,14 @@ questions:
     A service uses DynamoDB Global Tables across three regions. Two regions concurrently update the same
     item. What consistency behavior must the application design for?
   options:
-  - Strongly consistent, linearizable cross-region writes with automatic conflict prevention
+  - Strongly consistent, linearizable cross-region writes with automatic conflict prevention, so two
+    regions updating the same item are serialized into one agreed order before either write returns
   - Active-active replication that is eventually consistent across regions and resolves concurrent writes
     with last-writer-wins, so a concurrent update in another region can silently overwrite the other
-  - Automatic vector-clock sibling creation that the app must merge
-  - Cross-region two-phase commit on every write
+  - Automatic vector-clock sibling creation on every conflict, handing the application both divergent
+    versions of the item so it can merge them explicitly before the next write
+  - Cross-region two-phase commit on every write, blocking the client until all three regions have
+    durably prepared and committed the update in lockstep
   answer: 1
   explanation: |
     Global Tables are multi-region active-active, eventually consistent across regions, using last-writer-wins;
@@ -2051,9 +2287,12 @@ questions:
   - TrueTime returns a bounded time interval with uncertainty epsilon; on commit Spanner performs commit-wait,
     deliberately waiting out epsilon so no later transaction can receive an earlier timestamp - which
     adds a few milliseconds of write latency
-  - TrueTime returns an exact global timestamp with zero error, so commits are instant
-  - TrueTime replaces Paxos, so Spanner needs no consensus
-  - TrueTime makes Spanner an AP system with eventual cross-region reads
+  - TrueTime returns an exact global timestamp with zero measurement error using GPS and atomic clocks,
+    so commits can be assigned an instant with no waiting and no latency penalty at all
+  - TrueTime replaces the Paxos protocol entirely, so Spanner reaches its ordering purely from
+    synchronized clocks and never has to run a consensus round across its replicas
+  - TrueTime makes Spanner an AP system that serves eventually consistent cross-region reads, trading
+    strict ordering for availability whenever the network between datacenters degrades
   answer: 0
   explanation: |
     TrueTime exposes clock uncertainty as an interval; Spanner waits out that uncertainty (commit-wait) so
@@ -2070,12 +2309,15 @@ questions:
     CockroachDB targets serializable isolation without atomic clocks. What safety mechanism does it rely on,
     and what happens when a node's clock drifts too far?
   options:
-  - It ignores clock skew entirely and relies only on Raft
-  - It uses TrueTime hardware identical to Spanner
+  - It ignores clock skew entirely and relies solely on Raft to order writes, trusting the replication
+    log alone to keep transactions serializable no matter how far the node clocks drift apart
+  - It deploys the same GPS and atomic-clock TrueTime hardware as Spanner in every node, obtaining
+    tightly bounded timestamps directly from the physical clocks rather than estimating uncertainty
   - It configures a maximum clock offset and uses uncertainty intervals with read restarts to preserve
     serializability; if a node detects its clock has drifted beyond the max offset it crashes itself to
     avoid violating safety
-  - It falls back to eventual consistency when clocks drift
+  - It falls back to eventual consistency whenever clocks drift beyond the configured bound, relaxing its
+    isolation level automatically until the offending node's clock resynchronizes with its peers
   answer: 2
   explanation: |
     Lacking atomic clocks, CockroachDB assumes a bounded max clock offset and handles the resulting uncertainty
@@ -2094,9 +2336,12 @@ questions:
     A developer assumes every read from ZooKeeper is linearizable. Where is this assumption wrong, and how
     do you get a linearizable read?
   options:
-  - It is never wrong; all ZooKeeper reads are linearizable by default
-  - You must switch to LWW to get linearizable reads
-  - ZooKeeper reads are linearizable but writes are eventually consistent
+  - It is never wrong; every ZooKeeper read is linearizable by default because all reads are routed
+    through the elected leader and reflect the very latest committed write in real time
+  - You must switch the affected znodes to a last-write-wins conflict policy, after which follower reads
+    become linearizable because the highest-timestamp value is always the one returned
+  - ZooKeeper reads are linearizable but its writes are only eventually consistent, so a just-written
+    value may take time to propagate to the leader before it can be read back
   - ZooKeeper writes are linearizable but reads can be served by a follower and may be slightly stale;
     to get a linearizable read you must issue a sync() before the read (etcd offers a linearizable-read
     option routed through the leader / ReadIndex)
@@ -2117,11 +2362,14 @@ questions:
     Cassandra resolves conflicting cell writes by last-write-wins using cell timestamps. What real risk does
     this create in a multi-writer deployment, and why?
   options:
-  - No risk, because Cassandra uses vector clocks internally
+  - No risk at all, because Cassandra tracks causality with per-cell vector clocks internally and detects
+    every concurrent write, so no update can ever be dropped by a timestamp comparison
   - Clock skew between coordinators can cause a genuinely later write to carry a lower timestamp and be
     silently discarded (or an earlier write to win), so writes can be lost without any error
-  - It forces every write through a single leader, bottlenecking throughput
-  - It makes all reads linearizable
+  - It forces every write for a given key through a single elected leader replica, which serializes the
+    updates but bottlenecks throughput and cannot absorb multi-region write volume
+  - It makes all reads linearizable, because resolving each cell by its highest timestamp guarantees the
+    read returns the single most recent write in real-time order across every replica
   answer: 1
   explanation: |
     LWW by cell timestamp depends on synchronized clocks; skew can make a later write lose to an earlier one
@@ -2140,9 +2388,9 @@ questions:
     inherent cost you accept?
   options:
   - Google Spanner with TrueTime; cost is commit-wait latency (a few ms per write) tied to clock uncertainty
-  - Cassandra with EACH_QUORUM; cost is cross-region read latency
-  - DynamoDB Global Tables; cost is occasional LWW conflicts
-  - Riak with CRDTs; cost is app-side merge complexity
+  - Cassandra with EACH_QUORUM; cost is cross-region round-trip read and write latency
+  - DynamoDB Global Tables; cost is occasional last-writer-wins conflicts across regions
+  - Riak with native CRDT data types; cost is app-side merge and modeling complexity
   answer: 0
   explanation: |
     Strict serializability globally with hardware clocks is Spanner's design; the accepted cost is commit-wait
@@ -2159,11 +2407,14 @@ questions:
     Riak is the closest production descendant of the Dynamo paper. Which pair of features reflects that
     lineage?
   options:
-  - Single-leader replication with synchronous cross-region commit
-  - A Paxos-per-shard architecture with TrueTime
+  - Single-leader replication with synchronous cross-region commit, acknowledged only once a remote
+    replica has durably confirmed the write across the datacenter link
+  - A Paxos-per-shard architecture backed by TrueTime atomic clocks, using commit-wait to totally order
+    every transaction across regions
   - Leaderless N/R/W replication with dotted-version-vector siblings and native CRDT data types (counters,
     sets, maps, registers) for automatic convergence
-  - Strict serializability with two-phase locking
+  - Strict serializability enforced with two-phase locking, holding read and write locks on every key
+    until each transaction commits
   answer: 2
   explanation: |
     Riak is leaderless with tunable N/R/W, surfaces siblings via dotted version vectors, and ships native CRDTs
@@ -2180,9 +2431,12 @@ questions:
     Which real system is the canonical example of the unusual PC/EL corner of PACELC, and what does that
     posture mean?
   options:
-  - Google Spanner; it favors latency in both cases
-  - DynamoDB; it always favors consistency under partition
-  - Cassandra; it favors consistency in both cases
+  - Google Spanner; it favors latency in both the partition and the normal-operation case, serving fast
+    local reads rather than paying for cross-region coordination
+  - DynamoDB; it always favors consistency under a partition by blocking writes until a quorum is
+    reachable, and it does the same during ordinary operation
+  - Cassandra; it favors consistency in both cases, running synchronous quorum reads and writes whether
+    or not a partition is currently active
   - Yahoo PNUTS/Sherpa; it stays consistent under a partition (per-record timeline) yet favors latency
     over consistency in normal operation by allowing slightly stale but consistent per-record reads
   answer: 3
@@ -2200,12 +2454,15 @@ questions:
   question: |
     Why is it more precise to say "Cassandra is PA/EL by default" rather than "Cassandra is PA/EL"?
   options:
-  - Because Cassandra is actually PC/EC
+  - Because Cassandra is actually PC/EC, favoring consistency both under partition and in normal
+    operation once its default quorum settings are taken into account, so the PA/EL label is simply wrong
   - 'Because PACELC''s C is not strictly binary in a tunable store: individual operations can be effectively
     EC (e.g., a QUORUM/QUORUM path satisfying R+W>N) even though the system''s default posture is EL,
     so the classification describes a default, not an absolute'
-  - Because Cassandra changes its class based on the time of day
-  - Because PA/EL only applies to reads, not writes
+  - Because Cassandra automatically changes its PACELC class based on the time of day, favoring latency
+    during peak traffic hours and switching to consistency during off-peak maintenance windows each night
+  - Because the PA/EL classification only ever applies to read operations, while writes in Cassandra are
+    governed by an entirely separate and considerably stricter consistency posture negotiated per request
   answer: 1
   explanation: |
     Tunable consistency means the classification is a default; specific operations can be tuned toward EC
@@ -2225,9 +2482,12 @@ questions:
   - A sequence CRDT (e.g., RGA, Logoot, LSEQ) that assigns dense, totally-ordered position identifiers
     between existing elements so concurrent inserts interleave in the same deterministic order on every
     replica
-  - An LWW-Register on the whole document, keeping whichever edit has the later timestamp
-  - A PN-Counter tracking the document length
-  - A G-Set of characters with no ordering
+  - An LWW-Register holding the whole document, keeping whichever concurrent edit carries the later
+    wall-clock timestamp and discarding the other user's insertion entirely
+  - A PN-Counter tracking the running length of the document in characters, incrementing on every insert
+    and decrementing on every delete so replicas agree on the size
+  - A G-Set that accumulates every inserted character as an unordered grow-only collection, merging by
+    union so no character is ever lost between replicas
   answer: 0
   explanation: |
     Sequence CRDTs assign dense ordered position ids so concurrent inserts deterministically interleave the
@@ -2245,11 +2505,14 @@ questions:
     speed. A user occasionally fails to see their own just-committed write. What is the cause and a targeted
     fix?
   options:
-  - The write was not durable; increase the replication factor
-  - MongoDB cannot provide read-your-writes under any configuration
+  - The write never became durable in the first place; raise the replication factor so more secondaries
+    retain the committed value and the read can find it
+  - MongoDB is structurally unable to provide read-your-writes under any read or write concern, so the
+    only remedy is to move that data to a different database entirely
   - Secondary reads with readConcern:local can lag the primary, breaking read-your-writes; use a causal-consistency
     session (cluster time) or read with an appropriate read concern / from the primary for that path
-  - Switch all writes to w:1 to fix it
+  - Switch all writes to w:1 so they acknowledge faster, which lets the secondary catch up sooner and
+    closes the window in which the user misses their own write
   answer: 2
   explanation: |
     Reading local from a lagging secondary can miss a write already committed on the primary - a read-your-writes
@@ -2268,9 +2531,12 @@ questions:
     reply message before the original message it quotes. Under a causal-consistency checker, what does this
     represent?
   options:
-  - A benign reordering that causal consistency explicitly permits
-  - Expected behavior because concurrent messages may be reordered
-  - A linearizability violation only, not a causal one
+  - A benign reordering that causal consistency permits, since the model constrains only writes to the same
+    key and leaves the delivery order of separate messages completely free
+  - Expected behavior, because a reply and the message it quotes are treated as concurrent, independent
+    operations that any replica is allowed to reorder freely
+  - A linearizability violation only and not a causal one, since causal consistency governs cross-client
+    real-time recency rather than the relative ordering of dependent messages
   - 'A causality violation: the reply causally depends on (happened-after) the original, so no valid causal
     order allows observing the effect before its cause'
   answer: 3
@@ -2290,11 +2556,14 @@ questions:
     Two users each post to their own timeline; a reader sees both posts under sequential consistency. Which
     outcome is allowed under sequential consistency but forbidden under linearizability?
   options:
-  - Different readers see the two posts in different relative orders
+  - Different readers see the two posts in different relative orders, because sequential consistency lets
+    each replica pick its own independent interleaving of the concurrent writes
   - All readers see the same single order, but that order places a post that actually happened later in
     wall-clock time before one that happened earlier (while still respecting each poster's own order)
-  - A reader sees a reply before its original message within one timeline
-  - A reader never sees one of the posts at all
+  - A reader sees a reply appear before the original message it quotes inside a single timeline, inverting
+    the happens-before order of two causally dependent writes
+  - A reader never sees one of the two posts at all, because sequential consistency allows an acknowledged
+    write to be silently dropped from the agreed global order
   answer: 1
   explanation: |
     Sequential consistency requires one agreed order respecting each client's program order but not real time,
@@ -2316,9 +2585,12 @@ questions:
   - A leaderless AP store (DynamoDB Global Tables or Cassandra with LOCAL_QUORUM/LOCAL_ONE) serving local
     reads for the latency budget, accepting eventual cross-region convergence; guard against LWW loss
     by using conflict-tolerant session data or per-region ownership
-  - Spanner, because strict serializability is always the safest default regardless of latency budget
-  - A single-region etcd cluster, because linearizable reads guarantee correctness
-  - MongoDB with readConcern:linearizable in a single primary region, because it is simplest
+  - Spanner with globally-replicated strict serializability, because paying TrueTime commit-wait on every
+    write is always the safest default no matter how tight the per-region read latency budget is
+  - A single-region etcd cluster serving linearizable reads through the leader, because guaranteed
+    correctness matters more than serving sub-10ms reads from within each user's own region
+  - MongoDB with readConcern:linearizable pinned to a single primary region, because routing every global
+    session read back to one primary is the simplest topology to operate
   answer: 0
   explanation: |
     The latency budget and staleness tolerance point to a local-read AP store; the durability requirement is

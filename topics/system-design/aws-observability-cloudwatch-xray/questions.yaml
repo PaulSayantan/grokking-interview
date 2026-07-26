@@ -43,9 +43,12 @@ questions:
   question: |
     What is the primary purpose of CloudWatch Embedded Metric Format (EMF)?
   options:
-  - To compress log files before they are stored in S3
-  - To encrypt metric data at rest in CloudWatch
-  - To replace X-Ray for distributed tracing
+  - To compress and gzip log files automatically before they are batched and written to an S3 archive bucket
+    to lower ingestion cost
+  - To transparently encrypt metric data at rest in CloudWatch using a customer-managed KMS key scoped per
+    metric namespace
+  - To replace X-Ray as the distributed-tracing backend by embedding span timing directly inside each emitted
+    structured log line
   - To emit a structured log line that also carries extractable metrics, so you get high-cardinality metrics
     without a separate PutMetricData call
   answer: 3
@@ -62,11 +65,14 @@ questions:
     Why is it an anti-pattern to compute "count of HTTP 500s over the last week" by
     repeatedly running a Logs Insights query as a live dashboard widget?
   options:
-  - Logs Insights cannot filter by status code
+  - Logs Insights lacks a filter command for HTTP status fields, so it physically cannot isolate the 500-level
+    responses out of the stream
   - Logs Insights bills per GB of data scanned per query, so a repeated wide-range scan is expensive versus
     a metric filter that counts on ingestion
-  - Logs are deleted after 24 hours so the data won't be there
-  - Metrics cannot represent counts
+  - CloudWatch Logs are hard-deleted after 24 hours by default, so a week-wide query would find no events
+    left to count anyway
+  - CloudWatch metrics can only store gauge values and are unable to represent a cumulative count such as
+    a running total of HTTP 500s
   answer: 1
   explanation: |
     Logs Insights charges per GB scanned each run; repeatedly scanning a week of logs
@@ -81,9 +87,11 @@ questions:
     What is a CloudWatch high-resolution custom metric?
   options:
   - A metric stored at up to 1-second granularity, with alarms able to evaluate as fast as 10-second periods
-  - A metric with more than 30 dimensions
-  - A metric retained for 15 months at 1-second granularity
-  - A metric that is automatically replicated to all regions
+  - A custom metric configured with more than 30 dimensions so it can capture very high-cardinality label
+    combinations
+  - A metric that is retained for the full 15 months at 1-second granularity instead of being rolled up
+    into coarser aggregates
+  - A metric that is automatically replicated to every AWS region so dashboards render identically worldwide
   answer: 0
   explanation: |
     High-resolution metrics use StorageResolution=1 (1-second), and high-res alarms
@@ -98,11 +106,13 @@ questions:
     A teammate wants to view 1-second-resolution CPU spikes from a month ago in
     CloudWatch. Why can't they?
   options:
-  - High-resolution metrics are only visible to the account root user
-  - You must enable a paid feature to view any historical metrics
+  - High-resolution metrics older than a week are only visible to the account root user, not to IAM roles
+    with CloudWatch read access
+  - You must first enable a paid CloudWatch add-on before the console will render any metric data older than
+    the current day
   - 'CloudWatch rolls up data over time: 1-second data is retained ~3 hours, 1-minute ~15 days, and only
     1-hour aggregates survive out to 15 months'
-  - Metrics older than 24 hours are deleted entirely
+  - CloudWatch discards every metric datapoint older than 24 hours entirely, regardless of its storage resolution
   answer: 2
   explanation: |
     CloudWatch ages data into coarser resolutions: 1-second lasts ~3 hours, 1-minute
@@ -118,9 +128,12 @@ questions:
     metrics with 10-second alarms versus standard 1-minute metrics. What is the main
     trade-off?
   options:
-  - High-res metrics cannot trigger Auto Scaling; standard can
-  - Standard metrics have better durability guarantees
-  - There is no cost difference; always use high-resolution
+  - High-res metrics cannot trigger Auto Scaling policies because scaling only reads 1-minute periods; standard
+    metrics are required for scaling
+  - Standard 1-minute metrics carry stronger durability guarantees and a higher retention SLA than high-resolution
+    metrics do
+  - There is no cost difference between the two resolutions, so you should always default to high-resolution
+    for every metric
   - High-res detects spikes much faster but costs more (more PutMetricData volume, higher-priced high-res
     alarms) and keeps sub-minute detail only ~3 hours
   answer: 3
@@ -138,11 +151,13 @@ questions:
     p50/p90/max in CloudWatch while minimizing PutMetricData cost and calls. Best
     approach?
   options:
-  - Call PutMetricData once per measurement so every raw value is stored
+  - Call PutMetricData once per measurement so every raw value is stored individually and percentiles stay
+    perfectly exact
   - Publish pre-aggregated statistic sets (min/max/sum/count) in batched PutMetricData calls (up to 1,000
     metrics/call)
-  - Write each measurement to CloudWatch Logs and scan with Insights on every dashboard refresh
-  - Store the values in DynamoDB and compute percentiles client-side
+  - Write each measurement to CloudWatch Logs and scan the whole group with Insights on every dashboard refresh
+    to compute the percentiles
+  - Store the values in a DynamoDB table and compute the p50/p90/max client-side before rendering the dashboard
   answer: 1
   explanation: |
     Statistic sets let you send min/max/sum/count aggregates instead of every raw
@@ -159,9 +174,12 @@ questions:
   options:
   - Each unique combination of dimension values is a separate billable metric, so millions of userIds
     create millions of custom metrics
-  - Dimensions are billed per character in the dimension name
-  - CloudWatch charges extra for any metric with more than one dimension
-  - It forces all metrics into high-resolution mode
+  - Dimensions are billed per character in the dimension name, so a long key like `userId` is what inflates
+    the bill
+  - CloudWatch charges a fixed surcharge for any custom metric that carries more than one dimension attached
+    to it
+  - Adding a userId dimension forces every metric in the namespace into high-resolution 1-second mode, which
+    is billed at a premium
   answer: 0
   explanation: |
     A metric is uniquely defined by its full dimension set; every distinct value
@@ -176,10 +194,10 @@ questions:
     You need occasional "top-N noisiest tenants" analysis over high-cardinality
     tenant IDs without paying for a per-tenant metric 24/7. Best AWS choice?
   options:
-  - Add tenantId as a metric dimension and query it
-  - Create one alarm per tenant
+  - Add tenantId as a metric dimension and query it with metric math whenever you need the top-N ranking
+  - Create one CloudWatch alarm per tenant and sort them by their most recent breach count to find the noisiest
   - Use CloudWatch Contributor Insights rules over the logs to surface top-N contributors
-  - Increase metric retention to 15 months
+  - Increase metric retention to 15 months so the top-N tenants can be ranked from long-term historical data
   answer: 2
   explanation: |
     Contributor Insights analyzes logs to rank top-N contributors without minting a
@@ -194,9 +212,12 @@ questions:
     total requests per service (all users). Why might the naive query return nothing
     useful, and what's the fix?
   options:
-  - CloudWatch auto-aggregates across any dimension, so it just works
-  - You must delete the userId dimension from all past data first
-  - Dashboards cannot display summed metrics
+  - CloudWatch auto-aggregates across any dimension you omit from the query, so summing per service just works
+    transparently
+  - You must first delete the userId dimension from all previously-published datapoints before any per-service
+    total can be computed
+  - CloudWatch dashboard widgets are unable to display a summed or aggregated metric across multiple dimension
+    values
   - A metric with {service,region,userId} is distinct from one without userId; you must also emit the
     metric without userId, or use metric math/SEARCH to aggregate
   answer: 3
@@ -212,10 +233,10 @@ questions:
   question: |
     Which of these is a valid CloudWatch alarm action?
   options:
-  - Directly restart a Kubernetes pod
+  - Directly restart a specific Kubernetes pod by calling the EKS control plane from the alarm action
   - Publish to an SNS topic (which can fan out to paging/email/Lambda)
-  - Modify a DynamoDB item
-  - Rewrite application code
+  - Modify a DynamoDB item in place to record the alarm's most recent state transition
+  - Rewrite and redeploy the offending application code automatically once the threshold is breached
   answer: 1
   explanation: |
     Alarm actions include publishing to SNS, Auto Scaling actions, EC2 actions
@@ -231,9 +252,9 @@ questions:
   options:
   - breaching — a dropped heartbeat should be treated as a breach and page; notBreaching/missing could
     leave the alarm silent (INSUFFICIENT_DATA) during a real outage
-  - notBreaching — because missing data means the service is fine
-  - ignore — so the alarm state never changes
-  - It does not matter; missing data always pages
+  - notBreaching — because a missing heartbeat datapoint reliably means the service is healthy and idle
+  - ignore — so the alarm holds its last state and never transitions when heartbeats stop arriving
+  - It does not matter which setting you pick; a gap in the metric always drives the alarm into ALARM and pages
   answer: 0
   explanation: |
     For liveness, absence of data IS the failure, so treatMissingData=breaching pages.
@@ -248,11 +269,12 @@ questions:
     During incidents, one root cause triggers 40 cause-level alarm pages. What is the
     most appropriate CloudWatch mechanism to fix the noise?
   options:
-  - Delete the cause alarms entirely
-  - Increase every alarm's evaluation period to 1 hour
+  - Delete the 40 cause-level alarms entirely so only the top-level symptom alarm remains to ever page on-call
+  - Increase every one of the cause alarms' evaluation periods to 1 hour so they settle before they can fire
+    during an incident
   - Use a composite alarm on the user-visible symptom and configure ActionsSuppressor so child cause-alarms
     are suppressed while the parent is firing
-  - Switch all alarms to high-resolution
+  - Switch all 40 cause alarms to high-resolution 10-second evaluation so they resolve faster and stop paging
   answer: 2
   explanation: |
     Composite alarms with action suppression let you page once on the symptom while
@@ -266,9 +288,9 @@ questions:
   question: |
     What does an "M of N" (datapoints-to-alarm) configuration accomplish?
   options:
-  - It requires M different metrics to breach across N alarms
-  - It caps the alarm to M actions over N minutes
-  - It sets the metric resolution to N seconds
+  - It requires M different metrics to breach simultaneously across a set of N linked alarms before paging
+  - It rate-limits the alarm so it can fire at most M notification actions within any rolling N-minute window
+  - It configures the underlying metric's storage resolution to N seconds and its evaluation count to M
   - It reduces flapping by only alarming when M of the last N evaluation datapoints breach the threshold
   answer: 3
   explanation: |
@@ -283,10 +305,10 @@ questions:
     A business metric has strong daily and weekly seasonality; a static threshold
     either false-pages at nightly lows or misses daytime regressions. Best option?
   options:
-  - Set the static threshold to the all-time maximum
+  - Set the static threshold to the metric's all-time maximum so nightly lows can never trip a false page
   - Use a CloudWatch anomaly-detection band alarm that learns the expected range
-  - Disable the alarm during nights
-  - Switch the metric to high-resolution
+  - Disable the alarm during nights and re-enable it each morning to skip the seasonal lows
+  - Switch the metric to high-resolution 1-second storage so the daily and weekly seasonality averages out
   answer: 1
   explanation: |
     Anomaly detection bands learn seasonal patterns and alarm on deviation from the
@@ -301,9 +323,9 @@ questions:
     What is the default retention for a newly created CloudWatch Logs log group?
   options:
   - Never expire (logs are kept indefinitely until you set a policy)
-  - 30 days
-  - 90 days
-  - 1 day
+  - 30 days, after which events are automatically purged unless you extend the policy
+  - 90 days, matching the free CloudTrail Event history window applied to log groups
+  - 1 day, so unconfigured groups drop their events after 24 hours
   answer: 0
   explanation: |
     The default is "Never expire," which is a common hidden cost driver — chatty
@@ -316,10 +338,10 @@ questions:
   question: |
     What is the maximum size of a single PutLogEvents batch in CloudWatch Logs?
   options:
-  - 256 KB
-  - 5 MB
+  - 256 KB, matching the maximum size of a single individual log event
+  - 5 MB, with a separate cap of 5,000 events per PutLogEvents batch
   - 1 MB (up to 10,000 events per batch)
-  - 10 MB
+  - 10 MB, aligned with the Kinesis Data Streams per-record delivery limit
   answer: 2
   explanation: |
     A PutLogEvents batch is capped at 1 MB and 10,000 events. The max individual
@@ -333,9 +355,9 @@ questions:
     You must retain application logs for 7 years for compliance but only actively
     query the last 14 days. Most cost-effective design?
   options:
-  - Set 7-year retention on the CloudWatch log group
-  - Copy logs into DynamoDB with a 7-year TTL
-  - Store everything in the Infrequent Access log class for 7 years
+  - Set 7-year retention directly on the CloudWatch log group and rely on Logs Insights to run the occasional compliance query against all of it
+  - Copy every log event into a DynamoDB table with a 7-year item TTL and scan it with PartiQL whenever the compliance team needs the history
+  - Store everything in the CloudWatch Logs Infrequent Access class for the full 7 years, assuming its lower per-GB rate makes cold retention cheap
   - Keep ~14–30 day retention in CloudWatch for live ops and export/subscribe logs to S3 for cheap long-term
     retention (query with Athena when needed)
   answer: 3
@@ -370,9 +392,9 @@ questions:
     What is CloudWatch Logs Insights primarily for?
   options:
   - Ad-hoc, interactive querying of log groups with a query language (fields/filter/stats)
-  - Continuously alarming on a predefined pattern at ingestion time
-  - Streaming logs in real time to OpenSearch
-  - Encrypting log data
+  - Continuously evaluating a predefined pattern at ingestion time and incrementing an alarmable metric on every match
+  - Streaming raw log events in real time to an Amazon OpenSearch Service domain for full-text indexing and Kibana dashboards
+  - Encrypting log data at rest with an AWS KMS customer-managed key and rotating it automatically every 90 days
   answer: 0
   explanation: |
     Logs Insights is an interactive query tool for ad-hoc investigation, billed per GB
@@ -400,9 +422,9 @@ questions:
     security data lake, but you've hit the 2-subscription-filter-per-log-group limit
     elsewhere and want a scalable pattern. Best design?
   options:
-  - Give up on one of the two destinations
-  - Increase the subscription-filter limit via Service Quotas (it is adjustable)
-  - Poll GetLogEvents on a schedule and push to both
+  - Give up on one of the two destinations and forward only to the higher-priority consumer, backfilling the other later from an S3 export
+  - Raise the subscription-filter-per-log-group limit through a Service Quotas increase request, since AWS treats it as a soft adjustable quota
+  - Poll GetLogEvents on a fixed schedule with a Lambda and push each fetched page to both destinations in a fan-out loop
   - Use a subscription filter to Firehose/Kinesis (or an account-level subscription filter) and fan out
     to both destinations from there
   answer: 3
@@ -419,11 +441,11 @@ questions:
     You will alarm on error-log spikes continuously and cheaply. Metric filter vs
     Logs Insights — which and why?
   options:
-  - Logs Insights, because it can alarm without scanning
+  - Logs Insights, because a saved query can be attached directly to an alarm that re-evaluates without ever scanning the underlying data
   - Metric filter, because it increments a metric on ingestion (no repeated scan) and you alarm on that
     metric cheaply
-  - Neither can drive an alarm; use CloudTrail
-  - Both cost the same, so it doesn't matter
+  - Neither can drive an alarm on log content; you must route the errors through CloudTrail and alarm on its trail metrics instead
+  - Both cost exactly the same per GB of log data, so the choice between them makes no practical difference
   answer: 1
   explanation: |
     A metric filter counts matches on ingestion and produces an alarmable metric with
@@ -441,9 +463,9 @@ questions:
   options:
   - Kinesis Data Streams — low-latency, replayable, multi-consumer; but you manage shards (~1 MB/s or
     1,000 rec/s ingest per shard) versus Firehose's zero-management batched delivery
-  - Firehose — it gives the lowest latency and multiple independent consumers
-  - Firehose — because Kinesis Data Streams cannot receive subscription-filter output
-  - Neither; subscription filters only support Lambda
+  - Firehose — its buffered delivery gives the lowest per-record latency and lets any number of independent consumers read the same stream in parallel
+  - Firehose — because Kinesis Data Streams is not a permitted subscription-filter destination and can only be fed indirectly through a Lambda relay
+  - Neither — CloudWatch Logs subscription filters can only deliver to a Lambda function, so streaming to Kinesis or Firehose is impossible
   answer: 0
   explanation: |
     Kinesis Data Streams offers low-latency, replayable, multi-consumer streaming at
@@ -468,9 +490,9 @@ questions:
   question: |
     In AWS X-Ray, what is a "segment"?
   options:
-  - A one-second slice of a CloudWatch metric
-  - A shard of a Kinesis stream
-  - A CloudTrail management event
+  - A fixed one-second slice of a high-resolution CloudWatch metric that X-Ray samples to build its service map
+  - A single shard of a Kinesis Data Stream that buffers trace fragments before they are flushed to the X-Ray daemon
+  - A CloudTrail management event recording the control-plane API call that started the traced request
   - The work done by a single service/resource for a request, containing timing, annotations and subsegments
     for downstream calls
   answer: 3
@@ -485,10 +507,10 @@ questions:
   question: |
     What is X-Ray's default sampling rule?
   options:
-  - 100% of all requests are traced
+  - 100% of all incoming requests are traced until you explicitly define a rule to reduce the rate
   - 1 request per second (reservoir) plus 5% of any additional requests
-  - 10% of requests, chosen randomly
-  - Only requests that return an error
+  - A flat 10% of requests chosen uniformly at random with no per-second reservoir floor
+  - Only requests that return a 4xx or 5xx error, so successful requests are never sampled
   answer: 1
   explanation: |
     The default reservoir samples the first 1 request/second, then 5% of additional
@@ -513,11 +535,11 @@ questions:
     With default 5% sampling on a high-volume API, on-call complains that failing
     requests are often not traced. Best fix that controls cost?
   options:
-  - Set sampling to 100% for all requests
-  - Disable sampling entirely and rely on logs
+  - Set the sampling rate to 100% for all requests so nothing is ever missed, absorbing the extra tracing cost
+  - Disable X-Ray sampling entirely and reconstruct the failing requests after the fact from CloudWatch Logs instead
   - Add an X-Ray sampling rule to sample errors/faults at 100% (and boost sampling on critical low-traffic
     paths) while keeping happy-path high-volume traffic sampled
-  - Increase trace retention to capture more
+  - Increase the X-Ray trace retention window so more of the already-sampled failing requests are kept around
   answer: 2
   explanation: |
     Targeted rules that force-sample errors/faults at 100% guarantee failing requests
@@ -532,9 +554,9 @@ questions:
     You want to filter traces in the X-Ray console by a business key (e.g.
     customerTier). Where should you put it?
   options:
-  - In metadata, because metadata is indexed and searchable
-  - In the segment name
-  - In a CloudWatch metric dimension
+  - In metadata, because X-Ray automatically indexes every metadata field and exposes it to filter expressions
+  - In the segment name, since the console lets you build filter expressions directly against the segment name string
+  - In a CloudWatch metric dimension that X-Ray cross-references back to the matching trace when you filter
   - In annotations, because annotations are indexed and filterable (metadata is stored but NOT indexed)
   answer: 3
   explanation: |
@@ -549,11 +571,11 @@ questions:
     What is the difference between X-Ray "active" and "passive" tracing on API Gateway
     / Lambda?
   options:
-  - Active traces synchronous calls; passive traces async calls
+  - Active tracing captures only synchronous request/response calls, while passive tracing captures asynchronous, event-driven invocations
   - Active starts a new trace even without an inbound trace header; passive only continues an existing
     upstream trace
-  - Active costs nothing; passive is billed
-  - Active uses OpenTelemetry; passive uses the X-Ray SDK
+  - Active tracing is included at no charge, whereas passive tracing is billed per recorded segment and subsegment
+  - Active tracing is implemented through the OpenTelemetry collector, while passive tracing uses the legacy X-Ray SDK
   answer: 1
   explanation: |
     Active tracing initiates a trace when no upstream header exists (use at entry
@@ -570,9 +592,9 @@ questions:
   - A third-party APM (e.g. Datadog/Dynatrace) — X-Ray has coarser code profiling, 30-day retention, and
     is AWS-centric; APM gives deeper profiling, longer retention and cross-cloud, at higher cost and an
     agent to run
-  - X-Ray — it provides code-level profiling and 13-month retention out of the box
-  - Neither can do cross-cloud; only CloudTrail can
-  - X-Ray, because third-party APMs cannot ingest AWS telemetry
+  - X-Ray — it provides method-level code profiling and configurable 13-month trace retention out of the box with no extra tooling
+  - Neither option can unify telemetry across AWS and on-prem; only CloudTrail can correlate cross-cloud activity into one view
+  - X-Ray, because third-party APM products are unable to ingest AWS-native telemetry such as CloudWatch metrics or X-Ray traces
   answer: 0
   explanation: |
     X-Ray is integrated, cheap and zero-infra but has 30-day retention and coarser
@@ -587,11 +609,11 @@ questions:
     What is the primary advantage of instrumenting with OpenTelemetry/ADOT instead of
     the X-Ray SDK?
   options:
-  - It is the only way to get traces into X-Ray
-  - It removes the need for any collector or agent
+  - It is the only supported path for delivering trace segments into the X-Ray backend now that the SDK is deprecated
+  - It eliminates the need to run any collector or agent because the SDK ships telemetry straight to the backend
   - Vendor-neutral instrumentation — instrument once and export metrics/logs/traces to X-Ray, CloudWatch,
     Prometheus, or third parties, avoiding backend lock-in
-  - It guarantees 100% sampling
+  - It guarantees 100% sampling of every request by disabling the default reservoir-and-percentage rule
   answer: 2
   explanation: |
     OTel/ADOT is a vendor-neutral standard: one instrumentation, many possible
@@ -605,9 +627,9 @@ questions:
     What is the trade-off between running the ADOT/OTel Collector as a per-task sidecar
     versus a central gateway collector?
   options:
-  - Sidecars are cheaper and never fail; gateways always cost more
-  - Only sidecars can export to X-Ray
-  - Central gateways cannot process or transform telemetry
+  - Sidecars are always cheaper to run and cannot fail independently, whereas a central gateway invariably costs more to operate
+  - Only the per-task sidecar deployment mode is able to export telemetry to the X-Ray backend; gateways cannot
+  - Central gateway collectors can merely forward telemetry and are unable to process, filter, or transform it in flight
   - Sidecar isolates failure and buffers locally but multiplies resource use; a central gateway is efficient
     and centrally configurable but is a shared dependency whose outage drops telemetry fleet-wide
   answer: 3
@@ -623,11 +645,11 @@ questions:
     An EKS-heavy org standardized on PromQL and Grafana dashboards. Which observability
     backend fits best, and what's the cost?
   options:
-  - CloudWatch only, because it is the AWS default
+  - CloudWatch only, because it is the AWS default and its Metrics Insights query syntax is fully wire-compatible with PromQL
   - Amazon Managed Service for Prometheus + Managed Grafana (via ADOT) — Prometheus-native querying/dashboards,
     at the cost of extra managed services to operate and pay for versus turnkey CloudWatch
-  - X-Ray, because it supports PromQL
-  - CloudTrail, because it stores metrics
+  - X-Ray, because it natively evaluates PromQL expressions against its trace-derived metrics store
+  - CloudTrail, because it stores the fleet's time-series metrics and exposes them to Grafana dashboards
   answer: 1
   explanation: |
     A Prometheus/PromQL/Grafana shop is best served by AMP + AMG fed via ADOT, trading
@@ -641,9 +663,9 @@ questions:
     What is AWS CloudTrail primarily used for?
   options:
   - Auditing API activity — who called which API, when, from where
-  - Real-time operational metrics and dashboards
-  - Distributed tracing across microservices
-  - Storing application logs
+  - Real-time operational metrics and dashboards for service health monitoring
+  - Distributed tracing that attributes latency across microservice call graphs
+  - Storing and indexing raw application log lines for full-text search
   answer: 0
   explanation: |
     CloudTrail records API activity for security, audit, governance and forensics. It
@@ -656,11 +678,11 @@ questions:
   question: |
     Which statement about CloudTrail management vs data events is correct?
   options:
-  - Data events are logged by default and are free
-  - Management events are charged per event; data events are free
+  - Data events (e.g. S3 GetObject, Lambda Invoke) are captured by default and delivered at no additional charge
+  - Management events are billed per recorded event, whereas high-volume data events are always included for free
   - Management events (control-plane) are logged by default with one free copy; data events (e.g. S3 GetObject,
     Lambda Invoke) are NOT logged by default and are charged per event
-  - Both are disabled by default and both are free
+  - Both management and data events are disabled by default and both are delivered with no per-event charge
   answer: 2
   explanation: |
     Management events are on by default with one free copy; high-volume data events
@@ -675,9 +697,9 @@ questions:
     Without configuring any trail, how much CloudTrail history can you view for free in
     the console?
   options:
-  - The last 7 days of all events including data events
-  - The last 15 months of all events
-  - Nothing — you must create a trail first
+  - The last 7 days of all events, including object-level S3 and Lambda data events
+  - The last 15 months of all events, covering both management and data-plane activity
+  - Nothing at all — you must first create and configure a trail before any history appears
   - The last 90 days of management events (Event history), excluding data events
   answer: 3
   explanation: |
@@ -693,11 +715,11 @@ questions:
     A company with 200 AWS accounts under Organizations wants centralized, tamper-
     resistant API audit in one place. Best design?
   options:
-  - Enable Event history in each account and check them individually
+  - Enable the 90-day Event history in each of the 200 accounts and have auditors open and check them individually
   - Create an organization trail in the management/delegated-admin account that captures all member accounts'
     events into one central S3 bucket
-  - Create 200 independent trails and manually merge the S3 buckets nightly
-  - Rely on CloudWatch metrics across accounts
+  - Create 200 independent per-account trails and run a nightly job that manually merges all their S3 buckets
+  - Rely on cross-account CloudWatch metrics, treating the metric datapoints as the tamper-resistant audit record
   answer: 1
   explanation: |
     An organization trail centralizes all member accounts' events into a single
@@ -714,9 +736,9 @@ questions:
   options:
   - Management-event delivery is typically within ~15 minutes of the call, so it is not real-time — for
     immediate alerting you'd need other controls
-  - CloudTrail only logs successful calls
-  - CloudTrail cannot be sent to CloudWatch Logs
-  - CloudTrail events are encrypted and cannot be read
+  - CloudTrail only records successful API calls, so a denied malicious call would never generate an event
+  - CloudTrail events cannot be delivered to CloudWatch Logs, so metric-filter alarms on them are impossible
+  - CloudTrail events are always encrypted with an internal AWS key that consumers are unable to decrypt and read
   answer: 0
   explanation: |
     CloudTrail delivers management events within roughly 15 minutes, so it lags for
@@ -731,11 +753,11 @@ questions:
     You need multi-year, immutable, SQL-queryable API audit without building your own
     partitioning/schema on S3. Which CloudTrail feature, and what's the trade-off?
   options:
-  - S3 + Athena — it is always cheaper and requires no setup
-  - Event history — it retains events for multiple years
+  - S3 + Athena — it is always the cheapest option and needs no schema, partitioning, or query setup at all
+  - Event history — it already retains every management and data event immutably for multiple years by default
   - CloudTrail Lake — a managed immutable store with SQL and multi-year retention; turnkey but priced
     per ingestion + scan, versus cheaper-storage S3+Athena where you build the schema/queries yourself
-  - Config — it stores API audit events
+  - Config — it stores the full API audit trail of who called which API and exposes it directly via SQL
   answer: 2
   explanation: |
     CloudTrail Lake is the managed immutable long-retention SQL store, trading higher
@@ -763,11 +785,11 @@ questions:
     A security group was changed to allow 0.0.0.0/0 on port 22. Which service tells you
     WHO made the API call, and which tells you the resulting non-compliant STATE?
   options:
-  - CloudWatch for who; X-Ray for state
+  - CloudWatch metrics identify who made the call; X-Ray traces reconstruct the resulting security-group state
   - CloudTrail records the API call (who/when/from where); AWS Config records/evaluates the resulting
     resource state and compliance
-  - Config for who; CloudTrail for state
-  - Both are answered only by CloudWatch Logs
+  - AWS Config identifies who made the API call; CloudTrail reports the resulting non-compliant resource state
+  - Both the caller identity and the resulting compliance state are answered only by querying CloudWatch Logs
   answer: 1
   explanation: |
     CloudTrail logs the ModifySecurityGroup call and identity; Config captures the
@@ -783,9 +805,9 @@ questions:
   options:
   - AWS Config rule detects non-compliance → EventBridge → auto-remediation (revert), and CloudTrail identifies
     who made the change
-  - CloudWatch alarm on bucket metrics only
-  - X-Ray trace of the bucket request plus a CloudWatch dashboard
-  - CloudTrail Insights to revert the change automatically
+  - A CloudWatch alarm on bucket request metrics only, which both detects the public setting and reverts it
+  - An X-Ray trace of the bucket request plus a CloudWatch dashboard to spot and roll back the public access
+  - CloudTrail Insights, which detects the unusual API call and then automatically reverts the bucket policy
   answer: 0
   explanation: |
     Config continuously evaluates the bucket's compliance and can drive remediation via
@@ -799,10 +821,10 @@ questions:
   question: |
     In an observability workflow, what is EventBridge's core capability?
   options:
-  - Storing metrics at 1-second resolution
-  - Distributed tracing across services
+  - Storing high-resolution time-series metrics at 1-second granularity for dashboards and alarms
+  - Distributed tracing that stitches segments across services into an end-to-end request service map
   - Content-based routing of events (JSON pattern matching) to targets like Lambda, SQS, SNS, Step Functions
-  - Long-term log archival
+  - Long-term archival of raw log events into cheap durable storage for compliance retention
   answer: 2
   explanation: |
     EventBridge is a serverless bus that routes events by content-based rules to many
@@ -816,9 +838,9 @@ questions:
     For a pure "alarm breached → page on-call" path, why prefer SNS over routing the
     alarm-state change through EventBridge?
   options:
-  - EventBridge cannot receive CloudWatch alarm events
-  - SNS supports content-based filtering and EventBridge does not
-  - EventBridge cannot deliver to paging tools
+  - EventBridge is unable to receive CloudWatch alarm state-change events, so it cannot start a paging path
+  - Only SNS supports content-based filtering of alarm events; EventBridge offers no pattern matching at all
+  - EventBridge has no way to deliver notifications to third-party paging tools like PagerDuty or Opsgenie
   - SNS is the lowest-latency simple pub/sub for paging; EventBridge adds content filtering, transformation,
     archive/replay and a schema registry but with slightly higher latency you don't need on a pure paging
     path
@@ -835,11 +857,11 @@ questions:
   question: |
     What is the recommended way to structure an on-call triage dashboard?
   options:
-  - List every available metric alphabetically
+  - List every available metric alphabetically so responders can scan the full inventory during an incident
   - 'Top-down: a few symptom SLIs (availability, latency, error rate — the golden signals) at the top,
     with cause metrics below for drill-down'
-  - Only cause metrics like CPU and memory
-  - One dashboard per individual host
+  - Show only low-level cause metrics like CPU and memory, since those pinpoint the underlying fault fastest
+  - Build one dashboard per individual host so each server''s resource usage can be inspected in isolation
   answer: 1
   explanation: |
     Put user-visible symptom SLIs at the top for fast triage, cause metrics below for
@@ -855,9 +877,9 @@ questions:
   options:
   - 'CloudWatch cross-account observability via Observability Access Manager: source accounts create links
     to a monitoring account''s sink'
-  - Copy all telemetry into a single account manually
-  - Enable high-resolution metrics in every account
-  - Use CloudTrail organization trail for metrics
+  - Copy all metrics, logs, and traces into a single account manually with scheduled cross-account export jobs
+  - Enable high-resolution 1-second metrics in every account so a shared dashboard can render them together
+  - Use a CloudTrail organization trail to aggregate the fleet''s metrics into one central monitoring view
   answer: 0
   explanation: |
     Observability Access Manager links source accounts to a central monitoring
@@ -871,11 +893,11 @@ questions:
     You must continuously export metrics from a large fleet to a third-party analytics
     platform with low latency, without hammering the CloudWatch API. Best approach?
   options:
-  - Poll GetMetricData every few seconds across all metrics
-  - Screenshot dashboards on a schedule
+  - Poll GetMetricData every few seconds across every metric in the fleet and forward each batch to the partner
+  - Capture scheduled screenshots of the CloudWatch dashboards and ship the images to the analytics platform
   - Use CloudWatch Metric Streams to push metrics near-real-time to Firehose (→ the partner/S3), avoiding
     API rate limits
-  - Increase the GetMetricData quota to unlimited
+  - Request a Service Quotas increase raising the GetMetricData limit to unlimited so tight polling never throttles
   answer: 2
   explanation: |
     Metric Streams push metrics continuously via Firehose to external destinations,
@@ -889,9 +911,9 @@ questions:
   question: |
     Why do SRE best practices say to "page on symptoms, not causes"?
   options:
-  - Cause metrics are always cheaper to collect
-  - Symptoms are easier to autoscale on
-  - Causes cannot be put on dashboards
+  - Cause metrics such as CPU are always cheaper to collect and store than user-facing symptom metrics
+  - Symptom signals are inherently easier to drive Auto Scaling policies from than low-level cause metrics
+  - Cause metrics cannot be displayed on CloudWatch dashboards, so only symptoms are available to visualize
   - There are infinitely many causes but a bounded set of user-visible symptoms; paging on symptoms catches
     unknown failure modes and stays actionable
   answer: 3
@@ -907,11 +929,11 @@ questions:
   question: |
     What is a concrete downside of paging primarily on a CPU-utilization alarm?
   options:
-  - CPU cannot be measured on EC2
+  - CPU utilization cannot be measured on EC2 instances, so any alarm built on it has no data to evaluate
   - It both false-pages when users are unaffected AND misses user-facing failures that don't move CPU
     (e.g. a downstream dependency returning errors quickly)
-  - CPU alarms cannot use SNS
-  - CPU is a symptom, not a cause
+  - CPU-utilization alarms are unable to use SNS as an action, so they cannot page on-call at all
+  - CPU utilization is actually a user-visible symptom rather than a cause, so it over-reports real impact
   answer: 1
   explanation: |
     A cause alarm like CPU generates noise when users are fine and is blind to failures
@@ -928,9 +950,9 @@ questions:
   options:
   - 'Multi-window, multi-burn-rate alerting: a short window/fast-burn condition for severe incidents and
     a long window/slow-burn condition to avoid flapping'
-  - A single very high static threshold
-  - Disable the alarm at night
-  - Alarm only on CPU instead
+  - A single very high static error-rate threshold that only fires on the most catastrophic outages
+  - Disable the error-rate alarm overnight and re-enable it each morning to avoid off-hours flapping
+  - Abandon the error-rate signal and alarm only on CPU utilization instead to smooth out the blips
   answer: 0
   explanation: |
     Multi-window multi-burn-rate alerting pages fast on severe error-budget burns while
@@ -944,11 +966,11 @@ questions:
   question: |
     What is an error budget?
   options:
-  - The dollar amount you can spend on CloudWatch per month
-  - The number of alarms you're allowed to create
+  - The maximum dollar amount your team is permitted to spend on CloudWatch and observability tooling per month
+  - The maximum number of CloudWatch alarms and SLO monitors you are allowed to create per service
   - '1 − SLO: the allowed fraction of failures over the SLO window (e.g. 0.1% if the SLO is 99.9%), spent
     on risk and releases'
-  - The maximum log retention period
+  - The maximum log retention period allowed before events must be tiered to cheaper long-term storage
   answer: 2
   explanation: |
     Error budget = 1 − SLO, the tolerated failure fraction you can spend on change/risk.
@@ -961,9 +983,9 @@ questions:
     Which AWS feature provides first-class SLO tracking (attainment and error-budget
     burn) with auto-instrumentation?
   options:
-  - CloudTrail Lake
-  - AWS Config rules
-  - X-Ray sampling rules
+  - CloudTrail Lake audit queries
+  - AWS Config compliance rules
+  - X-Ray sampling rule reservoirs
   - CloudWatch Application Signals
   answer: 3
   explanation: |
@@ -978,11 +1000,11 @@ questions:
     For a correctness-sensitive checkout API, why might an availability SLI built only
     from ALB/API Gateway 2xx rates be insufficient?
   options:
-  - Gateway metrics are not real-time
+  - ALB and API Gateway publish their request metrics on a fixed 5-minute delay, so an availability SLI built on them always lags real user impact
   - HTTP-status-based SLIs miss semantically-failed 200 responses (a 200 that returned a wrong/empty result),
     so app-level/EMF-derived signals capture true correctness
-  - ALB does not emit any metrics
-  - API Gateway cannot measure availability
+  - ALB emits no per-request status-code metrics whatsoever, so a 2xx-based availability SLI simply cannot be built from load-balancer telemetry
+  - API Gateway exposes no success or error counts, so availability can only ever be inferred indirectly from downstream Lambda duration metrics
   answer: 1
   explanation: |
     A 200 can still be a business failure; gateway status codes miss such semantic
@@ -999,9 +1021,9 @@ questions:
   options:
   - A tiny error budget forces slow, conservative releases and expensive redundancy (e.g. multi-region)
     for imperceptible user benefit
-  - There is no downside; tighter is always better
-  - CloudWatch cannot measure four nines
-  - It automatically doubles your log retention
+  - There is genuinely no downside at all, so raising the target to 99.99% is always the safer choice with no cost to release velocity
+  - CloudWatch metric math cannot compute an availability figure to four-nines precision, so a 99.99% SLO can never actually be tracked
+  - Moving to four nines automatically doubles the retention period on every associated CloudWatch log group, sharply inflating storage cost
   answer: 0
   explanation: |
     Over-tight SLOs shrink the error budget, throttling release velocity and demanding
@@ -1015,11 +1037,11 @@ questions:
     How do X-Ray segments from API Gateway, Lambda and downstream calls get stitched
     into a single trace?
   options:
-  - By matching timestamps within the same minute
-  - By storing them in the same S3 bucket
+  - By correlating segments whose start timestamps fall within the same one-minute bucket on the X-Ray clock
+  - By persisting every service's segments into one shared S3 bucket that X-Ray scans to reassemble the trace
   - A trace ID is propagated (e.g. via the X-Amzn-Trace-Id header) so all segments link to the same trace
     and service map
-  - By using the same CloudWatch namespace
+  - By requiring all participating services to publish their segments under one common CloudWatch metric namespace
   answer: 2
   explanation: |
     A propagated trace ID (X-Amzn-Trace-Id) links segments across services into one
@@ -1033,9 +1055,9 @@ questions:
     In a Lambda → SQS → Lambda pipeline, the X-Ray service map fragments at the queue.
     Most likely cause?
   options:
-  - SQS deletes trace data
-  - X-Ray cannot trace Lambda at all
-  - The trace ID changes every 30 days
+  - SQS strips and permanently deletes any embedded X-Ray trace data as messages pass through the queue
+  - X-Ray is fundamentally incapable of instrumenting or tracing AWS Lambda functions in any configuration
+  - The propagated trace ID is rotated and reissued every 30 days, breaking the link across the queue boundary
   - The trace context wasn't propagated through the SQS message, so the producer and consumer segments
     don't join
   answer: 3
@@ -1052,11 +1074,11 @@ questions:
     Because the sampling decision is made at the trace root and propagated, what is the
     consequence in a fan-out request tree?
   options:
-  - Each service independently decides to sample, so partial traces are common
+  - Each downstream service re-evaluates the sampling rule independently, so partial half-sampled traces are the common result
   - The whole request tree is either sampled or not; low root sampling can leave a rare failing downstream
     branch untraced, so you boost/force-sample at critical entry points
-  - Sampling is disabled automatically for fan-out requests
-  - Only the last service in the chain is sampled
+  - X-Ray automatically disables sampling for any request that fans out to more than one downstream service
+  - Only the final service reached in the longest branch of the fan-out chain ever records a sampled segment
   answer: 1
   explanation: |
     A single root decision propagates, giving coherent whole-tree traces but meaning a
@@ -1073,9 +1095,9 @@ questions:
   options:
   - Cold starts appear as an Initialization subsegment, so you can see init time separately from downstream-call
     subsegments
-  - It cannot; cold starts are invisible to X-Ray
-  - Cold starts are logged only to CloudTrail
-  - Cold-start time is folded into the DynamoDB subsegment
+  - It cannot help here; cold-start initialization time is entirely invisible to X-Ray and never appears in a trace
+  - Cold-start events are emitted only to CloudTrail management logs, so you must correlate them there manually
+  - Cold-start latency is silently folded into the first DynamoDB subsegment, so it looks like database time
   answer: 0
   explanation: |
     X-Ray records an Initialization subsegment for cold starts, so init time is
@@ -1089,10 +1111,10 @@ questions:
   question: |
     Which is typically the DOMINANT cost of CloudWatch Logs?
   options:
-  - Storage per GB
-  - The number of log groups
+  - Archived storage per GB retained after ingestion
+  - The total number of distinct log groups created
   - Ingestion per GB (data ingested into logs)
-  - The number of log streams
+  - The total number of open log streams per group
   answer: 2
   explanation: |
     Ingestion per GB usually dominates CloudWatch Logs cost, with storage and
@@ -1106,9 +1128,9 @@ questions:
     A service does 1,000 req/s and writes a 2 KB structured log per request. Roughly
     how much log data is ingested per day, and why does it matter?
   options:
-  - ~2 MB/day — negligible
-  - ~2 GB/day — trivial
-  - ~17 TB/day — impossible to store
+  - ~2 MB/day (treating the 2 KB as a per-day total) — negligible and safe to ignore
+  - ~2 GB/day (counting only one write per minute rather than per second) — trivially cheap
+  - ~17 TB/day (multiplying the per-second bytes by requests again) — impossible to store affordably
   - ~170 GB/day (1,000 × 2 KB × 86,400) — a large monthly ingestion bill before storage or Insights scans,
     motivating sampling/tiering/retention
   answer: 3
@@ -1123,11 +1145,11 @@ questions:
   question: |
     Which change reduces observability cost with the LEAST loss of high-value signal?
   options:
-  - Stop tracing errors to save X-Ray cost
+  - Stop sampling and tracing failed/error requests entirely to shave X-Ray ingestion cost off the bill
   - Set retention on log groups, tier bulk debug logs to S3/IA, sample happy-path traces, and bound metric
     cardinality — while keeping SLIs, errors and security logs at full fidelity
-  - Delete all dashboards
-  - Turn off all alarms overnight
+  - Delete every operational dashboard across all teams to cut the console and query overhead
+  - Turn off all CloudWatch alarms overnight and on weekends to avoid off-hours evaluation charges
   answer: 1
   explanation: |
     The senior move economizes on low-value bulk (retention, tiering, sampling
@@ -1144,9 +1166,9 @@ questions:
   options:
   - Data events (e.g. S3 object-level and Lambda invoke logging) and CloudTrail Insights, which are high-volume
     and charged
-  - Management events (one free copy is included)
-  - Viewing Event history in the console
-  - Creating an organization trail
+  - Management events, since the single free copy included per account is the biggest recurring line item
+  - Viewing the 90-day Event history in the console, which is metered per query against the retained events
+  - Simply creating an organization trail, which carries a fixed per-account monthly subscription charge
   answer: 0
   explanation: |
     Data events and Insights are the expensive, high-volume parts; management events
@@ -1161,11 +1183,11 @@ questions:
     Which failure does a threshold alarm with treatMissingData=notBreaching FAIL to
     catch?
   options:
-  - A sustained breach above the threshold
-  - A brief spike above the threshold
+  - A sustained breach that holds well above the threshold across many consecutive evaluation periods
+  - A brief transient spike that momentarily crosses the threshold before falling back below it
   - A source that stops emitting the metric entirely — the alarm may sit in INSUFFICIENT_DATA and never
     page (a silent outage)
-  - A gradual increase toward the threshold
+  - A slow gradual climb that creeps steadily upward until it finally crosses the threshold value
   answer: 2
   explanation: |
     If the source dies and emits no data, notBreaching/missing can leave the alarm
@@ -1180,9 +1202,9 @@ questions:
     You monitor a service only with in-region CloudWatch alarms. Which failure is your
     design most likely to miss, and how do you close the gap?
   options:
-  - A CPU spike; fix with high-resolution metrics
-  - A single slow request; fix with more dashboards
-  - A log retention misconfiguration; fix with IA class
+  - A transient CPU spike on one instance; close the gap by switching to 1-second high-resolution metrics
+  - A single unusually slow request; close the gap by adding several more per-service triage dashboards
+  - A log-group retention misconfiguration; close the gap by moving those groups to the Infrequent Access class
   - A regional impairment that also degrades your in-region monitoring; close it with external synthetics/canaries
     from outside the region and cross-region or central-account alarms
   answer: 3
@@ -1197,10 +1219,10 @@ questions:
   question: |
     What is a core reliability principle for a monitoring system?
   options:
-  - It should share the same failure domain as the monitored system for consistency
+  - It should share the same hosts and failure domain as the monitored system so their availability stays consistent
   - It should be more reliable than the thing it monitors and fail loud, not silent
-  - It should only run during business hours
-  - It should sample everything at 5% to save cost
+  - It should run only during staffed business hours, since alerts outside those hours cannot be actioned anyway
+  - It should uniformly sample every signal at a flat 5% rate to keep monitoring cost low across the fleet
   answer: 1
   explanation: |
     Monitoring must be more reliable than what it watches and must fail loudly (alert on
@@ -1216,9 +1238,9 @@ questions:
   options:
   - Structured CloudWatch Logs (queried in Insights) pivoted by trace_id, correlated with the X-Ray trace
     if it was sampled
-  - A CloudWatch metric alarm history
-  - A CloudTrail data-event lookup
-  - An AWS Config configuration timeline
+  - The CloudWatch metric alarm state-change history for the service over the incident window
+  - A CloudTrail data-event lookup filtered to that request's API calls and caller identity
+  - An AWS Config configuration timeline showing how the resource's state changed around that time
   answer: 0
   explanation: |
     Per-request detail lives in structured logs (Insights), correlated by trace_id to
@@ -1233,10 +1255,10 @@ questions:
     operate and tight integration, accepting 30-day retention and coarser profiling.
     Best choice?
   options:
-  - A third-party APM with agents on every host
-  - Self-hosted Jaeger on EC2 that you operate
+  - A third-party APM product requiring a licensed collector agent deployed and maintained on every host
+  - A self-hosted Jaeger backend on EC2 whose storage, scaling and upgrades your team must operate
   - AWS X-Ray (optionally instrumented via ADOT/OTel for future portability)
-  - CloudTrail data events as a trace store
+  - CloudTrail data events repurposed as the trace store, correlating segments from the API-call log
   answer: 2
   explanation: |
     X-Ray is integrated, zero-infra and cost-effective, matching AWS-native cost-
@@ -1251,9 +1273,9 @@ questions:
     Which question is best answered by a metric (or metric filter/EMF) rather than a
     log or trace?
   options:
-  - The exact payload of one failed request
-  - The step-by-step call path of a request across services
-  - Who deleted an IAM role yesterday
+  - The exact request and response payload captured for one specific failed request
+  - The step-by-step call path a single request took as it fanned out across services
+  - The identity and timestamp of whoever deleted a particular IAM role yesterday
   - A continuously-alarmable, cheap signal like error rate over time
   answer: 3
   explanation: |
@@ -1269,12 +1291,12 @@ questions:
     real-time SLO alerting per service, and low-cost bulk log retention. Which design
     is most appropriate end-to-end?
   options:
-  - Per-account Event history for audit; alarm on CPU; keep all logs in CloudWatch with never-expire retention
+  - Per-account 90-day Event history as the 7-year audit record; page on host CPU utilization for SLOs; keep every log group in CloudWatch on the never-expire default
   - Organization CloudTrail (or CloudTrail Lake) to a central S3 bucket for 7-year immutable audit; CloudWatch
     Application Signals SLOs with symptom/burn-rate alarms per service; short CloudWatch log retention
     with bulk logs tiered to S3/IA
-  - X-Ray for audit; Config for SLOs; DynamoDB for logs
-  - Single-account CloudTrail; anomaly-detection alarms on every host metric; 7-year CloudWatch log retention
+  - X-Ray traces as the immutable audit store; AWS Config rules to track SLO attainment; a DynamoDB table as the primary log archive
+  - Single-account CloudTrail with no org aggregation; anomaly-detection alarms on every per-host metric; 7-year retention held entirely in CloudWatch Logs
   answer: 1
   explanation: |
     The correct end-to-end design uses an org trail / CloudTrail Lake for centralized
@@ -1291,9 +1313,9 @@ questions:
   options:
   - Monitoring watches for known/predicted failure modes; observability lets you ask arbitrary questions
     to explain unpredicted failures
-  - They are identical terms
-  - Observability only uses metrics; monitoring only uses logs
-  - Monitoring is serverless; observability requires servers
+  - They are two interchangeable names for exactly the same practice, so any dashboard, alarm, or query built for one is by definition the other
+  - Observability is restricted to consuming metrics alone, while monitoring is restricted to logs alone, and neither is ever permitted to use traces
+  - Monitoring is by definition a serverless-only capability, whereas observability can only ever be achieved by running dedicated always-on servers
   answer: 0
   explanation: |
     Monitoring targets known failure modes (predefined dashboards/alarms), while
@@ -1306,11 +1328,14 @@ questions:
   question: |
     Which statement about CloudWatch Logs Insights is accurate for capacity planning?
   options:
-  - Queries return unlimited rows and are free
-  - Queries scan all log groups in the account by default regardless of selection
+  - Queries return an unlimited number of rows at no charge, so capacity planning is unnecessary because neither
+    result size nor data scanned ever affects the bill
+  - Queries always scan every log group in the account by default regardless of the groups you select, so
+    narrowing the selection has no effect on the volume of data read
   - You are billed per GB of data scanned per query and results are capped (up to 10,000 rows), so scoping
     time range and log groups controls cost
-  - Insights can only query the last hour of logs
+  - Insights can only ever query the most recent one hour of log events, so any investigation of older data
+    must be run against an S3 export instead
   answer: 2
   explanation: |
     Insights bills per GB scanned and caps returned rows (up to 10,000), so narrowing
@@ -1324,9 +1349,12 @@ questions:
     By default, at what interval does EC2 basic monitoring publish metrics, and what
     does detailed monitoring change?
   options:
-  - 1 second basic; 1 minute detailed
-  - 1 minute basic; 10 seconds detailed
-  - 15 minutes basic; 5 minutes detailed
+  - 1-second basic monitoring included free, with detailed monitoring extending the interval out to 1-minute
+    metrics for a per-instance fee
+  - 1-minute basic monitoring by default, with detailed monitoring dropping the publish interval down to
+    high-resolution 10-second metrics for a fee
+  - 15-minute basic monitoring by default, with detailed monitoring improving the publish interval to
+    5-minute metrics for an additional charge
   - 5 minutes basic (free); detailed monitoring gives 1-minute metrics (paid)
   answer: 3
   explanation: |
