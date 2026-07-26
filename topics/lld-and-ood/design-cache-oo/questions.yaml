@@ -13,7 +13,7 @@ questions:
       - "Design a sharded cache with consistent hashing, since real caches are distributed"
       - "Ask, then explicitly scope to a single-machine in-process cache and note that distribution is an HLD concern"
       - "Skip scoping entirely and start coding the HashMap, since requirements are obvious for a cache"
-      - "Design for Redis compatibility from the start so the design ports later"
+      - "Design for Redis wire-protocol compatibility from the outset so the in-process design can be lifted into a cluster later"
     answer: 1
     explanation: |
       The machine-coding round grades single-machine OO design. The strong move is to
@@ -29,9 +29,9 @@ questions:
       Why do most cache designs disallow null values (rather than storing them)?
     options:
       - "Null values make get(key) ambiguous: callers cannot distinguish 'cached null' from a miss"
-      - "HashMap cannot store null values in Java"
-      - "Null values break the doubly linked list used by LRU"
-      - "Storing null wastes an entry slot that eviction cannot reclaim"
+      - "java.util.HashMap throws NullPointerException on null values, so the cache is forced to reject them"
+      - "Null values corrupt the doubly linked recency list used by LRU during move-to-front operations"
+      - "Storing null wastes an entry slot that the eviction policy can never select as a victim to reclaim"
     answer: 0
     explanation: |
       If null can be a legitimate stored value, a null return from get() no longer means
@@ -46,8 +46,8 @@ questions:
     question: |
       For LRU semantics, which operations should refresh a key's recency?
     options:
-      - "Only get; put is a write, not an access"
-      - "Only put on a new key"
+      - "Only get hits refresh recency; put is a write path, not a read access"
+      - "Only put on a brand-new key counts; reads never affect recency"
       - "Both get hits and put (insert or update) count as accesses"
       - "Only explicit touch(key) calls made by the client"
     answer: 2
@@ -64,9 +64,9 @@ questions:
     question: |
       In the recommended decomposition, what is the responsibility of InMemoryCache itself?
     options:
-      - "Maintain the doubly linked recency list and move nodes to the front on access"
-      - "Track per-key frequencies and the minimum frequency bucket"
-      - "Compute TTL deadlines and expire entries"
+      - "Maintain the doubly linked recency list directly and move nodes to the front of it on every access"
+      - "Track per-key access frequencies and maintain the minimum-frequency bucket for eviction decisions"
+      - "Compute per-entry TTL deadlines and lazily expire stale entries when they are read back"
       - "Orchestrate: manage storage and capacity, delegate victim selection to the policy, and fire eviction events"
     answer: 3
     explanation: |
@@ -83,10 +83,10 @@ questions:
       What is the design purpose of a CacheEntry<K,V> class rather than storing raw values
       in the map?
     options:
-      - "It makes the cache generic over key and value types"
+      - "It is what makes the cache generic over both its key and its value type parameters"
       - "It holds per-entry metadata (timestamps, hit count) without polluting the stored value type"
-      - "It is required for the HashMap to compute hash codes"
-      - "It reduces memory usage compared to storing values directly"
+      - "It is required for the backing HashMap to compute correct hash codes for stored entries"
+      - "It reduces memory usage compared to storing the values directly in the backing map"
     answer: 1
     explanation: |
       CacheEntry is a small value object carrying the key, value, and bookkeeping metadata
@@ -103,9 +103,9 @@ questions:
       surgery, TTL checks, and locking. In the LLD round, what is the primary criticism?
     options:
       - "It violates Single Responsibility: storage, eviction, expiry, and concurrency are separate reasons to change fused into one class"
-      - "It is too slow, since one class cannot achieve O(1) operations"
-      - "200 lines is over the limit most interviewers allow"
-      - "It cannot be unit tested because it has private methods"
+      - "It is too slow, because fusing hashing and list surgery into one class breaks O(1) operations"
+      - "At 200 lines it exceeds the strict class-size limit that most machine-coding interviewers enforce"
+      - "It cannot be unit tested at all, since its private helper methods are unreachable from tests"
     answer: 0
     explanation: |
       The code may be perfectly correct and O(1) — it would pass a DSA round. The LLD round
@@ -121,10 +121,10 @@ questions:
       The requirement "support LRU, LFU, and FIFO eviction, selectable at construction time"
       most directly calls for which pattern?
     options:
-      - "State — the cache transitions between eviction states"
+      - "State — the cache transitions between LRU, LFU, and FIFO states as its load changes at runtime"
       - "Template Method — a base cache with abstract evict() overridden per subclass"
       - "Strategy — an EvictionPolicy interface with interchangeable implementations injected into the cache"
-      - "Singleton — one shared policy instance for all caches"
+      - "Singleton — one globally shared eviction-policy instance reused across every cache in the process"
     answer: 2
     explanation: |
       Eviction is a family of interchangeable algorithms chosen per cache instance — the
@@ -141,10 +141,10 @@ questions:
       Why is `if (policy == LRU) {...} else if (policy == LFU) {...}` inside put() worse
       than an injected EvictionPolicy, even though both "work"?
     options:
-      - "The if-else chain is slower because branch prediction fails on enum comparisons"
+      - "The if-else chain is measurably slower because the CPU's branch predictor mispredicts on enum comparisons"
       - "Every new policy forces edits to tested cache code (Open-Closed violation) and the cache must carry every policy's bookkeeping fields"
-      - "if-else chains cannot handle more than three branches cleanly"
-      - "Enums cannot be extended with new values in Java"
+      - "if-else chains cannot handle more than three branches without becoming unreadable and error-prone"
+      - "Java enums are final and cannot be extended with new constant values at a later time"
     answer: 1
     explanation: |
       The cost is structural, not performance. With the conditional, adding SLRU means
@@ -160,9 +160,9 @@ questions:
       You need to flush evicted entries to a database asynchronously (write-behind) without
       coupling the cache to persistence. Which mechanism fits?
     options:
-      - "Subclass InMemoryCache and override evictOne() to write to the DB"
-      - "Have EvictionPolicy perform the DB write when it selects a victim"
-      - "Add a DatabaseWriter field to InMemoryCache and call it in evictOne()"
+      - "Subclass InMemoryCache and override evictOne() so the subclass writes the victim to the DB"
+      - "Have the EvictionPolicy perform the database write at the moment it selects a victim key"
+      - "Add a DatabaseWriter field to InMemoryCache and call it directly inside the evictOne() method"
       - "Register a CacheEventListener (Observer) whose onEviction enqueues the entry for an async flusher"
     answer: 3
     explanation: |
@@ -179,10 +179,10 @@ questions:
       Why is TTL expiry modeled as a decorator wrapping Cache rather than as subclasses
       like TtlLruCache and TtlLfuCache?
     options:
-      - "Decorators run faster than subclasses because they avoid virtual dispatch"
-      - "Subclassing a generic class is not allowed in Java"
+      - "Decorators run faster than subclasses because delegation avoids the cost of virtual method dispatch"
+      - "Subclassing a generic class such as InMemoryCache<K,V> is not permitted by the Java type system"
       - "TTL is orthogonal to eviction policy; subclassing multiplies classes per combination, while one decorator composes with any base cache"
-      - "Decorators are the only way to intercept get() calls"
+      - "A decorator is the only mechanism in Java capable of intercepting get() calls before they run"
     answer: 2
     explanation: |
       TTL, statistics, thread-safety, and eviction policy are independent axes. With
@@ -217,10 +217,10 @@ questions:
       In the recommended contract, evictKey() returns the victim but does NOT remove it from
       storage — the cache does the removal. What is the design reason?
     options:
-      - "The policy cannot access the storage map because it is private"
+      - "The policy is physically unable to touch the storage map because that field is private to the cache"
       - "Storage mutation is the cache's single responsibility; splitting it across policy and cache would desynchronize ownership and duplicate removal logic"
-      - "Returning the key is faster than removing it"
-      - "It allows evictKey() to be called speculatively without side effects"
+      - "Returning the victim key is a cheaper O(1) operation than actually unlinking and removing it"
+      - "It allows evictKey() to be called speculatively as a pure read, leaving the policy's own structures untouched"
     answer: 1
     explanation: |
       One class owns storage mutation: the cache. The policy's job ends at *selection*.
@@ -236,9 +236,9 @@ questions:
     question: |
       Callers of the cache should declare their dependency as which type?
     options:
-      - "LruEvictionPolicy<K>, to guarantee LRU behavior"
-      - "InMemoryCache<K,V>, since that is the real implementation"
-      - "HashMap<K,V>, since a cache is fundamentally a map"
+      - "LruEvictionPolicy<K>, so the compiler statically guarantees least-recently-used behavior at the call site"
+      - "InMemoryCache<K,V>, since that is the real concrete implementation clients ultimately run against"
+      - "HashMap<K,V>, since a cache is fundamentally just a map with a bounded number of entries"
       - "Cache<K,V>, the interface — so implementations and decorators can be substituted freely"
     answer: 3
     explanation: |
@@ -255,10 +255,10 @@ questions:
       Why does EvictionPolicy<K> take only keys (keyAccessed, keyRemoved, evictKey) and
       never see values?
     options:
-      - "Values may be null, which policies cannot handle"
-      - "Java generics forbid two type parameters on an interface"
+      - "Values may be null, and eviction policies have no defined way to handle a null payload"
+      - "Java generics forbid declaring two separate type parameters on a single interface definition"
       - "Victim selection only needs ordering metadata about keys; excluding values keeps the policy lightweight and reusable across caches"
-      - "Passing values would force the policy to deep-copy them"
+      - "Passing values in would force the policy to defensively deep-copy each one to stay safe"
     answer: 2
     explanation: |
       LRU needs recency order, LFU needs counts — both are properties of *keys*. Giving the
@@ -272,10 +272,10 @@ questions:
     question: |
       In put(), where must the capacity check and eviction happen?
     options:
-      - "Before checking whether the key already exists, so the cache never exceeds maxSize"
+      - "Before checking whether the key already exists, so the cache size never once exceeds maxSize"
       - "After confirming the key is new, and before inserting it — updates to existing keys must never trigger eviction"
-      - "After inserting, evict if size exceeds maxSize"
-      - "In a background thread that periodically trims the cache to maxSize"
+      - "After inserting the new entry, then evict a victim if the resulting size exceeds maxSize"
+      - "In a background sweeper thread that periodically trims the cache back down to maxSize"
     answer: 1
     explanation: |
       Updating an existing key doesn't grow the cache, so evicting on update is a classic
@@ -292,9 +292,9 @@ questions:
       instantiating `new LruEvictionPolicy()` internally. What does this buy?
     options:
       - "Dependency Inversion: the cache depends only on the abstraction, so policies can be swapped (including scripted fakes in tests) without touching cache code"
-      - "It avoids a null check on the policy field"
-      - "Constructor injection is required for the class to be generic"
-      - "It makes the cache immutable"
+      - "It removes the need for a defensive null check on the policy field inside every method"
+      - "Constructor injection is a language prerequisite for declaring the class generic over K and V"
+      - "It makes the resulting cache instance fully immutable and safe to share across threads"
     answer: 0
     explanation: |
       Constructor injection is the mechanism that makes the Strategy pattern real: the
@@ -309,9 +309,9 @@ questions:
     question: |
       Why does the LRU policy pair its doubly linked list with a HashMap<K, Node<K>> index?
     options:
-      - "The map stores the values while the list stores the keys"
-      - "The list alone cannot remember insertion order"
-      - "It halves the memory footprint of the list"
+      - "The map stores the actual values while the linked list separately stores just the keys"
+      - "The linked list on its own has no way to remember the insertion order of its nodes"
+      - "Pairing the two structures roughly halves the total memory footprint of the recency list"
       - "Without the index, finding a key's node to move it to the front is O(n) list traversal; the index makes keyAccessed O(1)"
     answer: 3
     explanation: |
@@ -328,10 +328,10 @@ questions:
       Why is java.util.LinkedList<K> (used via its public API) a poor recency structure for
       the LRU policy, compared to a hand-rolled DoublyLinkedList with an external node index?
     options:
-      - "LinkedList is singly linked, so removeLast is O(n)"
+      - "java.util.LinkedList is singly linked internally, which makes its removeLast operation O(n)"
       - "Removing a specific key from the middle requires an O(n) scan, because callers never hold node references — only the hand-rolled list plus node map gives O(1) unlink"
-      - "LinkedList does not preserve insertion order"
-      - "LinkedList cannot store generic types"
+      - "java.util.LinkedList reorders its elements on iteration and does not preserve insertion order"
+      - "java.util.LinkedList is a raw-typed collection that cannot hold generic key types"
     answer: 1
     explanation: |
       java.util.LinkedList is doubly linked (A is false), but its API hides nodes:
@@ -347,10 +347,10 @@ questions:
       In the OO decomposition, why should the linked-list Node<K> type be package-private
       and never appear in EvictionPolicy's public interface?
     options:
-      - "Public inner classes are a performance anti-pattern"
-      - "Nodes contain values, which must stay private"
+      - "Public inner classes are a JVM performance anti-pattern because each one forces the compiler to emit a hidden synthetic accessor that defeats method inlining"
+      - "Node objects hold the cached values directly, so exposing them would let callers mutate stored payloads behind the cache's back and break encapsulation"
       - "Nodes are an implementation detail of the LRU strategy; leaking them would couple the cache to one policy's internals and break substitutability with LFU/FIFO"
-      - "The garbage collector handles package-private classes more efficiently"
+      - "The garbage collector reclaims package-private classes more efficiently, since their tighter visibility lets the JIT prove the instances never escape"
     answer: 2
     explanation: |
       The whole point of EvictionPolicy is that the cache doesn't know whether recency is
@@ -366,9 +366,9 @@ questions:
       An interviewer asks: "Why not just use LinkedHashMap with accessOrder=true and
       removeEldestEntry?" What is the strongest answer?
     options:
-      - "LinkedHashMap is deprecated in modern Java"
-      - "LinkedHashMap's LRU is O(log n) rather than O(1)"
-      - "removeEldestEntry cannot actually remove entries"
+      - "LinkedHashMap was deprecated in Java 9 in favor of SequencedMap, so relying on its access-order mode is no longer supported"
+      - "LinkedHashMap's access-order reordering degrades to O(log n) per get because it rebalances an internal red-black tree to track recency"
+      - "removeEldestEntry can only signal a boolean and cannot actually unlink the eldest entry, so you must still evict manually on every put"
       - "It is the right production shortcut for LRU-only, but the explicit design exists for policy pluggability (LFU/FIFO drop into the same seam) — which LinkedHashMap cannot offer"
     answer: 3
     explanation: |
@@ -384,9 +384,9 @@ questions:
       What do head/tail sentinel nodes buy the DoublyLinkedList implementation?
     options:
       - "They eliminate null checks at the list edges — addFirst, removeLast, and unlink follow the same pointer logic regardless of list size"
-      - "They store the most and least recently used values for O(1) lookup"
-      - "They prevent the list from ever being empty, avoiding eviction bugs"
-      - "They make the list thread-safe"
+      - "They cache the most and least recently used values inside the two sentinels so peek operations skip the node map entirely"
+      - "They keep the list from ever being logically empty, which the eviction routine relies on to avoid returning a null victim on the last removal"
+      - "They make the list operations thread-safe by acting as fixed lock points that every writer must acquire before mutating"
     answer: 0
     explanation: |
       With sentinels, every real node always has non-null prev and next, so there are no
@@ -401,10 +401,10 @@ questions:
     question: |
       In the O(1) LFU policy, what is the role of the minFrequency field?
     options:
-      - "It caps how high any key's frequency may grow"
+      - "It caps how high any single key's access frequency may grow, so counts saturate rather than overflow the frequency map's integer values"
       - "It points at the lowest non-empty frequency bucket so evictKey() finds a victim in O(1) instead of scanning bucket levels"
-      - "It counts the number of distinct frequencies in use"
-      - "It records the frequency of the most recently evicted key"
+      - "It counts the number of distinct frequency buckets currently in use, letting the policy resize its bucket array when the count crosses a threshold"
+      - "It records the frequency level of the most recently evicted key so the next eviction can resume scanning from that same bucket"
     answer: 1
     explanation: |
       Without minFrequency, evictKey() would need to search upward from frequency 1 for a
@@ -420,10 +420,10 @@ questions:
       Two LFU entries tie at the minimum frequency. Which one does the standard design evict,
       and what structure encodes that choice?
     options:
-      - "The one with the larger value, found by comparing entries"
-      - "A random one, chosen from a HashSet bucket"
+      - "The one holding the larger value, found by comparing the two entries' payloads with the value type's natural ordering"
+      - "A uniformly random one of the tied keys, selected by iterating a plain HashSet bucket whose order is effectively arbitrary"
       - "The least recently used of the tied keys — the LinkedHashSet bucket's insertion order makes it the first element"
-      - "The one inserted most recently, from a stack-ordered bucket"
+      - "The most recently inserted of the tied keys, popped from a stack-ordered (LIFO) bucket that tracks arrival order"
     answer: 2
     explanation: |
       The standard tie-break is LRU-within-frequency. Using LinkedHashSet (not HashSet) for
@@ -439,10 +439,10 @@ questions:
       A scan-heavy workload (many one-time keys) hits a plain LFU cache holding long-lived
       hot entries. What pathology emerges?
     options:
-      - "The hot entries are evicted first because scans raise minFrequency"
+      - "The long-lived hot entries are evicted first, because each one-time scan key raises minFrequency and drags the eviction pointer up past them"
       - "New keys enter at frequency 1 (the minimum) and evict each other, while old high-frequency keys stay pinned even if they are no longer accessed"
-      - "The frequency map overflows because counts grow without bound"
-      - "minFrequency becomes negative, corrupting eviction"
+      - "The frequency map overflows because per-key counts grow without bound and eventually wrap past Integer.MAX_VALUE into negative territory"
+      - "minFrequency drifts negative once empty buckets accumulate below it, and eviction then indexes an invalid bucket and corrupts the policy"
     answer: 1
     explanation: |
       Plain LFU has no aging: history dominates. One-time scan keys churn at frequency 1
@@ -459,9 +459,9 @@ questions:
       which code changes?
     options:
       - "A new LfuEvictionPolicy class is added and the factory gains one case — InMemoryCache is untouched"
-      - "InMemoryCache.put() gains a frequency-tracking branch"
-      - "CacheEntry is subclassed into LfuCacheEntry with a frequency field"
-      - "Cache<K,V> gains a getFrequency(key) method"
+      - "InMemoryCache.put() gains an extra frequency-tracking branch that increments a per-key counter before delegating to the policy"
+      - "CacheEntry is subclassed into an LfuCacheEntry that carries a frequency field the policy reads during eviction"
+      - "Cache<K,V> gains a getFrequency(key) method so callers can inspect an entry's access count directly"
     answer: 0
     explanation: |
       This is the payoff sentence of the whole design and worth saying verbatim in the
@@ -477,9 +477,9 @@ questions:
       Why is guarding get() with the READ lock of a ReentrantReadWriteLock incorrect for
       this LRU cache?
     options:
-      - "Read locks are slower than write locks"
-      - "ReentrantReadWriteLock does not allow multiple concurrent readers"
-      - "get() must return before the lock can be released"
+      - "A read lock carries higher acquisition overhead than a write lock because it must atomically increment a shared reader counter on every entry"
+      - "ReentrantReadWriteLock serializes readers just like writers, so multiple threads can never hold the read lock at the same time anyway"
+      - "get() must fully return its value before the read lock can be released, which serializes callers and defeats the point of a shared lock"
       - "get() is not read-only here: it calls keyAccessed, which restructures the recency list — concurrent 'readers' would corrupt shared pointers"
     answer: 3
     explanation: |
@@ -496,10 +496,10 @@ questions:
       Replacing the storage HashMap with ConcurrentHashMap still leaves the cache unsafe
       under concurrent puts. Why?
     options:
-      - "ConcurrentHashMap does not support generic keys"
+      - "ConcurrentHashMap cannot be parameterized with generic key types, so the cache loses its compile-time key safety"
       - "put() is a compound check-then-act (containsKey, size check, evict, insert) that must be atomic with the policy update — a thread-safe map does not make multi-step operations atomic"
-      - "ConcurrentHashMap locks the entire table, deadlocking with the policy"
-      - "ConcurrentHashMap permits null keys, breaking the null contract"
+      - "ConcurrentHashMap takes a single table-wide lock on every write, which deadlocks against the lock the eviction policy already holds"
+      - "ConcurrentHashMap silently permits null keys and values, breaking the cache's no-null contract and turning misses into ambiguous results"
     answer: 1
     explanation: |
       Two threads can both pass the size check and both evict (or neither), and the map and
@@ -515,10 +515,10 @@ questions:
       What is the design advantage of providing thread safety via a SynchronizedCache
       decorator instead of putting synchronized on InMemoryCache's methods?
     options:
-      - "The decorator eliminates lock contention entirely"
-      - "synchronized methods cannot call private helpers"
+      - "The decorator eliminates lock contention entirely by giving each caller its own private copy of the underlying cache"
+      - "A synchronized method cannot invoke the class's private helper methods, so the base cache would have to expose its internals"
       - "Single-threaded users pay no locking cost, and concurrency composes as a layer like TTL — the base cache stays simple"
-      - "Java forbids synchronized methods on generic classes"
+      - "Java forbids the synchronized keyword on methods of a class declared generic over its type parameters"
     answer: 2
     explanation: |
       Same rationale as Collections.synchronizedMap: keep the core lock-free and wrap when
@@ -534,10 +534,10 @@ questions:
       Asked "how do production caches like Caffeine get high concurrent read throughput when
       every LRU read mutates recency?", what is the accurate one-line answer?
     options:
-      - "They shard the cache into segments and take one global lock per segment forever"
+      - "They shard the cache into fixed segments and take one segment-scoped lock per read, so contention is bounded but every get still blocks"
       - "They make reads lock-free on a concurrent map and record accesses into buffers that are replayed into the eviction policy asynchronously, accepting slightly stale ordering"
-      - "They switch to FIFO under load since it needs no recency updates"
-      - "They pin all hot entries so reads never touch the policy"
+      - "They automatically downgrade to a FIFO policy under high load, since FIFO ordering needs no per-read recency update"
+      - "They pin all frequently hit entries into a separate lock-free region so reads of hot keys never touch the eviction policy at all"
     answer: 1
     explanation: |
       Caffeine decouples the read path from policy maintenance: gets hit a ConcurrentHashMap
@@ -554,9 +554,9 @@ questions:
       active cleanup (background sweeper)?
     options:
       - "Lazy is O(1) with no extra threads but lets expired entries occupy capacity until touched; active reclaims memory promptly at the cost of a background thread and coordination"
-      - "Lazy is more accurate; active can never expire entries on time"
-      - "Active is always better; lazy exists only for single-threaded languages"
-      - "Lazy requires a min-heap of deadlines; active does not"
+      - "Lazy expiry is strictly more accurate because it checks the clock on every access, whereas an active sweeper can never expire an entry at its exact deadline"
+      - "Active cleanup is always the better choice; lazy expiration exists only as a fallback for single-threaded languages that cannot spawn a sweeper"
+      - "Lazy expiry requires maintaining a min-heap of deadlines to know which entry to check next, while active cleanup needs no such structure"
     answer: 0
     explanation: |
       The interview-grade answer is "lazy first, sweeper as an optional enhancement — they
@@ -571,10 +571,10 @@ questions:
     question: |
       Which statement correctly contrasts write-through and write-behind caching?
     options:
-      - "Write-through persists asynchronously on eviction; write-behind writes synchronously on put"
+      - "Write-through persists to the backing store asynchronously at eviction time, while write-behind writes both cache and store synchronously on every put"
       - "Write-through writes cache and backing store synchronously on put (simple, consistent, slower writes); write-behind defers persistence to an async flusher (fast writes, loss risk on crash)"
-      - "Write-through skips the cache and writes only to the store"
-      - "Write-behind guarantees durability because entries persist before eviction"
+      - "Write-through bypasses the cache entirely and writes straight to the backing store, so the cache is only ever populated on subsequent reads"
+      - "Write-behind guarantees durability because it always flushes an entry to the store before that entry is allowed to be evicted"
     answer: 1
     explanation: |
       Write-through trades write latency for simplicity and consistency; write-behind
@@ -590,9 +590,9 @@ questions:
       To build a two-level cache (L1 in-memory, L2 Redis-backed), the recommended structure is
       a TieredCache that:
     options:
-      - "Extends InMemoryCache and overrides get() to also query Redis"
-      - "Merges both levels' entries into one HashMap keyed by level"
-      - "Requires changing the Cache interface to add getFromLevel(int level)"
+      - "Extends InMemoryCache and overrides get() so that after an L1 miss the same instance also queries the Redis-backed store"
+      - "Merges both levels' entries into a single HashMap keyed by a (level, key) pair so one lookup can span L1 and L2"
+      - "Requires adding a getFromLevel(int level) method to the Cache interface so callers can address each tier explicitly"
       - "Implements Cache and composes two Cache instances — get checks L1, falls back to L2, and promotes hits into L1"
     answer: 3
     explanation: |
@@ -609,10 +609,10 @@ questions:
       You add a LoadingCacheDecorator that computes values on miss via a loader function.
       Under concurrency, what additional problem must you design for?
     options:
-      - "The loader may return a subtype of V, breaking generics"
+      - "The loader may return a subtype of V rather than V exactly, which breaks the decorator's generic bounds at runtime with a ClassCastException"
       - "Cache stampede: many threads missing the same key simultaneously all invoke the expensive loader — mitigate with per-key locking or a Future-based entry so one thread loads while others wait"
-      - "The decorator cannot see misses because get returns null"
-      - "Loaded values bypass eviction and can exceed maxSize"
+      - "The decorator cannot observe misses at all, because a miss makes get return null before any decorator code on the wrapped cache runs"
+      - "Values inserted by the loader bypass the eviction policy's bookkeeping entirely, so the cache can silently grow past its configured maxSize"
     answer: 1
     explanation: |
       Thundering herd on a hot missing key is the signature load-through problem. The
@@ -629,9 +629,9 @@ questions:
       for extensions, your first question to yourself should be:
     options:
       - "Which existing seam (Strategy, Decorator, Observer, Factory) does this land on, so I add a class instead of editing one?"
-      - "Which existing class has the most room for a new field?"
-      - "Can I fit it into CacheEntry to avoid new classes?"
-      - "Should I rewrite the cache in a more dynamic language first?"
+      - "Which existing class currently has the most room to absorb a new counter field without growing too large to review?"
+      - "Can I tuck the hit/miss counters into CacheEntry itself so the feature needs no new classes at all?"
+      - "Should I first rewrite the cache in a more dynamic language where adding cross-cutting counters is easier?"
     answer: 0
     explanation: |
       Every follow-up in this problem maps to a seam: stats fit a StatsCacheDecorator (or a
@@ -646,10 +646,10 @@ questions:
       A candidate writes: `if (storage.size() >= maxSize) evictOne();` as the FIRST line of
       put(), before checking whether the key exists. What bug results?
     options:
-      - "New keys are silently dropped when the cache is full"
-      - "The cache can exceed maxSize on updates"
+      - "New keys are silently dropped whenever the cache is full, because the early eviction consumes the slot before the insert can use it"
+      - "The cache can transiently exceed maxSize on updates, since the size check runs before the update rather than after the new entry lands"
       - "Updating an existing key in a full cache wrongly evicts some other entry, even though the update does not grow the cache"
-      - "evictOne() throws because the victim may equal the incoming key"
+      - "evictOne() throws an exception because the selected victim may turn out to equal the incoming key being written"
     answer: 2
     explanation: |
       Updates don't change size, so they must never evict. With the check first, a full
@@ -665,10 +665,10 @@ questions:
       The central correctness invariant introduced by splitting the cache from its eviction
       policy is:
     options:
-      - "The policy must never hold more than maxSize keys in its structures"
+      - "The policy's internal structures must never hold more than maxSize keys, even momentarily during an evict-then-insert sequence"
       - "Storage and policy must always track exactly the same key set — every storage mutation is mirrored by a keyAccessed or keyRemoved call"
-      - "minFrequency must always equal 1"
-      - "CacheEntry timestamps must be monotonically increasing across keys"
+      - "minFrequency must always equal 1 so that the very next eviction is guaranteed to find a victim in the lowest bucket"
+      - "CacheEntry timestamps must be strictly monotonically increasing across every key, so recency comparisons never see a tie"
     answer: 1
     explanation: |
       Separation of concerns creates a synchronization obligation: if a key exists in
@@ -685,9 +685,9 @@ questions:
       entry. Under the coarse-lock decorator, what risk does this create and what is a sound
       mitigation?
     options:
-      - "Stack overflow from infinite recursion; mitigate by limiting listeners to one"
-      - "No risk — listeners run on a separate thread automatically"
-      - "The listener's put silently no-ops because the lock is held"
+      - "Unbounded stack growth from infinite recursion, because each reinsert fires onEviction again; the only safe fix is to cap the cache to a single registered listener so the cycle cannot form"
+      - "No risk at all, because CacheEventListener callbacks are dispatched on a dedicated notification thread by default, so the reinserting put never runs inside the caller's locked section"
+      - "The listener's nested put silently no-ops, since the coarse lock is already held and the decorator detects the same owning thread and deliberately skips the second write to avoid a conflict"
       - "Re-entrancy: the callback runs inside evictOne, so the nested put can re-trigger eviction mid-eviction or deadlock (with non-reentrant locks); mitigate by firing notifications outside the critical section or documenting the constraint"
     answer: 3
     explanation: |
@@ -703,10 +703,10 @@ questions:
     question: |
       How should the design handle construction with maxSize = 0?
     options:
-      - "Accept it — the cache simply stays empty and every put is a no-op"
+      - "Accept it silently — a zero-capacity cache is a valid degenerate state where storage simply stays empty and every put returns without inserting anything"
       - "Reject with IllegalArgumentException in the constructor: a zero-capacity cache would have to evict the very key it is inserting"
-      - "Round it up to a default capacity of 16"
-      - "Defer the check to the first put, which throws"
+      - "Round it up to a sensible default capacity of 16 entries, matching HashMap's default table size, so the cache is always usable straight out of the box"
+      - "Defer validation to the first put call, which then throws IllegalStateException once it discovers there is no slot available for the incoming key"
     answer: 1
     explanation: |
       Fail fast at construction. A zero-capacity cache makes put's contract incoherent
@@ -723,9 +723,9 @@ questions:
       design?
     options:
       - "Victim selection in EvictionPolicy, expiry in the TTL decorator, storage in the cache's map, assembly in the factory"
-      - "Victim selection and expiry both in EvictionPolicy, since both remove entries"
-      - "Storage and victim selection both in InMemoryCache, since both touch keys"
-      - "Assembly and notification both in CacheFactory, since both are infrastructure"
+      - "Victim selection and expiry both in EvictionPolicy, since both ultimately remove entries and can therefore share one class's eviction pathway"
+      - "Storage and victim selection both in InMemoryCache, since both operate on keys and keeping them together avoids an extra delegation call per put"
+      - "Assembly and notification both in CacheFactory, since both are infrastructure concerns that sit outside the cache's core read/write path"
     answer: 0
     explanation: |
       Five reasons to change, five homes: storage (map inside the cache), selection
@@ -740,10 +740,10 @@ questions:
     question: |
       Which EvictionPolicy implementation behavior would violate Liskov Substitution?
     options:
-      - "Evicting the most recently used key (an MRU policy)"
-      - "Returning victims in FIFO order regardless of access patterns"
+      - "Evicting the most recently used key on every eviction (an MRU policy), which inverts the usual recency heuristic but still returns a resident key"
+      - "Returning victims in strict FIFO insertion order regardless of subsequent access patterns, ignoring how recently or often each key was touched"
       - "evictKey() returning a key that was never passed to keyAccessed — the cache would try to remove a phantom entry"
-      - "Using O(log n) internal structures instead of O(1)"
+      - "Using O(log n) internal structures such as a balanced tree of timestamps instead of the O(1) list-and-map combination the contract expects"
     answer: 2
     explanation: |
       LSP is about honoring the behavioral contract, not about which victim heuristic you
@@ -759,9 +759,9 @@ questions:
       Why do keyAccessed/keyRemoved/evictKey live on EvictionPolicy rather than on the public
       Cache interface?
     options:
-      - "They must be private, and interfaces cannot have private methods"
-      - "Putting them on Cache would slow down dynamic dispatch"
-      - "They are static utility methods that belong in a helper class"
+      - "They must be private implementation helpers, and since interfaces can only declare public abstract methods they cannot legally be added to the Cache interface at all"
+      - "Putting them on the Cache interface would slow down dynamic dispatch, because a wider method table forces the JVM to fall back from monomorphic to megamorphic call sites"
+      - "They are stateless static utility methods that belong in a shared CacheUtils helper class rather than on any instance-level interface"
       - "Interface Segregation: cache clients should not see (or be able to call) policy-maintenance callbacks — those belong to the cache-to-policy contract only"
     answer: 3
     explanation: |
@@ -777,10 +777,10 @@ questions:
     question: |
       Which dependency arrangement demonstrates Dependency Inversion in this design?
     options:
-      - "LruEvictionPolicy depends on InMemoryCache to read its storage map"
+      - "LruEvictionPolicy depends on InMemoryCache and reaches into its storage map on each eviction to scan for the least-recently-used entry directly"
       - "InMemoryCache depends on the EvictionPolicy abstraction (injected), and only the factory names concrete policy classes"
-      - "InMemoryCache instantiates LruEvictionPolicy directly so defaults work out of the box"
-      - "Cache extends EvictionPolicy so both vary together"
+      - "InMemoryCache instantiates LruEvictionPolicy directly in its constructor so a sensible default policy works out of the box without any factory wiring"
+      - "Cache extends EvictionPolicy so the two abstractions vary together and a single subclass can satisfy both roles at once"
     answer: 1
     explanation: |
       High-level module (the cache) and low-level modules (concrete policies) both depend
@@ -796,10 +796,10 @@ questions:
       In the class diagram, the link between InMemoryCache and EvictionPolicy is best
       described as which relationship?
     options:
-      - "Inheritance — the cache is a kind of policy"
-      - "Composition — the policy cannot exist without the cache and dies with it"
+      - "Inheritance — the cache is a specialized kind of eviction policy that overrides selection behavior while reusing the policy's base bookkeeping"
+      - "Composition — the policy's lifetime is bound to the cache: it is created inside the cache's constructor and becomes garbage the moment the cache is discarded"
       - "Aggregation ('has-a' via constructor injection) — the cache holds a reference to an interchangeable policy created elsewhere"
-      - "Dependency only — the cache receives the policy as a method parameter each call"
+      - "Dependency only — the cache does not hold a policy field at all and instead receives a fresh policy as a method parameter on each get and put call"
     answer: 2
     explanation: |
       The policy is created outside (by the factory) and handed in, and conceptually it is
@@ -816,9 +816,9 @@ questions:
       pattern require BOTH relationships?
     options:
       - "Implementing the interface lets it substitute anywhere a Cache is expected; wrapping a Cache lets it delegate and layer behavior — remove either and it is no longer a decorator"
-      - "It is a Java limitation: delegation requires implementing the delegate's interface"
-      - "Holding the reference is optional; only the interface matters"
-      - "Implementing the interface is optional; only delegation matters"
+      - "It is a hard Java language limitation: any object that delegates calls to another is required by the compiler to implement that delegate's interface first"
+      - "Holding the wrapped Cache reference is actually optional boilerplate; only implementing the Cache interface is strictly required for the decorator to work"
+      - "Implementing the Cache interface is optional; only holding and delegating to the wrapped instance is what genuinely defines the decorator pattern"
     answer: 0
     explanation: |
       Is-a plus has-a is the decorator signature. Without the interface it can't stack or
@@ -833,10 +833,10 @@ questions:
     question: |
       With 45 minutes on the clock, which sequencing of this problem earns the most signal?
     options:
-      - "Write the full LFU frequency-bucket code first since it is hardest, then backfill the interfaces"
+      - "Write the full LFU frequency-bucket code first since it is the hardest part to get right, then backfill the Cache and EvictionPolicy interfaces around the finished implementation"
       - "Clarify requirements, state the O(1) target, define Cache/EvictionPolicy interfaces and the class diagram, implement LRU end-to-end, then discuss LFU/TTL/concurrency as extensions on the seams"
-      - "Start with the thread-safe version since production caches are concurrent"
-      - "Draw a complete UML diagram of all nine classes including decorators before writing any code"
+      - "Start with the fully thread-safe locked version first, since real production caches are always concurrent and retrofitting locks later is riskier"
+      - "Draw a complete UML diagram of all nine classes including every decorator and listener before writing a single line of code"
     answer: 1
     explanation: |
       Interfaces-first proves the design; one working policy end-to-end proves you can
@@ -851,9 +851,9 @@ questions:
     question: |
       How does the Strategy split concretely improve testability of this design?
     options:
-      - "It removes the need for unit tests since interfaces are self-documenting"
-      - "It lets tests access private fields of the cache via the policy"
-      - "It guarantees 100% branch coverage automatically"
+      - "It removes the need for most unit tests, since well-named Strategy interfaces are self-documenting and their contracts can be verified by inspection alone"
+      - "It lets tests reach the cache's private storage fields indirectly through the injected policy, exposing internals that would otherwise be untestable"
+      - "It automatically guarantees 100% branch coverage of the eviction paths, because every Strategy implementation is exercised through the same shared interface"
       - "Policies unit-test in isolation (feed an access sequence, assert the victim) with no cache involved, and cache logic tests inject a scripted fake policy"
     answer: 3
     explanation: |
@@ -870,10 +870,10 @@ questions:
       The interviewer pushes: "now make the cache shared across 20 service hosts." The
       LLD-appropriate response is to:
     options:
-      - "Design a gossip protocol between hosts so the in-process caches synchronize"
-      - "Refuse the question as out of scope and move on"
+      - "Design a peer-to-peer gossip protocol between the 20 hosts so their in-process caches continuously synchronize entries and eviction decisions with each other"
+      - "Refuse the question as strictly out of scope for the LLD round and move on to the next topic without engaging with it"
       - "Note that a shared remote cache (consistency, invalidation, sharding) is an HLD problem, and show that the LLD answer is an adapter implementing Cache over a Redis/Memcached client — possibly as L2 in a tiered cache"
-      - "Serialize the InMemoryCache to disk and rsync it between hosts"
+      - "Periodically serialize the entire InMemoryCache to disk and rsync the snapshot file between all 20 hosts so each stays roughly in sync"
     answer: 2
     explanation: |
       Recognizing the boundary IS the answer: name the concerns that make it distributed
@@ -890,10 +890,10 @@ questions:
       Follow-up: "bound the cache by total memory weight instead of entry count." Which
       change best preserves the existing design?
     options:
-      - "Add getSizeInBytes() to the Cache interface so clients can enforce the bound"
+      - "Add a getSizeInBytes() method to the Cache interface so that every client is responsible for measuring the total footprint and enforcing the memory bound itself"
       - "Introduce a Weigher<K,V> strategy (like Caffeine's maximumWeight); the cache tracks total weight and evictOne loops until under the limit"
-      - "Require all values to implement a Sizeable interface with a bytes() method"
-      - "Move the size check into each EvictionPolicy so policies enforce weight"
+      - "Require all cached values to implement a Sizeable interface exposing a bytes() method so the cache can sum each entry's self-reported size"
+      - "Move the capacity check into each EvictionPolicy implementation so that individual policies become responsible for enforcing the total weight limit"
     answer: 1
     explanation: |
       Weighing is another axis of variation — so it gets another injected strategy, mirroring
