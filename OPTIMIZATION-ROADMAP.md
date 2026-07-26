@@ -102,6 +102,10 @@ These touch locked decisions (stack / content strategy / no-backend / third-part
 - **Unblock AI-answer crawlers (#51)?** robots.txt currently blocks GPTBot/ClaudeBot/PerplexityBot/CCBot/Google-Extended site-wide. Allow citation crawlers (keeping training opt-outs) to be discoverable in AI answer engines?
 - **Pre-sampled subset pools (part of #34)?** Generating smaller per-domain sampled pools would cut the system-design transfer ~90% but changes the static-sampling model — only if you want to go beyond the free dedupe win.
 
+## Planned v2 — approved for planning (queued after current work)
+
+- **Multi-select ("select all that apply") MCQ type.** Reverses the schema's "single-answer, exactly one correct" v1 decision. Adds `type: single|multi` + `answers: [int]` (default keeps all ~27k existing questions single-answer), all-or-nothing scoring v1, and a Submit-step UI in PracticeSession. Complements the distractor fix — SATA can't be gamed by elimination and matches AWS/CKA-style exams. Pre-work done: only 0.6% of questions are already phrased as multi-select (some "which two" items are shoehorned into single-answer — a latent defect). Sequenced AFTER the distractor rollout + engineering-blogs domain. Full design in Claude memory `queued-multiselect-mcq`.
+
 ## Explicitly not recommended / already done
 
 Three candidates were investigated and dropped during grounding:
