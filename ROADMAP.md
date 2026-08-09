@@ -102,6 +102,21 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 45 (2026-07-24):** **Multi-select MCQ type (v2) + AWS Cloud Design Patterns group.** Two
+  queued items shipped in order. **(1) Multi-select (SATA):** added a `type: single|multi` question type
+  across all 5 layers — schema (`answers: []` replaces `answer` for multi; all-or-nothing scoring so
+  SRS/mastery stay binary), validator (type-aware, rejects all-correct multi + answer/answers mixing;
+  negative-tested), sync-content + types (carry type/answers into slim pool), PracticeSession.tsx (checkbox
+  group + Submit step for multi; single unchanged), CONTRACT.md. All ~27.7k existing Qs default to single,
+  untouched. Pilot: 6 SATA Qs on aws-saas-isolation-patterns. Commit `0df37de`. **(2) AWS Cloud Design
+  Patterns:** new `aws-cdp-` group in system-design — 7 topics, **347 MCQs (73 multi-select)**, all 46
+  clouddesignpattern.org patterns taught "classic intent → modern AWS equivalent", cross-referencing the
+  aws-* deep-dives instead of re-teaching. First content group built on the new multi type. Grouping code:
+  `aws-cdp-`→"cdp" added BEFORE the `aws-` check in sdGroupKey + label + SD_GROUP_ORDER. Authored via
+  `aws-cdp-authoring.js` (14 agents, 0 errors); verify web-checked modern-AWS mappings. Commit `62afa14`.
+  system-design domain now **86 topics**. Validator green (460 files, 28,064 Qs); web build renders the new
+  group. See [[queued-multiselect-mcq]], [[aws-cdp-plan]]. UI verified via typecheck+build+data-shape (not a
+  live click-through — worth a manual look).
 - **Session 44 (2026-07-24):** **System Design refinement pilot — overlapped Session 43, verified clean.**
   User asked (via /deep-research, but the task was a content audit not web research) to review + refine
   study content to a great-teacher bar; scoped as a system-design pilot, audit-first with a review gate.
