@@ -1,0 +1,896 @@
+topic: "AWS Cloud Design Patterns: Basics and High Availability"
+domain: system-design
+topic_slug: aws-cdp-basic-and-ha
+version: 1
+questions:
+  - id: aws-cdp-basic-and-ha-001
+    difficulty: beginner
+    tags: [snapshot, backup, ebs]
+    question: |
+      In the CDP catalog, the Snapshot pattern solves which core problem?
+    options:
+      - "Distributing traffic across many identical servers"
+      - "Taking an automatable, capacity-unbounded point-in-time backup of a volume"
+      - "Reassigning a stable IP address on failover"
+      - "Checking the health of back-end dependencies"
+    answer: 1
+    explanation: |
+      Snapshot addresses safe, automatable backup. Tape/disk backups have capacity limits and
+      manual toil; the pattern uses S3-backed EBS snapshots — point-in-time copies you can take
+      by API/schedule with effectively unbounded capacity. Load distribution is Multi-Server/Scale
+      Out, IP failover is Floating IP, and dependency checking is Deep Health Check.
+    ref: "concepts.md#snapshot-pattern"
+
+  - id: aws-cdp-basic-and-ha-002
+    difficulty: beginner
+    tags: [snapshot, modern-mapping, backup]
+    question: |
+      A team still runs a hand-written cron job calling the EBS snapshot API to back up volumes.
+      What is the modern AWS way to schedule and govern these backups?
+    options:
+      - "Amazon Data Lifecycle Manager or AWS Backup with retention policies"
+      - "An Auto Scaling group with target tracking"
+      - "Route 53 calculated health checks"
+      - "EC2 Image Builder pipelines"
+    answer: 0
+    explanation: |
+      The Snapshot pattern is timeless but the manual scripting is superseded. Amazon Data
+      Lifecycle Manager (DLM) schedules and retains EBS snapshots/AMIs by tag, and AWS Backup
+      gives a central, cross-service, cross-account plan with vaulting and Vault Lock. Image
+      Builder bakes AMIs (Stamp), ASGs scale (Scale Out), Route 53 checks handle DNS failover.
+    ref: "concepts.md#snapshot-pattern"
+
+  - id: aws-cdp-basic-and-ha-003
+    difficulty: intermediate
+    tags: [snapshot, consistency, database]
+    question: |
+      Why is taking a plain EBS snapshot of a volume backing a running database potentially unsafe?
+    options:
+      - "EBS snapshots are stored in Glacier and take hours to restore"
+      - "Snapshots are full copies, so they are too large for a database volume"
+      - "Snapshots cannot capture the operating system, only data files"
+      - "Snapshots are crash-consistent, not application-consistent, so in-flight writes may be torn"
+    answer: 3
+    explanation: |
+      A raw EBS snapshot captures the volume at a point in time (crash-consistent) but does not
+      coordinate with the database's buffers/transactions, so it can capture a torn/inconsistent
+      state. Quiesce/flush the DB or use the DB's own snapshot mechanism (e.g. RDS snapshots).
+      Snapshots do include the OS, are incremental (not full), and are S3-backed (not Glacier).
+    ref: "concepts.md#snapshot-pattern"
+
+  - id: aws-cdp-basic-and-ha-004
+    difficulty: intermediate
+    tags: [snapshot, incremental, cost]
+    question: |
+      Which statements about EBS snapshots as used in the Snapshot pattern are TRUE? Select all that apply.
+    options:
+      - "After the first snapshot, subsequent snapshots store only changed blocks (incremental)"
+      - "Restored volumes may lazily hydrate blocks from S3 unless Fast Snapshot Restore is enabled"
+      - "Each snapshot is always a full, independent copy of the entire volume"
+      - "Snapshots must be taken manually from the console and cannot be automated"
+    type: multi
+    answers: [0, 1]
+    explanation: |
+      Snapshots are incremental after the first (only changed blocks are stored), and a volume
+      restored from a snapshot lazily pulls blocks from S3 on first access unless Fast Snapshot
+      Restore is enabled. They are not full independent copies, and they can absolutely be
+      automated via API/DLM/AWS Backup — that automatability is central to the pattern.
+    ref: "concepts.md#snapshot-pattern"
+
+  - id: aws-cdp-basic-and-ha-005
+    difficulty: beginner
+    tags: [stamp, ami, golden-image]
+    question: |
+      The Stamp pattern is best described as:
+    options:
+      - "Reassigning a static IP from a failed server to a spare"
+      - "Growing a disk volume on demand as capacity is needed"
+      - "Capturing a fully configured server as a reusable image to launch identical instances"
+      - "Spreading instances across multiple Availability Zones"
+    answer: 2
+    explanation: |
+      Stamp = build one server with OS/middleware/app configured, capture it as a machine image
+      (an AMI), and 'stamp out' identical instances from it — the golden-image idea. IP reassign
+      is Floating IP, disk growth is On-demand Disk, and AZ spread is Multi-Datacenter.
+    ref: "concepts.md#stamp-pattern"
+
+  - id: aws-cdp-basic-and-ha-006
+    difficulty: intermediate
+    tags: [stamp, modern-mapping, image-builder]
+    question: |
+      Today, instead of hand-baking a golden AMI and forgetting how it was made, which AWS service
+      pipelines the build, patch, test, and versioning of AMIs?
+    options:
+      - "AWS Backup"
+      - "Elastic Load Balancing"
+      - "AWS Compute Optimizer"
+      - "EC2 Image Builder"
+    answer: 3
+    explanation: |
+      EC2 Image Builder (or Packer) automates building, patching, testing, and versioning AMIs as
+      a repeatable pipeline — the modern realization of the Stamp pattern. AWS Backup governs
+      backups (Snapshot), Compute Optimizer right-sizes (Scale Up), and ELB distributes traffic.
+    ref: "concepts.md#stamp-pattern"
+
+  - id: aws-cdp-basic-and-ha-007
+    difficulty: advanced
+    tags: [stamp, bootstrap, trade-offs]
+    question: |
+      Which statements correctly contrast a fully baked golden AMI (Stamp) with bootstrap-at-launch
+      (user-data/cloud-init)? Select all that apply.
+    options:
+      - "A fully baked image boots faster and is immutable/reproducible"
+      - "Bootstrap-at-launch is more flexible but slower and can fail if a dependency is unavailable"
+      - "A fully baked image must be rebuilt whenever a component in it changes"
+      - "Bootstrap-at-launch guarantees the fastest possible instance startup"
+    type: multi
+    answers: [0, 1, 2]
+    explanation: |
+      Baked images boot fast, are immutable and reproducible, but must be rebuilt for any change.
+      Bootstrap is flexible but slower and can drift or fail if a dependency is down at launch.
+      The false claim is that bootstrap is fastest — it is slower than a pre-baked image. The
+      common modern answer is a hybrid: bake slow-changing layers, inject fast-changing config.
+    ref: "concepts.md#stamp-pattern"
+
+  - id: aws-cdp-basic-and-ha-008
+    difficulty: intermediate
+    tags: [stamp, scale-out, relationship]
+    question: |
+      Why does the Stamp pattern make the Scale Out pattern effective?
+    options:
+      - "It lets the load balancer detect unhealthy back-end dependencies"
+      - "It reassigns the Elastic IP to each new instance automatically"
+      - "It provides a pre-configured AMI so new instances launch ready in seconds, not minutes of setup"
+      - "It grows the EBS volume as more instances are added"
+    answer: 2
+    explanation: |
+      Scale Out adds identical instances under load; if each had to install and configure software
+      at launch (bootstrap), scaling would be slow and fragile. A Stamp/golden AMI makes new
+      instances boot already-configured, so an ASG can add capacity quickly. The other options
+      describe Deep Health Check, Floating IP, and On-demand Disk.
+    ref: "concepts.md#stamp-pattern"
+
+  - id: aws-cdp-basic-and-ha-009
+    difficulty: beginner
+    tags: [scale-up, vertical-scaling]
+    question: |
+      The Scale Up pattern refers to:
+    options:
+      - "Adding more identical servers behind a load balancer"
+      - "Spreading servers across data centers for redundancy"
+      - "Copying a configured server into a reusable image"
+      - "Changing a single server's spec (CPU/memory) — vertical scaling"
+    answer: 3
+    explanation: |
+      Scale Up = vertical scaling: change one instance's CPU/memory by changing its instance type.
+      Adding identical servers behind an LB is Scale Out, imaging is Stamp, and AZ spread is
+      Multi-Datacenter.
+    ref: "concepts.md#scale-up-pattern"
+
+  - id: aws-cdp-basic-and-ha-010
+    difficulty: intermediate
+    tags: [scale-up, ec2, downtime]
+    question: |
+      In the classic Scale Up procedure on EC2, how do you change an instance's type, and what is a
+      key consequence?
+    options:
+      - "Modify it live with no downtime using Elastic Volumes"
+      - "Detach the Elastic IP and attach it to a bigger instance"
+      - "Stop the instance, change the instance type, then start it — which incurs downtime"
+      - "Add a read replica and promote it"
+    answer: 2
+    explanation: |
+      To change an EBS-backed EC2 instance's type you stop it, modify the type, and start it —
+      which means downtime (and instance-store data is lost, though EBS volumes persist). Elastic
+      Volumes resize disks live (On-demand Disk), EIP reassignment is Floating IP, and read
+      replicas relate to databases.
+    ref: "concepts.md#scale-up-pattern"
+
+  - id: aws-cdp-basic-and-ha-011
+    difficulty: intermediate
+    tags: [scale-up, modern-mapping, compute-optimizer]
+    question: |
+      Which AWS service replaces eyeballing vmstat/CloudWatch by analyzing history and recommending
+      right-sized instance types and families?
+    options:
+      - "AWS Compute Optimizer"
+      - "AWS Backup"
+      - "Amazon Data Lifecycle Manager"
+      - "AWS WAF"
+    answer: 0
+    explanation: |
+      AWS Compute Optimizer analyzes CloudWatch utilization history and recommends instance types,
+      families (including Graviton), and sizes — the modern augmentation of the Scale Up pattern's
+      manual monitor-and-guess loop. The others handle backup lifecycle, backup, and web-app
+      firewalling.
+    ref: "concepts.md#scale-up-pattern"
+
+  - id: aws-cdp-basic-and-ha-012
+    difficulty: advanced
+    tags: [scale-up, scale-out, trade-offs]
+    question: |
+      Which statements accurately describe trade-offs of Scale Up versus Scale Out? Select all that apply.
+    options:
+      - "Scale Up is simpler and imposes no statelessness requirement on the application"
+      - "Scale Up has a ceiling (largest instance type) and leaves a single point of failure"
+      - "Scale Out requires instances to be stateless (or state externalized) and adds a load balancer"
+      - "Scale Out reduces availability because more instances mean more things can fail"
+    type: multi
+    answers: [0, 1, 2]
+    explanation: |
+      Scale Up needs no app changes and no statelessness, but has a spec ceiling and remains a
+      single point of failure. Scale Out needs stateless instances and a load balancer. The false
+      claim is that Scale Out reduces availability — running N instances behind an LB actually
+      improves availability, since losing one of N is survivable.
+    ref: "concepts.md#scale-up-pattern"
+
+  - id: aws-cdp-basic-and-ha-013
+    difficulty: beginner
+    tags: [scale-out, horizontal-scaling, asg]
+    question: |
+      The Scale Out pattern handles high traffic by:
+    options:
+      - "Using one very high-spec server to maximize per-box throughput"
+      - "Taking frequent snapshots of the web server volume"
+      - "Running multiple identical servers in parallel behind a load balancer and varying their count"
+      - "Reassigning a floating IP between servers"
+    answer: 2
+    explanation: |
+      Scale Out = horizontal scaling: multiple identical servers behind a load balancer, with the
+      number of servers varied to match load. Option 0 is Scale Up (which the catalog notes has a
+      ceiling and steep unit cost at high specs). The others are Snapshot and Floating IP.
+    ref: "concepts.md#scale-out-pattern"
+
+  - id: aws-cdp-basic-and-ha-014
+    difficulty: intermediate
+    tags: [scale-out, classic-mechanism, elb-cloudwatch-asg]
+    question: |
+      Which three AWS services did the classic Scale Out pattern combine to auto-scale a web tier?
+    options:
+      - "S3, CloudFront, and Route 53"
+      - "RDS, ElastiCache, and DynamoDB"
+      - "EBS, DLM, and AWS Backup"
+      - "Elastic Load Balancing, CloudWatch, and Auto Scaling"
+    answer: 3
+    explanation: |
+      The catalog's Scale Out implementation combined ELB (distribute load), CloudWatch (monitor a
+      metric and alarm), and Auto Scaling (add/remove EC2 instances on the alarm). New instances
+      launch from a Stamp AMI. The other groupings are edge/CDN, backup, and data services.
+    ref: "concepts.md#scale-out-pattern"
+
+  - id: aws-cdp-basic-and-ha-015
+    difficulty: intermediate
+    tags: [scale-out, modern-mapping, target-tracking]
+    question: |
+      Rather than hand-tuning CloudWatch step alarms, the modern preferred way to drive an Auto
+      Scaling group is:
+    options:
+      - "Target-tracking scaling (e.g. keep average CPU at 50%)"
+      - "Manually stopping and starting instances"
+      - "Reassigning Elastic IPs on a schedule"
+      - "Taking snapshots when CPU is high"
+    answer: 0
+    explanation: |
+      Target tracking lets you set a goal (e.g. average CPU or ALB requests-per-target) and AWS
+      manages the underlying alarms and adjustments — simpler and more robust than hand-tuned step
+      scaling. Predictive and scheduled scaling extend this. The other options are unrelated to
+      elasticity.
+    ref: "concepts.md#scale-out-pattern"
+
+  - id: aws-cdp-basic-and-ha-016
+    difficulty: advanced
+    tags: [scale-out, serverless, modern-mapping]
+    question: |
+      Which of the following take the Scale Out idea to its serverless conclusion (scale per-request
+      with no fleet to manage)? Select all that apply.
+    options:
+      - "AWS Lambda"
+      - "AWS Fargate"
+      - "DynamoDB on-demand capacity"
+      - "A single large EC2 instance you resize by hand"
+    type: multi
+    answers: [0, 1, 2]
+    explanation: |
+      Lambda, Fargate, and DynamoDB on-demand all scale out automatically per request/task with no
+      instance fleet to manage — the modern extreme of Scale Out. A single hand-resized EC2
+      instance is Scale Up (vertical), the opposite approach.
+    ref: "concepts.md#scale-out-pattern"
+
+  - id: aws-cdp-basic-and-ha-017
+    difficulty: advanced
+    tags: [scale-out, stateless, prerequisite]
+    question: |
+      What is the key application requirement that Scale Out imposes but Scale Up does not?
+    options:
+      - "The application must be written in a compiled language"
+      - "Instances must be stateless (or state externalized to a shared store / sticky sessions)"
+      - "The database must run on the same instance as the app"
+      - "Each instance must have a unique Elastic IP"
+    answer: 1
+    explanation: |
+      Because Scale Out adds and removes interchangeable instances, they must be stateless — or
+      critical state must live in a shared store (or you use sticky sessions). Scale Up keeps a
+      single box, so it has no such requirement. The other options are incorrect or counter to
+      Scale Out.
+    ref: "concepts.md#scale-out-pattern"
+
+  - id: aws-cdp-basic-and-ha-018
+    difficulty: beginner
+    tags: [on-demand-disk, ebs, capacity]
+    question: |
+      The On-demand Disk pattern addresses which problem?
+    options:
+      - "Predicting CPU needs at design time"
+      - "Losing traffic during a DNS TTL window"
+      - "Over-provisioning disk capacity up front because future usage is hard to forecast"
+      - "A load balancer not seeing back-end failures"
+    answer: 2
+    explanation: |
+      On-demand Disk targets storage capacity planning: rather than buying a big disk sized for
+      'years out × margin' that sits empty but paid-for, you provision storage as needed. CPU
+      forecasting relates to Scale Up, DNS TTL to Floating IP, and back-end visibility to Deep
+      Health Check.
+    ref: "concepts.md#on-demand-disk-pattern"
+
+  - id: aws-cdp-basic-and-ha-019
+    difficulty: intermediate
+    tags: [on-demand-disk, classic-mechanism, snapshot]
+    question: |
+      Before Elastic Volumes existed, how did the classic On-demand Disk pattern grow an EBS volume?
+    options:
+      - "It resized the attached volume live with a single API call"
+      - "It mounted an EFS file system instead"
+      - "It launched a bigger instance type"
+      - "It snapshotted the volume, created a new larger volume from the snapshot, then attached it"
+    answer: 3
+    explanation: |
+      The original resize trick was snapshot → create a larger volume from that snapshot → attach.
+      Live single-call resize is the modern Elastic Volumes feature (which superseded this dance).
+      Launching a bigger instance is Scale Up; EFS is a different, auto-growing option.
+    ref: "concepts.md#on-demand-disk-pattern"
+
+  - id: aws-cdp-basic-and-ha-020
+    difficulty: intermediate
+    tags: [on-demand-disk, modern-mapping, elastic-volumes]
+    question: |
+      What is the modern AWS feature that makes the On-demand Disk pattern's snapshot-and-recreate
+      trick obsolete?
+    options:
+      - "EBS Elastic Volumes — increase size, change type, and adjust IOPS/throughput on a live volume"
+      - "EC2 Image Builder"
+      - "Route 53 calculated health checks"
+      - "Auto Scaling predictive scaling"
+    answer: 0
+    explanation: |
+      EBS Elastic Volumes modify a live, attached volume's size, type, and IOPS/throughput with no
+      detach and no downtime (then you extend the filesystem) — replacing the snapshot-to-resize
+      procedure. The other services build images, do DNS failover, and scale compute.
+    ref: "concepts.md#on-demand-disk-pattern"
+
+  - id: aws-cdp-basic-and-ha-021
+    difficulty: advanced
+    tags: [on-demand-disk, gp3, modern-mapping]
+    question: |
+      Which statements about modern On-demand Disk on AWS are TRUE? Select all that apply.
+    options:
+      - "gp3 lets you provision IOPS and throughput independently of volume size"
+      - "Elastic Volumes have a cooldown (about 6 hours) before you can modify the same volume again"
+      - "EBS volumes can be shrunk online just as easily as they can be grown"
+      - "EFS and S3 grow automatically with no capacity planning at all"
+    type: multi
+    answers: [0, 1, 3]
+    explanation: |
+      gp3 decouples IOPS/throughput from size (gp2 tied them together); Elastic Volumes enforce a
+      ~6-hour cooldown between modifications; and EFS/S3 auto-expand with no capacity planning. The
+      false claim is online shrink — EBS volumes can only grow online; shrinking requires migrating
+      to a smaller volume.
+    ref: "concepts.md#on-demand-disk-pattern"
+
+  - id: aws-cdp-basic-and-ha-022
+    difficulty: intermediate
+    tags: [on-demand-disk, gp3, gp2]
+    question: |
+      Why does gp3 reduce waste compared with gp2 for the On-demand Disk goal?
+    options:
+      - "gp3 is stored in S3, which is cheaper than block storage"
+      - "gp3 lets you buy IOPS/throughput independently, so you needn't over-provision capacity just for performance"
+      - "gp3 automatically replicates across Regions"
+      - "gp3 shrinks automatically when data is deleted"
+    answer: 1
+    explanation: |
+      With gp2, IOPS scaled with volume size, so getting more performance meant buying more (often
+      unneeded) capacity. gp3 provisions IOPS and throughput separately from size, so you pay for
+      the performance you need without inflating capacity. gp3 is block storage, not S3, is not
+      cross-Region, and does not auto-shrink.
+    ref: "concepts.md#on-demand-disk-pattern"
+
+  - id: aws-cdp-basic-and-ha-023
+    difficulty: beginner
+    tags: [multi-server, redundancy, availability]
+    question: |
+      The Multi-Server pattern improves availability by:
+    options:
+      - "Running redundant instances behind a load balancer that routes only to healthy ones"
+      - "Resizing a single instance to a larger type"
+      - "Backing up the volume on a schedule"
+      - "Growing the disk as usage increases"
+    answer: 0
+    explanation: |
+      Multi-Server = server-level redundancy: multiple instances behind a load balancer, with the
+      LB health check removing an unhealthy instance so the rest carry traffic. The other options
+      are Scale Up, Snapshot, and On-demand Disk.
+    ref: "concepts.md#multi-server-pattern"
+
+  - id: aws-cdp-basic-and-ha-024
+    difficulty: intermediate
+    tags: [multi-server, scale-out, distinction]
+    question: |
+      Multi-Server and Scale Out use the same ALB+ASG construct. What distinguishes their intent?
+    options:
+      - "Multi-Server is about surviving a failure (availability); Scale Out is about handling more load (elasticity)"
+      - "Multi-Server is vertical scaling; Scale Out is horizontal scaling"
+      - "Multi-Server requires multiple Regions; Scale Out requires only one"
+      - "Multi-Server uses Elastic IPs; Scale Out uses DNS"
+    answer: 0
+    explanation: |
+      They are two facets of the same construct: Multi-Server emphasizes redundancy/availability
+      (survive an instance failure), while Scale Out emphasizes elasticity (add capacity for load).
+      Both are horizontal, neither requires multiple Regions, and neither is defined by IP vs DNS.
+    ref: "concepts.md#multi-server-pattern"
+
+  - id: aws-cdp-basic-and-ha-025
+    difficulty: intermediate
+    tags: [multi-server, health-check, elb]
+    question: |
+      In the Multi-Server pattern, what role does the ELB health check play?
+    options:
+      - "It resizes instances that are under heavy load"
+      - "It stops routing to an unhealthy instance so healthy ones continue serving"
+      - "It snapshots each instance before routing to it"
+      - "It moves the Elastic IP to a healthy instance"
+    answer: 1
+    explanation: |
+      The load balancer's health check confirms whether an instance is operating properly and
+      removes unhealthy ones from rotation, so traffic goes only to working instances — that is how
+      redundancy actually delivers availability. It does not resize, snapshot, or reassign IPs.
+    ref: "concepts.md#multi-server-pattern"
+
+  - id: aws-cdp-basic-and-ha-026
+    difficulty: advanced
+    tags: [multi-server, limitation, multi-datacenter]
+    question: |
+      What failure does Multi-Server alone NOT protect against, motivating the Multi-Datacenter pattern?
+    options:
+      - "A single instance crashing"
+      - "A spike in CPU utilization"
+      - "A single EBS volume filling up"
+      - "A data-center-level (whole-AZ) failure such as a power outage or network partition"
+    answer: 3
+    explanation: |
+      If all instances sit in one data center/AZ, Multi-Server survives one instance failing but
+      not the loss of the whole data center. Multi-Datacenter (spreading across AZs) addresses that.
+      Instance crashes are exactly what Multi-Server handles; disk-full and CPU spikes are other
+      patterns' concerns.
+    ref: "concepts.md#multi-server-pattern"
+
+  - id: aws-cdp-basic-and-ha-027
+    difficulty: beginner
+    tags: [multi-datacenter, multi-az, availability]
+    question: |
+      On AWS, the Multi-Datacenter pattern is realized by:
+    options:
+      - "Deploying to multiple Regions across continents"
+      - "Using multiple Elastic IPs on one instance"
+      - "Spreading instances across multiple Availability Zones within a Region (Multi-AZ)"
+      - "Taking snapshots in two accounts"
+    answer: 2
+    explanation: |
+      AWS's physically separated data centers within a Region are Availability Zones; placing
+      instances across multiple AZs is the Multi-Datacenter pattern (Multi-AZ HA). Multiple Regions
+      is disaster recovery, a different and costlier concern. The other options are unrelated.
+    ref: "concepts.md#multi-datacenter-pattern"
+
+  - id: aws-cdp-basic-and-ha-028
+    difficulty: intermediate
+    tags: [multi-datacenter, multi-region, distinction]
+    question: |
+      Which statement best captures the difference between Multi-Datacenter (Multi-AZ) and
+      Multi-Region deployments?
+    options:
+      - "Multi-AZ is disaster recovery; Multi-Region is high availability"
+      - "Multi-AZ is HA within a Region (survives an AZ loss); Multi-Region is DR (survives a Region loss)"
+      - "They are identical; the terms are interchangeable"
+      - "Multi-AZ costs more and is slower than Multi-Region"
+    answer: 1
+    explanation: |
+      Multi-AZ provides high availability inside one Region and can replicate synchronously across
+      AZs thanks to low inter-AZ latency. Multi-Region is for disaster recovery / compliance /
+      global latency and involves harder RTO/RPO and cost trade-offs. They are not interchangeable.
+    ref: "concepts.md#multi-datacenter-pattern"
+
+  - id: aws-cdp-basic-and-ha-029
+    difficulty: intermediate
+    tags: [multi-datacenter, managed-services, multi-az]
+    question: |
+      Which of the following give you Availability Zone resilience with little or no extra work?
+      Select all that apply.
+    options:
+      - "S3, DynamoDB, SQS, and Lambda (regional services that are multi-AZ internally)"
+      - "RDS/Aurora Multi-AZ with an automatic-failover standby"
+      - "An ALB and Auto Scaling group spanning two or more AZs"
+      - "A single EC2 instance with an Elastic IP"
+    type: multi
+    answers: [0, 1, 2]
+    explanation: |
+      Regional managed services are already multi-AZ internally; RDS/Aurora Multi-AZ keeps a
+      standby with automatic failover; and an ALB+ASG across AZs delivers Multi-Datacenter for the
+      compute tier. A single EC2 instance with an EIP lives in one AZ and is not AZ-resilient.
+    ref: "concepts.md#multi-datacenter-pattern"
+
+  - id: aws-cdp-basic-and-ha-030
+    difficulty: advanced
+    tags: [multi-datacenter, latency, replication]
+    question: |
+      Why can Multi-AZ (Multi-Datacenter) databases replicate synchronously without badly hurting
+      write latency, while Multi-Region synchronous replication usually cannot?
+    options:
+      - "AZs share the same physical building, so there is zero latency"
+      - "Multi-Region replication is always asynchronous by AWS policy"
+      - "Multi-AZ uses UDP and Multi-Region uses TCP"
+      - "Inter-AZ latency is low (single-digit ms), whereas cross-Region latency is far higher"
+    answer: 3
+    explanation: |
+      AZs are separate data centers but close enough for single-digit-ms latency over redundant
+      private fiber, so synchronous cross-AZ replication is practical. Cross-Region distances add
+      tens of ms, making synchronous writes costly — hence Region DR typically uses async
+      replication. AZs are separate buildings, and the protocol/policy claims are wrong.
+    ref: "concepts.md#multi-datacenter-pattern"
+
+  - id: aws-cdp-basic-and-ha-031
+    difficulty: beginner
+    tags: [floating-ip, eip, failover]
+    question: |
+      The Floating IP pattern solves which problem?
+    options:
+      - "Growing storage without downtime"
+      - "Building a reusable server image"
+      - "Swapping a server behind a stable address near-instantly, without waiting on DNS TTL"
+      - "Detecting a dead back-end database from the load balancer"
+    answer: 2
+    explanation: |
+      Floating IP keeps a stable address that you reassign to a replacement server, enabling
+      near-instant swaps unbounded by DNS TTL (DNS-based swapping is limited by client caching to
+      the TTL). The others are On-demand Disk, Stamp, and Deep Health Check.
+    ref: "concepts.md#floating-ip-pattern"
+
+  - id: aws-cdp-basic-and-ha-032
+    difficulty: intermediate
+    tags: [floating-ip, dns, ttl]
+    question: |
+      Why did the catalog consider DNS-based server swapping unsuitable for instant cutover,
+      motivating Floating IP?
+    options:
+      - "DNS records cannot point to EC2 instances"
+      - "Clients cache the record until its TTL expires, so old clients keep hitting the old server"
+      - "DNS changes require stopping the instance"
+      - "DNS only supports one server per name"
+    answer: 1
+    explanation: |
+      DNS cutover is bounded by the record's TTL: clients keep using the cached (old) address until
+      the TTL lapses, so you cannot swap instantly. Reassigning an Elastic IP swaps the target
+      immediately with no TTL wait. The other statements are false.
+    ref: "concepts.md#floating-ip-pattern"
+
+  - id: aws-cdp-basic-and-ha-033
+    difficulty: intermediate
+    tags: [floating-ip, classic-mechanism, eip]
+    question: |
+      In the classic Floating IP pattern on AWS, what is reassigned to perform the swap?
+    options:
+      - "An Elastic IP address, detached from the current instance and attached to a new one"
+      - "An EBS volume, detached and reattached"
+      - "A CloudFront distribution"
+      - "An Auto Scaling launch template"
+    answer: 0
+    explanation: |
+      The pattern uses an Elastic IP (EIP), a static address you own: detach it from the current
+      EC2 instance and attach it to a replacement (often pre-launched via Stamp) to swap the server
+      instantly and enable instant fall-back. Volumes, CloudFront, and launch templates are not the
+      floating address.
+    ref: "concepts.md#floating-ip-pattern"
+
+  - id: aws-cdp-basic-and-ha-034
+    difficulty: advanced
+    tags: [floating-ip, modern-mapping, load-balancer]
+    question: |
+      For general web-tier server swaps today, what is the preferred modern realization of the
+      Floating IP intent, and why?
+    options:
+      - "Keep using manual EIP reassignment scripts; load balancers cannot swap instances"
+      - "Put a load balancer in front and register/deregister targets, so clients hit a stable endpoint and never see the change"
+      - "Change the instance type to force a swap"
+      - "Shorten the DNS TTL to zero"
+    answer: 1
+    explanation: |
+      The deeper lesson is indirection: a load balancer gives a stable endpoint while you swap
+      healthy targets behind it (with built-in health checks), generalizing Floating IP to N
+      targets. EIP/ENI reassignment remains useful for single-node active/standby, but for the web
+      tier the LB is preferred. TTL-zero and instance-type changes don't solve this cleanly.
+    ref: "concepts.md#floating-ip-pattern"
+
+  - id: aws-cdp-basic-and-ha-035
+    difficulty: advanced
+    tags: [floating-ip, nlb, static-ip]
+    question: |
+      Which statements about modern realizations of the Floating IP pattern are TRUE? Select all that apply.
+    options:
+      - "A Network Load Balancer can provide a stable static IP per AZ (and supports Elastic IPs)"
+      - "EIP or ENI reassignment is still useful for single-node active/standby appliance failover"
+      - "For private failover you can move a secondary private IP or an ENI between instances"
+      - "Elastic IPs are the only way to achieve zero-downtime web-tier deploys on AWS"
+    type: multi
+    answers: [0, 1, 2]
+    explanation: |
+      NLBs offer stable static IPs per AZ and support EIPs; EIP/ENI floating still fits single-node
+      active/standby; and moving an ENI or secondary private IP handles private failover. The false
+      claim is that EIPs are the only route to zero-downtime deploys — load balancers with rolling/
+      immutable deployments are the standard way, without touching an EIP.
+    ref: "concepts.md#floating-ip-pattern"
+
+  - id: aws-cdp-basic-and-ha-036
+    difficulty: intermediate
+    tags: [floating-ip, use-case, active-standby]
+    question: |
+      For which scenario is EIP/ENI 'floating' still clearly relevant rather than superseded by a
+      load balancer?
+    options:
+      - "Distributing traffic across a large stateless web fleet"
+      - "Serving static assets from the edge"
+      - "Auto-scaling a serverless API"
+      - "Active/standby failover of a single appliance (or a fixed-IP requirement for allowlisting)"
+    answer: 3
+    explanation: |
+      Moving a single stable address between two nodes fits single-appliance active/standby (e.g. a
+      self-managed NAT/HA pair) or a fixed-IP allowlisting need. A large stateless fleet is better
+      served by a load balancer; serverless scaling and edge delivery are unrelated to floating IPs.
+    ref: "concepts.md#floating-ip-pattern"
+
+  - id: aws-cdp-basic-and-ha-037
+    difficulty: beginner
+    tags: [deep-health-check, dependencies, elb]
+    question: |
+      The Deep Health Check pattern exists because a shallow load-balancer health check:
+    options:
+      - "Cannot see the health of back-end dependencies (app server, database) behind the front server"
+      - "Cannot be automated"
+      - "Requires an Elastic IP"
+      - "Only works across multiple Regions"
+    answer: 0
+    explanation: |
+      A shallow check confirms the front (web) server responds but cannot see whether the proxy,
+      app server, or database behind it is healthy — so the LB may keep routing to an instance that
+      can't actually serve requests. Deep Health Check exercises the whole chain. The other options
+      are false.
+    ref: "concepts.md#deep-health-check-pattern"
+
+  - id: aws-cdp-basic-and-ha-038
+    difficulty: intermediate
+    tags: [deep-health-check, endpoint, classic-mechanism]
+    question: |
+      How does the Deep Health Check pattern make the load balancer's decision reflect system health?
+    options:
+      - "It shortens the health-check interval to one second"
+      - "It points the health check at a dynamic endpoint that exercises the dependency chain and returns success only if all are healthy"
+      - "It reassigns the Elastic IP when the database is slow"
+      - "It snapshots the database before each check"
+    answer: 1
+    explanation: |
+      The pattern targets a dynamic /health endpoint (a program) that reaches through to the app
+      server and database and returns healthy only if the whole chain works — so the LB pulls an
+      instance whose dependencies are broken. Interval tuning, EIP reassignment, and snapshots do
+      not accomplish this.
+    ref: "concepts.md#deep-health-check-pattern"
+
+  - id: aws-cdp-basic-and-ha-039
+    difficulty: advanced
+    tags: [deep-health-check, cascading-failure, gotcha]
+    question: |
+      What is the classic danger of an overly broad Deep Health Check?
+    options:
+      - "It makes instances boot more slowly"
+      - "A shared-dependency blip fails every instance's deep check at once, marking the whole fleet unhealthy"
+      - "It requires a second Region to function"
+      - "It prevents Auto Scaling from ever adding instances"
+    answer: 1
+    explanation: |
+      If the deep check depends on a shared resource (e.g. one database) and that resource blips,
+      every instance fails simultaneously, the LB de-registers the entire fleet, and a slow
+      dependency becomes a total outage. Mitigate by separating liveness from readiness and scoping
+      the deep check to truly required dependencies.
+    ref: "concepts.md#deep-health-check-pattern"
+
+  - id: aws-cdp-basic-and-ha-040
+    difficulty: advanced
+    tags: [deep-health-check, liveness-readiness, mitigation]
+    question: |
+      Which practices help avoid Deep Health Check cascading false failures? Select all that apply.
+    options:
+      - "Distinguish liveness (is this instance up?) from readiness/deep (are dependencies reachable?)"
+      - "Add dependency timeouts and a fail-open or degraded mode"
+      - "Avoid failing the whole check on a non-critical dependency"
+      - "Make every instance's deep check hard-depend on every downstream service"
+    type: multi
+    answers: [0, 1, 2]
+    explanation: |
+      Separating liveness from readiness, adding timeouts / fail-open behavior, and not failing on
+      non-critical dependencies all prevent a dependency blip from taking the fleet out of
+      rotation. The wrong option — hard-depending on every downstream — is exactly what causes the
+      cascading failure.
+    ref: "concepts.md#deep-health-check-pattern"
+
+  - id: aws-cdp-basic-and-ha-041
+    difficulty: intermediate
+    tags: [deep-health-check, route53, modern-mapping]
+    question: |
+      Which modern AWS mechanism is the DNS-tier analog of a Deep Health Check, combining child
+      checks with AND/OR/threshold logic?
+    options:
+      - "Route 53 calculated health checks"
+      - "EBS Fast Snapshot Restore"
+      - "Auto Scaling scheduled actions"
+      - "AWS Compute Optimizer"
+    answer: 0
+    explanation: |
+      Route 53 health checks — including calculated health checks that combine child checks with
+      boolean/threshold logic and CloudWatch-metric-based checks — bring deep-check semantics to
+      DNS-level failover. The other services handle snapshot restore, scaling schedules, and
+      right-sizing.
+    ref: "concepts.md#deep-health-check-pattern"
+
+  - id: aws-cdp-basic-and-ha-042
+    difficulty: intermediate
+    tags: [deep-health-check, kubernetes, ecs]
+    question: |
+      In container platforms, the Deep Health Check idea maps most directly to:
+    options:
+      - "Kubernetes readiness probes / ECS container health checks that gate traffic on dependency readiness"
+      - "Horizontal Pod Autoscaler"
+      - "A golden container image in ECR"
+      - "A persistent volume claim"
+    answer: 0
+    explanation: |
+      Readiness probes (K8s) and ECS container health checks determine whether a task/pod should
+      receive traffic based on whether it (and its dependencies) are ready — the container analog
+      of a deep check. Autoscaling, images, and volumes are the Scale Out, Stamp, and storage
+      patterns respectively.
+    ref: "concepts.md#deep-health-check-pattern"
+
+  - id: aws-cdp-basic-and-ha-043
+    difficulty: intermediate
+    tags: [pattern-selection, scenario]
+    question: |
+      A stateful, hard-to-parallelize relational primary is CPU-bound. Which CDP pattern is the
+      pragmatic first move to give it more capacity?
+    options:
+      - "Scale Out"
+      - "Deep Health Check"
+      - "Multi-Datacenter"
+      - "Scale Up"
+    answer: 3
+    explanation: |
+      A single relational primary is hard to scale horizontally, so vertical Scale Up (a larger
+      instance class) is the pragmatic first move. Scale Out needs statelessness; Multi-Datacenter
+      is about AZ redundancy; Deep Health Check is about routing decisions.
+    ref: "concepts.md#scale-up-pattern"
+
+  - id: aws-cdp-basic-and-ha-044
+    difficulty: intermediate
+    tags: [pattern-selection, scenario, ha]
+    question: |
+      A stateless web tier already runs several instances behind an ALB in one AZ. To survive a
+      whole-data-center failure, which pattern do you add?
+    options:
+      - "Snapshot"
+      - "Scale Up"
+      - "Multi-Datacenter (spread instances across multiple AZs)"
+      - "On-demand Disk"
+    answer: 2
+    explanation: |
+      Multiple instances in a single AZ (Multi-Server) survive an instance failure but not the loss
+      of the AZ. Spreading the ASG across multiple AZs is Multi-Datacenter (Multi-AZ), which
+      survives a data-center-level failure. Snapshot, Scale Up, and On-demand Disk don't address
+      AZ-level redundancy.
+    ref: "concepts.md#multi-datacenter-pattern"
+
+  - id: aws-cdp-basic-and-ha-045
+    difficulty: advanced
+    tags: [pattern-selection, scenario, floating-ip]
+    question: |
+      You run a self-managed HA appliance as an active/standby pair and need clients to reach a
+      single fixed IP that moves to the standby on failover. Which pattern fits best?
+    options:
+      - "Scale Out behind an ALB"
+      - "Floating IP via EIP or ENI reassignment"
+      - "Multi-Datacenter"
+      - "Snapshot"
+    answer: 1
+    explanation: |
+      A single fixed address that moves between two nodes on failover is exactly the Floating IP
+      pattern, still relevant for single-appliance active/standby via EIP or ENI reassignment. An
+      ALB fronts N targets (not a single fixed IP appliance pair the same way), and the other
+      patterns are unrelated.
+    ref: "concepts.md#floating-ip-pattern"
+
+  - id: aws-cdp-basic-and-ha-046
+    difficulty: advanced
+    tags: [classic-vs-modern, superseded, summary]
+    question: |
+      Which CDP patterns in this group are most fully SUPERSEDED by managed features (as opposed to
+      still-living patterns now delivered via managed features)? Select all that apply.
+    options:
+      - "On-demand Disk's snapshot-and-recreate resize trick (now EBS Elastic Volumes)"
+      - "Web-tier Floating IP via manual EIP scripts (now load balancers)"
+      - "Deep Health Check (still current best practice)"
+      - "Multi-Datacenter / Multi-AZ (still mandatory for production HA)"
+    type: multi
+    answers: [0, 1]
+    explanation: |
+      The snapshot-to-resize procedure is superseded by Elastic Volumes, and web-tier EIP scripting
+      is superseded by load balancers. Deep Health Check and Multi-Datacenter remain living, current
+      patterns — now delivered through managed features, not replaced by them.
+    ref: "concepts.md#on-demand-disk-pattern"
+
+  - id: aws-cdp-basic-and-ha-047
+    difficulty: beginner
+    tags: [scale-up, scale-out, terminology]
+    question: |
+      'Scaling Up' and 'Scaling Out' differ in that:
+    options:
+      - "Scaling Up adds more machines; Scaling Out makes one machine bigger"
+      - "They both only apply to databases"
+      - "Scaling Up makes one machine bigger (vertical); Scaling Out adds more machines (horizontal)"
+      - "Scaling Out is only possible on-premises"
+    answer: 2
+    explanation: |
+      Scale Up is vertical (a higher-spec single machine); Scale Out is horizontal (more identical
+      machines in parallel behind a load balancer). Option 0 reverses them; the others are false.
+    ref: "concepts.md#scale-out-pattern"
+
+  - id: aws-cdp-basic-and-ha-048
+    difficulty: intermediate
+    tags: [stamp, immutable, deployment]
+    question: |
+      Why is the Stamp pattern the foundation of immutable deployments?
+    options:
+      - "It mutates running instances in place to apply patches"
+      - "It produces a versioned, reproducible image so instances are replaced (not modified) to change them"
+      - "It reassigns Elastic IPs to avoid rebuilding"
+      - "It grows volumes rather than replacing servers"
+    answer: 1
+    explanation: |
+      A baked image is versioned and reproducible; to change the environment you build a new image
+      and replace instances rather than mutating live ones — the essence of immutable
+      infrastructure. In-place mutation is the opposite; EIP reassignment and volume growth are
+      other patterns.
+    ref: "concepts.md#stamp-pattern"
+
+  - id: aws-cdp-basic-and-ha-049
+    difficulty: intermediate
+    tags: [multi-server, redundancy, classic-mechanism]
+    question: |
+      Which statements about the Multi-Server pattern (as the CDP catalog framed it) are TRUE?
+      Select all that apply.
+    options:
+      - "The load balancer's health check removes an unhealthy instance so the remaining instances carry the traffic"
+      - "It can replace one high-spec box with several lower-spec boxes to gain redundancy"
+      - "Multi-Server alone protects against a whole-data-center (AZ) failure"
+      - "On AWS the load balancer is pay-as-you-go, with no appliance to buy up front"
+    type: multi
+    answers: [0, 1, 3]
+    explanation: |
+      The catalog frames Multi-Server as server-level redundancy: the ELB health check pulls an
+      unhealthy instance from rotation so the rest serve traffic, you can swap one large box for
+      several smaller ones, and the load balancer is pay-as-you-go with no appliance to purchase.
+      The false claim is AZ-failure protection — that requires spreading across AZs (Multi-Datacenter);
+      Multi-Server instances in one AZ still fall with that AZ.
+    ref: "concepts.md#multi-server-pattern"

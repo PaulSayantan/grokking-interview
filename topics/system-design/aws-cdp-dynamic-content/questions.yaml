@@ -1,0 +1,896 @@
+topic: "AWS Cloud Design Patterns: Dynamic Content and Scaling"
+domain: system-design
+topic_slug: aws-cdp-dynamic-content
+version: 1
+questions:
+  - id: aws-cdp-dynamic-content-001
+    difficulty: beginner
+    tags: [clone-server, pattern-intent]
+    question: |
+      In the classic CDP catalog, which pattern takes a single server that was never designed
+      for load distribution and makes scale-out possible by capturing it as a machine image?
+    options:
+      - NFS Sharing Pattern
+      - State Sharing Pattern
+      - Clone Server Pattern
+      - Scheduled Scale Out Pattern
+    answer: 2
+    explanation: |
+      Clone Server treats an existing running server as a master, bakes an AMI from it (with
+      content-sync and DB-connection settings pre-adjusted), and launches clones behind an ELB —
+      enabling scale-out "with essentially no changes to the existing system."
+    ref: "concepts.md#clone-server-pattern"
+
+  - id: aws-cdp-dynamic-content-002
+    difficulty: intermediate
+    tags: [clone-server, classic-vs-modern]
+    question: |
+      The classic Clone Server pattern (master AMI + rsync'd clones behind an ELB) is realized
+      today on AWS primarily by which approach?
+    options:
+      - A single large EC2 instance with vertical scaling only
+      - Storing the whole application in a single DynamoDB table
+      - Manually copying files between instances with scp on a cron job
+      - Immutable golden AMI + launch template + Auto Scaling Group behind an ALB/NLB
+    answer: 3
+    explanation: |
+      The modern equivalent is the immutable golden-AMI workflow: bake an AMI, define a launch
+      template, and let an Auto Scaling Group launch identical instances behind a load balancer,
+      with config pulled at boot from user-data/SSM/EFS. Instances become cattle, not hand-synced
+      clones.
+    ref: "concepts.md#clone-server-pattern"
+
+  - id: aws-cdp-dynamic-content-003
+    difficulty: intermediate
+    type: multi
+    tags: [clone-server, cautions, spof]
+    question: |
+      Which of the following are genuine cautions the CDP catalog raises about the Clone Server
+      pattern? Select all that apply.
+    options:
+      - The master EC2 instance becomes a single point of failure
+      - You should not run a database on the master, since each clone would inherit its own copy
+      - Clones cannot be placed behind an ELB
+      - AMIs cannot include application code
+    answers: [0, 1]
+    explanation: |
+      The catalog warns the master EC2 is a SPOF and that you must not run a database on the master
+      (each clone would inherit a separate DB copy and diverge). Clones are explicitly placed behind
+      an ELB, and AMIs routinely bake in application code — so those two options are false.
+    ref: "concepts.md#clone-server-pattern"
+
+  - id: aws-cdp-dynamic-content-004
+    difficulty: intermediate
+    tags: [clone-server, sync, consistency]
+    question: |
+      In the original Clone Server pattern, how did the catalog keep the cloned servers' content
+      in step with the master?
+    options:
+      - Periodic rsync from the master to the clones
+      - Real-time block replication over the network
+      - A shared DynamoDB global table
+      - CloudFront origin failover
+    answer: 0
+    explanation: |
+      The catalog prescribes periodic rsync between the master and the clones, which gives
+      eventual, delayed consistency. Modern designs instead pull config at boot or mount a shared
+      file system.
+    ref: "concepts.md#clone-server-pattern"
+
+  - id: aws-cdp-dynamic-content-005
+    difficulty: advanced
+    type: multi
+    tags: [clone-server, classic-vs-modern]
+    question: |
+      Which of the following are TRUE of how the Clone Server pattern maps to modern AWS?
+      Select all that apply.
+    options:
+      - The master+rsync clone topology is superseded by immutable Auto Scaling Groups
+      - The core idea of capturing a known-good server as an image is still valid today
+      - Boot-time configuration is better done via user-data/SSM than by rsync from a master
+      - Golden AMIs are impossible to create without a running master serving live traffic
+    answers: [0, 1, 2]
+    explanation: |
+      The literal master+rsync design is superseded by immutable ASGs, but the underlying idea —
+      image a known-good server and replicate it — is more relevant than ever, and boot config is
+      now pulled from user-data/SSM/EFS. AMIs can be built by pipelines (EC2 Image Builder/Packer)
+      with no live master, so the last option is false.
+    ref: "concepts.md#clone-server-pattern"
+
+  - id: aws-cdp-dynamic-content-006
+    difficulty: beginner
+    tags: [nfs-sharing, pattern-intent]
+    question: |
+      Which classic pattern lets multiple scale-out servers read AND write identical content in
+      real time by mounting a shared file server?
+    options:
+      - NFS Replica Pattern
+      - Cache Proxy Pattern
+      - NFS Sharing Pattern
+      - URL Rewriting Pattern
+    answer: 2
+    explanation: |
+      NFS Sharing designates one server as an NFS server holding shared content; every node
+      mounts it as an NFS client, so any server can read/write and all see updates in real time —
+      solving the write-back problem of one-way periodic sync.
+    ref: "concepts.md#nfs-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-007
+    difficulty: intermediate
+    tags: [nfs-sharing, classic-vs-modern, efs]
+    question: |
+      The self-managed NFS-server-on-EC2 of the NFS Sharing pattern is realized today by which
+      managed AWS service?
+    options:
+      - Amazon S3
+      - Amazon DynamoDB
+      - Amazon EFS
+      - Amazon Kinesis
+    answer: 2
+    explanation: |
+      Amazon EFS is a fully managed, elastic NFS v4.1 file system mountable by many instances,
+      containers, and Lambda across AZs at once — removing the NFS server you'd otherwise run and
+      patch, and eliminating its SPOF.
+    ref: "concepts.md#nfs-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-008
+    difficulty: intermediate
+    tags: [nfs-sharing, cautions]
+    question: |
+      Which concern did the CDP catalog explicitly raise about the NFS Sharing pattern's
+      self-managed NFS server?
+    options:
+      - It cannot store files, only metadata
+      - It requires CloudFront to function
+      - It only works within a single Availability Zone by design of NFS
+      - It is a SPOF and its access performance degrades as the fleet grows
+    answer: 3
+    explanation: |
+      The catalog warns the self-run NFS server is a SPOF and that access performance must be
+      considered as the number of EC2 instances grows (it even suggests GlusterFS as a fix). EFS
+      resolves both by being managed and multi-AZ.
+    ref: "concepts.md#nfs-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-009
+    difficulty: advanced
+    tags: [nfs-sharing, fsx, windows]
+    question: |
+      A workload needs a shared file system across a fleet but uses Windows/SMB rather than
+      POSIX/NFS semantics. Which modern AWS service is the right fit?
+    options:
+      - Amazon EFS
+      - Amazon S3 with a mounted FUSE layer
+      - Amazon FSx (for Windows File Server)
+      - Amazon ElastiCache
+    answer: 2
+    explanation: |
+      EFS provides NFS (POSIX) shared storage; for Windows/SMB workloads the equivalent is Amazon
+      FSx (FSx for Windows File Server, or FSx for NetApp ONTAP for multi-protocol).
+    ref: "concepts.md#nfs-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-010
+    difficulty: beginner
+    tags: [nfs-replica, pattern-intent]
+    question: |
+      Which pattern addresses an NFS read bottleneck by copying the shared files onto each
+      server's own local disk to serve as a read-only replica?
+    options:
+      - NFS Sharing Pattern
+      - State Sharing Pattern
+      - NFS Replica Pattern
+      - Rewrite Proxy Pattern
+    answer: 2
+    explanation: |
+      NFS Replica layers on NFS Sharing: each server copies the NFS content to its own EBS (or
+      instance store) at startup and reads locally, avoiding the per-request NFS hop and removing
+      the NFS SPOF for reads.
+    ref: "concepts.md#nfs-replica-pattern"
+
+  - id: aws-cdp-dynamic-content-011
+    difficulty: intermediate
+    tags: [nfs-replica, cautions, consistency]
+    question: |
+      What is the key caution the catalog gives for the NFS Replica pattern?
+    options:
+      - Updates on the source are not automatically reflected to the local replicas
+      - EBS volumes cannot be attached to EC2 instances
+      - Local reads are slower than NFS reads
+      - Replicas must be writable by all servers
+    answer: 0
+    explanation: |
+      Because each server reads a local copy, an update on the NFS source is NOT propagated
+      automatically — you must re-sync (rsync). Replicas are stale between syncs, so the pattern
+      suits read-mostly, stale-tolerant data.
+    ref: "concepts.md#nfs-replica-pattern"
+
+  - id: aws-cdp-dynamic-content-012
+    difficulty: advanced
+    type: multi
+    tags: [nfs-replica, trade-offs]
+    question: |
+      Which statements about the NFS Replica pattern are TRUE? Select all that apply.
+    options:
+      - It improves read performance by serving files from a local disk instead of NFS
+      - Because content exists on each local disk, the NFS server stops being a read SPOF
+      - It guarantees strong consistency of updates across all replicas
+      - It is best suited to read-mostly content that tolerates some staleness
+    answers: [0, 1, 3]
+    explanation: |
+      Local reads are faster and, since the content lives on every node's disk, the NFS server is
+      no longer a read SPOF; the pattern fits read-mostly/stale-tolerant data. It does NOT provide
+      strong consistency — updates must be re-synced, so replicas lag.
+    ref: "concepts.md#nfs-replica-pattern"
+
+  - id: aws-cdp-dynamic-content-013
+    difficulty: advanced
+    tags: [nfs-replica, classic-vs-modern]
+    question: |
+      NFS Replica is best understood as the file-system-level instance of which universal modern
+      idea?
+    options:
+      - Sharding writes across partitions
+      - Replicating read data close to each reader
+      - Encrypting data at rest with KMS
+      - Rate-limiting requests at the edge
+    answer: 1
+    explanation: |
+      NFS Replica embodies "replicate read data close to each reader" — the same principle behind
+      RDS/Aurora read replicas, DynamoDB replicas/DAX, ElastiCache read replicas, and CloudFront
+      edge caches.
+    ref: "concepts.md#nfs-replica-pattern"
+
+  - id: aws-cdp-dynamic-content-014
+    difficulty: intermediate
+    tags: [nfs-replica, cost, instance-store]
+    question: |
+      The catalog notes you can improve performance and reduce cost in NFS Replica by copying the
+      files to what, instead of EBS?
+    options:
+      - Amazon S3 Glacier
+      - EC2 instance store (ephemeral local disk)
+      - Amazon RDS
+      - An NFS server in another region
+    answer: 1
+    explanation: |
+      The catalog suggests using an EC2 instance store (ephemeral local disk) as the local replica
+      target for better performance and lower cost, at the price of losing the data when the
+      instance stops.
+    ref: "concepts.md#nfs-replica-pattern"
+
+  - id: aws-cdp-dynamic-content-015
+    difficulty: beginner
+    tags: [state-sharing, pattern-intent]
+    question: |
+      Which pattern makes web/app servers stateless so a user's session survives when a server is
+      scaled in or fails behind a load balancer?
+    options:
+      - Clone Server Pattern
+      - State Sharing Pattern
+      - Cache Proxy Pattern
+      - NFS Sharing Pattern
+    answer: 1
+    explanation: |
+      State Sharing externalizes HTTP session/state into a durable shared data store keyed by
+      session/user ID, so servers hold no local state and any node can serve any request.
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-016
+    difficulty: intermediate
+    tags: [state-sharing, classic-vs-modern]
+    question: |
+      The State Sharing catalog listed ElastiCache, SimpleDB, and DynamoDB as session stores.
+      Which of those is no longer the recommended choice for new AWS workloads?
+    options:
+      - SimpleDB
+      - ElastiCache
+      - DynamoDB
+      - All three are equally recommended today
+    answer: 0
+    explanation: |
+      Amazon SimpleDB is no longer open to new customers; today you'd use ElastiCache
+      (Redis/Valkey/Memcached) or DynamoDB (with TTL) as the shared session store.
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-017
+    difficulty: intermediate
+    tags: [state-sharing, dynamodb, ttl]
+    question: |
+      Which DynamoDB feature most directly helps implement session expiry for a State Sharing
+      store?
+    options:
+      - Global secondary indexes
+      - Time to Live (TTL)
+      - Streams
+      - Provisioned throughput reserved capacity
+    answer: 1
+    explanation: |
+      DynamoDB TTL automatically expires items after a timestamp, which is ideal for session
+      records — the catalog's DynamoDB choice is now paired with TTL for automatic cleanup.
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-018
+    difficulty: intermediate
+    tags: [state-sharing, cautions, bottleneck]
+    question: |
+      What timeless caution does the catalog raise about externalizing state into a shared store?
+    options:
+      - Sessions can never be expired
+      - The shared store can become a bottleneck or SPOF and must be sized/replicated for peak
+      - State can only be shared within one Availability Zone
+      - Only integers can be stored as session values
+    answer: 1
+    explanation: |
+      Concentrating all session access on one store makes that store a potential bottleneck/SPOF,
+      so it must be replicated and sized for peak; the catalog suggests DynamoDB when the store
+      must not become a bottleneck.
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-019
+    difficulty: advanced
+    type: multi
+    tags: [state-sharing, stateless, trade-offs]
+    question: |
+      Which are valid modern ways to satisfy the State Sharing pattern's goal of a stateless,
+      scalable web tier? Select all that apply.
+    options:
+      - Store sessions in ElastiCache (Redis/Valkey) with TTL-based expiry
+      - Use stateless signed tokens (JWT / signed cookies) so there is no server-side session
+      - Store sessions in DynamoDB with TTL
+      - Rely solely on ALB sticky sessions as the durable source of truth
+    answers: [0, 1, 2]
+    explanation: |
+      ElastiCache with TTL, DynamoDB with TTL, and tokenless JWT/signed cookies all achieve
+      stateless servers. Sticky sessions are only a weak stopgap — they don't survive node loss
+      and re-introduce the SPOF State Sharing removes, so they are not a durable source of truth.
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-020
+    difficulty: intermediate
+    tags: [state-sharing, sticky-sessions]
+    question: |
+      Why are ALB sticky sessions considered a weaker alternative to true State Sharing?
+    options:
+      - They cost more than a DynamoDB table
+      - They pin a user to one server, so the session is lost if that server fails or is scaled in
+      - They cannot be enabled on Application Load Balancers
+      - They require CloudFront in front of the ALB
+    answer: 1
+    explanation: |
+      Stickiness routes a user back to the same server, so a node failure or scale-in loses that
+      user's in-memory session — exactly the SPOF that externalizing state into a shared store
+      eliminates.
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-021
+    difficulty: beginner
+    tags: [url-rewriting, pattern-intent]
+    question: |
+      Which pattern offloads static assets (JS/CSS/images) to Internet storage and changes the
+      asset URLs in delivered HTML to point there?
+    options:
+      - URL Rewriting Pattern
+      - State Sharing Pattern
+      - NFS Replica Pattern
+      - Scheduled Scale Out Pattern
+    answer: 0
+    explanation: |
+      URL Rewriting moves static content to Internet storage (S3) and rewrites the asset URLs in
+      the HTML — either directly or via a web-server filter — so the expensive dynamic tier only
+      generates HTML.
+    ref: "concepts.md#url-rewriting-pattern"
+
+  - id: aws-cdp-dynamic-content-022
+    difficulty: intermediate
+    tags: [url-rewriting, classic-vs-modern, s3, cloudfront]
+    question: |
+      Which combination is the modern AWS realization of the URL Rewriting pattern?
+    options:
+      - EBS volumes shared across instances
+      - S3 for static assets fronted by CloudFront with Origin Access Control
+      - A single EC2 instance serving all content
+      - DynamoDB storing image binaries as items
+    answer: 1
+    explanation: |
+      Static assets go in S3 and are served through CloudFront with OAC (keeping the bucket
+      private). URL rewriting moves to edge compute (CloudFront Functions/Lambda@Edge) or is
+      emitted by the frontend build with content-hashed CDN URLs.
+    ref: "concepts.md#url-rewriting-pattern"
+
+  - id: aws-cdp-dynamic-content-023
+    difficulty: intermediate
+    tags: [url-rewriting, classic-mechanism]
+    question: |
+      In the classic URL Rewriting pattern, how could you rewrite asset URLs WITHOUT hand-editing
+      every HTML file?
+    options:
+      - By using a web-server filter module (Apache/Nginx) to rewrite URLs at delivery time
+      - By rebooting the EC2 instance
+      - By renaming the S3 bucket
+      - By enabling ELB stickiness
+    answer: 0
+    explanation: |
+      The catalog notes you can use the Apache filter module or Nginx to overwrite the static
+      URLs dynamically at delivery time, avoiding direct edits to the content.
+    ref: "concepts.md#url-rewriting-pattern"
+
+  - id: aws-cdp-dynamic-content-024
+    difficulty: advanced
+    tags: [url-rewriting, edge-compute]
+    question: |
+      Today, the URL-rewriting step of the URL Rewriting pattern is most appropriately done with
+      which AWS capability (replacing an Apache/Nginx filter on the origin)?
+    options:
+      - CloudFront Functions or Lambda@Edge
+      - Amazon SQS
+      - AWS Glue
+      - Amazon Athena
+    answer: 0
+    explanation: |
+      CloudFront Functions (lightweight viewer request/response) or Lambda@Edge (heavier) perform
+      URL rewriting at the edge, replacing origin-side Apache/Nginx filter modules.
+    ref: "concepts.md#url-rewriting-pattern"
+
+  - id: aws-cdp-dynamic-content-025
+    difficulty: advanced
+    type: multi
+    tags: [url-rewriting, benefits, trade-offs]
+    question: |
+      Which are genuine benefits/trade-offs of the URL Rewriting pattern as the catalog frames it?
+      Select all that apply.
+    options:
+      - Static traffic no longer consumes the expensive dynamic (EC2) tier
+      - Serving via CloudFront reduces latency for globally distributed users
+      - Cache invalidation and asset versioning become ongoing concerns
+      - It eliminates the need to ever cache any content
+    answers: [0, 1, 2]
+    explanation: |
+      Offloading statics spares the EC2 tier and cuts cost; CloudFront cuts global latency; but
+      cache invalidation and URL/versioning (content hashing) become real work. It does not
+      eliminate caching — CDN caching is central to the benefit.
+    ref: "concepts.md#url-rewriting-pattern"
+
+  - id: aws-cdp-dynamic-content-026
+    difficulty: beginner
+    tags: [rewrite-proxy, pattern-intent]
+    question: |
+      Which pattern offloads static content WITHOUT modifying the existing app, by inserting a
+      reverse proxy in front of it that rewrites asset URLs?
+    options:
+      - Rewrite Proxy Pattern
+      - Cache Proxy Pattern
+      - URL Rewriting Pattern
+      - Clone Server Pattern
+    answer: 0
+    explanation: |
+      Rewrite Proxy places an Nginx/Apache reverse proxy in front of the unmodified app; the proxy
+      rewrites asset URLs in passing responses so clients fetch statics from S3/CDN — no change to
+      the app itself.
+    ref: "concepts.md#rewrite-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-027
+    difficulty: advanced
+    tags: [rewrite-proxy, url-rewriting, distinction]
+    question: |
+      What distinguishes the Rewrite Proxy pattern from the URL Rewriting pattern?
+    options:
+      - Rewrite Proxy caches responses while URL Rewriting never touches static content
+      - Rewrite Proxy performs the rewrite in a proxy so the app is untouched, while URL Rewriting
+        changes the content/URLs (or the origin web server's filter)
+      - Rewrite Proxy only works for dynamic content and URL Rewriting only for databases
+      - There is no difference; they are two names for the same pattern
+    answer: 1
+    explanation: |
+      Both aim to offload statics, but URL Rewriting changes the content/URLs (possibly via an
+      origin filter), whereas Rewrite Proxy inserts a separate proxy that rewrites URLs so the
+      existing system needs no modification.
+    ref: "concepts.md#rewrite-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-028
+    difficulty: advanced
+    type: multi
+    tags: [rewrite-proxy, cautions, spof]
+    question: |
+      Which cautions does the catalog raise about a self-run Rewrite Proxy? Select all that apply.
+    options:
+      - The proxy must be made redundant or it becomes a SPOF
+      - Because the app sits behind the proxy, ASG add/remove of app nodes no longer registers
+        directly with the ELB
+      - The proxy makes it impossible to serve any static content
+      - The proxy can only run on physical hardware, not EC2
+    answers: [0, 1]
+    explanation: |
+      The catalog warns the proxy must be redundant (else SPOF) and that inserting it between the
+      ELB and the app breaks the direct ELB-to-app wiring, complicating ASG registration. It can
+      run on EC2 and it exists precisely to serve/offload static content.
+    ref: "concepts.md#rewrite-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-029
+    difficulty: advanced
+    tags: [rewrite-proxy, classic-vs-modern]
+    question: |
+      An interviewer asks how you would offload static assets from a frozen legacy app you cannot
+      modify, on AWS today. Which is the cleanest modern answer?
+    options:
+      - Run a self-managed Nginx rewrite-proxy fleet on EC2 behind the ELB
+      - Use CloudFront with CloudFront Functions/Lambda@Edge to rewrite requests without touching
+        the origin
+      - Rewrite the app in a new language first
+      - Move all traffic to a single larger instance
+    answer: 1
+    explanation: |
+      The "don't modify the origin" property now lives at the edge: CloudFront + CloudFront
+      Functions/Lambda@Edge rewrite requests/responses without a self-run proxy fleet, avoiding the
+      SPOF and ELB-registration coupling of the classic approach.
+    ref: "concepts.md#rewrite-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-030
+    difficulty: beginner
+    tags: [cache-proxy, pattern-intent]
+    question: |
+      Which pattern raises throughput on a tight budget by placing a cache upstream of the web/app
+      tier that stores and serves copies of responses until they expire?
+    options:
+      - Cache Proxy Pattern
+      - Rewrite Proxy Pattern
+      - NFS Sharing Pattern
+      - State Sharing Pattern
+    answer: 0
+    explanation: |
+      Cache Proxy puts a cache server (classically Varnish on EC2) in front of the app; it serves
+      cached static content and slow-changing dynamic content, cutting generation load without
+      adding expensive web/app servers.
+    ref: "concepts.md#cache-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-031
+    difficulty: intermediate
+    tags: [cache-proxy, classic-mechanism]
+    question: |
+      What software does the CDP catalog cite for building the Cache Proxy on an EC2 instance?
+    options:
+      - Varnish
+      - PostgreSQL
+      - HAProxy configured as a database
+      - Elasticsearch
+    answer: 0
+    explanation: |
+      The catalog builds Cache Proxy with a common cache server such as Varnish installed on an
+      EC2 instance, placed in front of the web/app tier.
+    ref: "concepts.md#cache-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-032
+    difficulty: intermediate
+    tags: [cache-proxy, classic-vs-modern, cloudfront]
+    question: |
+      Which managed AWS service is the natural modern equivalent of a Varnish-on-EC2 Cache Proxy
+      sitting in front of an origin?
+    options:
+      - Amazon EFS
+      - Amazon SQS
+      - Amazon CloudFront
+      - AWS Step Functions
+    answer: 2
+    explanation: |
+      CloudFront is a managed, globally distributed reverse cache in front of your origin, with
+      cache-key control (headers/query/cookies via cache policies) and TTLs — doing what Varnish
+      did, managed and at the edge. ElastiCache covers in-region app-level caching.
+    ref: "concepts.md#cache-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-033
+    difficulty: advanced
+    tags: [cache-proxy, rewrite-proxy, distinction]
+    question: |
+      What is the essential difference between the Cache Proxy and Rewrite Proxy patterns?
+    options:
+      - Cache Proxy stores and serves copies of responses; Rewrite Proxy rewrites/redirects URLs to
+        another origin
+      - Cache Proxy only works for HTTPS; Rewrite Proxy only for HTTP
+      - Cache Proxy requires DynamoDB; Rewrite Proxy requires RDS
+      - They are identical except for the port number used
+    answer: 0
+    explanation: |
+      Cache Proxy caches and serves response copies; Rewrite Proxy rewrites/redirects asset URLs to
+      a different origin (S3) without caching. Both are proxies but do different jobs.
+    ref: "concepts.md#cache-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-034
+    difficulty: advanced
+    type: multi
+    tags: [cache-proxy, dynamic-content, benefits]
+    question: |
+      Which statements about the Cache Proxy pattern's benefits are TRUE? Select all that apply.
+    options:
+      - Caching slow-changing dynamic content greatly reduces content-generation load
+      - It can raise throughput without adding more expensive web/app servers
+      - You can flexibly control caching via HTTP headers, URLs, and cookies
+      - Content that changes on every single request is the ideal thing to cache
+    answers: [0, 1, 2]
+    explanation: |
+      The catalog highlights that caching slow-changing dynamic content cuts generation load, raises
+      throughput without adding servers, and can be tuned via headers/URLs/cookies. Content that
+      changes every request is the worst caching candidate, so that option is false.
+    ref: "concepts.md#cache-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-035
+    difficulty: beginner
+    tags: [scheduled-scale-out, pattern-intent]
+    question: |
+      Which pattern pre-provisions servers ahead of a spike whose timing is known in advance,
+      rather than reacting to observed load?
+    options:
+      - Clone Server Pattern
+      - Cache Proxy Pattern
+      - Scheduled Scale Out Pattern
+      - NFS Replica Pattern
+    answer: 2
+    explanation: |
+      Scheduled Scale Out uses time-based scaling: when the surge time is known, scale out before
+      it so capacity is ready, then scale in when traffic settles — because reactive scaling can't
+      keep up with a sudden spike.
+    ref: "concepts.md#scheduled-scale-out-pattern"
+
+  - id: aws-cdp-dynamic-content-036
+    difficulty: intermediate
+    tags: [scheduled-scale-out, classic-mechanism]
+    question: |
+      In the classic pattern, how did you pre-scale an Auto Scaling group for a known event time?
+    options:
+      - By deleting the Auto Scaling group
+      - By disabling the load balancer temporarily
+      - By raising the group's minimum instance count (min-size) at the scheduled time
+      - By switching the instances to a larger AMI
+    answer: 2
+    explanation: |
+      The catalog uses Auto Scaling's time-based setting to raise the minimum instance count
+      (--min-size) at the scheduled time so the fleet is scaled out before the surge, then lowers
+      it later so normal scale-in reclaims capacity.
+    ref: "concepts.md#scheduled-scale-out-pattern"
+
+  - id: aws-cdp-dynamic-content-037
+    difficulty: intermediate
+    tags: [scheduled-scale-out, classic-vs-modern]
+    question: |
+      What is the modern, native AWS mechanism for Scheduled Scale Out?
+    options:
+      - A cron job on a bastion host that calls the EC2 API
+      - Auto Scaling Group scheduled actions (one-off or cron recurrence) setting Min/Max/Desired
+      - Manually launching instances from the console each morning
+      - CloudFront cache invalidation on a timer
+    answer: 1
+    explanation: |
+      ASG scheduled actions (PutScheduledUpdateGroupAction) set MinSize/MaxSize/DesiredCapacity for
+      a time window with one-off or cron recurrence — no external cron box needed. Pair with
+      target-tracking/predictive scaling for the noise.
+    ref: "concepts.md#scheduled-scale-out-pattern"
+
+  - id: aws-cdp-dynamic-content-038
+    difficulty: intermediate
+    tags: [scheduled-scale-out, reactive-scaling, limits]
+    question: |
+      Why does purely reactive autoscaling fail during a very sudden spike (e.g., traffic doubling
+      in under five minutes)?
+    options:
+      - Reactive scaling is disabled by default in AWS
+      - Instance launch, boot, and warm-up take minutes, so capacity lags exactly when needed
+      - Load balancers cannot detect increased traffic
+      - Reactive scaling only works for databases
+    answer: 1
+    explanation: |
+      The catalog's core point: watching load and then launching instances can't keep up because
+      instance creation/boot/warm-up takes minutes. If the timing is known, Scheduled Scale Out
+      pre-warms capacity before the surge.
+    ref: "concepts.md#scheduled-scale-out-pattern"
+
+  - id: aws-cdp-dynamic-content-039
+    difficulty: advanced
+    type: multi
+    tags: [scheduled-scale-out, trade-offs]
+    question: |
+      Which statements about Scheduled Scale Out are TRUE? Select all that apply.
+    options:
+      - It only helps when the spike timing is known in advance
+      - It reduces cost versus always-on over-provisioning
+      - It can fully replace reactive/predictive scaling for unpredictable spikes
+      - Scaling up should be set comfortably before the event to absorb boot time
+    answers: [0, 1, 3]
+    explanation: |
+      Scheduled scaling helps only for known timings, saves cost versus permanent over-provisioning,
+      and should fire before the event to absorb boot latency. It cannot handle genuinely
+      unpredictable spikes — those still need reactive/predictive scaling.
+    ref: "concepts.md#scheduled-scale-out-pattern"
+
+  - id: aws-cdp-dynamic-content-040
+    difficulty: advanced
+    tags: [scheduled-scale-out, predictive-scaling]
+    question: |
+      How do modern designs typically combine scheduled and dynamic scaling?
+    options:
+      - Use scheduled actions for the known baseline shift and target-tracking/predictive scaling
+        for the remaining variability
+      - Use only scheduled actions and disable all dynamic policies
+      - Use only reactive policies and never schedule anything
+      - Replace autoscaling entirely with a single fixed fleet size
+    answer: 0
+    explanation: |
+      Scheduled actions cover the known baseline change (e.g., business-hours or launch window)
+      while target-tracking or predictive scaling absorbs the residual noise — layering both is the
+      standard approach.
+    ref: "concepts.md#scheduled-scale-out-pattern"
+
+  - id: aws-cdp-dynamic-content-041
+    difficulty: intermediate
+    tags: [pattern-selection, nfs-sharing, nfs-replica]
+    question: |
+      Multiple servers must all read AND write a shared file tree and see each other's writes
+      immediately. Which pattern (and modern service) fits best?
+    options:
+      - NFS Sharing, realized today with Amazon EFS
+      - NFS Replica, using per-instance EBS copies
+      - Cache Proxy, using CloudFront
+      - State Sharing, using DynamoDB
+    answer: 0
+    explanation: |
+      Shared read/write with immediate visibility is NFS Sharing; today that is Amazon EFS. NFS
+      Replica is read-only/stale-tolerant; Cache Proxy and State Sharing solve different problems.
+    ref: "concepts.md#nfs-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-042
+    difficulty: intermediate
+    tags: [pattern-selection, cache-proxy, cost]
+    question: |
+      Your budget won't allow adding more web/app servers, but you must raise throughput. Most
+      responses are cacheable. Which pattern is the direct fit?
+    options:
+      - Clone Server Pattern
+      - Scheduled Scale Out Pattern
+      - Cache Proxy Pattern
+      - State Sharing Pattern
+    answer: 2
+    explanation: |
+      Cache Proxy exists precisely for the "tight budget, don't multiply expensive servers" case:
+      cache responses upstream so the app tier does less work. Modern realization: CloudFront /
+      ElastiCache.
+    ref: "concepts.md#cache-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-043
+    difficulty: advanced
+    type: multi
+    tags: [pattern-selection, distinctions]
+    question: |
+      Match the intent to the pattern: which of these pairings are correct? Select all that apply.
+    options:
+      - Externalize HTTP session so servers are stateless -> State Sharing
+      - Pre-scale before a known traffic peak -> Scheduled Scale Out
+      - Cache responses upstream to cut app load -> Cache Proxy
+      - Copy a running master into a shared session store -> Clone Server
+    answers: [0, 1, 2]
+    explanation: |
+      State Sharing externalizes session; Scheduled Scale Out pre-scales for known peaks; Cache
+      Proxy caches responses. Clone Server duplicates a server via an AMI behind an ELB — it has
+      nothing to do with a session store, so the last pairing is false.
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-044
+    difficulty: intermediate
+    tags: [pattern-selection, url-rewriting, edge]
+    question: |
+      A dynamic app spends most of its CPU serving images and JS from EC2. You want to stop scaling
+      EC2 for that traffic and can edit the frontend build. Which pattern and stack?
+    options:
+      - State Sharing with ElastiCache
+      - NFS Replica with instance store
+      - URL Rewriting with S3 + CloudFront (content-hashed asset URLs)
+      - Scheduled Scale Out with ASG scheduled actions
+    answer: 2
+    explanation: |
+      Offloading static assets and pointing their URLs at object storage/CDN is URL Rewriting;
+      today that's S3 + CloudFront with build-emitted content-hashed URLs, so EC2 only serves HTML.
+    ref: "concepts.md#url-rewriting-pattern"
+
+  - id: aws-cdp-dynamic-content-045
+    difficulty: advanced
+    tags: [clone-server, database, gotcha]
+    question: |
+      Per the Clone Server pattern's cautions, why must you avoid running the database on the
+      master EC2 that you clone?
+    options:
+      - Databases cannot be installed on EC2
+      - Each clone would carry its own copy of the DB, so data would diverge and be inconsistent
+      - AMIs strip out all database software automatically
+      - The ELB would route all DB traffic to a single clone
+    answer: 1
+    explanation: |
+      If the DB lives on the master, every clone inherits a separate copy from the AMI, so writes
+      diverge across clones. The DB must be externalized (e.g., RDS/Aurora), which is why the
+      pattern keeps the master's DB out of the clone image.
+    ref: "concepts.md#clone-server-pattern"
+
+  - id: aws-cdp-dynamic-content-046
+    difficulty: advanced
+    type: multi
+    tags: [proxy-patterns, spof, coupling]
+    question: |
+      Both the Rewrite Proxy and Cache Proxy patterns, when SELF-RUN on EC2, share which drawbacks
+      that the managed-edge (CloudFront) approach avoids? Select all that apply.
+    options:
+      - The self-run proxy must be made redundant or it is a SPOF
+      - Sitting between ELB and the app complicates direct ASG-to-ELB registration of app nodes
+      - They make it impossible to serve dynamic content at all
+      - They require rewriting the application in a new framework
+    answers: [0, 1]
+    explanation: |
+      Both self-run proxies risk being a SPOF and both break the direct ELB-to-app wiring
+      (the app sits behind the proxy), complicating autoscaling registration — the exact reasons the
+      managed edge (CloudFront) is preferred. They don't prevent dynamic content or require a
+      rewrite.
+    ref: "concepts.md#cache-proxy-pattern"
+
+  - id: aws-cdp-dynamic-content-047
+    difficulty: intermediate
+    tags: [state-sharing, cross-ref]
+    question: |
+      For the deep internals of the session/cache stores behind State Sharing (Redis engine
+      behavior, DAX, eviction), which topic does this pattern-level note cross-reference?
+    options:
+      - system-design/aws-storage-s3-deep-dive
+      - system-design/aws-caching-elasticache-dax
+      - system-design/aws-networking-vpc-privatelink
+      - system-design/aws-migration-modernization
+    answer: 1
+    explanation: |
+      State Sharing stays at pattern altitude and defers store internals to
+      system-design/aws-caching-elasticache-dax (and aws-dynamodb-deep-dive for DynamoDB session
+      stores).
+    ref: "concepts.md#state-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-048
+    difficulty: expert
+    tags: [clone-server, nfs-sharing, evolution]
+    question: |
+      A team using Clone Server rsync'd content between clones but hit drift and write-back
+      problems. Which single pattern change best fixes shared read/write content across the fleet?
+    options:
+      - Switch to NFS Sharing (mount a shared file system, i.e., EFS today)
+      - Add more clones and rsync more frequently
+      - Move to Scheduled Scale Out
+      - Enable ELB stickiness
+    answer: 0
+    explanation: |
+      rsync between clones gives delayed, one-way sync and can't cleanly handle writes on a
+      replica. NFS Sharing (a mounted shared file system, EFS today) gives real-time read/write
+      sharing across all nodes — the intended evolution the catalog itself points to.
+    ref: "concepts.md#nfs-sharing-pattern"
+
+  - id: aws-cdp-dynamic-content-049
+    difficulty: advanced
+    tags: [url-rewriting, s3, oac, security]
+    question: |
+      When realizing URL Rewriting with S3 + CloudFront today, what does Origin Access Control
+      (OAC) provide?
+    options:
+      - It lets the S3 bucket stay private while CloudFront is the only path that can read it
+      - It rewrites the HTML at the origin
+      - It replaces the need for an Auto Scaling group
+      - It stores session state for the app tier
+    answer: 0
+    explanation: |
+      OAC keeps the S3 bucket private and ensures only CloudFront can fetch objects from it, so
+      assets are served through the CDN rather than directly from a public bucket.
+    ref: "concepts.md#url-rewriting-pattern"
+
+  - id: aws-cdp-dynamic-content-050
+    difficulty: intermediate
+    tags: [nfs-sharing, use-cases]
+    question: |
+      Which workload is the BEST fit for shared NFS-style storage (NFS Sharing / EFS) rather than a
+      cache or database?
+    options:
+      - Hot per-request key-value lookups needing sub-millisecond latency
+      - Storing relational transactional records with ACID guarantees
+      - User-uploaded files and a common web root that many app servers must read and write
+      - Serving a global CDN cache of static images
+    answer: 2
+    explanation: |
+      Shared POSIX files that many servers read/write (uploads, shared config, common web root) fit
+      NFS Sharing/EFS. Hot KV lookups want a cache/DynamoDB, transactions want an RDBMS, and global
+      static caching wants CloudFront.
+    ref: "concepts.md#nfs-sharing-pattern"

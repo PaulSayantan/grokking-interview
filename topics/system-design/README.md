@@ -1,7 +1,8 @@
 # System Design
 
 27 core + 8 advanced/expert deep-dive + 7 design-patterns + 6 architectural-patterns +
-31 AWS System Design topics (79 total).
+8 cloud-computing-patterns + 31 AWS System Design + 7 AWS Cloud Design Patterns topics
+(86 total).
 Study content and MCQs live in per-topic subfolders. See the master taxonomy in
 `../../TOPICS.md`.
 
@@ -174,4 +175,23 @@ article. **389 MCQs.**
 All 31 AWS topics: deep trade-off + service-selection concepts.md with service limits,
 comparison tables, cost reasoning, Mermaid/ASCII diagrams, and end-to-end reference
 designs; validated MCQs across all four tiers (heavy scenario/judgment + AWS-fact style).
+
+## AWS Cloud Design Patterns (7 topics)
+
+The classic AWS Cloud Design Patterns catalog (46 patterns, from clouddesignpattern.org),
+taught **"classic intent → modern AWS equivalent"** — each ~2012-2015 EC2-era pattern is
+framed by the problem it solves, the classic mechanism, and how you'd actually build it on
+AWS today (many are now managed-service features). Overlaps with the AWS deep-dives are
+cross-referenced, not re-taught. `aws-cdp-` slug prefix. **347 MCQs** (incl. 73 select-all
+multi-select), all four tiers.
+
+| Topic | Slug | Freq | Difficulty | Status |
+|---|---|---|---|---|
+| Basics and High Availability | `aws-cdp-basic-and-ha` | medium | intermediate | ✅ (49 MCQs · 10 multi) |
+| Dynamic Content and Scaling | `aws-cdp-dynamic-content` | medium | intermediate | ✅ (50 MCQs · 10 multi) |
+| Static Content Delivery and Data Upload | `aws-cdp-static-content-and-upload` | medium | intermediate | ✅ (55 MCQs · 11 multi) |
+| Relational Databases and Data Stores | `aws-cdp-rdbms-and-data` | medium | advanced | ✅ (48 MCQs · 10 multi) |
+| Batch Processing and Asynchronous Workflows | `aws-cdp-batch-and-async` | medium | advanced | ✅ (46 MCQs · 10 multi) |
+| Operation and Maintenance | `aws-cdp-operation-and-maintenance` | medium | intermediate | ✅ (48 MCQs · 12 multi) |
+| Networking and Security | `aws-cdp-network` | medium | advanced | ✅ (51 MCQs · 10 multi) |
 

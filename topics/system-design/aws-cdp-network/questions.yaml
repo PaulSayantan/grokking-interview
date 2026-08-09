@@ -1,0 +1,927 @@
+topic: "AWS Cloud Design Patterns: Networking and Security"
+domain: system-design
+topic_slug: aws-cdp-network
+version: 1
+questions:
+- id: aws-cdp-network-001
+  difficulty: beginner
+  tags: [ondemand-nat, egress, pattern-intent]
+  question: |
+    In the classic CDP catalog, which problem does the OnDemand NAT pattern set out
+    to solve?
+  options:
+  - "Giving private-subnet instances controlled outbound internet access without paying for a NAT device that sits idle most of the time"
+  - "Distributing inbound HTTPS traffic across many web servers"
+  - "Blocking SQL-injection and XSS attacks at the edge"
+  - "Connecting many remote offices over a single VPN hub"
+  answer: 0
+  explanation: |
+    OnDemand NAT addresses outbound egress for private instances (patching, package
+    updates, API calls) while avoiding the waste of a 24/7 NAT device. The other
+    options describe Multi-Load Balancer, WAF Proxy, and CloudHub respectively.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-002
+  difficulty: beginner
+  tags: [ondemand-nat, classic-mechanism]
+  question: |
+    How did the classic OnDemand NAT pattern actually provide egress, as the catalog
+    described it?
+  options:
+  - "It used a managed NAT Gateway that AWS scales automatically"
+  - "It ran a NAT instance (EC2) launched only during maintenance windows and terminated afterward"
+  - "It attached an Elastic IP directly to every private instance"
+  - "It used an S3 gateway endpoint for all outbound traffic"
+  answer: 1
+  explanation: |
+    In the EC2 era there was no managed NAT Gateway. The pattern ran a NAT *instance*
+    and, since instances bill by time, launched it only when maintenance needed egress
+    and terminated it otherwise, automating this via the EC2 API.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-003
+  difficulty: intermediate
+  tags: [ondemand-nat, modern-mapping, nat-gateway]
+  question: |
+    What is the modern AWS equivalent of the OnDemand NAT pattern's self-managed NAT
+    instance?
+  options:
+  - "An Internet Gateway attached to the private subnet"
+  - "A Virtual Private Gateway"
+  - "A managed NAT Gateway (per AZ) in a public subnet"
+  - "A Gateway Load Balancer"
+  answer: 2
+  explanation: |
+    The managed NAT Gateway replaced the self-run NAT instance: it is HA within its AZ,
+    scales throughput automatically, and needs no patching. An IGW can't route a private
+    subnet's egress by itself, a VGW is for VPN, and GWLB inserts appliances.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-004
+  difficulty: advanced
+  tags: [ondemand-nat, cost, vpc-endpoints]
+  question: |
+    A team's NAT Gateway data-processing charges are high because most egress is calls
+    to S3 and DynamoDB. What is the standard modern way to cut that cost?
+  options:
+  - "Switch back to a self-managed NAT instance"
+  - "Attach an Elastic IP to each app instance"
+  - "Route S3/DynamoDB traffic through VPC gateway endpoints so it never traverses the NAT Gateway"
+  - "Move the app instances into a public subnet"
+  answer: 2
+  explanation: |
+    Gateway endpoints for S3 and DynamoDB (and interface endpoints/PrivateLink for other
+    services) keep AWS-bound traffic off the NAT Gateway, avoiding its per-GB
+    data-processing charge. Reverting to a NAT instance reintroduces SPOF/ops burden, and
+    a public subnet/EIP breaks the private-isolation goal.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-005
+  difficulty: advanced
+  tags: [ondemand-nat, trade-offs]
+  type: multi
+  question: |
+    Which statements accurately contrast the classic NAT instance with the modern
+    managed NAT Gateway? Select all that apply.
+  options:
+  - "The classic NAT instance was a single point of failure capped at the instance's bandwidth"
+  - "The NAT Gateway bills per-hour plus per-GB processed in each AZ it runs in"
+  - "The NAT instance required disabling the source/destination check"
+  - "The NAT Gateway can perform custom port forwarding and deep packet inspection that a NAT instance cannot"
+  answers: [0, 1, 2]
+  explanation: |
+    A NAT instance was a SPOF, bandwidth-bound, and needed source/dest check disabled to
+    forward traffic; NAT Gateway bills hourly + per-GB per AZ. The last option is
+    backwards: it is the NAT *instance* that can be customized (port forwarding, packet
+    inspection); NAT Gateway is a fixed managed service.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-006
+  difficulty: intermediate
+  tags: [ondemand-nat, ipv6]
+  question: |
+    For outbound-only IPv6 internet access from a private subnet, what is the modern
+    AWS component (the IPv6 analogue of NAT Gateway)?
+  options:
+  - "Egress-only Internet Gateway"
+  - "NAT Gateway"
+  - "Internet Gateway"
+  - "Customer Gateway"
+  answer: 0
+  explanation: |
+    An egress-only internet gateway provides outbound-only IPv6 egress (stateful, no
+    inbound). NAT Gateway is for IPv4; a plain IGW allows inbound; a customer gateway is
+    the on-prem side of a VPN.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-007
+  difficulty: beginner
+  tags: [backnet, pattern-intent]
+  question: |
+    What problem does the Backnet pattern address?
+  options:
+  - "Reducing NAT costs during maintenance windows"
+  - "Terminating multiple SSL certificates on one fleet"
+  - "Filtering web attacks with a proxy"
+  - "Separating the trusted management/admin network path from the untrusted public-facing path on a server"
+  answer: 3
+  explanation: |
+    Backnet keeps management traffic (SSH, logs, DB admin) off the same interface that
+    serves untrusted public users, reducing the risk of mixing trusted and untrusted
+    paths.
+  ref: "concepts.md#backnet"
+
+- id: aws-cdp-network-008
+  difficulty: intermediate
+  tags: [backnet, classic-mechanism, eni]
+  question: |
+    How did the classic Backnet pattern implement the separation, as the catalog framed
+    it?
+  options:
+  - "By attaching two Elastic Network Interfaces (ENIs) to one instance — a public ENI and a management ENI — each with its own security group and route"
+  - "By running the web server and DB on separate accounts"
+  - "By placing an AWS WAF web ACL in front of the instance"
+  - "By using Route 53 weighted routing"
+  answer: 0
+  explanation: |
+    The pattern gave one EC2 instance two ENIs: an outward-facing ENI in a public subnet
+    (port 80/443 to the IGW) and an inward-facing "Backnet" ENI in a private subnet
+    routing to a VPN gateway for SSH/management/logs, each with a distinct security group.
+  ref: "concepts.md#backnet"
+
+- id: aws-cdp-network-009
+  difficulty: intermediate
+  tags: [backnet, modern-mapping, ssm]
+  question: |
+    What is the preferred modern AWS approach to isolating the server-management path,
+    superseding the Backnet dual-ENI trick?
+  options:
+  - "Give every instance a public IP and restrict port 22 by security group"
+  - "A second Internet Gateway dedicated to SSH"
+  - "AWS Systems Manager Session Manager — agent-based, outbound-only access with no open port 22, IAM-authorized and CloudTrail-logged"
+  - "A NAT instance per management subnet"
+  answer: 2
+  explanation: |
+    SSM Session Manager removes the inbound attack surface entirely (no open 22, no
+    bastion needed), authorizes via IAM, and logs to CloudTrail — a strictly better
+    posture than dual ENIs for ordinary administration.
+  ref: "concepts.md#backnet"
+
+- id: aws-cdp-network-010
+  difficulty: advanced
+  tags: [backnet, trade-offs]
+  question: |
+    Why is the Backnet dual-ENI approach considered an anti-pattern for admin isolation
+    today, even though it still works?
+  options:
+  - "ENIs can no longer have separate security groups"
+  - "Both ENIs live on the same OS, so it doesn't help if the host is compromised, and it still leaves you managing SSH keys and an inbound path"
+  - "VPCs no longer support more than one subnet"
+  - "Elastic Network Interfaces are deprecated"
+  answer: 1
+  explanation: |
+    Two ENIs give two SGs and two routes but share one operating system, so a host
+    compromise defeats the isolation, and you still manage keys and an inbound SSH path.
+    SSM removes the inbound surface and centralizes audit. ENIs and multi-ENI SGs are
+    very much still supported.
+  ref: "concepts.md#backnet"
+
+- id: aws-cdp-network-011
+  difficulty: beginner
+  tags: [functional-firewall, pattern-intent]
+  question: |
+    The Functional Firewall pattern groups access-control rules by what dimension?
+  options:
+  - "By operator organization (dev company, ops vendor)"
+  - "By AWS Region"
+  - "By function/tier (web, app, database)"
+  - "By TLS certificate"
+  answer: 2
+  explanation: |
+    Functional Firewall creates one security group per function/tier and attaches it to
+    the instances of that tier, so rules are authored and maintained per function.
+    Grouping by operator is the sibling Operational Firewall pattern.
+  ref: "concepts.md#functional-firewall"
+
+- id: aws-cdp-network-012
+  difficulty: intermediate
+  tags: [functional-firewall, security-groups, modern-mapping]
+  question: |
+    Which AWS primitive realizes the Functional Firewall pattern, and how has it aged?
+  options:
+  - "Per-tier security groups — and it aged well; it is still exactly how you do L3/L4 tier isolation"
+  - "Network ACLs — and it is now obsolete"
+  - "AWS WAF web ACLs — and it is now the only option"
+  - "Route tables — and it was never really needed"
+  answer: 0
+  explanation: |
+    Security groups per tier are still the standard for tier isolation. The modern
+    refinement is security-group *referencing* (allow the app SG as source rather than a
+    CIDR), keeping rules correct as instance IPs churn.
+  ref: "concepts.md#functional-firewall"
+
+- id: aws-cdp-network-013
+  difficulty: intermediate
+  tags: [functional-firewall, autoscaling]
+  question: |
+    Why does grouping firewall rules by function (Functional Firewall) work well with
+    Auto Scaling?
+  options:
+  - "Auto Scaling disables all firewalls during scale events"
+  - "Security groups automatically create a NAT Gateway per instance"
+  - "Each new instance gets a unique NACL generated on launch"
+  - "New instances simply join the tier's security group, so no rule change is needed when the fleet scales out or in"
+  answer: 3
+  explanation: |
+    Because the rules attach to the group, scaling a tier just adds/removes members of
+    the SG — the rule set is unchanged. That is precisely the maintenance win the pattern
+    highlights.
+  ref: "concepts.md#functional-firewall"
+
+- id: aws-cdp-network-014
+  difficulty: advanced
+  tags: [functional-firewall, security-groups, sg-referencing]
+  type: multi
+  question: |
+    Which statements about security groups (the vehicle for the Functional Firewall
+    pattern) are TRUE? Select all that apply.
+  options:
+  - "They are stateful — return traffic for an allowed flow is automatically permitted"
+  - "A rule can reference another security group as its source instead of a CIDR"
+  - "They support explicit deny rules to block a specific bad CIDR"
+  - "They are allow-only; you cannot express a deny rule in a security group"
+  answers: [0, 1, 3]
+  explanation: |
+    Security groups are stateful, allow-only, and can reference other SGs as sources.
+    They cannot express deny — for that you need a NACL. So the "support explicit deny"
+    option is false; the allow-only option is true.
+  ref: "concepts.md#functional-firewall"
+
+- id: aws-cdp-network-015
+  difficulty: beginner
+  tags: [operational-firewall, pattern-intent]
+  question: |
+    The Operational Firewall pattern controls access based on what dimension?
+  options:
+  - "The function/tier of the server"
+  - "The source/operator organization (e.g. dev company, monitoring vendor) and its source addresses"
+  - "The client device type (PC vs mobile)"
+  - "The TLS cipher suite"
+  answer: 1
+  explanation: |
+    Operational Firewall creates a security group per operating organization scoped to
+    that operator's source addresses/ports, giving centralized, per-operator access
+    control. Grouping by tier is the Functional Firewall pattern.
+  ref: "concepts.md#operational-firewall"
+
+- id: aws-cdp-network-016
+  difficulty: intermediate
+  tags: [operational-firewall, classic-mechanism]
+  question: |
+    How does the Operational Firewall pattern give you a single revocation point per
+    organization?
+  options:
+  - "By putting each organization in its own AWS Region"
+  - "By assigning each organization a dedicated NAT Gateway"
+  - "By creating one security group per organization and attaching the relevant operator SGs (in addition to functional SGs) to instances"
+  - "By issuing each organization a separate TLS certificate"
+  answer: 2
+  explanation: |
+    An instance can carry multiple SGs, so you add per-operator SGs on top of the tier
+    SGs. Revoking a vendor means editing/detaching their one SG, which removes their
+    access everywhere at once. The pattern explicitly composes with Functional Firewall.
+  ref: "concepts.md#operational-firewall"
+
+- id: aws-cdp-network-017
+  difficulty: intermediate
+  tags: [operational-firewall, functional-firewall, sg-vs-nacl]
+  question: |
+    A colleague needs to block one specific malicious CIDR range at the subnet edge.
+    Security groups can't do this. Which AWS control expresses an explicit deny?
+  options:
+  - "A security group with a deny rule"
+  - "A Network ACL (NACL), which is stateless and supports allow and deny in numbered order"
+  - "An IAM policy on the instance"
+  - "A Route 53 health check"
+  answer: 1
+  explanation: |
+    Only NACLs can express deny. They are stateless (you must allow both directions),
+    evaluated in numbered order, and attach to a subnet — the right tool for a CIDR block
+    that SGs (allow-only) cannot express.
+  ref: "concepts.md#operational-firewall"
+
+- id: aws-cdp-network-018
+  difficulty: advanced
+  tags: [sg-vs-nacl, functional-firewall, operational-firewall]
+  type: multi
+  question: |
+    Which statements correctly distinguish security groups from network ACLs? Select all
+    that apply.
+  options:
+  - "Security groups are stateful; NACLs are stateless"
+  - "Security groups attach to ENIs/instances; NACLs attach to subnets"
+  - "NACLs support explicit deny rules; security groups do not"
+  - "NACLs are evaluated as a single unordered allow-list, just like security groups"
+  answers: [0, 1, 2]
+  explanation: |
+    SGs are stateful and per-ENI; NACLs are stateless and per-subnet; NACLs support deny
+    (and are evaluated in numbered rule order) while SGs are allow-only. The last option
+    is false — NACLs are ordered by rule number, not unordered.
+  ref: "concepts.md#operational-firewall"
+
+- id: aws-cdp-network-019
+  difficulty: advanced
+  tags: [operational-firewall, modern-mapping, iam-ssm]
+  question: |
+    For controlling which human *operators* can access which systems today, what have
+    most teams moved to instead of source-CIDR security groups?
+  options:
+  - "Hardcoding operator laptop IPs into NACLs"
+  - "A dedicated NAT Gateway per operator"
+  - "IAM plus SSM Session Manager — authenticated identity with CloudTrail auditing"
+  - "AWS WAF rate-based rules"
+  answer: 2
+  explanation: |
+    The operator dimension moves up the stack to IAM + SSM: access is by authenticated
+    identity (who), with full CloudTrail audit, rather than brittle source-CIDR SGs.
+    Source-CIDR SGs/NACLs remain useful for machine-to-machine and edge deny.
+  ref: "concepts.md#operational-firewall"
+
+- id: aws-cdp-network-020
+  difficulty: intermediate
+  tags: [functional-firewall, operational-firewall, selection]
+  question: |
+    "Web tier may talk to app tier on 8080; app tier may talk to DB tier on 5432; nothing
+    else." Which pattern does this describe?
+  options:
+  - "Operational Firewall"
+  - "WAF Proxy"
+  - "Functional Firewall"
+  - "Backnet"
+  answer: 2
+  explanation: |
+    Filtering by tier/function is the Functional Firewall pattern (SGs per tier,
+    referencing each other as sources). Operational Firewall would filter by source
+    organization instead.
+  ref: "concepts.md#functional-firewall"
+
+- id: aws-cdp-network-021
+  difficulty: beginner
+  tags: [multi-load-balancer, pattern-intent]
+  question: |
+    What problem does the Multi-Load Balancer pattern address?
+  options:
+  - "Private instances need outbound internet only during patching"
+  - "One server fleet must serve different clients/protocols/policies (PC vs mobile, multiple SSL certs, different session/health settings) without baking that into the instances"
+  - "Many remote sites must connect over one VPN hub"
+  - "A management path must be separated from the public path"
+  answer: 1
+  explanation: |
+    Multi-Load Balancer moves per-client/per-protocol behavior (SSL termination, session
+    stickiness, health checks) to the load-balancer layer so instances stay policy-free
+    as the fleet scales. The others describe OnDemand NAT, CloudHub, and Backnet.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-022
+  difficulty: intermediate
+  tags: [multi-load-balancer, classic-mechanism]
+  question: |
+    How did the classic Multi-Load Balancer pattern implement per-client behavior?
+  options:
+  - "By running one WAF proxy per client type"
+  - "By giving each instance multiple ENIs"
+  - "By using Transit Gateway route tables"
+  - "By attaching multiple ELBs with different settings to the same EC2 instances and routing each client class to the right ELB"
+  answer: 3
+  explanation: |
+    The pattern attached several classic ELBs — each with its own SSL/session/health
+    configuration — to the same instances, changing behavior at the LB layer rather than
+    on the servers.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-023
+  difficulty: intermediate
+  tags: [multi-load-balancer, modern-mapping, alb]
+  question: |
+    What modern AWS capability collapses much of what used to require several classic
+    ELBs (multiple certs, PC vs mobile routing)?
+  options:
+  - "A single Network Load Balancer with one TCP listener"
+  - "A single Application Load Balancer with multiple listeners/listener rules and multiple ACM certificates via SNI"
+  - "A Gateway Load Balancer with a firewall appliance"
+  - "A Virtual Private Gateway"
+  answer: 1
+  explanation: |
+    One ALB can do host/path/header routing across listener rules and serve multiple
+    certs via SNI, so a single ALB often replaces the old "one ELB per policy"
+    arrangement. NLB is L4 (no host/path routing), and GWLB inserts appliances.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-024
+  difficulty: advanced
+  tags: [multi-load-balancer, alb-nlb-gwlb, selection]
+  type: multi
+  question: |
+    When following the modern "right load balancer per need" approach, which choices are
+    appropriate? Select all that apply.
+  options:
+  - "Use a Network Load Balancer when you need a static/Elastic IP or raw L4 TCP/UDP with ultra-low latency"
+  - "Use an Application Load Balancer for L7 host/path/header routing and SNI multi-cert termination"
+  - "Use a Gateway Load Balancer to insert third-party firewall/IDS appliances transparently in the path"
+  - "Use a Virtual Private Gateway to load-balance HTTP requests across a fleet"
+  answers: [0, 1, 2]
+  explanation: |
+    NLB = L4/static-IP/low-latency; ALB = L7 routing + SNI; GWLB = appliance insertion.
+    A Virtual Private Gateway is the AWS side of a Site-to-Site VPN — it does not load
+    balance HTTP, so that option is false.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-025
+  difficulty: advanced
+  tags: [multi-load-balancer, trade-offs, ssl-termination]
+  question: |
+    The Multi-Load Balancer catalog entry warns of a maintenance caution. Which is it?
+  options:
+  - "You must recreate the VPC to remove an instance from an LB"
+  - "To take an instance out for maintenance you must deregister it from EVERY load balancer it belongs to"
+  - "SSL termination is impossible when more than one ELB is attached"
+  - "Multiple ELBs force you to disable Auto Scaling entirely"
+  answer: 1
+  explanation: |
+    Because the same instance sits behind multiple LBs, draining it for maintenance
+    requires deregistering it from all of them. Also, when the LB terminates TLS the app
+    sees plain HTTP (use X-Forwarded-Proto). The other options overstate the caution.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-026
+  difficulty: intermediate
+  tags: [multi-load-balancer, ssl-termination]
+  question: |
+    When an ELB/ALB performs SSL/TLS termination, how does the backend app determine the
+    original request was HTTPS?
+  options:
+  - "It cannot; the information is lost"
+  - "By inspecting the TLS handshake directly on the instance"
+  - "By reading the X-Forwarded-Proto header the load balancer adds"
+  - "By querying the NAT Gateway"
+  answer: 2
+  explanation: |
+    After termination the instance receives plain HTTP, so it relies on the
+    X-Forwarded-Proto header (and X-Forwarded-For for client IP) the load balancer
+    injects. It can't inspect the TLS handshake because the LB already terminated it.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-027
+  difficulty: beginner
+  tags: [waf-proxy, pattern-intent]
+  question: |
+    What problem does the WAF Proxy pattern address?
+  options:
+  - "How to give private instances outbound internet access"
+  - "How to run a web application firewall for an auto-scaling fleet without licensing/installing WAF on every server"
+  - "How to connect many sites over VPN"
+  - "How to separate management traffic from public traffic"
+  answer: 1
+  explanation: |
+    In an elastic fleet you can't size WAF licenses per server or touch every host. WAF
+    Proxy funnels traffic through a small number of WAF-running proxy nodes instead.
+  ref: "concepts.md#waf-proxy"
+
+- id: aws-cdp-network-028
+  difficulty: intermediate
+  tags: [waf-proxy, classic-mechanism]
+  question: |
+    How did the classic WAF Proxy pattern place the WAF, as the catalog described it?
+  options:
+  - "As a managed web ACL attached to CloudFront"
+  - "As an agent on every application instance"
+  - "As dedicated proxy servers (EC2) with WAF software installed, inserted between the ELB and the app instances"
+  - "As a rule in the security group"
+  answer: 2
+  explanation: |
+    The pattern ran a small, fixed number of WAF-equipped proxy EC2 nodes in the path
+    (between ELB and app), so only the proxies needed WAF licenses/patching. Multiple
+    proxies (e.g. behind HAProxy) avoided a single point of failure.
+  ref: "concepts.md#waf-proxy"
+
+- id: aws-cdp-network-029
+  difficulty: intermediate
+  tags: [waf-proxy, modern-mapping, aws-waf]
+  question: |
+    What is the modern AWS equivalent of the WAF Proxy pattern?
+  options:
+  - "AWS WAF — a managed web ACL attached to CloudFront, ALB, API Gateway, AppSync, or Cognito with no proxy fleet to run"
+  - "A larger NAT Gateway"
+  - "A Gateway Load Balancer with HAProxy"
+  - "Security groups per tier"
+  answer: 0
+  explanation: |
+    AWS WAF is fully managed and attaches directly to CloudFront/ALB/API Gateway/etc.,
+    with managed rule groups, rate-based rules, and per-request billing — no proxy fleet
+    to license, patch, or make HA.
+  ref: "concepts.md#waf-proxy"
+
+- id: aws-cdp-network-030
+  difficulty: advanced
+  tags: [waf-proxy, trade-offs, autoscaling]
+  question: |
+    Besides being a fleet you must run and make HA, what specific problem did inserting a
+    WAF proxy between the ALB and the instances create?
+  options:
+  - "It disabled TLS entirely"
+  - "It forced all traffic through a NAT Gateway"
+  - "It broke native Auto Scaling registration, since instances no longer register directly with the ELB"
+  - "It required a separate VPC per proxy"
+  answer: 2
+  explanation: |
+    With a proxy sitting between the ELB and the instances, the instances are indirect to
+    the ELB, so the ELB's Auto Scaling registration function can't manage them directly.
+    AWS WAF avoids this by attaching to the ALB/CloudFront itself.
+  ref: "concepts.md#waf-proxy"
+
+- id: aws-cdp-network-031
+  difficulty: advanced
+  tags: [waf-proxy, aws-waf, edge]
+  type: multi
+  question: |
+    Which are TRUE of AWS WAF, the modern replacement for the WAF Proxy pattern? Select
+    all that apply.
+  options:
+  - "It can be attached to CloudFront to filter attacks at the edge before they reach the Region"
+  - "It offers managed rule groups (including OWASP-style and bot-control sets) and rate-based rules"
+  - "It requires you to run and patch a fleet of proxy EC2 instances"
+  - "It integrates with AWS Shield for DDoS protection"
+  answers: [0, 1, 3]
+  explanation: |
+    AWS WAF attaches to CloudFront/ALB/API Gateway (edge filtering at CloudFront), offers
+    managed rule groups and rate-based rules, and pairs with AWS Shield. It is fully
+    managed — there is no proxy fleet to run, so that option is false.
+  ref: "concepts.md#waf-proxy"
+
+- id: aws-cdp-network-032
+  difficulty: advanced
+  tags: [waf-proxy, still-relevant, gwlb, network-firewall]
+  question: |
+    If AWS WAF genuinely can't express the deep custom inspection you need, what is the
+    modern way to insert a specialized filtering engine — rather than hand-running a
+    proxy fleet?
+  options:
+  - "Put the engine on every application instance"
+  - "Use Route 53 latency routing"
+  - "Add more listener rules to the ALB"
+  - "Attach the vendor engine via a Gateway Load Balancer or AWS Network Firewall"
+  answer: 3
+  explanation: |
+    For custom/vendor inspection, insert appliances transparently via Gateway Load
+    Balancer, or use AWS Network Firewall — both managed insertion points that avoid a
+    self-run proxy fleet. Per-instance agents and Route 53 routing don't provide L7
+    inspection.
+  ref: "concepts.md#waf-proxy"
+
+- id: aws-cdp-network-033
+  difficulty: beginner
+  tags: [cloudhub, pattern-intent]
+  question: |
+    What problem does the CloudHub pattern address?
+  options:
+  - "Connecting many remote sites over VPN without a full-mesh explosion, while keeping the hub highly available"
+  - "Filtering web attacks for an auto-scaling fleet"
+  - "Providing outbound internet to private instances"
+  - "Serving PC and mobile clients from one fleet"
+  answer: 0
+  explanation: |
+    CloudHub uses AWS as a VPN hub so each site connects only to the hub (avoiding the
+    O(n^2) full-mesh burden) while inheriting AWS's high availability instead of costly
+    redundant on-prem hub hardware.
+  ref: "concepts.md#cloudhub"
+
+- id: aws-cdp-network-034
+  difficulty: intermediate
+  tags: [cloudhub, full-mesh, hub-spoke]
+  question: |
+    Why does a full-mesh VPN between sites become unmanageable as sites are added, per the
+    CloudHub pattern?
+  options:
+  - "Each site needs its own AWS account"
+  - "Full mesh requires a NAT Gateway per tunnel"
+  - "Connections grow quadratically — every new site forces reconfiguring every existing site's router"
+  - "VPN cannot cross Availability Zones"
+  answer: 2
+  explanation: |
+    Full mesh means every site connects to every other, so connections grow ~O(n^2) and
+    adding a site touches all existing routers. Hub-and-spoke (each site to one hub) fixes
+    the fan-out, which is what CloudHub provides.
+  ref: "concepts.md#cloudhub"
+
+- id: aws-cdp-network-035
+  difficulty: intermediate
+  tags: [cloudhub, classic-mechanism, vgw]
+  question: |
+    How did the classic CloudHub pattern use AWS as the VPN hub?
+  options:
+  - "A Transit Gateway with hundreds of VPC attachments"
+  - "A VPC with a Virtual Private Gateway as the hub, a Customer Gateway per site, and a Site-to-Site VPN from each site to the VGW"
+  - "A CloudFront distribution per site"
+  - "An Internet Gateway shared by all sites"
+  answer: 1
+  explanation: |
+    The catalog era used a VPC + Virtual Private Gateway (VGW) as the hub, with a customer
+    gateway and Site-to-Site VPN connection per site — the classic "VPN CloudHub." Transit
+    Gateway is the modern evolution, not the classic mechanism.
+  ref: "concepts.md#cloudhub"
+
+- id: aws-cdp-network-036
+  difficulty: intermediate
+  tags: [cloudhub, modern-mapping, transit-gateway]
+  question: |
+    For anything beyond a handful of sites, what is the modern AWS hub that supersedes the
+    VGW-based VPN CloudHub?
+  options:
+  - "Internet Gateway"
+  - "A NAT Gateway per site"
+  - "AWS Transit Gateway — a regional cloud router that terminates VPN, Direct Connect, and VPC attachments with hub-and-spoke and spoke-to-spoke routing"
+  - "Amazon CloudFront"
+  answer: 2
+  explanation: |
+    Transit Gateway scales to thousands of attachments, provides route tables, ECMP, and
+    spoke-to-spoke routing, and terminates S2S VPN + Direct Connect + VPCs — the current
+    default hub. Cloud WAN extends this globally.
+  ref: "concepts.md#cloudhub"
+
+- id: aws-cdp-network-037
+  difficulty: advanced
+  tags: [cloudhub, transit-gateway, trade-offs]
+  type: multi
+  question: |
+    Which statements about the modern CloudHub / Transit Gateway approach are TRUE? Select
+    all that apply.
+  options:
+  - "A single Site-to-Site VPN connection provides two tunnels for redundancy but is capped around 1.25 Gbps per tunnel"
+  - "Transit Gateway supports spoke-to-spoke routing between attachments, unlike a plain hub"
+  - "You can use ECMP over multiple tunnels/TGW to scale bandwidth beyond a single tunnel"
+  - "VPN over the internet gives lower and more consistent latency than Direct Connect"
+  answers: [0, 1, 2]
+  explanation: |
+    Each S2S VPN gives two tunnels (~1.25 Gbps each), TGW enables spoke-to-spoke routing,
+    and ECMP scales bandwidth. The last option is backwards — Direct Connect gives lower,
+    more consistent latency/jitter than internet-based VPN.
+  ref: "concepts.md#cloudhub"
+
+- id: aws-cdp-network-038
+  difficulty: advanced
+  tags: [cloudhub, direct-connect, bandwidth]
+  question: |
+    A CloudHub-style design needs higher, more consistent bandwidth to on-prem than
+    internet VPN tunnels provide. What is the modern AWS option?
+  options:
+  - "Add more Elastic IPs to the VGW"
+  - "AWS Direct Connect (optionally attached to Transit Gateway)"
+  - "A larger NAT Gateway"
+  - "CloudFront with OAC"
+  answer: 1
+  explanation: |
+    Direct Connect provides dedicated, higher-bandwidth, lower-jitter connectivity than
+    internet VPN, and can attach to a Transit Gateway hub. EIPs, NAT, and CloudFront don't
+    address site-to-cloud bandwidth.
+  ref: "concepts.md#cloudhub"
+
+- id: aws-cdp-network-039
+  difficulty: intermediate
+  tags: [selection, pattern-intent]
+  question: |
+    A private-subnet batch fleet needs to download OS patches from the internet a few times
+    a month but must never accept inbound connections. Which CDP pattern's intent applies?
+  options:
+  - "WAF Proxy"
+  - "OnDemand NAT"
+  - "Multi-Load Balancer"
+  - "Functional Firewall"
+  answer: 1
+  explanation: |
+    Intermittent outbound-only egress for private instances is exactly OnDemand NAT's
+    intent. Today you'd use a NAT Gateway (or VPC endpoints for AWS-bound traffic), not a
+    toggled NAT instance.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-040
+  difficulty: advanced
+  tags: [selection, cross-pattern]
+  question: |
+    An external monitoring vendor's source IP range just changed. You want to update their
+    access everywhere at once without touching tier rules. Which pattern were you following?
+  options:
+  - "Functional Firewall"
+  - "Operational Firewall"
+  - "Backnet"
+  - "CloudHub"
+  answer: 1
+  explanation: |
+    Per-operator SGs (Operational Firewall) give one revocation/edit point per
+    organization, independent of the functional/tier SGs. Editing the vendor's single SG
+    updates their access everywhere.
+  ref: "concepts.md#operational-firewall"
+
+- id: aws-cdp-network-041
+  difficulty: advanced
+  tags: [classic-vs-modern, mapping]
+  type: multi
+  question: |
+    Which classic-CDP-pattern to modern-AWS-service mappings are correct? Select all that
+    apply.
+  options:
+  - "OnDemand NAT -> managed NAT Gateway (plus VPC endpoints for AWS-bound traffic)"
+  - "WAF Proxy -> AWS WAF on CloudFront/ALB/API Gateway"
+  - "CloudHub -> AWS Transit Gateway (or the legacy VGW VPN CloudHub)"
+  - "Backnet -> AWS Shield Advanced"
+  answers: [0, 1, 2]
+  explanation: |
+    OnDemand NAT maps to NAT Gateway/VPC endpoints, WAF Proxy to AWS WAF, and CloudHub to
+    Transit Gateway/VGW CloudHub. Backnet (management-path isolation) maps to SSM Session
+    Manager + private subnets, not AWS Shield (which is DDoS protection).
+  ref: "concepts.md#backnet"
+
+- id: aws-cdp-network-042
+  difficulty: intermediate
+  tags: [functional-firewall, operational-firewall, composition]
+  question: |
+    How do the Functional Firewall and Operational Firewall patterns relate?
+  options:
+  - "They are mutually exclusive; you must choose one"
+  - "Operational Firewall replaced Functional Firewall entirely"
+  - "They compose — functional (tier) SGs and operational (per-operator) SGs are both attached to the same instances"
+  - "Functional Firewall only works with NACLs"
+  answer: 2
+  explanation: |
+    The catalog explicitly says Operational Firewall can be used together with Functional
+    Firewall: an instance carries its tier SG(s) plus the relevant operator SG(s), giving
+    both function-based and source/operator-based control.
+  ref: "concepts.md#operational-firewall"
+
+- id: aws-cdp-network-043
+  difficulty: intermediate
+  tags: [selection, multi-load-balancer, waf-proxy]
+  question: |
+    You need one EC2 fleet reachable both as an L7 HTTPS site (multiple certs, path
+    routing) AND as a raw TCP service on a fixed static IP. What is the modern realization
+    of the Multi-Load Balancer intent?
+  options:
+  - "Two classic ELBs configured identically"
+  - "A single NAT Gateway"
+  - "An ALB (SNI multi-cert, path routing) plus an NLB (static/Elastic IP, L4 TCP), both pointing at the shared target group"
+  - "A WAF proxy fleet"
+  answer: 2
+  explanation: |
+    Distinct L7 and L4/static-IP needs are the case where you genuinely use ALB + NLB per
+    need against the same targets — the modern form of Multi-Load Balancer. A NAT Gateway
+    and WAF proxy solve different problems.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-044
+  difficulty: beginner
+  tags: [backnet, ssm, modern-mapping]
+  question: |
+    Which modern service lets you get a shell on a private EC2 instance with NO open
+    inbound port 22, using IAM for authorization and CloudTrail for audit?
+  options:
+  - "AWS WAF"
+  - "AWS Systems Manager Session Manager"
+  - "Elastic Load Balancing"
+  - "Amazon CloudFront"
+  answer: 1
+  explanation: |
+    SSM Session Manager provides agent-based, outbound-initiated shell access with no open
+    inbound port, IAM authorization, and CloudTrail logging — the modern answer to
+    Backnet's management-isolation goal.
+  ref: "concepts.md#backnet"
+
+- id: aws-cdp-network-045
+  difficulty: advanced
+  tags: [still-relevant, nuance]
+  type: multi
+  question: |
+    Which of these CDP network/security patterns are still fundamentally the standard way
+    to do the job on AWS today (not superseded)? Select all that apply.
+  options:
+  - "Functional Firewall (per-tier security groups)"
+  - "Operational Firewall (per-source/operator access control)"
+  - "OnDemand NAT's self-managed NAT *instance* form"
+  - "The Backnet dual-ENI form for ordinary server administration"
+  answers: [0, 1]
+  explanation: |
+    Per-tier SGs (Functional) and source/operator-based control (Operational) remain
+    standard. The self-managed NAT instance is superseded by NAT Gateway, and the Backnet
+    dual-ENI trick is superseded by SSM Session Manager for ordinary admin.
+  ref: "concepts.md#functional-firewall"
+
+- id: aws-cdp-network-046
+  difficulty: intermediate
+  tags: [waf-proxy, edge, cloudfront]
+  question: |
+    Attaching AWS WAF at CloudFront (rather than only at the regional ALB) gives which
+    additional benefit?
+  options:
+  - "It removes the need for security groups"
+  - "It provides outbound NAT for private instances"
+  - "It filters malicious requests at the edge, before they reach the Region"
+  - "It terminates Site-to-Site VPN tunnels"
+  answer: 2
+  explanation: |
+    AWS WAF on CloudFront enforces rules at edge locations, blocking attacks closer to the
+    client and before traffic reaches regional resources. It doesn't replace SGs, provide
+    NAT, or terminate VPNs.
+  ref: "concepts.md#waf-proxy"
+
+- id: aws-cdp-network-047
+  difficulty: advanced
+  tags: [cloudhub, cloud-wan, global]
+  question: |
+    A CloudHub-style network must now span multiple AWS Regions globally with centralized
+    policy. Which modern service extends the Transit Gateway hub concept globally?
+  options:
+  - "Amazon Route 53 Resolver"
+  - "AWS Global Accelerator"
+  - "Elastic IP"
+  - "AWS Cloud WAN"
+  answer: 3
+  explanation: |
+    AWS Cloud WAN builds and manages a global network across Regions with centralized
+    policy, extending the regional Transit Gateway hub concept. Global Accelerator improves
+    client-to-endpoint routing but isn't a multi-region VPN/network hub.
+  ref: "concepts.md#cloudhub"
+
+- id: aws-cdp-network-048
+  difficulty: intermediate
+  tags: [ondemand-nat, ha, nat-gateway]
+  question: |
+    Why is a NAT Gateway typically deployed once per Availability Zone rather than a single
+    shared one for the whole VPC?
+  options:
+  - "AWS forbids more than one NAT Gateway per VPC"
+  - "So that an AZ failure (or its NAT) doesn't cut egress for instances in other AZs, and to avoid cross-AZ data charges"
+  - "Because each NAT Gateway can only handle one instance"
+  - "To provide inbound internet access to private instances"
+  answer: 1
+  explanation: |
+    A NAT Gateway is AZ-scoped; deploying one per AZ (with each AZ's private route table
+    pointing at its local NAT GW) keeps egress available if one AZ fails and avoids
+    cross-AZ data-transfer charges. NAT never provides inbound access.
+  ref: "concepts.md#ondemand-nat"
+
+- id: aws-cdp-network-049
+  difficulty: advanced
+  tags: [backnet, selection, ssm, cross-pattern]
+  type: multi
+  question: |
+    A private-subnet host must be administered by your ops team but expose NO inbound port
+    22. Which modern approaches satisfy the Backnet intent? Select all that apply.
+  options:
+  - "SSM Session Manager over the SSM agent (outbound-only, IAM-authorized)"
+  - "A bastion/jump host in a public subnet reached over a private path (Client VPN / Direct Connect)"
+  - "Opening port 22 to 0.0.0.0/0 on the instance's security group"
+  - "Attaching a public Elastic IP to the host and SSHing directly from the internet"
+  answers: [0, 1]
+  explanation: |
+    SSM Session Manager (no open port) and a bastion reached over a private path both keep
+    the management path off the public internet. Opening 22 to the world or SSHing to a
+    public EIP directly reintroduce exactly the inbound exposure Backnet aims to remove.
+  ref: "concepts.md#backnet"
+
+- id: aws-cdp-network-050
+  difficulty: intermediate
+  tags: [multi-load-balancer, gwlb, selection]
+  question: |
+    In the modern "right load balancer per need" toolkit, which load balancer is purpose-
+    built to transparently insert third-party firewall or IDS/IPS appliances into the
+    traffic path?
+  options:
+  - "Gateway Load Balancer"
+  - "Application Load Balancer"
+  - "Classic Load Balancer"
+  - "Virtual Private Gateway"
+  answer: 0
+  explanation: |
+    Gateway Load Balancer (GWLB) is designed to deploy and scale virtual appliances
+    (firewalls, IDS/IPS) transparently using the GENEVE protocol. ALB is L7 routing, the
+    Classic LB is legacy, and a VGW is a VPN endpoint, not a load balancer.
+  ref: "concepts.md#multi-load-balancer"
+
+- id: aws-cdp-network-051
+  difficulty: advanced
+  tags: [classic-vs-modern, trade-offs, managed-services]
+  type: multi
+  question: |
+    Across these CDP network/security patterns, why did managed AWS services (NAT
+    Gateway, AWS WAF, Transit Gateway) generally replace the classic self-managed EC2
+    forms? Select all that apply.
+  options:
+  - "They remove the single-point-of-failure and self-HA burden of a hand-run instance/proxy fleet"
+  - "They eliminate per-node license sizing and OS patching that an elastic fleet made impractical"
+  - "They scale throughput/attachments automatically instead of being capped by one instance"
+  - "They are always cheaper in every dimension, with no per-GB or per-request charges"
+  answers: [0, 1, 2]
+  explanation: |
+    Managed services removed the SPOF/self-HA burden, the license-sizing and patching
+    toil, and the single-instance throughput cap. The cost claim is false: NAT Gateway
+    bills per-GB, AWS WAF per-request/per-rule, and TGW per-attachment/per-GB — you often
+    trade some cost for HA and lower ops, and must still engineer around those charges.
+  ref: "concepts.md#ondemand-nat"

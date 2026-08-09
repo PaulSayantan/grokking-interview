@@ -1,0 +1,784 @@
+topic: "AWS Cloud Design Patterns: Batch Processing and Asynchronous Workflows"
+domain: system-design
+topic_slug: aws-cdp-batch-and-async
+version: 1
+questions:
+  - id: aws-cdp-batch-and-async-001
+    difficulty: beginner
+    tags: [queuing-chain, pattern-intent, decoupling]
+    question: |
+      A batch job has distinct stages (watermark, encode, publish) and you want each stage to fail,
+      retry, and scale independently without a slow stage stalling the others. Which CDP pattern
+      describes putting a queue between each pair of stages?
+    options: ["Queuing Chain", "Priority Queue", "Job Observer", "Scheduled Scale Out"]
+    answer: 0
+    explanation: |
+      Queuing Chain places an SQS queue between every pair of stages so each stage's workers poll
+      their input queue, process, and enqueue to the next stage. This decouples stages in time and
+      load and isolates failures/retries per stage.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-002
+    difficulty: beginner
+    tags: [job-observer, autoscaling, pattern-intent]
+    question: |
+      You want the number of worker instances to automatically track the amount of pending work in a
+      queue, scaling out when the backlog grows and in when it drains. Which CDP pattern is this?
+    options: ["Scheduled Scale Out", "Queuing Chain", "Job Observer", "Priority Queue"]
+    answer: 2
+    explanation: |
+      Job Observer is the queue-based-load-leveling + auto-scaling pattern: CloudWatch observes queue
+      backlog and Auto Scaling (or Lambda concurrency) sizes the worker fleet to the demand.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-003
+    difficulty: beginner
+    tags: [scheduled-autoscaling, pattern-intent, predictable-load]
+    question: |
+      A nightly ETL and a 9 a.m. business ramp are predictable by the clock. You want capacity warm
+      BEFORE the window begins rather than reacting after the backlog appears. Which pattern fits?
+    options: ["Scheduled Autoscaling", "Job Observer", "Queuing Chain", "Priority Queue"]
+    answer: 0
+    explanation: |
+      Scheduled Autoscaling (catalog: Scheduled Scale Out) pre-scales on a time/cron schedule so
+      capacity is in place before deterministic, clock-driven load arrives.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-004
+    difficulty: beginner
+    tags: [priority-queue, pattern-intent, tiering]
+    question: |
+      Premium-tier exports must jump ahead of bulk free-tier work even when the backlog is large.
+      Which CDP pattern addresses processing higher-priority work first?
+    options: ["Priority Queue", "Job Observer", "Queuing Chain", "Scheduled Scale Out"]
+    answer: 0
+    explanation: |
+      Priority Queue uses separate queues per priority level with workers that drain the high-priority
+      queue first (or with heavier weight), so urgent work is not stuck behind bulk work.
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-005
+    difficulty: intermediate
+    tags: [queuing-chain, classic-vs-modern, lambda]
+    question: |
+      In the classic Queuing Chain the workers were EC2 instances hand-polling SQS. What is the most
+      direct modern AWS realization of those per-stage workers for variable, bursty load?
+    options:
+      - "A single EC2 instance running cron"
+      - "SQS queues with Lambda event-source mappings as the stage workers"
+      - "An Application Load Balancer in front of each stage"
+      - "DynamoDB streams between every stage"
+    answer: 1
+    explanation: |
+      SQS + Lambda event-source mapping is the direct modern equivalent: Lambda polls each queue,
+      scales concurrency with the backlog, and auto-deletes on success. Each stage's Lambda enqueues
+      to the next stage's queue.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-006
+    difficulty: intermediate
+    tags: [queuing-chain, orchestration, step-functions]
+    question: |
+      Your pipeline needs auditable end-to-end job status, branching, and per-step retry/catch logic
+      with a central view. Compared to a hand-wired Queuing Chain (choreography), what does AWS
+      recommend for this orchestration need?
+    options:
+      - "AWS Step Functions"
+      - "More SQS queues with longer visibility timeouts"
+      - "Amazon SNS fan-out only"
+      - "A larger single EC2 instance"
+    answer: 0
+    explanation: |
+      Queuing Chain is choreography — each stage only knows its in/out queue and there is no central
+      status. When you need explicit state, branching, and per-step retry/catch with visibility,
+      Step Functions (orchestration) is the fit.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-007
+    difficulty: intermediate
+    tags: [job-observer, metric, backlog-per-instance]
+    question: |
+      AWS warns against target-tracking autoscaling on ApproximateNumberOfMessagesVisible alone.
+      What metric does AWS recommend for scaling an SQS-driven worker fleet?
+    options:
+      - "Raw queue depth (visible messages)"
+      - "CPU utilization of the queue"
+      - "Backlog per instance (messages divided by InService instances)"
+      - "Number of DLQ messages"
+    answer: 2
+    explanation: |
+      Raw queue depth does not change proportionally to fleet size. AWS recommends backlog per
+      instance = ApproximateNumberOfMessages / InService count, with the target set to
+      acceptable-latency / average-per-message-processing-time.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-008
+    difficulty: intermediate
+    tags: [job-observer, target-tracking, calculation]
+    question: |
+      Messages take 0.1s each to process and your acceptable latency is 10 seconds. What is the
+      correct target value (acceptable backlog per instance) for a target-tracking policy?
+    options: ["10", "100", "1000", "0.01"]
+    answer: 1
+    explanation: |
+      Acceptable backlog per instance = acceptable latency / per-message processing time = 10 / 0.1 =
+      100 messages per instance. This is the AWS worked example.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-009
+    difficulty: intermediate
+    tags: [priority-queue, fifo, misconception]
+    question: |
+      A candidate proposes using an SQS FIFO queue to implement Priority Queue. Why is that wrong?
+    options:
+      - "FIFO queues cannot be consumed by Lambda"
+      - "FIFO gives ordering/exactly-once within a group, but delivers in arrival order — not by priority"
+      - "FIFO queues have no visibility timeout"
+      - "FIFO queues automatically drop low-priority messages"
+    answer: 1
+    explanation: |
+      FIFO provides ordering and exactly-once processing within a message group, but it still
+      delivers in arrival order. It does not reorder by priority, so it is not a substitute for
+      separate high/low priority queues.
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-010
+    difficulty: intermediate
+    tags: [priority-queue, single-queue, antipattern]
+    question: |
+      Why does putting a "priority" field inside ONE SQS queue fail to implement Priority Queue well?
+    options:
+      - "SQS messages cannot contain custom attributes"
+      - "SQS has no server-side priority ordering, so you'd receive, inspect, and re-hide low-priority messages, wasting receives and in-flight slots"
+      - "A single queue cannot have more than one consumer"
+      - "Message bodies are limited to 1 KB"
+    answer: 1
+    explanation: |
+      SQS provides no server-side priority ordering. To honor a priority field you'd have to receive
+      messages, inspect them, and re-hide the low-priority ones — wasting receive calls and consuming
+      the in-flight message limit. Separate queues make priority a cheap poll-order decision.
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-011
+    difficulty: intermediate
+    tags: [scheduled-autoscaling, scheduled-actions, cron]
+    question: |
+      What is the modern AWS mechanism that directly realizes the classic Scheduled Scale Out for an
+      EC2 Auto Scaling group?
+    options:
+      - "A CloudWatch alarm on CPU"
+      - "An SQS DLQ redrive policy"
+      - "Scheduled actions that set desired/min/max on a one-time or recurring cron schedule"
+      - "A Route 53 weighted routing record"
+    answer: 2
+    explanation: |
+      EC2 Auto Scaling scheduled actions set the group's desired/min/max capacity at a specific time
+      or on a recurring cron schedule (with time-zone/DST support) — the direct modern equivalent of
+      Scheduled Scale Out.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-012
+    difficulty: intermediate
+    tags: [scheduled-autoscaling, eventbridge-scheduler]
+    question: |
+      Beyond EC2 ASG scheduled actions, which modern general-purpose AWS service schedules one-time or
+      recurring cron/rate invocations (with time zones) against arbitrary targets like Lambda, ECS,
+      or Step Functions?
+    options: ["Amazon EventBridge Scheduler", "AWS Config", "Amazon Inspector", "AWS Batch DLQ"]
+    answer: 0
+    explanation: |
+      EventBridge Scheduler is the modern general-purpose scheduler for one-time/recurring schedules
+      against many targets. It supersedes CloudWatch Events scheduled rules for new work.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-013
+    difficulty: intermediate
+    tags: [visibility-timeout, duplicates, idempotency]
+    question: |
+      A worker occasionally processes the same SQS message twice. Which combination best explains and
+      mitigates this?
+    options:
+      - "At-least-once delivery plus visibility-timeout expiry cause redelivery; fix with idempotent processing"
+      - "SQS is broken; open a support ticket to disable retries"
+      - "Messages duplicate only in FIFO queues; switch to standard"
+      - "It is caused by DLQs; remove the DLQ"
+    answer: 0
+    explanation: |
+      SQS is at-least-once. If a worker is slow, crashes, or is scaled in before deleting the message,
+      the visibility timeout expires and the message is redelivered. The correct fix is idempotent
+      processing (plus right-sized timeout / heartbeat extension).
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-014
+    difficulty: intermediate
+    tags: [dlq, poison-message, queuing-chain]
+    question: |
+      A poison message repeatedly fails and keeps reappearing, consuming worker capacity. What
+      mechanism prevents it from looping forever?
+    options:
+      - "Increasing the number of workers"
+      - "Switching the queue to FIFO"
+      - "Lowering the visibility timeout to 0"
+      - "A dead-letter queue with a maxReceiveCount redrive policy"
+    answer: 3
+    explanation: |
+      A DLQ with maxReceiveCount captures messages that fail processing a set number of times, moving
+      them off the main queue for inspection so they don't loop forever and stall the pipeline.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-015
+    difficulty: advanced
+    type: multi
+    tags: [queuing-chain, benefits, multi]
+    question: |
+      Which of the following are genuine benefits of the Queuing Chain pattern? Select all that apply.
+    options:
+      - "Stages are decoupled in time and load and can scale independently"
+      - "A crash mid-task lets the message reappear and be retried, so no work is lost"
+      - "It guarantees a single central view of end-to-end job status across all stages"
+      - "It isolates failures/retries to the affected stage"
+    answers: [0, 1, 3]
+    explanation: |
+      Queuing Chain decouples stages, gives per-stage independent scaling, and (via visibility
+      timeout) retries crashed work with no loss and isolates failures per stage. It does NOT give a
+      central end-to-end status view — that is choreography's weakness; use Step Functions for that.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-016
+    difficulty: advanced
+    type: multi
+    tags: [job-observer, autoscaling, multi]
+    question: |
+      Which statements about the Job Observer pattern on modern AWS are TRUE? Select all that apply.
+    options:
+      - "Backlog per instance is a better target-tracking metric than raw visible-message count"
+      - "An SQS + Lambda event-source mapping is effectively a serverless Job Observer"
+      - "Instance scale-in protection can stop scale-in from killing a long-running worker mid-message"
+      - "Raw queue depth scales proportionally to fleet size, making it the ideal metric"
+    answers: [0, 1, 2]
+    explanation: |
+      Backlog-per-instance is the recommended metric; SQS+Lambda auto-scales concurrency with the
+      backlog (a serverless Job Observer); scale-in protection guards long tasks. The last option is
+      false — raw queue depth does NOT scale proportionally to fleet size, which is exactly why AWS
+      advises against it.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-017
+    difficulty: advanced
+    type: multi
+    tags: [priority-queue, multi, tradeoffs]
+    question: |
+      Which of the following are TRUE of implementing Priority Queue with separate SQS queues per
+      priority? Select all that apply.
+    options:
+      - "Workers can drain the high-priority queue first or poll it with heavier weight"
+      - "Always strictly draining high first risks starving the low-priority queue"
+      - "EventBridge rules or SNS filtering can route messages to the correct priority queue by attribute"
+      - "A single FIFO queue would provide the same priority behavior"
+    answers: [0, 1, 2]
+    explanation: |
+      Separate queues let workers weight the high queue, but strict high-first polling can starve the
+      low queue (mitigate with weighted polling). EventBridge/SNS filtering can route by attribute.
+      A FIFO queue delivers in arrival order and does NOT provide priority.
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-018
+    difficulty: advanced
+    tags: [scheduled-autoscaling, combine, best-practice]
+    question: |
+      What is AWS's recommended way to handle a predictable batch window that also has unpredictable
+      variance in volume?
+    options:
+      - "Use only scheduled scaling and over-provision heavily"
+      - "Use only dynamic scaling and accept the cold-start lag"
+      - "Combine scheduled scaling (set higher min/desired before the window) with dynamic/target-tracking on top"
+      - "Manually add instances the morning of each run"
+    answer: 2
+    explanation: |
+      Best practice is to layer them: a scheduled action warms the baseline min/desired before the
+      window, and dynamic (target-tracking / Job Observer) scaling reacts to the actual backlog within
+      the new min/max. Scheduled handles the predictable baseline; dynamic handles the variance.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-019
+    difficulty: intermediate
+    tags: [visibility-timeout, limits]
+    question: |
+      What are the default and maximum values for an SQS visibility timeout?
+    options:
+      - "Default 30 seconds, max 12 hours"
+      - "Default 0 seconds, max 1 hour"
+      - "Default 5 minutes, max 24 hours"
+      - "Default 30 seconds, max 30 minutes"
+    answer: 0
+    explanation: |
+      The default visibility timeout is 30 seconds and the maximum is 12 hours from first receipt.
+      Extending via ChangeMessageVisibility does not reset the 12-hour ceiling.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-020
+    difficulty: advanced
+    tags: [visibility-timeout, long-tasks, heartbeat]
+    question: |
+      A worker's processing time varies and sometimes exceeds the configured visibility timeout,
+      causing premature redelivery. Which approach best addresses this WITHOUT just setting a huge
+      static timeout?
+    options:
+      - "Delete the message before processing starts"
+      - "Switch to short polling"
+      - "Use ChangeMessageVisibility as a heartbeat to extend the timeout while still working"
+      - "Move the message to the DLQ immediately"
+    answer: 2
+    explanation: |
+      A heartbeat that calls ChangeMessageVisibility periodically extends the timeout only while the
+      worker is genuinely still processing, avoiding both premature redelivery and the slow-retry
+      penalty of a huge static timeout. (Deleting before processing risks losing work on a crash.)
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-021
+    difficulty: intermediate
+    tags: [scheduled-autoscaling, limits, gotcha]
+    question: |
+      Which is a real operational constraint of EC2 Auto Scaling scheduled actions to keep in mind?
+    options:
+      - "They can only run once per account"
+      - "An action may run up to ~2 minutes late, so schedule slightly before the window"
+      - "They require a running EC2 instance to trigger"
+      - "They cannot use cron expressions"
+    answer: 1
+    explanation: |
+      A scheduled action generally runs within seconds but may be delayed up to ~2 minutes; the guidance
+      is to schedule a little before the window. (Other real limits: up to 125 actions per ASG, unique
+      names and unique start times; cron and time zones are fully supported.)
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-022
+    difficulty: intermediate
+    tags: [queuing-chain, fan-out, sns]
+    question: |
+      Within a Queuing Chain, a stage must send its output to MULTIPLE downstream consumers (not just
+      one next stage). Which AWS building block cleanly adds fan-out at that seam?
+    options:
+      - "A larger visibility timeout"
+      - "A second DLQ"
+      - "An SNS topic (or EventBridge bus) fanning out to several SQS queues"
+      - "Route 53 latency routing"
+    answer: 2
+    explanation: |
+      SNS (or EventBridge) provides fan-out: one publish delivers to multiple subscribed SQS queues
+      (fan-out / pub-sub), letting several downstream stages each get their own copy while preserving
+      per-consumer queue buffering.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-023
+    difficulty: advanced
+    tags: [scheduled-autoscaling, dst, timezone]
+    question: |
+      You configure a recurring scheduled action with the time zone America/New_York. What behavior
+      should you expect around daylight saving time?
+    options:
+      - "The action fails during DST transitions"
+      - "The action shifts by one hour permanently after the first DST change"
+      - "The action automatically adjusts for DST, staying at the intended local time"
+      - "Time zones are ignored; only UTC is honored"
+    answer: 2
+    explanation: |
+      IANA location-based time zones such as America/New_York automatically adjust for DST, so the
+      action fires at the intended local time year-round. A UTC-based zone like Etc/UTC does not adjust.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-024
+    difficulty: advanced
+    type: multi
+    tags: [scheduled-autoscaling, multi, tradeoffs]
+    question: |
+      Which statements about Scheduled Autoscaling (Scheduled Scale Out) are TRUE? Select all that apply.
+    options:
+      - "It is blind to reality — if the spike comes early/late or is bigger than expected, it over- or under-provisions"
+      - "It eliminates the reactive cold-start lag for known, clock-driven load"
+      - "EventBridge Scheduler and Application Auto Scaling scheduled actions are modern realizations"
+      - "It reacts automatically to unpredictable, metric-driven bursts"
+    answers: [0, 1, 2]
+    explanation: |
+      Scheduled scaling pre-warms capacity for predictable windows (no cold-start lag) but is blind to
+      actual demand, so it can mis-provision if reality differs. EventBridge Scheduler and Application
+      Auto Scaling scheduled actions realize it today. Reacting to unpredictable bursts is Job Observer
+      (dynamic scaling), not scheduled scaling.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-025
+    difficulty: intermediate
+    tags: [job-observer, load-leveling]
+    question: |
+      In the Job Observer pattern, what role does the queue itself play while the fleet is scaling out?
+    options:
+      - "It drops excess messages to protect workers"
+      - "It routes messages by priority automatically"
+      - "It levels the spiky producer load, buffering work so nothing is lost during the scale-out lag"
+      - "It caches results for the CDN"
+    answer: 2
+    explanation: |
+      The queue provides queue-based load leveling: it absorbs the spiky producer rate and buffers
+      pending work while the fleet takes minutes to scale out, guaranteeing no work is dropped during
+      the lag.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-026
+    difficulty: advanced
+    tags: [priority-queue, starvation, fairness]
+    question: |
+      To prevent a flood of high-priority messages from completely starving the low-priority queue,
+      what is the recommended tactic?
+    options:
+      - "Delete the low-priority queue during spikes"
+      - "Merge both queues into one"
+      - "Set the low queue's visibility timeout to 0"
+      - "Weighted polling (e.g. 4:1) rather than strict high-first draining"
+    answer: 3
+    explanation: |
+      Strict high-first polling can starve the low queue. Weighted polling (e.g. drain high 4x as
+      often as low) preserves priority while guaranteeing the low-priority queue still makes progress.
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-027
+    difficulty: intermediate
+    tags: [classic-vs-modern, mapping, job-observer]
+    question: |
+      In the classic Job Observer, the "observer" that watched the queue and triggered scaling was
+      which AWS service?
+    options: ["AWS Config", "AWS CloudTrail", "Amazon CloudWatch", "Amazon Macie"]
+    answer: 2
+    explanation: |
+      Classic Job Observer used a CloudWatch alarm on SQS queue depth to trigger Auto Scaling actions
+      on the worker fleet. CloudWatch is the "observer" in the pattern name.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-028
+    difficulty: advanced
+    type: multi
+    tags: [idempotency, at-least-once, multi]
+    question: |
+      Because SQS delivery is at-least-once and workers can die mid-task, which practices make a
+      worker safe to redeliver to? Select all that apply.
+    options:
+      - "Use an idempotency/dedup key so reprocessing the same message is a no-op"
+      - "Perform conditional writes (e.g. put-if-not-exists) keyed on the message id"
+      - "Assume each message is delivered exactly once and skip dedup logic"
+      - "Right-size the visibility timeout and use heartbeat extension for long tasks"
+    answers: [0, 1, 3]
+    explanation: |
+      Idempotency (dedup keys), conditional writes, and correct visibility-timeout handling all make
+      redelivery safe. Assuming exactly-once is wrong for standard SQS (at-least-once), which is the
+      root cause of duplicate processing.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-029
+    difficulty: advanced
+    tags: [scenario, pattern-selection, combined]
+    question: |
+      Design an image-processing backend that survives worker crashes and unpredictable upload spikes,
+      with independent stages. Which combination of CDP patterns best fits?
+    options:
+      - "Priority Queue + Scheduled Scale Out only"
+      - "A single monolithic EC2 instance with cron"
+      - "Queuing Chain (SQS between stages) + Job Observer (scale on backlog) + idempotent workers + per-stage DLQs"
+      - "Scheduled Scale Out only, sized for peak"
+    answer: 2
+    explanation: |
+      Independent stages call for a Queuing Chain; unpredictable spikes and crash survival call for
+      Job Observer (backlog-driven scaling) plus idempotent workers and DLQs. Spikes here are not
+      clock-predictable, so scheduled scaling alone is insufficient.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-030
+    difficulty: intermediate
+    tags: [scenario, pattern-selection, scheduled]
+    question: |
+      Month-end billing runs at a known time on the last day of each month and generates a large,
+      fairly predictable batch. Which pattern most directly ensures capacity is ready?
+    options: ["Priority Queue", "Queuing Chain", "Read Replica", "Scheduled Autoscaling"]
+    answer: 3
+    explanation: |
+      Month-end billing is clock-predictable, so Scheduled Autoscaling (a recurring scheduled action /
+      EventBridge Scheduler cron) pre-warms capacity for the known window. Layer dynamic scaling on top
+      for variance.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-031
+    difficulty: advanced
+    tags: [scenario, pattern-selection, priority]
+    question: |
+      A transcoding service must serve paid customers faster than free-tier users during heavy load,
+      while still eventually processing free jobs. Which pattern is the primary fit?
+    options: ["Job Observer", "Queuing Chain", "Priority Queue", "Scheduled Scale Out"]
+    answer: 2
+    explanation: |
+      Differentiating urgency between tiers is exactly Priority Queue: separate paid/free queues with
+      weighted polling so paid jobs go first but free jobs still make progress (avoiding starvation).
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-032
+    difficulty: intermediate
+    tags: [job-observer, metric-math]
+    question: |
+      AWS notes you can now avoid publishing your own custom SQS backlog metric to CloudWatch. What
+      modern feature makes that possible?
+    options:
+      - "CloudWatch metric math (computing backlog per instance from existing metrics)"
+      - "S3 event notifications"
+      - "AWS Glue crawlers"
+      - "Kinesis enhanced fan-out"
+    answer: 0
+    explanation: |
+      CloudWatch metric math lets you compute backlog-per-instance from existing SQS and ASG metrics
+      inside the target-tracking policy, so you no longer have to publish a custom metric yourself.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-033
+    difficulty: advanced
+    tags: [scale-in, long-running, job-observer]
+    question: |
+      Your Auto Scaling worker fleet is draining an SQS queue, but scale-in sometimes terminates an
+      instance running a 20-minute job. Which two-part outcome/mitigation is correct?
+    options:
+      - "The job is lost permanently; there is no mitigation"
+      - "The unfinished message returns to the queue after its visibility timeout and is retried; use instance scale-in protection to control which workers are terminated"
+      - "SQS blocks scale-in until the queue is empty"
+      - "The instance keeps running forever until the job finishes"
+    answer: 1
+    explanation: |
+      An interrupted message reappears after the visibility timeout and is retried by another worker
+      (which only works because workers are idempotent). Instance scale-in protection lets you control
+      which workers get terminated to avoid killing long tasks in the first place.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-034
+    difficulty: intermediate
+    tags: [choreography, orchestration, definitions]
+    question: |
+      How do "choreography" (Queuing Chain) and "orchestration" (Step Functions) differ?
+    options:
+      - "Choreography uses a central coordinator; orchestration is fully decentralized"
+      - "They are synonyms for the same design"
+      - "Orchestration cannot do retries; choreography can"
+      - "In choreography each stage knows only its in/out queue; in orchestration a central state machine drives the stages"
+    answer: 3
+    explanation: |
+      Choreography (Queuing Chain) is decentralized — each stage knows only its input/output queue.
+      Orchestration (Step Functions) uses a central state machine that drives stages and holds
+      end-to-end state, retries, and branching.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-035
+    difficulty: advanced
+    type: multi
+    tags: [priority-queue, routing, multi]
+    question: |
+      Which AWS mechanisms can route a message to the correct priority queue based on an attribute
+      such as tier=premium? Select all that apply.
+    options:
+      - "Amazon EventBridge rules matching on the event payload/attributes"
+      - "Amazon SNS message filtering by subscription filter policy"
+      - "SQS server-side priority ordering within a single queue"
+      - "The producer choosing the target queue at enqueue time"
+    answers: [0, 1, 3]
+    explanation: |
+      EventBridge rules and SNS filter policies can route by attribute, and the producer can simply
+      pick the target queue at enqueue time. SQS has no server-side priority ordering within a single
+      queue, so that option is false.
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-036
+    difficulty: intermediate
+    tags: [in-flight, limits, sqs]
+    question: |
+      For an SQS standard queue, roughly how many in-flight (received-but-not-deleted) messages are
+      allowed, and what happens at the limit under short polling?
+    options:
+      - "About 1,000; the queue is deleted"
+      - "Unlimited; nothing happens"
+      - "About 120,000; SQS returns an OverLimit error until some in-flight messages are deleted"
+      - "About 10; new sends are rejected"
+    answer: 2
+    explanation: |
+      Standard queues allow roughly 120,000 in-flight messages. Under short polling, reaching the
+      limit returns an OverLimit error until in-flight messages are deleted (under long polling, SQS
+      simply returns no new messages until the count drops).
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-037
+    difficulty: advanced
+    tags: [scheduled-autoscaling, misconception]
+    question: |
+      Which statement about pure Scheduled Autoscaling (no dynamic scaling layered on) is the key
+      weakness an interviewer wants you to name?
+    options:
+      - "It cannot be expressed with cron"
+      - "It only works for databases"
+      - "It requires manual approval before each run"
+      - "It is blind to real-time demand, so early/late or larger/smaller spikes cause mis-provisioning"
+    answer: 3
+    explanation: |
+      A pure schedule is blind to reality: if the spike arrives early/late or differs in size, it over-
+      or under-provisions. That is why AWS recommends combining scheduled with dynamic/target-tracking
+      scaling.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-038
+    difficulty: intermediate
+    tags: [queuing-chain, worker-runtime, fargate]
+    question: |
+      For a Queuing Chain stage that is CPU-heavy and long-running (e.g. video encoding), which worker
+      runtime is the most appropriate modern choice polling SQS?
+    options:
+      - "A Lambda function with a 3-second timeout"
+      - "Amazon SNS"
+      - "A DynamoDB table"
+      - "ECS/Fargate (or an EC2 ASG) containers polling the queue"
+    answer: 3
+    explanation: |
+      Long-running, CPU-heavy stages fit ECS/Fargate (or EC2 ASG) workers polling SQS. Lambda suits
+      shorter, bursty units of work; a 3-second timeout would be wrong for heavy encoding.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-039
+    difficulty: beginner
+    tags: [classic-vs-modern, framing]
+    question: |
+      The CDP catalog is classic (~2012-2015). How should these batch/async patterns be taught today?
+    options:
+      - "As exact step-by-step EC2 recipes to copy verbatim"
+      - "As timeless problems whose classic EC2 mechanics now map to managed services (Lambda ESM, ASG target tracking, EventBridge Scheduler)"
+      - "As obsolete ideas with no modern relevance"
+      - "As AWS billing features"
+    answer: 1
+    explanation: |
+      The framing is classic intent -> modern AWS equivalent: the problems are timeless, but the
+      EC2-era manual glue is now absorbed by managed services (Lambda event-source mapping, ASG target
+      tracking with metric math, EventBridge Scheduler).
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-040
+    difficulty: advanced
+    type: multi
+    tags: [dlq, visibility-timeout, multi]
+    question: |
+      Which statements about DLQs and visibility timeouts are TRUE? Select all that apply.
+    options:
+      - "A DLQ captures messages that exceed maxReceiveCount so poison messages stop looping"
+      - "Extending a message via ChangeMessageVisibility does not reset the 12-hour maximum"
+      - "Setting VisibilityTimeout to 0 immediately makes a received message available to other consumers"
+      - "A DLQ guarantees a message is processed exactly once"
+    answers: [0, 1, 2]
+    explanation: |
+      DLQs isolate poison messages after maxReceiveCount; the 12-hour ceiling is not reset by
+      extensions; setting the timeout to 0 releases a message immediately. A DLQ does not provide
+      exactly-once processing — SQS standard is at-least-once regardless of DLQs.
+    ref: "concepts.md#job-observer"
+
+  - id: aws-cdp-batch-and-async-041
+    difficulty: intermediate
+    tags: [priority-queue, lambda-concurrency]
+    question: |
+      Using Lambda to drain separate priority queues, how do you make the high-priority queue drain
+      faster than the low-priority one?
+    options:
+      - "Use one shared event-source mapping for both queues"
+      - "Set the low queue to FIFO"
+      - "Attach separate event-source mappings and give the high-priority mapping more available/reserved concurrency"
+      - "Disable batching on the low queue only"
+    answer: 2
+    explanation: |
+      Attach one event-source mapping per queue and give the high-priority mapping more concurrency so
+      it drains faster, realizing weighted priority with serverless workers.
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-042
+    difficulty: advanced
+    tags: [scenario, pattern-selection, combined-schedule-dynamic]
+    question: |
+      A retailer knows traffic ramps every day at 8:00 a.m. but the exact peak varies day to day.
+      Which design is best?
+    options:
+      - "Scheduled action to set a higher baseline min/desired at ~7:50, plus target-tracking on backlog for the daily variance"
+      - "Only a fixed fleet sized for the historical maximum"
+      - "Only Job Observer with no schedule, accepting the morning cold-start lag every day"
+      - "Manually scale each morning"
+    answer: 0
+    explanation: |
+      The 8 a.m. ramp is predictable (schedule the baseline just before it) but the peak size varies
+      (let target-tracking / Job Observer handle the variance within the new min/max). This is the
+      canonical combine-scheduled-with-dynamic answer.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-043
+    difficulty: intermediate
+    tags: [cross-reference, boundary]
+    question: |
+      For the deep mechanics of SQS FIFO semantics, DLQ redrive, and SNS/EventBridge routing, which
+      topic does this pattern topic tell you to consult (rather than duplicating)?
+    options:
+      - "system-design/aws-dynamodb-deep-dive"
+      - "system-design/aws-messaging-sqs-sns-eventbridge"
+      - "system-design/aws-storage-s3-deep-dive"
+      - "system-design/aws-security-iam-deep-dive"
+    answer: 1
+    explanation: |
+      This is a pattern-altitude topic; the deep messaging mechanics live in
+      system-design/aws-messaging-sqs-sns-eventbridge, which the concepts file cross-references.
+    ref: "concepts.md#queuing-chain"
+
+  - id: aws-cdp-batch-and-async-044
+    difficulty: advanced
+    type: multi
+    tags: [pattern-selection, multi, synthesis]
+    question: |
+      Match the driver to the pattern: which of the following pairings are correct? Select all that apply.
+    options:
+      - "Unpredictable, bursty demand -> Job Observer (backlog-driven dynamic scaling)"
+      - "Clock-predictable window -> Scheduled Autoscaling"
+      - "Independent multi-stage pipeline -> Queuing Chain"
+      - "Need arrival-order guarantees within a group -> Priority Queue"
+    answers: [0, 1, 2]
+    explanation: |
+      Bursty demand -> Job Observer; predictable windows -> Scheduled Autoscaling; multi-stage pipeline
+      -> Queuing Chain. Arrival-order-within-a-group is provided by SQS FIFO, NOT Priority Queue
+      (priority is about urgency ordering across separate queues, not FIFO ordering).
+    ref: "concepts.md#priority-queue"
+
+  - id: aws-cdp-batch-and-async-045
+    difficulty: advanced
+    type: multi
+    tags: [scheduled-autoscaling, limits, multi]
+    question: |
+      Which statements about EC2 Auto Scaling scheduled actions are TRUE? Select all that apply.
+    options:
+      - "You can create up to 125 scheduled actions per Auto Scaling group"
+      - "A recurring schedule uses a cron expression and can specify an IANA time zone"
+      - "Two scheduled actions in the same group may share an identical start time with well-defined ordering"
+      - "A scheduled action can set the group's desired, minimum, and maximum capacity"
+    answers: [0, 1, 3]
+    explanation: |
+      Up to 125 actions per group; recurring schedules use cron plus a time zone; an action can set
+      desired/min/max. Actions must have UNIQUE start times per group — identical times are rejected,
+      and identical cron expressions produce arbitrary, undefined ordering, so that option is false.
+    ref: "concepts.md#scheduled-autoscaling"
+
+  - id: aws-cdp-batch-and-async-046
+    difficulty: intermediate
+    type: multi
+    tags: [queuing-chain, worker-runtime, multi]
+    question: |
+      Which are valid modern worker runtimes for draining an SQS queue in a Queuing Chain stage?
+      Select all that apply.
+    options:
+      - "AWS Lambda via an SQS event-source mapping"
+      - "ECS/Fargate tasks that long-poll the queue"
+      - "EC2 instances in an Auto Scaling group that poll the queue"
+      - "Amazon Route 53 health checks"
+    answers: [0, 1, 2]
+    explanation: |
+      Lambda (event-source mapping), ECS/Fargate pollers, and EC2 ASG pollers are all valid worker
+      runtimes for SQS-driven stages. Route 53 health checks are a DNS failover mechanism, not a queue
+      consumer.
+    ref: "concepts.md#queuing-chain"
