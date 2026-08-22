@@ -240,7 +240,7 @@ ETag: "order-1001-v7"
 }
 ```
 
-> [!NOTE]
+> [!WARNING]
 > The `_links` shape above is an **illustrative (non-standard) sketch**: plain HAL links
 > do *not* carry a `method` field — HAL models reads (link relations) only. To express a
 > *write* action like cancel/pay properly you need **HAL-FORMS** or **Siren**, which add

@@ -17,7 +17,7 @@ gRPC, gRPC-Web, and its own browser-friendly HTTP protocol without a separate pr
 > `google.api.http` annotations. Connect collapses all of this into one runtime that
 > needs **no proxy** for browsers.
 
-> [!NOTE]
+> [!TIP]
 > HTTP/2 framing, HPACK, flow control, multiplexing, and TLS internals are owned by the
 > **networking** (and **security**) domains — this topic uses those foundations but does
 > not re-derive them. REST/HTTP API contracts and GraphQL as an API style are owned by
@@ -249,7 +249,7 @@ The same transcoding can also run **inside Envoy** via the
 `envoy.filters.http.grpc_json_transcoder` filter, which reads a compiled proto
 **descriptor set** and does JSON↔gRPC at the edge with no generated Go code.
 
-> [!NOTE]
+> [!WARNING]
 > Transcoding costs a JSON↔protobuf conversion on every call and loses some gRPC features
 > (no streaming semantics beyond simple cases, no trailers to the HTTP client). It is a
 > compatibility bridge, not a replacement for native gRPC between services.

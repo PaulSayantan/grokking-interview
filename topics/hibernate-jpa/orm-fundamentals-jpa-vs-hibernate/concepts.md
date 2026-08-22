@@ -620,7 +620,7 @@ Also removed: **`@Proxy`, `@LazyToOne`, `@LazyCollection`, `@Persister`, `@Loade
 - `runInTransaction`/`callInTransaction` on the EMF and `runWithConnection`/`callWithConnection`
   on the EM for lambda-style unit-of-work code.
 
-> [!NOTE]
+> [!INTERVIEW]
 > Under the Jakarta model there is no single JCP-style *mandated* RI: the spec lists
 > **compatible implementations** (EclipseLink and Hibernate both certify against the TCK).
 > EclipseLink remains the **historical/official RI** and Hibernate is the de-facto standard —

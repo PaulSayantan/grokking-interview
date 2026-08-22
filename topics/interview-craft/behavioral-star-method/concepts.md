@@ -12,7 +12,7 @@ rounds exist, **how** to structure an answer (STAR and its variants), how to bui
 > judgment, scope). Every sentence should either set up the stakes or demonstrate a signal.
 > If a sentence does neither, cut it.
 
-> [!NOTE]
+> [!TIP]
 > This topic owns the **behavioral/storytelling** craft. The *technical* system-design
 > interview method (driving a whiteboard) lives in
 > `system-design/interview-method-scenario-playbooks`; the specific competency stories

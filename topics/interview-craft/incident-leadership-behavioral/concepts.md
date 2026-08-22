@@ -14,7 +14,7 @@ staff-level leadership, not "I was on the pager and it was stressful."
 > postmortem and the follow-through that prevented recurrence.** Every sentence should advance
 > one of those beats.
 
-> [!NOTE]
+> [!TIP]
 > This topic owns the **behavioral / storytelling** angle on incidents. The *process mechanics*
 > — SLOs, error budgets, alerting, runbooks, on-call rotation design, RCA templates — live in
 > `devops-cicd/observability`. Point there for the "how the system works" details; here we care

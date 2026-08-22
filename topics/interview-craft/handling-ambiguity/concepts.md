@@ -14,7 +14,7 @@ failure modes that quietly sink candidates.
 > almost always graded as: *did they establish the goal and constraints before
 > committing to a direction?*
 
-> [!NOTE]
+> [!TIP]
 > This topic owns the **behavioral / communication** angle of ambiguity. The
 > technical method for driving a whiteboard system-design session lives in
 > `system-design/interview-method-scenario-playbooks` — cross-reference it for the

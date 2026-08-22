@@ -15,7 +15,7 @@ behaviour, alerting, and cross-service error propagation.
 > **trailers** (`grpc-status`, `grpc-message`), and rich structured errors ride in the
 > binary `grpc-status-details-bin` trailer as a serialized `google.rpc.Status`.
 
-> [!NOTE]
+> [!TIP]
 > HTTP/2 framing, HPACK, and trailer mechanics themselves are owned by the
 > **networking** domain; TLS/mTLS internals by **networking/security**; general
 > retry/backoff/circuit-breaker theory by **reliability-ops**; interceptor plumbing by
@@ -211,7 +211,7 @@ sequenceDiagram
     Note over C,S: On immediate rejection, server may send one HEADERS<br/>frame with :status 200 and grpc-status set (Trailers-Only)
 ```
 
-> [!NOTE]
+> [!WARNING]
 > A **non-200 HTTP status** (e.g. a proxy returns `502`, or `:status: 404`) is a
 > *transport-level* failure, not a gRPC status. gRPC maps these to codes via a fixed
 > table — e.g. HTTP `502/503/504` → `UNAVAILABLE`, `401` → `UNAUTHENTICATED`, `403` →
@@ -255,7 +255,7 @@ return nil, st.Err()
 > traces, big lists) into error details — oversized trailers can be truncated or
 > rejected, and huge metadata hurts every RPC. Keep details small and structured.
 
-> [!NOTE]
+> [!TIP]
 > The `code` inside `google.rpc.Status` should match the `grpc-status` code. They are
 > two encodings of the same outcome; clients treat the top-level `grpc-status` as
 > authoritative and use the details for extra structure.

@@ -53,7 +53,7 @@ flowchart TD
     H -- No, record & assert after --> J[Spy]
 ```
 
-> [!NOTE]
+> [!WARNING]
 > The "set expectations up front" vs "record then assert after" split above is a
 > *framework-era* distinction, not a law about mocks. Classic frameworks (EasyMock, jMock)
 > used a **record → replay → verify** cycle: you declared the expected calls *before* exercising
