@@ -2,7 +2,7 @@
 
 27 core + 8 advanced/expert deep-dive + 7 design-patterns + 6 architectural-patterns +
 8 cloud-computing-patterns + 31 AWS System Design + 7 AWS Cloud Design Patterns topics
-(86 total).
+(94 total).
 Study content and MCQs live in per-topic subfolders. See the master taxonomy in
 `../../TOPICS.md`.
 
@@ -167,7 +167,7 @@ article. **389 MCQs.**
 | Topic | Slug | Freq | Difficulty | Status |
 |---|---|---|---|---|
 | AWS SaaS and Multi-Tenancy Foundations | `aws-saas-multitenancy-foundations` | high | beginner | ✅ (81 MCQs · 38 adv/expert) |
-| AWS Tenant Isolation Architecture Patterns | `aws-saas-isolation-patterns` | high | advanced | ✅ (70 MCQs · 32 adv/expert) |
+| AWS Tenant Isolation Architecture Patterns | `aws-saas-isolation-patterns` | high | advanced | ✅ (76 MCQs · 36 adv/expert) |
 | AWS SaaS Tenant Identity, Context and Routing | `aws-saas-tenant-identity-and-routing` | high | advanced | ✅ (66 MCQs · 30 adv/expert) |
 | AWS SaaS Data Partitioning and Isolation | `aws-saas-data-partitioning` | high | advanced | ✅ (96 MCQs · 51 adv/expert) |
 | AWS SaaS Metering, Tiering, Throttling and Cost-per-Tenant | `aws-saas-metering-tiering-throttling` | high | advanced | ✅ (76 MCQs · 36 adv/expert) |

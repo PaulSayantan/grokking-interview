@@ -82,7 +82,9 @@ async function readReadmeTitle(domainDir, fallback) {
  * the FIRST backticked token that looks like a slug and record its order of
  * first appearance. Slugs not found in the README fall back to the end (sorted
  * by title), so the site never drops a subtopic just because the README is
- * incomplete. Returns a Map<slug, orderIndex> (0-based).
+ * incomplete — processAuthoredDomain console.warn()s for each such slug so an
+ * incomplete README can't silently scramble the learning order.
+ * Returns a Map<slug, orderIndex> (0-based).
  */
 async function readReadmeOrder(domainDir) {
   const readmePath = path.join(domainDir, "README.md");
@@ -280,6 +282,21 @@ async function processAuthoredDomain(domainSlug) {
         path.join(outConceptsDir, `${slug}.md`),
         fm + strippedBody,
         "utf8",
+      );
+    }
+
+    // --- Warn loudly when the README doesn't place this subtopic ---
+    // The README table IS the learning order (see readReadmeOrder). A subtopic
+    // missing from it sinks to the end of its group in an arbitrary, title-sorted
+    // position, which silently breaks the intended reading sequence. Warn (don't
+    // throw) so a half-authored topic can't block the build.
+    if (!readmeOrder.has(slug)) {
+      console.warn(
+        `[sync-content] WARNING: "${slug}" (domain "${domainSlug}") has no row in ` +
+          `topics/${domainSlug}/README.md, so its learning-order position is undefined ` +
+          `(it will be dumped at the end of its group, sorted by title). ` +
+          `Fix: add a table row for \`${slug}\` to topics/${domainSlug}/README.md ` +
+          `at the position it should be studied.`,
       );
     }
 

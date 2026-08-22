@@ -26,10 +26,10 @@ subfolders. See the master taxonomy in `../../TOPICS.md`.
 | CompletableFuture & Asynchronous Programming | `completablefuture-async` | high | advanced | ✅ (58 MCQs · 26 adv/expert) |
 | Records, Sealed Classes & Modern Data Modeling (JDK 16-17) | `records-sealed-classes` | high | intermediate | ✅ (60 MCQs · 26 adv/expert) |
 | Pattern Matching, Switch Expressions & Text Blocks (JDK 14-21) | `pattern-matching-switch-expressions` | high | intermediate | ✅ (60 MCQs · 27 adv/expert) |
-| Virtual Threads & Structured Concurrency (JDK 21, Project Loom) | `virtual-threads-structured-concurrency` | very-high | advanced | ✅ (58 MCQs · 26 adv/expert) |
+| Virtual Threads & Structured Concurrency (JDK 21, Project Loom) | `virtual-threads-structured-concurrency` | very-high | advanced | ✅ (65 MCQs · 29 adv/expert) |
 | Modern JVM: ZGC, Shenandoah, JIT, GraalVM & JFR | `modern-jvm-gc-jit-graalvm` | high | advanced | ✅ (64 MCQs · 24 adv/expert) |
-| Java Platform Module System (JPMS) | `java-module-system-jpms` | medium | intermediate | ✅ (60 MCQs · 30 adv/expert) |
-| Parallelism: Parallel Streams, Fork/Join & Data Parallelism | `parallelism-parallel-streams-forkjoin` | high | advanced | ✅ (60 MCQs · 28 adv/expert) |
+| Java Platform Module System (JPMS) | `java-module-system-jpms` | medium | intermediate | ✅ (62 MCQs · 33 adv/expert) |
+| Parallelism: Parallel Streams, Fork/Join & Data Parallelism | `parallelism-parallel-streams-forkjoin` | high | advanced | ✅ (65 MCQs · 27 adv/expert) |
 
 Status: ☐ not started · ◐ concepts done · ● concepts+MCQs · ✅ validated
 
