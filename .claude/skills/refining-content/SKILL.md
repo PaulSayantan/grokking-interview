@@ -10,10 +10,24 @@ Use this to **improve an existing** `concepts.md` so a motivated student finishe
 companion to `authoring-content` (which creates new topics). The authoritative data
 contract is still `docs/content-schema.md`.
 
+> [!WARNING]
+> **Not the right skill for a clarity wave.** If the task is to make a topic *easier to read*
+> — plainer sentences, an accessible on-ramp into expert depth, think-prompts, a cliffhanger
+> — stop and use **`clarity-standard`** instead. That skill rewrites prose top to bottom at
+> zero information loss and owns the `prompts.yaml` sidecar; this one deliberately does not.
+> Running both on the same file produces opposite edits.
+>
+> Use `refining-content` for what it is good at: a one-off fix to a topic that is *not* in a
+> clarity wave — a wrong fact, a missing worked example, an undefined term, a stale version.
+
 > [!KEY-TAKEAWAY]
-> Refinement is **additive and surgical**, not a rewrite. Most of this corpus is already
-> strong. Preserve the author's voice, structure, and stable `## H2` anchors. Add what's
-> missing; fix what's wrong; don't churn what already works.
+> Refinement is **additive and surgical**, not a rewrite. Preserve the author's voice,
+> structure, and stable `## H2` anchors. Add what's missing; fix what's wrong; don't churn
+> what already works.
+>
+> Scope note: "most of this corpus is already strong" was measured on correctness, depth, and
+> examples — not on how plainly it reads. See the superseding note in
+> `topics/CONTENT-AUDIT-MASTER.md`.
 
 ## The refinement standard (the bar every refined file must hit)
 

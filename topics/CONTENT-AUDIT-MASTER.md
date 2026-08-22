@@ -1,5 +1,26 @@
 # Interview-Prep Corpus — Master Content Audit
 
+> [!WARNING]
+> **Superseded in part, 2026-08-23, by the clarity effort (`.claude/skills/clarity-standard`).**
+>
+> This audit scored correctness, interview depth, examples, and diagrams. On those axes its
+> findings stand and its per-domain backlog is still the reference. It did **not** score the
+> readability of the explanation itself, and that is where student feedback landed: the
+> concepts are informative but hard to read and exhausting, worst in the deepest passages.
+>
+> Two conclusions below are therefore no longer operative:
+> - **"There is no domain requiring a rewrite"** (§Executive summary) and **"refinement is
+>   polish, not triage"** (takeaway 2) — both were true against *this* audit's axes. A
+>   clarity wave **does** rewrite prose, top to bottom, at zero information loss. Do not cite
+>   these lines to argue against one.
+> - **"The fix is additive, not a rewrite"** (takeaway 1) — the worked-examples finding was
+>   correct and is the strongest empirical support the clarity standard has. It is folded in
+>   as rule **C4** (a concrete instance inside the first 60 words of every section), which is
+>   a structural requirement rather than an injection.
+>
+> Numbers here predate the case-studies scale-up: 19 domains / 429 subtopics vs **20 / 460**
+> today. Treat the scorecard as directional. `docs/corpus-stats.md` is authoritative.
+
 ## Executive summary
 
 The library is in strong, largely publishable shape. Across **19 domains and 429 subtopics**, only **1 subtopic is high-priority** (a single correctness bug in `dsa-coding`), **308 are medium**, and **120 are low**. There is no domain requiring a rewrite, and no domain whose content is structurally broken. Clarity and interview depth are consistently high (most domains average 4.5–5.0 on both); several domains — `hibernate-jpa`, `networking`, `reliability-ops`, `security`, `spring-boot`, `spring-core` — score a perfect **5/5 on interview depth**.
