@@ -24,16 +24,19 @@ Progress legend: ☐ not started · ◐ concepts done · ● concepts + MCQs don
 
 See the per-domain checklist in **"Content progress"** below (generated from TOPICS.md).
 
-### Phase 2 — Web application (Astro) (multiple sessions)
-- [ ] Scaffold Astro + Tailwind + Preact in `web/`; content sync (`sync-content.mjs`)
+### Phase 2 — Web application (Astro) ✅ (multiple sessions)
+
+_All six shipped, deployed, tested and CI'd. These boxes sat unchecked long after the
+fact; corrected 2026-08-23 against disk._
+- [x] Scaffold Astro + Tailwind + Preact in `web/`; content sync (`sync-content.mjs`)
       that reads `topics/` → content collection + per-pool question JSON.
-- [ ] Pages: landing → grouped catalog → domain (grouped subtopics + filter) →
+- [x] Pages: landing → grouped catalog → domain (grouped subtopics + filter) →
       subtopic hub → study (concepts.md rendered to HTML) → practice.
-- [ ] Practice engine: 25-MCQ sessions (subtopic / group / domain level), shuffled
+- [x] Practice engine: 25-MCQ sessions (subtopic / group / domain level), shuffled
       questions + options, immediate per-question feedback, score + localStorage history.
-- [ ] Deep-link "Learn more" from a question → study page heading anchor.
-- [ ] Deploy: static `dist/` to Netlify/Vercel.
-- [ ] Tests / smoke checks for the sync pipeline + practice logic.
+- [x] Deep-link "Learn more" from a question → study page heading anchor.
+- [x] Deploy: static `dist/` to Netlify/Vercel.
+- [x] Tests / smoke checks for the sync pipeline + practice logic.
 
 ### Phase 3 — Polish (later)
 
@@ -59,15 +62,25 @@ plan lives in Claude memory (`web-design-enhancement-plan.md`). Highlights:
       progress/activity reset. *(Session 16)*
       _Sidebar is disclosure-only (not a persistent rail) and omitted on the domain
       page (cards already list subtopics) — deliberate scope calls._
-- [ ] **P3** Achievement badges; SRS-light scheduling; self-test `<details>` blocks.
-      *(Light-theme toggle shipped in Session 13.)*
-- [ ] Multi-answer & code-snippet question types.
-- [ ] Import/export progress.
+- [x] **P3** SRS-light scheduling (Leitner 1/3/7/14/30d). *(commit `db791e6`)*
+- [x] Multi-answer question type (select-all-that-apply, all-or-nothing scoring).
+      *(Session 45, commit `0df37de`)* — but only **79 questions across 8 of 460
+      topics**, and the quiz UI was never click-through tested.
+- [ ] **P3** Achievement badges; self-test `<details>` blocks; code-snippet question type.
+- [ ] Import/export progress. **The last genuinely-open Phase 3 item** — and the only
+      defense against a `localStorage` wipe erasing months of mastery data on a site
+      with no backend.
 
 ## Content progress
 
-Populated once `TOPICS.md` is generated. Each domain lists its topics with status.
-Update the marker as you author each topic.
+**All 20 domains / 460 topics are authored.** Do not maintain counts here — they drifted
+badly (this file has said system-design is 86 topics and also 70; it is 94, and the rollup
+below never got a row for `system-design-case-studies`, which is why the repo kept saying
+"19 domains").
+
+> **`docs/corpus-stats.md` is authoritative for every count.** Regenerate with
+> `python3 scripts/corpus_stats.py`. Verified 2026-08-23: 20 domains, 460 topics,
+> 28,064 MCQs, 2,339,891 words.
 
 <!-- CONTENT-PROGRESS-START -->
 
@@ -102,6 +115,47 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 46 (2026-08-22/23) — landed the stalled redesign, then opened the CLARITY effort.**
+  Two efforts. (1) **Landed 3 weeks of finished-but-uncommitted landing-page work** on
+  `landing-3d-depth-2026-08` (`a470c5c`, `c0ebf91`): the 3D depth system (sticky deck,
+  hero parallax, pointer tilt), the brand mark + full favicon set + a new
+  `manifest.webmanifest` (the `icon-192/512` pair had been orphaned; `gen-csp-headers.mjs`
+  was *already* emitting `manifest-src 'self'`), and two WCAG AA contrast fixes.
+  Browser-verified with Playwright before committing rather than trusting green gates:
+  **0 contrast failures** across dark/light/mobile and 6 routes, primary-CTA hover 8.16:1,
+  pointer tilt confirmed producing real rotation, reduced-motion fully visible, and no-JS
+  renders identically to JS-on (the animations are pure CSS scroll-driven).
+- **Session 46 (cont.) — the clarity effort begins.** Students reported the concepts are
+  informative but **hard to understand and exhausting to read**. Root finding: writing
+  quality **degrades monotonically down the depth stack** — the `**Beginner.**` tier gets
+  an analogy, the `**Advanced.**` tier gets dense unreadable prose (778 audience-tier
+  labels across 46 files). So the prose is worst exactly where the material is hardest.
+  Designed a clarity standard (expert ideas, plain explanation, zero information loss),
+  a `prompts.yaml` sidecar for think-prompts + cliffhangers, and a study-page reveal UI;
+  adversarially reviewed, **9 blockers found and folded in**. Locked decisions live in
+  Claude memory (`clarity-effort.md`). **Phase A pre-flight shipped** (`5c714b0`,
+  `13c0a8f`, `41d6f95`, `c547fb2`, `b73daae`):
+  - **Governance:** `CONTENT-AUDIT-MASTER.md` said "no domain requiring a rewrite" and
+    `refining-content` opens "additive and surgical, not a rewrite" — both would have made
+    an agent refuse this work. Reconciled, with the audit's worked-examples finding folded
+    in as the standard's rule C4.
+  - **Validator hardened** 204 → ~316 lines: fence-aware headings (**425 phantom headings**
+    across 96 files were `# comment` lines inside code fences), four new structural gates
+    (zero corpus violations), a removed silent skip, and **26 H1 refs migrated to H2** —
+    they were dead in-page links because `stripLeadingH1` strips the H1 from the page.
+  - **`topics/.anchors.lock`**: all 8,702 headings manifested; `--check-lock` in CI fails
+    any modification or removal and names the MCQ-ref blast radius. Runs in 0.33s.
+  - **`docs/corpus-stats.md`** is now authoritative for all counts. Settled two disputed
+    numbers: `dp-enterprise-application` really has 72 H2s, and system-design is **94**
+    topics (this file said 86 and also 70).
+  - **Live site bug fixed:** `system-design-case-studies/README.md` had 1 table row for 23
+    directories, so 22 topics sorted on the `Infinity` fallback and that domain's learning
+    order was an alphabetical accident. Now 23 rows, grouped by company, sequenced on real
+    dependencies. The fallback is now a loud warning.
+  - 11 unsupported `[!NOTE]` callouts retyped (they rendered as plain blockquotes).
+  **Next:** Phase B machinery (clarity linter, rewrite-audit gates, `prompts.yaml`
+  plumbing, the reveal UI), then the **`docker` pilot** — 16 topics, sequential in README
+  order. Then review before the other 19 domains.
 - **Session 45 (2026-07-24):** **Multi-select MCQ type (v2) + AWS Cloud Design Patterns group.** Two
   queued items shipped in order. **(1) Multi-select (SATA):** added a `type: single|multi` question type
   across all 5 layers — schema (`answers: []` replaces `answer` for multi; all-or-nothing scoring so
