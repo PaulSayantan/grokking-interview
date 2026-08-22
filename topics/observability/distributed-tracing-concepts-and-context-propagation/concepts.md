@@ -203,23 +203,45 @@ flowchart LR
 
 ## In-process context propagation
 
-Before a request ever leaves the process, the tracer must know *"what is the
-current span?"* so that the next operation becomes its child. That "current
-span" is held in a **Context** object propagated implicitly along the execution
-path.
+A trace can break inside one process, with no network involved at all, and it
+looks exactly like the network breaking it.
 
-- **Synchronous / thread-per-request**: the active span is stored in a
-  **thread-local** (Java `ThreadLocal`, via OTel's `Context`/`Scope`; Go passes
-  `context.Context` explicitly as the first argument; .NET uses
-  `AsyncLocal`/`Activity.Current`; Node uses `AsyncLocalStorage`). Each new span
-  is created as a child of whatever is current, then set current for the
-  duration of its scope.
-- **Asynchronous / thread pools / reactive**: the danger zone. When work hops to
-  another thread (executor submit, `CompletableFuture`, reactor/coroutine
-  scheduler, callback), the thread-local **does not follow automatically**. The
-  context must be explicitly **captured** on the submitting thread and
-  **restored** on the executing thread — or the child span is created under the
-  wrong parent (or none), fracturing the trace.
+The `/checkout` waterfall earlier in this file runs 320 ms, and the inventory
+call at 150 ms is the bar that matters. For that bar to sit under the gateway
+span at all, the inventory spans have to hang off it. Here is how they stop
+hanging off it. Suppose the handler makes three inventory lookups instead of one,
+on a pool of 16 threads, and returns. Jaeger now shows four traces rather than
+one: the gateway's, plus three single-span orphans with no parent. No header was
+stripped. The request never left the process.
+
+You have met this failure already, under another name. In
+[structured logging](/study/observability/structured-logging-and-log-levels), MDC
+is a thread-local map, and a log line written on a pooled thread carries whatever
+MDC that thread was left holding. Tracing has the same slot and the same hazard.
+Something has to answer "which span is open on this thread right now?", because
+every new span is created as a child of whatever that answer is.
+
+That slot holds a **Context**: an immutable object carrying the active span, which
+rides along the execution path so nobody has to pass the parent by hand.
+
+Every runtime carries the Context for you, and they differ on one thing only —
+how easily you can lose it. Go makes the hand-off visible: `context.Context` is
+the first argument of any function that might start a span, so you cannot omit it
+without the compiler noticing. You can still pass the *wrong* one —
+`context.Background()` compiles cleanly and silently orphans every child span,
+which is the most common tracing bug in Go. Java, .NET and Node make the hand-off
+implicit, which is nicer to write and easier to lose entirely. In Java that slot is OTel's `Context` and `Scope` over a `ThreadLocal`;
+in .NET it is `AsyncLocal` and `Activity.Current`; in Node it is
+`AsyncLocalStorage`. In all four, opening a span makes it current for the duration
+of its scope, and closing the scope restores whatever was current before.
+
+The slot is per-thread, so the moment work changes threads the slot changes with
+it. Submit a task to an executor, chain a `CompletableFuture`, hand off to a
+Reactor scheduler, register a callback: the worker thread has its own slot and
+does not inherit yours. Two explicit steps fix that. Capture the Context on the
+request thread, then restore it on the worker thread. Skip either one and the
+child span is created under the wrong parent, or under no parent at all, and the
+trace fractures.
 
 ```mermaid
 sequenceDiagram
@@ -233,33 +255,53 @@ sequenceDiagram
   Pool->>T1: complete
 ```
 
-Practical mitigations: OTel and Micrometer provide
-**context-propagating wrappers** — `Context.wrap(Runnable)`,
-`ContextExecutorService`, Reactor's `contextPropagation` hook, Micrometer's
-`ContextSnapshot`. Auto-instrumentation agents patch common executors so this
-"just works" for standard pools, but hand-rolled threading or custom schedulers
-routinely break it.
+### Where it breaks: losing the thread
+
+Wrap that same pool in `ContextExecutorService` and the three orphans above
+become children of the `/checkout` span: 1 trace instead of 4. Four tools do the
+capture-and-restore for you, and they differ only in who calls them. OTel ships
+`Context.wrap(Runnable)` and `ContextExecutorService`; Reactor has the
+`contextPropagation` hook; Micrometer has `ContextSnapshot`. Auto-instrumentation
+agents go further and patch the common executors at load time, which is why
+standard pools need no code from you. Hand-rolled threads and custom schedulers
+get no such patch, so they break.
 
 > [!WARNING]
-> The single most common cause of "my trace is missing the downstream spans" in
-> Java is losing the `Context` across a thread-pool or reactive boundary. If
-> spans show up as **new roots** (no parent) or attach to the *wrong* request,
-> suspect in-process context loss before blaming the network propagator.
+> 3 spans in the `/checkout` trace above should have had a parent and did not.
+> When that happens in a Java service, the instinct is to suspect the propagator
+> or a proxy. Check the thread boundaries first. Spans that show up as new roots,
+> or that attach to the wrong request, are the signature of a lost Context. On the
+> JVM, a thread pool or a reactive hand-off is the most common reason.
+
+Once the span leaves the process there is no thread to lose it on, and no shared
+memory either. Headers do that job.
 
 ---
 
 ## Cross-process propagation via headers
 
-Between processes there is no shared memory, so the SpanContext is serialized
-into the **carrier** — HTTP/gRPC headers, or message metadata — by the caller
-(**inject**) and read by the callee (**extract**). OpenTelemetry models this as
-a **`TextMapPropagator`** with two operations:
+The trace identity has to survive a hop that shares nothing with you except the
+request itself.
 
-- **inject(context, carrier, setter)** — client-side: write `traceparent` (and
-  `tracestate`, baggage, …) into outgoing headers.
-- **extract(context, carrier, getter)** — server-side: read those headers back
-  into a Context, so the incoming handler's span becomes a child of the caller's
-  span.
+Service A holds the gateway span for that same `/checkout` request: `trace_id` T,
+`span_id` S1. At 150 ms it calls the inventory service. The only thing that
+reaches service B is an HTTP request, so A writes one line of text into it —
+`traceparent: 00-T-S1-01` — and B reads that line back out. That is all of
+cross-process propagation.
+
+The thing A writes into is the **carrier**: whatever the request already carries
+that the far side will still see. HTTP and gRPC headers are carriers. So are
+Kafka record headers and SQS message attributes.
+
+Writing the identity into a carrier and reading it back are the two halves of one
+object, OpenTelemetry's `TextMapPropagator`:
+
+- **inject** — the caller runs it before the request goes out. It writes
+  `traceparent` into the outgoing headers, plus `tracestate` and baggage if those
+  are configured. Full signature: `inject(context, carrier, setter)`.
+- **extract** — the callee runs it as the request arrives. It reads those headers
+  back into a Context, so the handler's span becomes a child of the caller's span.
+  Full signature: `extract(context, carrier, getter)`.
 
 ```mermaid
 sequenceDiagram
@@ -273,28 +315,49 @@ sequenceDiagram
   Note over B: S2 is a "server" span, child of client span S1
 ```
 
-Key semantics:
+Three things follow from that exchange, and the third is the one teams get wrong.
 
-- The callee's incoming span is a **child of the caller's span** and inherits the
-  **same `trace_id`** and the **sampled flag** — this is what stitches the trace.
-- Each hop typically creates a **client span** (caller side, egress) and a
-  matching **server span** (callee side, ingress) — SpanKind `CLIENT`/`SERVER`.
-- Propagation format is negotiated by configuration; you can register multiple
-  propagators (e.g. W3C + B3) so a service interoperates with mixed fleets.
+B's span is a child of A's span, on the same `trace_id`, carrying the same sampled
+flag. That inheritance is the whole stitching mechanism. No coordinator anywhere
+assembles the trace; the identity travels with the request, and the backend groups
+by `trace_id`.
 
-If a service **does not propagate** (an un-instrumented proxy that strips
-unknown headers, or a service using an incompatible format), the trace breaks at
-that hop and downstream spans start a **new trace** — you see two disconnected
-traces instead of one.
+One hop produces two spans rather than one whenever both sides are instrumented.
+A client span opens on A as the request leaves, and a server span opens on B as it
+arrives. OpenTelemetry records which is which in **SpanKind**, as `CLIENT` and
+`SERVER`, so a backend can tell an egress span from the ingress span it caused.
+
+The wire format is configuration, not protocol. A service can register several
+propagators at once, W3C and B3 together for instance, so one deployment keeps
+talking to a fleet that has not finished migrating.
+
+### Where it breaks: losing the header
+
+Put an un-instrumented proxy between A and B, one that forwards the headers it
+knows and drops the rest, and B's handler finds no `traceparent` at all. Extract
+has nothing to read, so B starts a fresh root span under a new `trace_id`. You
+have 2 traces for 1 request, each internally correct, neither of them the story
+you wanted. A service running an incompatible format does the same damage from
+the other direction: the header arrives, and the extractor does not recognise it.
+
+Both of those look like 2 traces where you wanted 1, and so does the thread-pool
+failure. One detail separates them. Look at where the trace stops. A lost Context
+cuts a service's spans away from that service's own parent span, so the break
+sits inside one service. A dropped or unreadable header cuts cleanly at the
+boundary between two services, and the upstream side is complete. Check where the
+break sits before you check anyone's config.
+
+All of that assumed both ends agree on the exact text of one header. That
+agreement is `traceparent`.
 
 ---
 
 ## W3C Trace Context: traceparent and tracestate
 
-**W3C Trace Context** is the vendor-neutral standard (a W3C Recommendation) and
-the **default propagator in OpenTelemetry**. It defines two HTTP headers.
+One header carries the identity every system must agree on. The other carries the
+parts only one vendor understands.
 
-**`traceparent`** — four dash-delimited, lowercase-hex fields:
+Here is the first one whole:
 
 ```
 traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
@@ -305,37 +368,69 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
              └─ version (1 byte): 00
 ```
 
+Four fields, dash-separated, lowercase hex, and nothing else. Add up the field
+lengths and the separators and a version-`00` header is 55 characters on the wire,
+every time. **`traceparent`** is defined by W3C Trace Context, which is a W3C
+Recommendation rather than a vendor format. OpenTelemetry installs it as the
+propagator unless you configure a different one.
+
+Three of those four fields have a value that means "this header is broken, ignore
+it", and a receiver is expected to notice:
+
 | Field | Length | Rules |
 |---|---|---|
 | version | 2 hex | `00` today; `ff` is invalid |
 | trace-id | 32 hex (16 B) | all-zeros invalid → ignore the header |
 | parent-id | 16 hex (8 B) | the caller's `span_id`; all-zeros invalid |
-| trace-flags | 2 hex (8-bit) | bit 0 = **sampled** (`01` sampled, `00` not); other bits reserved/zero |
+| trace-flags | 2 hex (8-bit) | bit 0 = sampled (`01` sampled, `00` not); other bits reserved/zero |
 
-**`tracestate`** — a comma-separated list of `key=value` vendor entries carrying
-per-vendor context alongside the (single, standard) `traceparent`:
+The second header is **`tracestate`**, and it exists because more than one tracing
+system can be watching the same request. Each system gets one entry, keyed by its
+own name, holding whatever opaque string it likes:
 
 ```
 tracestate: rojo=00f067aa0ba902b7,congo=t61rcWkgMzE
 ```
 
-Rules that come up in interviews:
+Everyone agrees on one `traceparent`. Nobody has to understand anyone else's
+`tracestate` entry, and nobody is allowed to delete one. That is how two tracing
+vendors ride the same request without negotiating anything.
 
-- **Max 32 list-members**; one entry per key; values are opaque printable ASCII
-  (≤256 chars), no commas/equals inside a value.
-- **Mutation prepends**: a vendor that updates its entry moves it to the
-  **left-most** position and preserves the order of others. The left-most entry
-  identifies the vendor that wrote the current `traceparent`.
-- `tracestate` is how multiple tracing systems coexist: each vendor keeps its own
-  opaque state without clobbering others, while everyone agrees on the single
-  `traceparent` identity.
+### Why the simple version is wrong
+
+`tracestate` reads like a bag of key/value pairs, so people append to it. It is an
+ordered list of at most 32 entries, and an entry's position is data.
+
+Take the header above and send that request into a service run by `congo`. That
+service starts its own span, so it writes a new `traceparent`. The spec then makes
+it rewrite its own entry and move that entry to the front:
+
+```
+tracestate: congo=<congo's new value>,rojo=00f067aa0ba902b7
+```
+
+The left-most entry names the system that wrote the `traceparent` now on the
+request. Everything behind it keeps the order it arrived in. So a receiver reads
+position one and knows whose `span_id` it is holding, without any vendor having to
+parse a format it does not own.
+
+Four limits keep the header bounded and unambiguous:
+
+- at most 32 list-members, which is the spec's word for an entry
+- one entry per key
+- each value is opaque printable ASCII, at most 256 characters
+- no commas and no equals signs inside a value, because those two characters are
+  the delimiters
 
 > [!KEY-TAKEAWAY]
-> `traceparent` carries the **shared, standardized identity** (trace-id,
-> parent span-id, sampled flag). `tracestate` carries **optional per-vendor
-> key/values** and must survive untouched through systems that don't understand
-> it. If a hop drops `tracestate` but keeps `traceparent`, the trace still
-> stitches — you just lose vendor-specific routing/sampling hints.
+> `traceparent` is the part every system must agree on: trace-id, parent span-id,
+> sampled flag. `tracestate` is the part nobody else has to understand and nobody
+> is allowed to drop. If a hop drops it anyway, the trace still stitches, because
+> stitching needs only `traceparent`. What you lose is the vendor routing and
+> sampling hints that were riding along.
+
+Not every fleet speaks this standard. B3 came first, Istio still emits it, and it
+is the next section.
 
 ---
 
@@ -626,6 +721,27 @@ The `trace_id` (and `span_id`) is the join key that unifies the three pillars:
 - **"How do you keep sampling consistent across services?"** Propagate the
   sampled flag (ParentBased sampler) so children honor the root's decision, or
   use tail sampling / consistent trace-id-based probability sampling.
+
+## What breaks next
+
+You can now put a valid `traceparent` on every hop and prove it with a packet
+capture. Here is a service that does all of that correctly and still emits
+nothing:
+
+```java
+// OTel API on the classpath, no OTel SDK installed
+Tracer tracer = GlobalOpenTelemetry.getTracer("checkout");
+Span span = tracer.spanBuilder("POST /checkout").startSpan();
+// span.getSpanContext().getTraceId() == "00000000000000000000000000000000"
+```
+
+The outgoing request carries no `traceparent`, and every downstream service
+starts its own trace. You already know why that header would be ignored even if
+it were sent: an all-zero trace-id is invalid. Nothing in this topic explains why
+the tracer handed back zeros. The reason sits one level below the wire. The
+OpenTelemetry API is deliberately a no-op until an application owner installs an
+SDK. That split, API versus SDK, is where the next topic picks this up:
+[OpenTelemetry Signals & Instrumentation](/study/observability/opentelemetry-signals-and-instrumentation).
 
 ## References
 
