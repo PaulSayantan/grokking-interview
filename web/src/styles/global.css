@@ -46,7 +46,17 @@
   /* Orange primary for bold, energetic CTAs and focus */
   --color-primary: #FF6B00; /* Vibrant orange (was blue #58a6ff) */
   --color-primary-hover: #FF8533; /* Lighter orange on hover */
-  --color-primary-contrast: #ffffff; /* White text on orange */
+  /* Label color for text sitting ON a saturated fill (primary / correct /
+     incorrect). Near-black, not white: these dark-theme fills are all
+     bright, high-chroma colors, and white text on them fails WCAG AA.
+     Measured label contrast on each fill that consumes this token:
+                        white     near-black
+       primary #FF6B00   2.86  ->   6.93  AA
+       hover   #FF8533   2.43  ->   8.16  AA
+       correct #10B981   2.54  ->   7.80  AA
+       incorrect #EF4444 3.76  ->   5.26  AA
+     White cleared AA on none of them; near-black clears it on all four. */
+  --color-primary-contrast: #0a0a0a;
   --color-accent: #FF6B00;
   --color-focus: #FF6B00; /* Orange focus ring */
 
@@ -217,25 +227,74 @@
 
   body {
     @apply font-sans antialiased;
-    background-color: var(--color-bg);
-    /* FutureAGI-style faint square grid on the page canvas itself. Cards,
-       panels, and the header (solid/near-solid surfaces) sit on top of it.
-       Fixed attachment keeps the squares stable while content scrolls. */
+    /* NO background-color here. The page base color lives on <html> (set in
+       the `html` rule above) so that the fixed grid layer below — which is a
+       body::before at z-index:-1 — is not painted over by body's own
+       background. A negative z-index only escapes behind the element's
+       background if that background is absent. */
+    color: var(--color-text);
+    font-size: var(--step-0);
+    line-height: 1.6;
+  }
+
+  /* Faint square grid on the page canvas. Cards, panels, and the header
+     (solid/near-solid surfaces) sit on top of it.
+
+     This lives on a `position: fixed` pseudo-element rather than as a
+     `background-attachment: fixed` image on <body>, which is what it used
+     to be. Both look identical — the grid stays stationary while content
+     scrolls — but a fixed *background attachment* cannot be composited:
+     the background's position relative to the scrolling box changes every
+     frame, so Chromium re-rasters the grid over and over while you scroll.
+     A fixed-position layer is instead promoted once and simply not redrawn.
+
+     Measured on the landing page, 70 wheel steps scrolling UP from the
+     bottom of the page, with the grid verified as actually painting in
+     both configurations:
+       this fixed layer            348 raster tasks /  59ms
+       old background-attachment  4149 raster tasks / 718ms
+       control, no grid at all     347 raster tasks /  61ms
+     i.e. this layer is ~free (indistinguishable from having no grid),
+     where the old one cost 12x the raster work — the difference between
+     janky and smooth on a real GPU.
+
+     `pointer-events: none` keeps it inert and `z-index: -1` puts it behind
+     all content. NOTE: for that negative z-index to stay *visible*, <body>
+     must not paint its own background-color over it — the page base color
+     is therefore set on <html>, not <body>. Moving it back to body makes
+     this layer silently invisible (pixel-identical to deleting it). */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
     background-image:
       linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
       linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
     background-size: var(--grid-size) var(--grid-size);
-    background-attachment: fixed;
-    color: var(--color-text);
-    font-size: var(--step-0);
-    line-height: 1.6;
   }
 
   a {
     color: var(--color-primary);
     text-underline-offset: 2px;
   }
-  a:hover {
+  /* Link hover tint — the default for BARE text links.
+     Written as `:where(a):hover`, not `a:hover`, purely for specificity:
+     `:where()` contributes nothing, so this weighs (0,1,0) — one
+     pseudo-class — instead of (0,1,1). That places it just above the base
+     `a { color: … }` rule (0,0,1), so plain links still tint, but level
+     with any class-based color (`.btn-large`, Tailwind's
+     `text-[color:…]`), which then wins on source order since those come
+     later in the sheet.
+     Why it matters: as a bare `a:hover` this outranked every filled
+     button's own label color. Primary CTAs recolored their text to
+     --color-primary-hover while the background transitioned to that same
+     value, so the label went invisible under the pointer (measured
+     contrast 1.00:1, both themes). Keeping the weight low means anything
+     that styles itself keeps its own color on hover, automatically — no
+     per-component blocklist to maintain. */
+  :where(a):hover {
     color: var(--color-primary-hover);
   }
 
@@ -354,7 +413,9 @@
     gap: 0.5rem;
     padding: 0.5rem 1rem;
     background: var(--color-primary);
-    color: #ffffff;
+    /* Use the token, not a hardcoded #fff — white fails WCAG AA on the
+       dark theme's orange fill (2.86:1). See --color-primary-contrast. */
+    color: var(--color-primary-contrast);
     border-radius: var(--radius-full);
     font-size: 0.875rem;
     font-weight: 600;
@@ -435,6 +496,10 @@
 
   .btn-large:hover {
     background: var(--color-primary-hover);
+    /* Pin the label color explicitly: the button's fill changes on hover,
+       so the text must keep its on-primary contrast and never inherit a
+       link tint. */
+    color: var(--color-primary-contrast);
     box-shadow:
       0 0 0 1px color-mix(in oklab, var(--color-primary) 30%, transparent),
       0 12px 32px color-mix(in oklab, var(--color-primary) 40%, transparent);
@@ -582,6 +647,241 @@
       }
     }
   }
+
+  /* --------------------------------------------------------------- */
+  /* 3D DEPTH SYSTEM                                                  */
+  /* ---------------------------------------------------------------  */
+  /* Four composable effects, all compositor-only (transform +        */
+  /* opacity) and all no-ops under prefers-reduced-motion:            */
+  /*                                                                  */
+  /*   .scene-3d        perspective container (put on the grid/list)  */
+  /*   .tilt-in         scroll-driven rotateX entrance for children   */
+  /*   .deck / .deck-card   sticky stacked-card deck                  */
+  /*   .depth-layer     hero parallax layer (scroll(root) timeline)   */
+  /*   .tilt-pointer    cursor-follow tilt (needs the tiny script)    */
+  /*                                                                  */
+  /* Intensity is tunable per-scope via the --tilt-* / --depth-*      */
+  /* custom properties documented on each block.                     */
+  /* --------------------------------------------------------------- */
+
+  /* Perspective container. Children that use .tilt-in / .tilt-pointer
+     must live inside one of these to get real (non-flat) 3D. The
+     perspective itself is inert — no motion, so no gate needed. */
+  .scene-3d {
+    perspective: var(--scene-perspective, 1100px);
+    perspective-origin: 50% 50%;
+  }
+
+  /* -------- 1. Scroll-driven tilt-in ----------------------------- */
+  /* Cards start pitched back and away, then rotate flat as they      */
+  /* enter the viewport. Resting state is fully flat + visible.       */
+  .tilt-in {
+    opacity: 1;
+    transform: none;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    @supports (animation-timeline: view()) {
+      .tilt-in {
+        transform-origin: 50% 100%;
+        animation: tilt-in linear both;
+        animation-timeline: view();
+        animation-range: entry 0% cover 42%;
+        will-change: transform, opacity;
+      }
+      /* Stagger for sibling cards — later cards finish later. */
+      .tilt-in.reveal-delay-1 { animation-range: entry 5% cover 48%; }
+      .tilt-in.reveal-delay-2 { animation-range: entry 10% cover 54%; }
+      .tilt-in.reveal-delay-3 { animation-range: entry 15% cover 60%; }
+    }
+  }
+
+  /* -------- 2. Sticky stacked deck ------------------------------- */
+  /* Cards pin at the same offset and pile up like a physical deck: as   */
+  /* each new card rises over the stack, the ones beneath scale down,    */
+  /* recede in Z and dim, leaving their top edges peeking out.           */
+  /*                                                                    */
+  /* Structure (markup must match — see the landing page):              */
+  /*   ul.deck                                                          */
+  /*     li.deck-card       <- sticky, all pin to the SAME top offset   */
+  /*     li.deck-runway     <- scroll spacer, owns the view timeline     */
+  /*     li.deck-card                                                    */
+  /*     li.deck-runway                                                  */
+  /*     …                                                               */
+  /*     li.deck-card.deck-card-front   <- last card, never recedes      */
+  /*                                                                    */
+  /* Why it's built this way (both parts are load-bearing):             */
+  /*                                                                    */
+  /*  1. All cards are siblings pinning to the same `top`, so they       */
+  /*     genuinely stack on top of each other. (Wrapping each card in    */
+  /*     its own tall slot instead makes each card sticky within its     */
+  /*     own box — the cards then scroll past one another and never      */
+  /*     pile up.)                                                       */
+  /*  2. A card cannot drive its own animation: a `view()` timeline      */
+  /*     tracks an element's position in the scrollport, and a *stuck*   */
+  /*     element has stopped moving — so its progress freezes at 0 for   */
+  /*     the entire pinned stretch and then snaps. Each card therefore   */
+  /*     animates against the timeline of the RUNWAY SPACER that         */
+  /*     follows it (that spacer scrolls normally), published up to the  */
+  /*     shared `.deck` scope via `timeline-scope` and matched by index.  */
+  /*                                                                    */
+  /* Perspective is baked into the keyframes rather than set on `.deck`  */
+  /* because a `perspective` ancestor becomes a containing block and     */
+  /* breaks sticky positioning.                                          */
+  .deck {
+    display: flex;
+    flex-direction: column;
+    /* Resting layout is a plain card column; the runway spacers collapse
+       to zero unless the effect is live (see the gated block below). */
+    gap: var(--space-4);
+  }
+
+  .deck-runway {
+    height: 0;
+  }
+
+  .deck-card {
+    /* resting state: a plain card in a plain column */
+    transform: none;
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    @supports (animation-timeline: view()) {
+      .deck {
+        gap: 0;
+        /* The runway timelines are declared inline on the spacers (see the
+           landing page) and pulled into this shared scope so the cards —
+           which are siblings, not ancestors, of the spacers — can name
+           them. `timeline-scope` must list every name; the markup emits
+           them from the card index, so keep this list >= the largest deck
+           on the site. */
+        timeline-scope: --deck-run-0, --deck-run-1, --deck-run-2,
+          --deck-run-3, --deck-run-4, --deck-run-5;
+      }
+
+      /* Scroll distance over which the next card travels up over the
+         stack. This is the whole cost of the effect in page height. */
+      .deck-runway {
+        height: var(--deck-runway-h, 72vh);
+      }
+
+      .deck-card {
+        position: sticky;
+        /* Staircase, not a single shared offset. Each card pins slightly
+           LOWER than the one before it (--deck-step per card, index set
+           inline), so the buried cards peek out as a neat ladder of top
+           edges above the front card.
+           This is what keeps the effect clean: cards pinned at the *same*
+           offset unavoidably expose the strip above the still-climbing
+           front card, and at 1.5rem+ of card padding that strip is big
+           enough to leak the card's heading. A step smaller than the
+           card's top padding guarantees only blank padding is ever
+           visible. `--deck-top` clears the sticky site header. */
+        top: calc(
+          var(--deck-top, 5.5rem) + var(--deck-index, 0) * var(--deck-step, 14px)
+        );
+        transform-origin: 50% 0%;
+        /* `animation-timeline` is set inline per card (the runway that
+           FOLLOWS it); only the name/timing/range live here. */
+        animation-name: deck-recede;
+        animation-timing-function: linear;
+        animation-fill-mode: both;
+        /* Hold crisp while the following card is still well below, then
+           recede as it climbs — finishing BEFORE it pins, so a card is
+           never left mid-recede with its heading exposed above the card
+           in front of it. */
+        animation-range: var(--deck-range, cover 25% cover 60%);
+        will-change: transform, opacity;
+      }
+
+      /* The front-most card is never covered — it stays crisp. */
+      .deck-card.deck-card-front {
+        animation-name: none;
+      }
+    }
+  }
+
+  /* Fallbacks are the resting state above: with no scroll-timeline
+     support or under reduced motion, `.deck` keeps its `gap`, the runway
+     spacers stay 0px tall, cards stay `static` and untransformed — i.e.
+     an ordinary readable card column. */
+
+  /* -------- 3. Hero depth parallax ------------------------------- */
+  /* Layers drift at different speeds/depths as the scene leaves the   */
+  /* viewport. --depth-y sets travel distance (negative = moves up     */
+  /* faster), --depth-rot the pitch, --depth-fade the end opacity.     */
+  /*                                                                   */
+  /* The timeline is declared on `.depth-scene` (the hero section) and  */
+  /* referenced by name, NOT taken from each layer's own `view()`. Two  */
+  /* reasons: (1) all layers must share one progress value or they'd    */
+  /* desync, and (2) the hero panel is `overflow: hidden`, which makes  */
+  /* it a scroll container — so a `view()` timeline on a layer inside   */
+  /* it resolves against that non-scrolling box and never advances.     */
+  .depth-scene {
+    /* inert without the layers; no motion, so no gate needed */
+    view-timeline-name: --depth-scene;
+  }
+
+  .depth-layer {
+    transform: none;
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    @supports (animation-timeline: view()) {
+      .depth-layer {
+        transform-origin: 50% 50%;
+        animation: depth-drift linear both;
+        animation-timeline: --depth-scene;
+        /* Only animate on the way OUT — the hero is fully composed at
+           rest on load (the .anim-* entrances own that), then it
+           parallaxes away as you scroll past it. */
+        animation-range: exit 0% exit 100%;
+        will-change: transform, opacity;
+      }
+    }
+  }
+
+  /* -------- 4. Pointer-follow tilt ------------------------------- */
+  /* The script sets --tilt-x / --tilt-y (deg) and --tilt-lift (px)   */
+  /* from the cursor position; CSS just consumes them. Fine-pointer   */
+  /* only, so touch devices never get a stuck tilt. */
+  .tilt-pointer {
+    --tilt-x: 0deg;
+    --tilt-y: 0deg;
+    --tilt-lift: 0px;
+    transform-style: preserve-3d;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    @media (hover: hover) and (pointer: fine) {
+      /* `perspective()` is baked into the transform rather than inherited
+         from `.scene-3d`: the `.tilt-in` wrapper between them is itself
+         transformed while animating, which flattens the ancestor
+         perspective. Self-contained perspective works at any nesting. */
+      .tilt-pointer {
+        transform: perspective(var(--tilt-pointer-perspective, 700px))
+          rotateX(var(--tilt-x)) rotateY(var(--tilt-y))
+          translate3d(0, var(--tilt-lift), 0);
+        transition: transform var(--dur-med) var(--ease-out);
+      }
+      /* While the cursor is inside, follow it with no easing lag. */
+      .tilt-pointer[data-tilting="1"] {
+        transition: transform 90ms linear;
+      }
+      /* The pointer tilt owns `transform`, so suppress the .card hover
+         lift on these elements (it would clobber the rotation) and let
+         the border/shadow feedback come through instead. */
+      .tilt-pointer.card-interactive:hover,
+      a.card.tilt-pointer:hover,
+      button.card.tilt-pointer:hover {
+        transform: perspective(var(--tilt-pointer-perspective, 700px))
+          rotateX(var(--tilt-x)) rotateY(var(--tilt-y))
+          translate3d(0, var(--tilt-lift), 0);
+      }
+    }
+  }
 }
 
 /* ------------------------------------------------------------------- */
@@ -626,6 +926,75 @@
   }
   to {
     opacity: 1;
+  }
+}
+
+/* ---- 3D depth keyframes (see the .scene-3d block above) ----------- */
+/* All are transform+opacity only. Intensity is "pronounced" by design:
+   ~18deg pitch and real Z travel. Tune per-scope with the custom props
+   rather than editing these keyframes. */
+
+/* Card pitches back and away, then rotates flat and rises into place. */
+@keyframes tilt-in {
+  from {
+    opacity: 0;
+    transform: perspective(var(--tilt-perspective, 1100px))
+      translate3d(0, var(--tilt-from-y, 3rem), var(--tilt-from-z, -180px))
+      rotateX(var(--tilt-from-rot, 18deg))
+      scale(var(--tilt-from-scale, 0.94));
+  }
+  to {
+    opacity: 1;
+    transform: perspective(var(--tilt-perspective, 1100px))
+      translate3d(0, 0, 0) rotateX(0deg) scale(1);
+  }
+}
+
+/* Deck card recedes into the stack as the next one climbs over it. Driven
+   by the following runway spacer's view timeline (see .deck-card).
+   `transform-origin` is the card's TOP edge, so it shrinks and rises just
+   enough for its top edge to peek out above the card in front.
+
+   Deliberately NO opacity fade. Every card pins to the same sticky offset,
+   so a receded card sits directly behind the next one — fading it makes it
+   translucent, the card behind shows through, and the overlapping body
+   text turns to unreadable mush. Fully opaque + the z-index order set in
+   the markup means each card cleanly occludes the one behind it, and all
+   you see of the buried cards is their peeking top edges. Depth is carried
+   entirely by scale/Z/rotation, which is also how a real deck of cards
+   reads (physical cards don't fade).
+
+   Per-card depth (--deck-y / --deck-scale / --deck-z / --deck-rot) is set
+   inline from the card's distance to the front of the stack. */
+@keyframes deck-recede {
+  from {
+    transform: perspective(var(--scene-perspective, 1400px))
+      translate3d(0, 0, 0) scale(1) rotateX(0deg);
+  }
+  to {
+    /* --deck-y defaults to 0: with `transform-origin` at the top edge, the
+       scale-down alone reveals the buried card's side/bottom edges while
+       keeping its TOP edge (and therefore all its text) tucked behind the
+       card in front. Translating it upward instead lifts its heading out
+       above the front card mid-climb, which reads as a glitch. */
+    transform: perspective(var(--scene-perspective, 1400px))
+      translate3d(0, var(--deck-y, 0), var(--deck-z, -120px))
+      scale(var(--deck-scale, 0.955)) rotateX(var(--deck-rot, 5deg));
+  }
+}
+
+/* Hero layer drifts up/back at its own depth as the hero scrolls away. */
+@keyframes depth-drift {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) rotateX(0deg) scale(1);
+  }
+  to {
+    opacity: var(--depth-fade, 1);
+    transform: perspective(var(--depth-perspective, 900px))
+      translate3d(0, var(--depth-y, -4rem), var(--depth-z, 0px))
+      rotateX(var(--depth-rot, 0deg))
+      scale(var(--depth-scale, 1));
   }
 }
 

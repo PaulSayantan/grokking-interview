@@ -181,6 +181,73 @@ stagger class:
 Shadows `--shadow-1|2|3` and `--shadow-glow` (colored). Radii `--radius-sm|md|lg|xl|full`.
 Tailwind: `shadow-1|2|3|glow`, `rounded-xl` (maps to `--radius-xl`).
 
+### 3D depth system (landing page; reusable)
+Four composable effects in `global.css`, all compositor-only (transform/opacity), all
+reduced-motion gated with a fully-visible static resting state, **zero new dependencies**.
+Read the block comments in `global.css` before changing them — the structural requirements
+below are load-bearing, not stylistic.
+
+| Class | Effect |
+| --- | --- |
+| `.scene-3d` | perspective container; put it on the grid/list that holds tilting children |
+| `.tilt-in` | scroll-driven `rotateX` entrance (native `view()` timeline). Reuses `.reveal-delay-1|2|3` for stagger |
+| `.deck` / `.deck-card` / `.deck-runway` | sticky stacked card deck |
+| `.depth-scene` / `.depth-layer` | hero parallax — layers drift at different Z depths on exit |
+| `.tilt-pointer` | cursor-follow tilt (fine-pointer only; needs the small script on the landing page) |
+
+Tunable per scope via custom properties (`--tilt-from-rot`, `--depth-y`, `--depth-rot`,
+`--depth-fade`, `--deck-scale`, `--deck-z`, `--deck-step`, `--deck-runway-h`, …).
+
+**Three non-obvious rules** (each cost real debugging — don't "simplify" them away):
+
+1. **Never put `.tilt-in` and `.tilt-pointer` on the same element.** One animates `transform`,
+   the other transitions it; they'd overwrite each other. Wrap: `li.tilt-in > div.tilt-pointer`.
+2. **A sticky element cannot drive its own scroll animation.** A `view()` timeline tracks
+   position in the scrollport, and a *stuck* element has stopped moving — progress freezes at 0
+   for the whole pinned stretch, then snaps. Hence `.deck-card` animates against the
+   `.deck-runway` spacer that *follows* it, published via `timeline-scope` on `.deck`. The card
+   also needs `--deck-index` + inline `animation-timeline` / `view-timeline-name` per index.
+3. **`overflow: hidden` makes an element a scroll container.** The hero panel is
+   `overflow-hidden`, so a `view()` timeline on a layer inside it resolves against that
+   non-scrolling box and never advances. That's why `.depth-layer` references a *named*
+   timeline declared on `.depth-scene` instead of using `view()` directly — which also keeps
+   every layer on one shared progress value so they can't desync.
+
+Deck cards must stay **fully opaque** and carry ascending `z-index`, and the sticky offsets form
+a staircase (`--deck-step` < the card's top padding). Fading them makes buried cards translucent
+so overlapping text turns to mush; a shared offset exposes a strip big enough to leak headings.
+
+### Scroll performance: never use `background-attachment: fixed`
+A fixed *background attachment* cannot be composited — its position relative to the scrolling
+box changes every frame, so the browser re-rasters it continuously. The grid backdrop used to be
+`background-attachment: fixed` on `<body>` and made the whole site feel laggy. Measured on the
+landing page (70 wheel steps, scrolling up from the bottom, grid verified painting in both):
+
+| Approach | Raster tasks | Raster time |
+| --- | --- | --- |
+| `body::before` fixed layer (current) | 348 | 59ms |
+| `background-attachment: fixed` (old) | 4149 | 718ms |
+| no grid at all (control) | 347 | 61ms |
+
+Use a `position: fixed` pseudo-element instead — promoted once, never redrawn, effectively free.
+
+**Two invariants this depends on, both guarded by `src/lib/theme-css.test.ts`:**
+- `<body>` must NOT set a `background-color`. The grid is a `body::before` at `z-index: -1`, and
+  a negative z-index only escapes behind its own element's background if that background is
+  absent. The page base color therefore lives on `<html>`. Regressing this makes the grid
+  **silently invisible** — pixel-identical to deleting it, with no build or visual error.
+- `--color-primary-contrast` must stay near-black in the dark theme. It labels the primary,
+  correct, and incorrect fills, which are all bright/high-chroma; white text fails WCAG AA on
+  every one of them (2.4–3.8:1) while near-black clears it on all four (5.3–8.2:1).
+
+### Link hover must not outrank component colors
+The base link hover tint is `:where(a):hover`, deliberately at (0,1,0) specificity rather than
+`a:hover` at (0,1,1). Tailwind v3 here strips `@layer`, so plain specificity decides: as
+`a:hover` this rule beat every filled button's own class-based label color, recoloring CTA text
+to `--color-primary-hover` while the background transitioned to that same value — the label went
+invisible under the pointer (contrast 1.00:1, both themes). Keep the weight low so any component
+that sets its own color keeps it on hover. `.btn-large:hover` also pins `color` explicitly.
+
 ---
 
 ## 4. The reduced-motion pattern (copy this)
