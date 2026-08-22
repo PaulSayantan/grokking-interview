@@ -15,7 +15,12 @@ stated otherwise.
 - **Preact** via `@astrojs/preact` — use islands **only** for the interactive practice quiz
   (`client:load` / `client:visible`). Everything else is static Astro/HTML.
 - **TypeScript** (strict). Path aliases: `@/*` -> `src/*`, `@lib/*` -> `src/lib/*`.
-- Markdown pipeline (configured in `astro.config.mjs`, do not change):
+- Markdown pipeline (configured in `astro.config.mjs`). **Frozen, with one approved
+  pending amendment:** the clarity effort adds `rehype-prompts` (injects think-prompts from
+  `prompts.yaml`) and `rehype-lede` (marks each section's first paragraph). Both were
+  explicitly signed off — see the "frozen-pipeline sign-offs" decision in the clarity plan.
+  Until they land, treat the list below as complete; do not add anything else without a
+  fresh sign-off.
   - `remark-gfm` — GFM tables in `concepts.md` comparison sections.
   - `rehype-slug` — GitHub-slugger-compatible heading ids (matches `ref` anchors).
   - `rehype-autolink-headings` (`behavior: "wrap"`, class `heading-anchor`) — anchor affordance.
@@ -62,7 +67,7 @@ web/
       <domain>/<slug>.slim.json         per-subtopic pool (slim: no explanation/tags/difficulty)
       <domain>/_all.slim.json           domain-level pool (slim)
       <domain>/_explanations.json       { question_id -> explanation } (lazy-loaded)
-      system-design/_group-{core,advanced,aws}.slim.json
+      system-design/_group-{core,advanced,patterns,architecture,ccp,aws,cdp}.slim.json
 ```
 
 ## 3. Content sync (`npm run sync`)
@@ -73,20 +78,37 @@ web/
 Wired into `dev` and `build` (both run sync first). Never edit generated files by hand;
 never modify anything under `topics/`.
 
-Authored domains (browsable): `system-design`, `spring-boot`, `spring-core`, `java-jvm`.
-Coming-soon domains (no content, `authored:false`): `docker`, `kubernetes`, `devops-cicd`,
-`hibernate-jpa`, `messaging-databases`. Domain display titles come from
-the first `# H1` of `topics/<domain>/README.md`.
+**All 20 domains are authored and browsable.** The list is the hardcoded
+`AUTHORED_DOMAINS` array at `scripts/sync-content.mjs:45` — a domain folder alone is
+invisible to the site, so adding one means editing that array. `COMING_SOON_DOMAINS`
+(`:48`) is now `[]`; the `authored:false` render path still exists but nothing uses it.
+Domain display titles come from the first `# H1` of `topics/<domain>/README.md`, and
+learning order within a domain comes from that README's **table row order**.
 
-**Current generated volume:** 4 authored domains, 6 coming-soon, 119 subtopics, 9432
-questions (system-design 57/4515, spring-boot 18/1851, spring-core 19/1511, java-jvm 25/1555).
+**Current generated volume: 20 domains, 460 subtopics, 28,064 questions.** Per domain:
+
+| Domain | Sub | Questions | | Domain | Sub | Questions |
+|---|--:|--:|---|---|--:|--:|
+| `system-design` | 94 | 6,611 | | `devops-cicd` | 21 | 1,065 |
+| `lld-and-ood` | 33 | 1,671 | | `messaging-databases` | 20 | 1,086 |
+| `java-jvm` | 25 | 1,555 | | `kubernetes` | 19 | 981 |
+| `system-design-case-studies` | 23 | 230 | | `observability` | 17 | 844 |
+| `rest-api-design` | 20 | 1,633 | | `grpc` | 16 | 806 |
+| `dsa-coding` | 20 | 456 | | `docker` | 16 | 794 |
+| `spring-core` | 19 | 1,511 | | `interview-craft` | 16 | 793 |
+| `spring-boot` | 18 | 1,851 | | `testing` | 16 | 784 |
+| `hibernate-jpa` | 18 | 1,401 | | `security` | 17 | 1,341 |
+| `networking` | 16 | 1,372 | | `reliability-ops` | 16 | 1,279 |
+
+> Do not hand-maintain these numbers. **`docs/corpus-stats.md` is authoritative**;
+> regenerate with `python3 scripts/corpus_stats.py`. Verified 2026-08-23.
 
 ## 4. Generated data shapes
 
 ### 4.1 `src/data/catalog.json` — the manifest pages render from
 
 Shape: `{ domains: CatalogDomain[] }`. Import it via `@lib/catalog` helpers (§5), not by
-reading the file directly. Real excerpt (trimmed to one authored + one coming-soon domain):
+reading the file directly. Real excerpt (trimmed to one domain and one group):
 
 ```json
 {
@@ -95,8 +117,8 @@ reading the file directly. Real excerpt (trimmed to one authored + one coming-so
       "slug": "system-design",
       "title": "System Design",
       "authored": true,
-      "subtopicCount": 57,
-      "questionCount": 4515,
+      "subtopicCount": 94,
+      "questionCount": 6611,
       "groups": [
         {
           "key": "core",
@@ -106,32 +128,42 @@ reading the file directly. Real excerpt (trimmed to one authored + one coming-so
           ]
         }
       ]
-    },
-    {
-      "slug": "docker",
-      "title": "Docker",
-      "authored": false,
-      "subtopicCount": 0,
-      "questionCount": 0,
-      "groups": []
     }
   ]
 }
 ```
 
-- **Domain order** in `domains[]`: authored first (system-design, spring-boot, spring-core,
-  java-jvm), then coming-soon (docker, kubernetes, devops-cicd, hibernate-jpa,
-  messaging-databases).
-- **Groups:** `system-design` has exactly 3 groups in this order:
-  `core` (label "Core Topics", 23 subtopics), `advanced` (label
-  "Advanced & Expert Deep-Dives", 8 subtopics), `aws` (label "AWS System Design", 26
-  subtopics). Grouping rule: slug prefix `aws-` -> `aws`; the 8 known deep-dive slugs ->
-  `advanced`; everything else -> `core`. All other authored domains have a **single** group
-  `{ key: "all", label: "", subtopics: [...] }`.
-- Subtopics within a group are sorted by `title` (locale-aware).
+> An unauthored domain would carry `"authored": false`, `"subtopicCount": 0`,
+> `"questionCount": 0` and `"groups": []`. No domain is in that state today — the earlier
+> version of this document used `docker` as the example, which now has 16 subtopics and
+> 794 questions.
+
+- **Domain order** in `domains[]` follows the `AUTHORED_DOMAINS` array
+  (`scripts/sync-content.mjs:45`), then coming-soon — currently empty.
+- **Groups:** `system-design` has **7** groups, in this order:
+
+  | Key | Label | Subtopics | Rule |
+  |---|---|--:|---|
+  | `core` | Core Topics | 27 | fallback — anything unmatched below |
+  | `advanced` | Advanced & Expert Deep-Dives | 8 | membership in the `SD_ADVANCED` set |
+  | `patterns` | Design Patterns | 7 | slug prefix `dp-` |
+  | `architecture` | Architectural Patterns | 6 | slug prefix `arch-` |
+  | `ccp` | Cloud Computing Patterns | 8 | slug prefix `ccp-` |
+  | `aws` | AWS System Design | 31 | slug prefix `aws-` |
+  | `cdp` | AWS Cloud Design Patterns | 7 | slug prefix `aws-cdp-` |
+
+  **Prefix order in `sdGroupKey()` (`:165`) is load-bearing:** `ccp-`, then `aws-cdp-`,
+  then `aws-`. `aws-cdp-` must be tested before `aws-` because it is itself an `aws-`
+  prefix — get it wrong and all 7 CDP topics land in the AWS group.
+
+  All other domains have a **single** group `{ key: "all", label: "", subtopics: [...] }`.
+- Subtopics within a group are ordered by their **README table row order** (the domain's
+  learning order), not alphabetically. A topic missing from its README table falls back to
+  a sentinel and its position is undefined — `sync-content.mjs` warns loudly when this
+  happens, because it silently mis-ordered a whole domain once already.
 - Subtopic `title` comes from the `topic` field of its `questions.yaml` (fallback: concepts.md H1).
-- Coming-soon domains have `groups: []` and zero counts — render as **disabled, non-clickable
-  "Coming soon"** cards.
+- Coming-soon domains would have `groups: []` and zero counts and render as **disabled,
+  non-clickable "Coming soon"** cards. This path is currently unexercised.
 
 ### 4.2 Question JSON — `public/questions/...`
 
@@ -149,9 +181,7 @@ was the most convenient bulk-scrape target. See the header comment in `sync-cont
 | `public/questions/<domain>/<slug>.slim.json` | one subtopic's questions (slim) |
 | `public/questions/<domain>/_all.slim.json` | every question in the domain, slim (parent-level practice) |
 | `public/questions/<domain>/_explanations.json` | `{ question_id -> explanation }`, lazy-loaded on answer |
-| `public/questions/system-design/_group-core.slim.json` | system-design "core" pool (slim) |
-| `public/questions/system-design/_group-advanced.slim.json` | system-design "advanced" pool (slim) |
-| `public/questions/system-design/_group-aws.slim.json` | system-design "aws" pool (slim) |
+| `public/questions/system-design/_group-<key>.slim.json` | one system-design group pool (slim) — 7 of them: `core`, `advanced`, `patterns`, `architecture`, `ccp`, `aws`, `cdp` |
 
 Each question object (matches the `Question` type in `@lib/types`):
 
@@ -266,6 +296,17 @@ pre-paint inline script (**no flash of wrong theme**). Page content goes in the 
 
 Imported by `BaseLayout` — every page gets it. Tailwind layers + design tokens + a
 hand-rolled `.prose` ruleset. Do not rename tokens/classes below.
+
+> **Approved pending amendment (clarity effort):** seven `.prose` typography rules change
+> — `line-height` 1.7 → 1.63, paragraph gap `1em` → `1.15em`, `h2` margins, per-block
+> leading for `li`/`td`/`pre`, a wider `--measure-wide` (80ch) for `pre`/`table`/mermaid at
+> ≥1024px, mobile `overscroll-behavior-x`, and `text-wrap: pretty`. `--measure` stays 68ch.
+> Signed off; not yet landed. **No token or class is renamed.**
+>
+> Four invariants in this file are guarded by `src/lib/theme-css.test.ts` and fail silently
+> in a browser if regressed: no `background` on `body`, no `background-attachment: fixed`,
+> `--color-primary-contrast` stays dark, and `a:hover` stays de-escalated to
+> `:where(a):hover`. Run `npm test` after touching them.
 
 - **Design tokens** (CSS custom properties on `:root` and `[data-theme="dark"]`):
   `--color-bg`, `--color-surface`, `--color-surface-2`, `--color-border`, `--color-text`,
