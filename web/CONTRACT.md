@@ -48,7 +48,16 @@ web/
     content/
       concepts/<domain>/<slug>.md   GENERATED collection entries (§6)
   public/
-    favicon.svg
+    favicon.svg            brand "G" mark, modern tabs (source of the PNG set)
+    favicon-32.png         PNG tab fallback
+    apple-touch-icon.png   iOS home screen
+    icon-192.png           manifest icon (Android/Chrome home screen)
+    icon-512.png           manifest icon (splash / high-DPI)
+    manifest.webmanifest   installable web-app manifest (CSP: manifest-src 'self')
+    og-default.svg         editable source for the social card
+    og-default.png         og:image — social platforms do not render SVG
+    robots.txt
+    fonts/                 self-hosted Inter + mono woff2 (fontsource)
     questions/             GENERATED question pools (§4)
       <domain>/<slug>.slim.json         per-subtopic pool (slim: no explanation/tags/difficulty)
       <domain>/_all.slim.json           domain-level pool (slim)
