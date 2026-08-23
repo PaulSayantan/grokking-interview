@@ -9,29 +9,61 @@ This is the **single authoritative standard** for the clarity rewrite. It supers
 `/tmp/clarity-design/standard.json` and `/tmp/clarity-design/plan.md` (both deleted) and it
 supersedes `topics/CONTENT-AUDIT-MASTER.md`'s "refinement is polish, not triage" conclusion
 for any topic in a wave. Where you remember those documents disagreeing, **this file wins.**
-There is no other standard to consult.
 
 > [!KEY-TAKEAWAY]
 > This corpus conflates two independent dials, and this rewrite turns them in opposite
 > directions. **The difficulty of the IDEA stays exactly where it is — senior/staff
 > interview grade. The complexity of the EXPLANATION goes to near zero, in every passage,
-> including the deepest one.** Gopen & Swan clarified opaque molecular-biology prose without
-> removing a single technical term: "We have striven not for simplification but for
-> clarification." Nothing here licenses softening. Every claim, number, caveat, version,
-> spec citation and failure mode must survive item for item. Dense prose in a deep section
-> is not rigour, it is unfinished thinking — and it sits exactly where readers quit.
+> including the deepest one.** Nothing here licenses softening. Every claim, number, caveat,
+> version, spec citation and failure mode must survive item for item. Dense prose in a deep
+> section is not rigour, it is unfinished thinking — and it sits exactly where readers quit.
 
 The operating test for every sentence in every beat: **could a competent engineer meeting
 this concept for the first time follow it on one read, without re-reading and without
 looking up anything the file has not already given them?** If not, the sentence is wrong,
 not the reader.
 
-**How to use this document.** Work the **per-topic loop** near the end; it is the entry point and
-it cites every other section in the order you need it. Each rule is stated **exactly once**, in
-its own section, and every threshold appears in the rule and in the review checklist with the same
-value — nowhere else. If two places ever seem to disagree again, that is a bug in this file and
-the **rule text wins over the checklist and over the template**. Fix it there rather than working
-around it.
+## The normative/illustrative invariant — where a rule may live
+
+> **SKILL.md is NORMATIVE. `references/` is ILLUSTRATIVE.**
+>
+> Every rule, every threshold, every numeric bound and every pass/fail check lives in this
+> file. **Each threshold is stated exactly twice and nowhere else: once in its own rule, and
+> once in the Review checklist, at the same value.** The checklist is the exit gate, so it has
+> to be readable on its own; that one duplication is deliberate and is the only one allowed.
+> Where the file template quotes a threshold it is quoting the rule, not setting one.
+>
+> `references/` holds only examples, before/after pairs, rationale, case studies and corpus
+> statistics. **A reference file may not contain a rule, a threshold or an imperative that
+> changes what an author must do.** If a sentence in `references/` could be quoted to settle a
+> dispute about what is required, it belongs here instead.
+
+If two places in this file ever seem to disagree, that is a bug in this file and the **rule
+text wins over the checklist and over the template**. Fix it there rather than working around
+it. If a reference file seems to state a requirement, this file wins and the reference file is
+the bug.
+
+## How to use this skill
+
+1. **Read this file fully, once.** It is the whole standard: nothing you need in order to
+   decide what to write is anywhere else.
+2. **Open a reference file only when you want to see an example** of a rule you have already
+   read, and open only the one you need. They are illustration; skipping all of them costs you
+   nothing normative.
+3. **Then work the per-topic loop near the end of this file.** It is the entry point and it
+   cites every other section in the order you need it.
+
+Do not read the references, the target `concepts.md` and the sibling `questions.yaml` all before
+writing anything — that orientation is what stalls a run. Load the loop's step-1 context, write
+section by section, and pull an example only for the rule you are actually unsure about.
+
+| File | Holds |
+|---|---|
+| `references/examples.md` | The bad/good pair for each C rule, the S1 seam shapes, a full before/after section, and a REGISTER SWAP that failed then passed |
+| `references/rationale.md` | The "why" for every rule and the corpus statistics behind each threshold |
+| `references/fact-safety-cases.md` | The four real fact regressions, and why a marker grep cannot be the gate |
+| `references/prompts-and-cliffhangers.md` | A full shipped `prompts.yaml`, a full shipped cliffhanger, and the six patterns illustrated |
+| `references/ledger-example.md` | A filled-in continuity ledger |
 
 ## Which skill, and when
 
@@ -46,15 +78,14 @@ whole-file rewrite, the other is additive-and-surgical, and they produce opposit
 
 ## Hard repo constraints (violating any of these is a build failure)
 
-1. **H2 heading text is an MCQ anchor target.** 28,064 questions carry
+1. **H2 heading text is an MCQ anchor target.** Tens of thousands of questions carry
    `ref: concepts.md#anchor` and 100% resolve today. **Never rename, merge, split or delete
    an `## H2`.** **Additions are legal at any level** — a new H3 or a new H2 only adds an
-   anchor. `topics/.anchors.lock` enforces exactly this: `check_lock()` collects added
-   anchors only to enrich its messages, so additions pass at any level, while modifications
-   and removals FAIL and the error names the MCQ refs that would break. Prefer an H3 seam;
-   add an H2 only when the material is genuinely a new section, never to reshape an existing
-   one. **No heading may produce a duplicate slug** — that is a hard validator error, which
-   is why S1's seam vocabulary is a prefix rather than a fixed string.
+   anchor, and `topics/.anchors.lock` enforces exactly this: modifications and removals FAIL
+   and the error names the MCQ refs that would break. Prefer an H3 seam; add an H2 only when
+   the material is genuinely a new section, never to reshape an existing one. **No heading may
+   produce a duplicate slug** — that is a hard validator error, which is why S1's seam
+   vocabulary is a prefix rather than a fixed string.
 2. **Four callout types only**, case-sensitive, marker alone on the blockquote's first line:
    `[!TIP]`, `[!WARNING]`, `[!INTERVIEW]`, `[!KEY-TAKEAWAY]`. A `[!NOTE]` renders as a plain
    grey blockquote — it is not a callout. Do not invent a fifth type.
@@ -79,39 +110,21 @@ Check line says REPORT-ONLY it never fails a topic; if it says BINDING it does. 
 is binding on judgement and report-only as a count, its Check line says which is which.
 
 **There is no reading-time ceiling.** The user's decision is "let files grow." Reading
-minutes are **reported before and after, never gated** — the corpus runs a median 24 and a
-max 83 rendered minutes today and clarity is allowed to raise that. Padding is still a
-defect, caught by the **bloat check** (loop step 5), not by a time limit. On the one hard
-case that went through the full loop, two sections grew +87.9% and roughly 50 of the added
-words turned out to be narration rather than teaching. Cut those; keep the rest.
+minutes are **reported before and after, never gated.** Padding is still a defect, caught by
+the **bloat check** (loop step 5), not by a time limit.
 
 ---
 
 ## The clarity rules — sentence and paragraph level
+
+Each rule is stated once, with its check. Illustrations are in `references/examples.md`, the
+reasoning and the corpus data in `references/rationale.md`.
 
 ### C1 — Deepest-beat parity
 
 **Rule.** The clarity floor is **identical in every beat of a section.** Depth is bought by
 removing scaffolding — no re-glossing, no new analogy, no re-derivation — never by raising
 the register.
-
-**Why.** This is the most likely way the whole effort fails — a nicely rewritten on-ramp over a
-deep tier as dense as today, which leaves the complaint unfixed for exactly the readers who go
-deepest. Expertise reversal reduces the **guidance** an expert needs, never the plainness.
-
-**Bad** — `java-jvm/synchronized-volatile-jmm/concepts.md` (the old `**Advanced.**` tier):
-"The JMM is also careful to forbid *out-of-thin-air* values via a causality model, so that
-data races (while unspecified in ordering) still cannot fabricate arbitrary values for
-references (which would break memory safety)." Three abstract nouns never shown, the spec as
-the actor, and the same file's opening tier is plain and analogised — the writing is worst
-exactly where the material is hardest.
-
-**Good.** "A race can hand you a stale value, but never an invented one. The JMM forbids
-**out-of-thin-air values**: a racy read may return any value some thread actually wrote, and
-nothing else. That matters most for references — if a race could fabricate one, a `String`
-field could come back pointing at arbitrary memory and Java would not be memory-safe."
-(One bold in the paragraph, on the term's teaching site. The thesis sentence carries the
-weight by sitting first, not by being bold — see C8.)
 
 **Check. REPORT-ONLY.** On the section's **closing 30%** by word count — callouts and the S7 exit
 sentence excluded, a fence or table counting as a concrete instance — read off
@@ -124,20 +137,7 @@ arithmetic in **C2 and C8 stays BINDING**. The **BINDING** gate for parity is th
 **Rule.** Four moves, always in this order: the pain in ordinary words → the mechanism
 described without its name → **the name** (bolded, once) → a one-clause definition. A gloss
 may use only words the reader already has. A locally coined abbreviation used before it is
-coined is a hard failure (`PETPP` at `spring-core/bean-definition-stereotype-annotations` is
-used 17 lines before the line that coins it).
-
-**Why.** A definition arriving before the reader has seen one instance has nothing to attach
-to — which is the mechanical reason the 181 files whose body opens `This topic|note|section|
-page|document …` lose readers in the first paragraph.
-
-**Bad** — `messaging-databases/database-scaling-replication-pooling/concepts.md:3`: a 97-word
-single-sentence table of contents with 12 undefined terms and zero instances.
-
-**Good.** "Your one database is at 90% CPU at 3pm every day, and the graph is still going up.
-You have exactly three moves. Buy a bigger machine. Keep a full copy of the same data on more
-machines, so reads can go anywhere. Or split *different* data across machines, so writes can
-go anywhere too. The second move is called **replication**: every node holds the same rows."
+coined is a hard failure.
 
 **Check. BINDING.** Every bolded or italicised term first use has a gloss marker (`is`,
 `means`, `—`, `:`, a parenthetical) within **25 words**, and a concrete instance in the
@@ -149,22 +149,6 @@ go anywhere too. The second move is called **replication**: every node holds the
 Never splice a gloss into an item of a list the reader is following. Long definitions become
 their own sentence. Citations land after the definition, or in `## References`.
 
-**Why.** The 2026-07 waves demanded "define jargon at first use", chose inline apposition, and
-produced the corpus's signature clarity killer. Gopen & Swan: "anything of length that
-intervenes between subject and verb is read as an interruption, and therefore as something of
-lesser importance."
-
-**Bad** — `system-design/interview-method-scenario-playbooks/concepts.md:632`: "the **outbox
-pattern** (write the event into an `outbox` table *in the same DB transaction* as the state
-change, then a relay publishes from that table) + **CDC** (Change Data Capture — tail the DB's
-write-ahead log …) for reliable event publishing without a **dual-write** (…)". Four nested
-definitions, then the sentence abandons syntax and collapses into bare keywords.
-
-**Good.** "Write the event into an `outbox` table in the same database transaction as the
-state change, then let a relay read that table and publish. Otherwise you are doing a
-**dual-write** — one write to the database, one to the broker, no transaction across them —
-and either can fail and leave the two disagreeing."
-
 **Check. BINDING on judgement, grep-assisted.** Read each sentence's outer clause with every
 parenthetical deleted; if it is no longer grammatical or no longer says the thing, the glosses
 have eaten it. Grep flags sentences with ≥2 parentheticals or ≥2 em-dash pairs for mandatory
@@ -175,22 +159,8 @@ review (REPORT-ONLY as a count).
 **Rule.** Every H2 and every H3 seam puts something the reader can picture inside its first
 **60 words**, before any general characterisation: a number with a unit, a named
 class/service, a specific request, a step-by-step trace, or a fenced block. Then fade to the
-abstract, keeping the instance nameable for the rest of the section.
-
-**Why.** Examples are the corpus's lowest-scoring axis in its own audit (2.95–4.00 domain-wide)
-and the measurable form of "not easy to understand." Concreteness fading says the abstraction
-must still land — it just lands second.
-
-**Bad** — `java-jvm/oop-principles-polymorphism` §Encapsulation opened with the definition
-("bundling data (fields) and the methods that operate on that data into a single unit"), while
-the perfect instance — a `BankAccount` that can guarantee `balance >= 0` only if nobody can
-write `balance = -100` — already sat two paragraphs down. A reordering defect, not a writing
-defect. Look for these first: the instance is usually already in the file.
-
-**Good.** "Give any caller direct access to a `BankAccount`'s `balance` field and someone will
-eventually write `balance = -100`. The account is now in a state your business rules say
-cannot exist… Bundling the data with the methods that operate on it, and letting nothing
-outside touch the data directly, is called **encapsulation**."
+abstract, keeping the instance nameable for the rest of the section. **Look for a reordering
+fix first: the instance is usually already somewhere in the file.**
 
 **Check. REPORT-ONLY** for the offset detector; **BINDING** on judgement. The instance must
 be a number with a unit, a named component, a specific request, a trace, or a fence. A token
@@ -205,31 +175,12 @@ thing you want remembered. Never open a sentence with a bare demonstrative whose
 more than one sentence back. Never open on the most obscure new information available — an
 internal class name, a constructor flag, a spec section.
 
-**Why.** Gopen & Swan call misplacing old and new "the No. 1 problem in American professional
-writing today," and the corpus does both halves: 2,780 sentences open on a bare demonstrative,
-and the framework domains open on an API surface and reach the consequence three clauses later.
-
-**Bad** — `spring-boot/core-annotations-stereotypes/concepts.md:79` opens on the API surface:
-"the default `AnnotationTypeFilter(Component.class)` used by scanning is created with
-`considerMetaAnnotations=true` but `considerInterfaces=false` and does **not** traverse
-superclasses. So a concrete subclass that merely *extends* an `@Component`-annotated base is
-**not** auto-registered…"
-
-**Good.** "Put `@Service` on a base class, extend it, and the subclass never becomes a bean.
-Nothing is registered, nothing is logged, and injection fails at startup with a missing-bean
-error that names the interface rather than the cause. The reason is that component scanning
-looks for the stereotype on the class itself. It does follow meta-annotations, which is why
-`@Service` works at all — but it does not walk up the superclass chain, because the filter
-scanning installs by default is built with `considerInterfaces=false` and no superclass
-traversal." **Every fact survives, including both constructor flags** — that is the point.
-
 **Check. BINDING** — name the referent or rewrite. Match **sentence-initial**, not
 line-initial: `(?:(?<=[.!?]\s)|^)(This|That|These|Those|It)\s+(is|are|means|gives|makes|lets|allows)`.
-The `^`-anchored version sees only paragraph openers and catches 356 hits against this one's
-**2,398**, i.e. about 13% of the phenomenon; expect the higher number and do not read it as a
-regression. The old/new *ordering* is **judgement**: list each sentence's first five and last
-five words per paragraph; the first-word list must read as one continuing subject, and no
-last-word entry may be a citation or a hedge.
+The `^`-anchored version sees only paragraph openers; expect the sentence-initial count to be
+much higher and do not read it as a regression. The old/new *ordering* is **judgement**: list
+each sentence's first five and last five words per paragraph; the first-word list must read as
+one continuing subject, and no last-word entry may be a citation or a hedge.
 
 ### C6 — One payload per syntactic closure
 
@@ -237,25 +188,10 @@ last-word entry may be a citation or a hedge.
 plus each properly used colon or semicolon. More than that: split it, or install a closure.
 Any clause over ~8 words goes at the **end** of its sentence. **There is no word-count limit.**
 
-**The repo tokenizer counts each list item as a sentence.** `scripts/corpus_stats.py` starts a
-new segment at every list item, so a C7 conversion of an inline enumeration *into* a list will
-raise your p90. **That rise is expected and is not a C6 failure.** Do not hand-roll a different
-tokenizer to make the number look better — use the repo's, and say in your report which of the
-delta came from C7 conversions.
-
-**Why.** Length is not this corpus's problem — sentences mean 14.9 words, p90 28 — and chopping
-strips the connectives that carry the logical relations. Gopen & Swan: "A sentence is too long
-when it has more viable candidates for stress positions than there are stress positions
-available." The damage sits in ~1,290 monsters over 45 words.
-
-**Bad** — `system-design/ccp-management-elasticity-resiliency/concepts.md:340`, the corpus's
-longest sentence at 116 words: "The mechanics that stop thrashing are worth naming in an
-interview: (1) a **deadband / hysteresis** … (2) **cooldown windows** … (3) **asymmetric
-policy** …".
-
-**Good.** "Three things stop an autoscaler flapping. First, hold steady inside a band around
-the target — say 45% to 55% CPU — so a metric hovering near it does not ping-pong. That band
-is a **deadband**… Second, after you act, ignore the metric for a fixed window…"
+**The repo tokenizer counts each list item as a sentence**, so a C7 conversion of an inline
+enumeration into a list raises your p90. **That rise is expected and is not a C6 failure.** Use
+`scripts/corpus_stats.py` rather than hand-rolling a tokenizer that flatters the number, and say
+in your report which of the delta came from C7 conversions.
 
 **Check. Judgement, BINDING.** List the things you want the reader to carry away from the
 sentence; if that count exceeds 1 + (colons and semicolons used as closures), it fails.
@@ -267,21 +203,6 @@ Sentence-length reporting is **REPORT-ONLY**.
 answer, then group them by their answer. Never present an enumeration as the explanation.
 No inline glosses inside list items.
 
-**Why.** An enumeration asserts that things belong together without saying why, and working memory
-tops out around four items, so items 5–15 are lost while the reader still pays for trying. It is
-also the source of the corpus's nominalization density (35.97 per 1,000 prose words) — the prose
-nominalizes *because* it lists.
-
-**Bad** — `reliability-ops/cascading-failures-and-antipatterns/concepts.md:743`: twelve
-stability patterns, six inline glosses, 88 words, one sentence. The reader gets twelve
-unrelated names and keeps four.
-
-**Good.** "Nygard's twelve stability patterns are twelve answers to one question: where do you
-put the wall that stops a failure spreading? There are only three places to put it." Then three
-grouped sub-lists — *in time*, *in capacity*, *in the process itself* — one gloss per line.
-(The question needs no bold. A colon plus a question mark already gives it two closures under
-C6; bolding it would spend the paragraph's one bold on something that is not a term.)
-
 **Check. Judgement, BINDING.** The paragraph immediately above the list contains the one
 question the list answers; the list is grouped by the answer; no item carries a parenthetical
 gloss over 12 words.
@@ -289,53 +210,36 @@ gloss over 12 words.
 ### C8 — Emphasis budget, and one bold per term per file
 
 **Rule.** Bold marks the **teaching site** of a term the reader must now know: the place this
-file defines it. **Each distinct term is bolded exactly once in the file, at that teaching
-site, and nowhere else.** Never bold for enthusiasm, never for negation ("does **not**"), never
-for a slot label, never for three of nine list items, and **never a whole claim sentence or a
-question** — bolded claim sentences are this corpus's dominant bold defect.
+file defines it — not the first occurrence, which is a repaired wording. **Each distinct term
+is bolded exactly once in the file, at that teaching site, and nowhere else.** Never bold for
+enthusiasm, never for negation ("does **not**"), never for a slot label, never for three of
+nine list items, and **never a whole claim sentence or a question** — bolded claim sentences
+are this corpus's dominant bold defect.
 
 **The budget, with its tie-break** (same shape as S9's, deliberately):
 
 - **Primary, per file (BINDING):** ≤ **12 bold spans per 1,000 prose words**.
 - **Secondary, per paragraph (BINDING):** ≤ **1**.
 - **Both must hold, and whichever admits fewer bolds governs.** On a normal file the per-file
-  cap is the one that binds — the corpus median is 22.3 paragraphs per 1,000 prose words, so
-  ≤1-per-paragraph would license ~22 while the per-file cap licenses 12. **Expect roughly one
-  bold every third or fourth paragraph, not one per paragraph.** Do not work paragraph by
-  paragraph and discover the per-file overrun at the end: budget the file first.
+  cap is the one that binds. **Expect roughly one bold every third or fourth paragraph, not one
+  per paragraph.** Budget the file first rather than discovering the overrun at the end.
 
-**Why.** The corpus runs 39.83 bold spans per 1,000 prose words — one bolded phrase every 25
-words against a median paragraph of 20–27. Emphasis works by contrast; at that saturation it
-carries no information and the eye cannot establish a rhythm, which is the literal sensation
-behind "exhausting".
+**Check. BINDING arithmetic.** Count `\*\*[^*]+\*\*` outside code fences, with a **fence-aware,
+newline-tolerant** matcher — a naive `[^*\n]+` misses every bold span that wraps a source line.
+Then: ≤12 per 1,000 prose words **and** ≤1 per paragraph, whichever admits fewer, and no term
+bolded twice.
 
-**Why "teaching site" and not "first occurrence"** — this is a repaired rule. The old wording
-was "the first whole-token occurrence in the file," which fails three ways: it collides on
-`Context` inside `SpanContext`; it spends a term's bold on an opener that name-drops it 270
-lines before it is taught; and it is **uncheckable on a partial-file pass** — the hard-case run
-hit a live collision where the rewritten scope bolded `**visibility**` and un-rewritten line
-219 already bolded it. Anchoring the bold to the definition site is checkable inside whatever
-scope you hold, and it makes an opener name-drop automatically ineligible.
+**Whole-file pass (the default).** Grep the finished file for each bolded token; two bolded
+occurrences of the same term is a failure. Displaced siblings become structure, not typography:
+a claim moves to its sentence's stress position, a warning moves into a `[!WARNING]`, parallel
+items become a list.
 
-**Check. BINDING arithmetic.** Count `\*\*[^*]+\*\*` outside code fences — but use a
-**fence-aware, newline-tolerant** matcher: a naive `[^*\n]+` misses any bold span that wraps
-a source line, which in an 88-column file is most of the long ones (it under-reported 5 where
-the file had 6). Then: ≤12 per 1,000 prose words **and** ≤1 per paragraph, whichever admits
-fewer, and no term bolded twice.
-
-**Whole-file pass (the default, and what the pilot does).** Grep the finished file for each
-bolded token; two bolded occurrences of the same term is a failure. Displaced siblings become
-structure, not typography: a claim moves to its sentence's stress position, a warning moves
-into a `[!WARNING]`, parallel items become a list.
-
-**Partial-pass exception (documented, and it owes something).** When you rewrite fewer than
-all H2s: (a) no term is bolded twice inside your scope; (b) grep the **un-rewritten
-remainder** for `**<term>**` for every term you bold. On a collision, keep the bold only if
-your occurrence is the file's genuine teaching site; otherwise do not bold it. **Never edit
-prose outside your scope to resolve it.** Record the surviving duplicate in the ledger's
-**`owed:`** list (not `known_defects`, which is for defects you did not create) as a debt to
-whoever rewrites that section — that is exactly what the hard case did with `visibility`, and
-recording it is the difference between a known debt and a silent regression.
+**Partial-pass exception.** When you rewrite fewer than all H2s: (a) no term is bolded twice
+inside your scope; (b) grep the **un-rewritten remainder** for `**<term>**` for every term you
+bold. On a collision, keep the bold only if your occurrence is the file's genuine teaching site;
+otherwise do not bold it. **Never edit prose outside your scope to resolve it.** Record the
+surviving duplicate in the ledger's **`owed:`** list (not `known_defects`, which is for defects
+you did not create), as a debt to whoever rewrites that section.
 
 A partial pass also suspends every rule that needs whole-file scope: **S2** (opener), **S6**
 (reading map), the S7 exit of any H2 you did not rewrite, and the ledger's cliffhanger and
@@ -353,18 +257,9 @@ are **one edit, never two**.
 
 > [!WARNING]
 > **If you cannot source the condition, KEEP the hedge and flag a content gap. Do not invent
-> it.** De-hedging is the single most dangerous edit in this standard: three of the four
-> fact regressions on the hard case were C9 de-hedges that invented a condition the source
-> does not state. "on some JVMs" is spec-accurate; "on a 32-bit JVM" is not.
-
-**Bad.** "Reads from replicas are relatively fast, and in most cases a caching strategy at the
-application level is sufficient; in a multi-tenant context the isolation model may need to be
-revisited depending on the workload."
-
-**Good.** "Reads served from a local replica return in under 1 ms; a cross-region read costs
-60–100 ms. Cache-aside with a 60-second TTL covers it until your write rate passes the single
-leader's disk throughput — above that, the cache hides a database that is already falling
-behind."
+> it.** De-hedging is the single most dangerous edit in this standard — most of the calibration
+> run's fact regressions were C9 de-hedges that invented a condition the source does not state.
+> "on some JVMs" is spec-accurate; "on a 32-bit JVM" is not.
 
 **Check. REPORT-ONLY** density; **BINDING** per hit: either the condition or the magnitude
 appears in the same sentence, or the hedge is retained and **the gap is logged in the ledger's
@@ -381,45 +276,16 @@ deal unless Z". **Zero tolerance on the audience-tier triple** `**Beginner.**` /
 `**Intermediate.**` / `**Advanced.**`. A trade-off is never a Pros list adjacent to a Cons
 list.
 
-**Why.** A label is not a transition, so nothing carries the reader from slot to slot and a
-2,648-line file becomes 72 identical cold starts — the mechanical cause of "boring." The shape
-regex below finds **15,771** of them, a median of 22 per file (14 files have none, 86 under eight).
-
-**Bad** — `system-design/dp-concurrency/concepts.md:314` fuses seven labelled slots into one
-110-word block (*Pros / Cons / Use when / Avoid when / vs L-F / vs Reactor / Real-world*), then
-repeats the shape for each of ~30 patterns in the file.
-
-**Good.** "You pay one queue hop per message — a context switch, usually a data copy, plus the
-memory the queue holds — and in exchange every worker gets to be written as ordinary blocking
-code. That is the whole deal, and it is a good one whenever the people writing handlers
-outnumber the people who understand the event loop. Take it unless microseconds matter."
-
-**Check. BINDING, shape-based** — not a fixed string list. Grep
-`^\s*(?:[-*]\s+)?\*\*[^*\n]{2,60}[.:]\*\*`, with a small allowlist for a genuine term first
-use. The 11-string version catches ~8% of the phenomenon and is evaded by renaming
-`**Trade-offs.**` to `**Trade-off.**` (94 instances already did). Then the judgement gate: the
-replacement paragraph states a cost-for-benefit relation **and** a condition that flips the
-decision.
+**Check. BINDING, shape-based** — not a fixed string list, which is evaded by renaming the
+label. Grep `^\s*(?:[-*]\s+)?\*\*[^*\n]{2,60}[.:]\*\*`, with a small allowlist for a genuine
+term first use. Then the judgement gate: the replacement paragraph states a cost-for-benefit
+relation **and** a condition that flips the decision.
 
 ### C11 — Explain the mechanism, not the interviewer
 
 **Rule.** Never substitute a statement about how the reader will be assessed for the
 explanation itself. Interview framing survives **only** inside an `[!INTERVIEW]` callout, and
 only as a question — never as the reason a thing is true.
-
-**Why.** 435 "Interviewers probe/want/expect" plus 126 "in an interview". This converts
-learning into memorising a performance and inverts the motivation: the reason to understand
-happens-before becomes "it will be asked" rather than "your loop will never terminate."
-
-**Bad** — `networking/tls-ssl-https/concepts.md:21`: "**Why it matters.** Interviewers want to
-know that TLS is a distinct layer that sits **between the reliable transport (TCP) and the
-application (HTTP)**." The reason TLS is a distinct layer is never given.
-
-**Good.** "TLS sits between TCP and HTTP, and that position is the whole design. It needs TCP
-underneath because it assumes bytes arrive in order and none are lost — a handshake message
-that arrives second breaks the key schedule… That is why HTTP/1.1, HTTP/2, IMAP and SMTP all
-get TLS for free, and why the same protocol had to be redesigned as DTLS the moment anyone
-wanted it over UDP."
 
 **Check. BINDING, zero hits outside an `[!INTERVIEW]` block.** Grep
 `[Ii]nterviewer(s)?\s+(probe|want|expect|ask|love|use|listen)|in an interview|the (senior|strong) (probe|signal|answer)|high-signal|[Cc]oncepts you must name|The bar is not|come up in interviews|commonly asked|a favourite question|worth being able to say out loud`.
@@ -430,12 +296,12 @@ wanted it over UDP."
 
 | | Rule | Check |
 |---|---|---|
-| **S1** | **Three-beat section, seam above ~50 lines.** An `## H2` **over ~50 lines** runs the case → the mechanism → the depth, with the depth behind a **content-named `### H3` seam**. An H2 **at or under ~50 lines** runs the first two beats inline and takes **no seam** — the clarity floor still applies to its closing paragraph. Seam vocabulary is a **prefix, not a fixed string**: `### Where it breaks: …`, `### What it costs: …`, `### Tuning it: …`, `### The version-specific truth: …`, `### Why the simple version is wrong: …`. Never an audience label, and never `### What breaks next` (see S8). A fixed string produces duplicate slugs — a hard validator error — in any file with two "where it breaks" seams. | Every H2 over ~50 lines has ≥1 content-named H3; shorter H2s need none. Zero audience-named seams; zero duplicate slugs. **BINDING**; where a seam exists, Beat 3 must add a *distinct* claim, not restate Beat 2 at greater length. Only 15% of the corpus's 7,903 H2 sections exceed 50 lines, so most sections take no seam |
-| **S2** | **Openers.** The first 60 words after the `# H1` carry a specific situation, number or observable symptom. Delete every "This topic covers…", every citation slab, every attribution paragraph — bibliography goes to `## References`. The opening paragraph's last sentence states the question the file answers. | Grep `^\s*This (topic\|note\|section\|page\|document)\s+(covers\|is about\|explains\|discusses\|teaches\|builds)` → **zero hits, BINDING** (that exact grep returns **80** hits in 80 files today; the looser `^\s*This (topic\|note\|section\|page\|document)\b` returns 185 in 181). Then C4's 60-word test on the opener |
+| **S1** | **Three-beat section, seam above ~50 lines.** An `## H2` **over ~50 lines** runs the case → the mechanism → the depth, with the depth behind a **content-named `### H3` seam**. An H2 **at or under ~50 lines** runs the first two beats inline and takes **no seam** — the clarity floor still applies to its closing paragraph. Seam vocabulary is a **prefix, not a fixed string**: `### Where it breaks: …`, `### What it costs: …`, `### The version-specific truth: …` (more shapes in `references/examples.md`). Never an audience label, and never `### What breaks next` (see S8). A fixed string produces duplicate slugs — a hard validator error — in any file with two "where it breaks" seams. | Every H2 over ~50 lines has ≥1 content-named H3; shorter H2s need none. Zero audience-named seams; zero duplicate slugs. **BINDING**; where a seam exists, Beat 3 must add a *distinct* claim, not restate Beat 2 at greater length |
+| **S2** | **Openers.** The first 60 words after the `# H1` carry a specific situation, number or observable symptom. Delete every "This topic covers…", every citation slab, every attribution paragraph — bibliography goes to `## References`. The opening paragraph's last sentence states the question the file answers. | Grep `^\s*This (topic\|note\|section\|page\|document)\s+(covers\|is about\|explains\|discusses\|teaches\|builds)` → **zero hits, BINDING**. Then C4's 60-word test on the opener |
 | **S3** | **Delete author-facing scaffolding from the reader's path.** Every "Boundaries — don't duplicate" slab, every cross-reference directory, every author erratum. Where a boundary genuinely helps, it becomes **one inline sentence with one link at the point of need**, below the file's first 25%. | Grep `Boundaries\|Cross-references\|don't duplicate\|do not duplicate`. Target ≤2 backticked `domain/slug` references per file. **BINDING** |
 | **S4** | **Diagram by positive test, not by quota.** Add a mermaid diagram only if one holds: ≥3 entities with directional relationships; an ordering or timing the reader must hold; a state space with legal transitions; a layered or boundary structure. **The diagram replaces the enumeration it renders** — delete the list. Labels live inside the figure, verbatim from the prose. Mermaid only; convert ASCII art you touch. | Name which test fired. **BINDING**: the replaced enumeration is deleted, not left above the figure. See the note below on definitions versus placement |
 | **S5** | **H2 text frozen; the claim goes in the first body line.** Never rename, merge, split or delete an H2. Under a bare-noun H2, the first line of body prose carries the claim the heading could not make — a finite verb and a claim, not a definition ("False sharing is when…" fails under C2). **Additions are legal at any level** — prefer an H3 seam; add an H2 only for genuinely new material, never to reshape an existing section. No duplicate slugs. | `--check-lock` plus `validate_content.py`. Every base H2's `(level, text)` still present and in order; anything extra is an addition. **BINDING, build-breaking** |
-| **S6** | **Reading map for long files.** Any file over **3,500 RAW words** opens with exactly one `> [!TIP]` reading map: the minute budget, and explicit permission to skip named sections with the reason. At or under 3,500: no map. **Exempt from the callout budget.** | **The basis is RAW words** — the site's own count, the one that drives `readingMinutes`. `prose_words` (S9's basis, which strips fences, tables and callouts) is a different, smaller number and using it here fails 149 files the wrong way. **BINDING.** 387 of 460 files qualify on raw words; exactly one map exists today |
+| **S6** | **Reading map for long files.** Any file over **3,500 RAW words** opens with exactly one `> [!TIP]` reading map: the minute budget, and explicit permission to skip named sections with the reason. At or under 3,500: no map. **Exempt from the callout budget.** | **The basis is RAW words** — the site's own count, the one that drives `readingMinutes`. `prose_words` (S9's basis, which strips fences, tables and callouts) is a different, smaller number and using it here fails 149 files the wrong way. **BINDING** |
 | **S7** | **Section exits are plain transitions.** The last sentence of each content H2 names the problem the next content H2 solves, in flat declarative prose, ≤25 words, withholding nothing. **Three exemptions, on every file:** the **last content H2** closes the topic's arc instead (its forward hook is the `prompts.yaml` cliffhanger), and `## Common follow-up questions` and `## References` take **no exit sentence at all**. Exactly one withheld payoff exists per topic and it lives in `prompts.yaml`. | Grep `there'?s a catch\|read on\|we'?ll see\|coming up\|stay tuned\|you'?ll never look at` → **zero hits, BINDING** |
 | **S8** | ~~terminal `## What breaks next` H2~~ — **DELETED. Do not add this heading.** | See below |
 | **S9** | **Callout budget, four types, colour quarantined.** See the resolved budget below. Every war story, historical aside, vendor anecdote and fun fact moves **into** a callout — never deleted, never left inline in the load-bearing chain. | **BINDING arithmetic** |
@@ -445,40 +311,26 @@ wanted it over UDP."
 There is **no terminal cliffhanger H2.** `grep -E '^## (What breaks next|Where this goes next)'`
 must return **zero hits** in any `concepts.md`. The cliffhanger lives only in `prompts.yaml`,
 under the `cliffhanger:` key. (The grep is H2-scoped on purpose: S1 seams are prefixes, so
-`### What breaks next: the 64-bit case` is a legal seam. Only the H2 form is banned.)
+`### What breaks next: the 64-bit case` is a legal seam. Only the H2 form is banned.) The two
+hard reasons — search indexing and payoff verifiability — are in `references/rationale.md`.
 
-Two reasons, both hard. The study page has a single `data-pagefind-body`, so a cliffhanger in
-the prose is by construction dense in the *next* topic's highest-signal terms and would
-surface the wrong page in search — and shipping it in both places renders it twice. Second,
-the prompts schema is the thing that can verify the payoff anchor resolves; a markdown heading
-cannot.
-
-If you remember a rule mandating that heading, it is the deleted S8. Run the H2-scoped grep
-above on your finished file; the correct result is nothing.
+If you remember a rule mandating that heading, it is the deleted S8.
 
 ### The callout budget, resolved
 
-Two differently shaped numbers used to be live at once ("≤1 per H2" and "≤5 per file" and
-"≈1.2 per 1,000 words") with no tie-break. They agree by luck on a 2,000-word slice and
-diverge on a 6,000-word file. This is the single rule:
+This is the single rule; the earlier pair of differently shaped numbers with no tie-break is
+dead.
 
-- **Primary, per file (binding):** `allowed = max(1, round(1.2 × prose_words / 1000))`.
-  A 2,010-word section slice gets 2. A 4,000-word file gets 5. A 6,000-word file gets 7.
+- **Primary, per file (binding):** `allowed = max(1, round(1.2 × prose_words / 1000))` — so a
+  4,000-word file gets 5 and a 6,000-word file gets 7.
 - **Secondary, per H2 (binding):** at most **1** callout per H2. This is an anti-clustering
-  cap, not a budget — it never actually binds, because on 0 of 460 files does the per-file
-  budget exceed the H2 count (a median file's budget of **4** spreads across 15 H2s).
+  cap, not a budget.
 - **Tie-break: both must hold, and whichever admits fewer callouts governs.** The per-H2 cap
   can never license exceeding the per-file budget, and the per-file budget can never be spent
   by stacking two callouts in one section.
 - **The S6 reading map is exempt** from the per-file arithmetic.
 
-**Why 1.2 and not 5 per file.** A rule nothing obeys is not a rule. The corpus runs about 7
-callouts per file — 1.79 per 1,000 prose words, max 27 — and **256 of 460 files exceed 5**,
-while `refining-content` asks for 1–3 and only 82 files comply. 1.2 per 1,000 words is a real
-one-third reduction from today's rate, it is satisfiable on every file including the 27-callout
-one, and it scales with length instead of punishing long files. Usage is strongly bimodal by
-domain (`spring-boot` and `spring-core` sit at 0.05 per 1,000 words, `testing` at 3.99), so
-some files must **shed** callouts and some must **gain** them.
+Usage is bimodal by domain, so some files shed callouts under this rule and some gain them.
 
 **Surplus callouts are demoted, never deleted.** A `[!WARNING]` over budget moves into the
 **stress position of a body paragraph** — the end of the sentence, where the payload belongs
@@ -486,11 +338,10 @@ under C5. An anecdote, a date or a vendor name over budget moves to `## Referenc
 it is information loss and fails the gate.
 
 **So callout counts MAY drop, and `[!WARNING]`/`[!INTERVIEW]` counts are deliberately NOT in the
-information inventory** (loop step 4). 276 of 460 files exceed this budget today, and on 193 of
-them the `[!WARNING]` plus `[!INTERVIEW]` count alone exceeds it — those counts *must* fall.
-What is gated instead is the **demotion log**: one line per dropped callout, naming the body
-sentence or `## References` line that now carries its content. A drop with no log line is
-information loss and fails. Callouts are typography; their content is information.
+information inventory** (loop step 4). What is gated instead is the **demotion log**: one line
+per dropped callout, naming the body sentence or `## References` line that now carries its
+content. A drop with no log line is information loss and fails. Callouts are typography; their
+content is information.
 
 ### S4 note — definitions and placement are two objects
 
@@ -506,10 +357,8 @@ which object each figure carries, so a reviewer does not read it as redundancy.
 
 **An `## H2` over ~50 lines runs all three beats, with Beat 3 behind a content-named `### H3`
 seam. An H2 at or under ~50 lines runs Beats 1–2 inline and takes no seam** — the clarity floor
-still applies to its closing paragraph. This is the same ~50-line threshold as S1, and it is the
-only threshold: only 15% of the corpus's 7,903 H2 sections exceed it (mean span 36.1 lines), so
-on a typical file most sections get no seam and the 72-H2 file gets a handful, not 72.
-Beats 1 and 2 are always unlabelled prose.
+still applies to its closing paragraph. This is S1's ~50-line threshold, and it is the only
+threshold here: on a typical file most sections get no seam. Beats 1 and 2 are unlabelled prose.
 
 - **Beat 1 — the case.** Opens with a concrete particular inside 60 words. Runs pain →
   mechanism → **name** → one-clause definition. At most one analogy, shipped with its mapping
@@ -523,10 +372,6 @@ Beats 1 and 2 are always unlabelled prose.
   name.
 - **Beat 3 — the depth.** Only in sections over ~50 lines, behind the seam. Scaffolds removed;
   clarity floor unchanged. Must add a **distinct** claim.
-
-H3 seams are structurally free: `read_headings` collects `#{1,6}` so a new H3 only *adds* an
-anchor, and the study page builds its sidebar TOC from `depth === 2`, so seams add no clutter
-and leak no spoilers.
 
 ### The parity table — guidance is the only axis that moves
 
@@ -546,13 +391,10 @@ conflicting set of thresholds gets born.
 
 ### Content labels, never audience labels
 
-`### Where it breaks: losing the thread` lets a strong reader skip by scent; `**Advanced.**`
-makes them self-diagnose before they have read anything, and status labels make strong readers
-skip material they needed. That is why the 778 audience-tier labels across 46 files are a
-zero-tolerance grep and not a preference.
-
-The skip affordance has exactly two levels: the H3 seam, and the S6 reading map that names the
-seams worth jumping to. No collapsible blocks, no new markers, no CSS work.
+Seams are named by content, never by audience: `### Where it breaks: losing the thread`, never
+`**Advanced.**`. Audience-tier labels are a zero-tolerance grep under C10, not a preference. The
+skip affordance has exactly two levels — the H3 seam, and the S6 reading map that names the seams
+worth jumping to. No collapsible blocks, no new markers, no CSS work.
 
 ---
 
@@ -583,15 +425,10 @@ report-only precisely because they are gameable; this one is not, and it is the 
 7. Record both sentence-length lists per section in your report. **They are report-only** — the
    pass/fail is your answer to step 4, not a threshold on the lists.
 
-**What a failure looks like, from the real run.** The hard case scored **PARTIAL**: vocabulary
-passed decisively, clause depth did not. `## volatile` opened `[8, 8]` and its deep beat closed
-`[33, 11, 24]` on a four-clause transitivity walk. The writer's own self-report claimed the deep
-tier's longest sentence was 26 words; it was 38. **A writer measuring its own register swap will
-understate it** — which is why step 7 of the loop hands this to a separate verifier. The repair
-split four sentences, moved no content, and landed at `[8, 8]` versus `[13, 13]`. That is a pass.
-
 A cheaper tell before you measure: read the deep paragraph aloud. If you run out of breath before
-the verb, it fails.
+the verb, it fails. A real failure-then-pass, with the measured lists, is in
+`references/examples.md` — including why a writer measuring its own swap understates it, which is
+why loop step 7 hands this to a separate verifier.
 
 ---
 
@@ -685,15 +522,31 @@ clean), gives every prompt a stable id for reveal state, and needs no fifth call
 > **`prompts.yaml` is a new third file, and two things owe it work before the wave starts.**
 > (1) `docs/content-schema.md` — the contract `CLAUDE.md` says to follow exactly — documents the
 > topic directory as `concepts.md` + `questions.yaml` only. **Add `prompts.yaml` to it once,
-> before topic 1**, or the authoritative contract and the shipped tree disagree from the first
-> commit. (2) **Nothing in `web/` reads `prompts.yaml` today** — `sync-content.mjs` reads only
-> `concepts.md` and `questions.yaml`. So the render-time resolution of a cliffhanger's
+> before topic 1.** (2) **Nothing in `web/` reads `prompts.yaml` today** — `sync-content.mjs`
+> reads only `concepts.md` and `questions.yaml`. So the render-time resolution of a cliffhanger's
 > destination title from README row order, and the `id` field's reveal state, are **required
-> future web work, not existing properties.** Until that renderer ships, nothing downstream
-> verifies these files: your own `payoff.anchor` check is the only gate. Do not assume the chain
-> self-verifies.
+> future web work, not existing properties.** Until that renderer ships, **your own
+> `payoff.anchor` check is the only gate.** Do not assume the chain self-verifies.
 
-**Real example** (from the hard-case run; abridged to three prompts):
+### The field spec
+
+File-level keys: `topic`, `domain`, `topic_slug`, `schema: 1`, `pass: clarity-v1`, then
+`prompts:` and `cliffhanger:`.
+
+| Field | Required | Rule |
+|---|---|---|
+| `id` | always | `<topic_slug>-pNNN`, stable once shipped — reveal state keys off it |
+| `ref` | always | `concepts.md#anchor`; must resolve. ≤1 prompt per anchor |
+| `kind` | always | one of the five kinds below; no others |
+| `tier` | always | `A` in-file, `B` other topic, `C` primary source, `D` open |
+| `prompt` | always | **≤35 words**, one question, no "and" joining two interrogatives |
+| `hint` | optional | one line, points at what to count or look at; never the answer |
+| `answer_in` | always | in-file anchor (A), `/study/<domain>/<slug>#anchor` (B), or `external` (C/D) |
+| `success_criterion` | **mandatory for tier C** | what having it looks like; bounds an otherwise unbounded hunt. Exempt from the 35-word cap |
+| `search_hint` | tier C | the primary source to open, with any caveat about it |
+| `answer_shape` | **mandatory for tier D** | the two or three dimensions any credible answer must price. Exempt from the 35-word cap. An open prompt with no `answer_shape` is the abandonment failure |
+
+Canonical shape — one prompt, all the mandatory keys:
 
 ```yaml
 topic: "synchronized, volatile & the Java Memory Model"
@@ -705,55 +558,27 @@ pass: clarity-v1
 prompts:
   - id: synchronized-volatile-jmm-p001
     ref: "concepts.md#visibility-reordering-and-atomicity"
-    kind: predict-failure          # predict-failure | name-the-price |
-                                   # draw-the-boundary | refute | notice-in-wild
-    tier: A                        # A in-file | B other topic | C source | D open
-    prompt: |                      # <=35 words
+    kind: predict-failure
+    tier: A
+    prompt: |
       Your teammate declares `stop` volatile, the loop exits, so they apply the same fix
       to a `hits` counter that eight threads increment. Name what still breaks.
     hint: "Count the memory accesses in one `hits++`."
     answer_in: "concepts.md#volatile"
-
-  - id: synchronized-volatile-jmm-p002
-    ref: "concepts.md#why-the-simple-version-is-wrong-three-machines-reorder-not-one"
-    kind: draw-the-boundary
-    tier: C
-    prompt: |
-      Your racy cache passes 10,000 runs on an x86 laptop and fails within a minute on an
-      ARM build server. Which reordering did the ARM core permit?
-    success_criterion: |           # MANDATORY for tier C. Exempt from the 35-word cap.
-      You have it when you can name one reordering an ARM core may perform that an x86 core
-      may not, and say which barrier a JVM therefore has to emit on ARM and not on x86.
-      This file states only that ARM and POWER permit reorderings x86 forbids; it does not
-      say which, and that gap is the point of the hunt.
-    answer_in: external
-    search_hint: |
-      Doug Lea, 'The JSR-133 Cookbook for Compiler Writers' — the barriers-required table.
-      The page self-labels its processor rows as historical, so confirm anything you take
-      from it against your target chip's own manual.
-
-  - id: synchronized-volatile-jmm-p005
-    ref: "concepts.md#what-it-costs-the-fences-hotspot-emits"
-    kind: notice-in-wild
-    tier: D
-    prompt: |
-      Next time a profiler shows a hot method with a `volatile` write in it, count the
-      writes per call. One write per call usually means one full fence per call.
-    answer_shape: |                # MANDATORY for tier D. Exempt from the word cap.
-      A good answer prices three things: how many StoreLoad fences one call executes, what
-      each fence has to drain before the next load may proceed, and whether the write could
-      happen once outside the hot path instead of once inside it.
 ```
+
+A full three-prompt file with the tier-C and tier-D fields filled in is in
+`references/prompts-and-cliffhangers.md`.
 
 ### The five kinds — no others
 
 | Kind | Shape |
 |---|---|
-| **predict-failure** | Concrete scenario with numbers; name the first thing that breaks. Highest-yield: it forces a pre-commitment, so a later miss is legible instead of dissolving into "yes, I knew that" |
+| **predict-failure** | Concrete scenario with numbers; name the first thing that breaks. Highest-yield, because it forces a pre-commitment |
 | **name-the-price** | "{Mechanism} gives you {benefit}. Name what it costs, and the workload where that cost is the one that matters" |
 | **draw-the-boundary** | "Everything here assumed {implicit assumption}. Find where it fails." Doubles as the Beat 2 → Beat 3 seam marker |
-| **refute** | A colleague's confidently worded, subtly wrong review comment. Anxiety-cheap, because the person who is wrong is fictional. Source the wrong claim from a distractor already in the topic's `questions.yaml` |
-| **notice-in-wild** | "Next time you {situation}, check {observable}." Nothing to get wrong. Keep **about a third** of all prompts this kind — it is the anxiety budget that keeps a reader attempting prompt nine |
+| **refute** | A colleague's confidently worded, subtly wrong review comment. Source the wrong claim from a distractor already in the topic's `questions.yaml` |
+| **notice-in-wild** | "Next time you {situation}, check {observable}." Nothing to get wrong. Keep **about a third** of all prompts this kind |
 
 ### The four closure tiers — every prompt has one
 
@@ -761,10 +586,9 @@ prompts:
   link labelled "Where this gets answered", not the answer.
 - **B — answered in another topic.** `answer_in` is `/study/<domain>/<slug>#anchor`.
 - **C — in a primary source.** `answer_in: external`, plus a `search_hint` and a **mandatory
-  `success_criterion`**: the criterion bounds an otherwise unbounded task and is the substitute
-  for a human mentor. At most **one tier-C hunt per topic**, in the deepest section.
-- **D — genuinely open.** **Mandatory `answer_shape`**: the two or three dimensions any
-  credible answer must price. An open prompt with no `answer_shape` is the abandonment failure.
+  `success_criterion`**: the criterion is the substitute for a human mentor. At most **one
+  tier-C hunt per topic**, in the deepest section.
+- **D — genuinely open.** **Mandatory `answer_shape`.**
 
 ### Density, placement, and the one absolute rule
 
@@ -772,9 +596,8 @@ prompts:
   number that governs. Do **not** scale with length: the 72-H2 file gets 14, placed at natural
   resume points so they double as session bookmarks.
 - **Within that cap: ≤1 prompt per anchor, and instrument about two-thirds of teachable H2s, or
-  as many as the cap allows — whichever is fewer.** Above ~21 teachable H2s the cap is what
-  binds, and the corpus p95 is 29 H2s, so on the biggest files you will instrument well under
-  two-thirds. That is correct, not a shortfall.
+  as many as the cap allows — whichever is fewer.** Instrumenting well under two-thirds on the
+  biggest files is correct, not a shortfall.
 - **Skip unconditionally:** `## References`, the follow-up-questions H2 (already question
   shaped), `## Trade-offs and when to use what` (already comparative), and short pure-enumeration
   sections.
@@ -783,11 +606,9 @@ prompts:
   Beat 2 → Beat 3 seam.
 - **Placement: after the section it interrogates, never before.** The only pre-question a reader
   meets is the previous topic's cliffhanger.
-- **Prompt body ≤35 words**, one question, no "and" joining two interrogatives. `success_criterion`
-  and `answer_shape` are exempt from the cap.
-- **Never inline the answer.** All 460 files currently do exactly that — *"Is `R + W > N` the same
-  as linearizability? Why not? (No — sloppy quorums, concurrent writes and read-repair races still
-  allow anomalies.)"* — which leaves no interval in which the reader could generate.
+- **Never inline the answer.** All 460 files currently do exactly that, which leaves no interval
+  in which the reader could generate. The canonical instance is quoted in
+  `references/prompts-and-cliffhangers.md`.
 - **No duplicates.** Grep the topic's `questions.yaml` first; if an MCQ already tests it, the
   prompt must ask something the MCQ format cannot.
 - **Invitation register.** No "Quiz", no "Test yourself", no score, no streak, no taunt. State
@@ -800,40 +621,12 @@ or escalate it. Below ~20%, add a cue, narrow it, or demote it to a tier-C hunt.
 
 ## Cliffhangers — in `prompts.yaml` only
 
-One per topic, under the `cliffhanger:` key. Never a heading (S8 is deleted). **Never author the
-destination's title or a link to it** — the design is that a future renderer resolves both from
-README row order, so the chain tracks reading order forever and the pager and the cliffhanger can
-never disagree. That renderer does not exist yet (see the warning above); the authoring rule
-holds regardless, because a hand-written title is what goes stale.
-
-**Real example** (same run; verified to pay off in the genuine next topic):
-
-```yaml
-cliffhanger:
-  hook: |
-    You can now make any shared field correct. Pick the edge, pick the tool, and the race
-    is gone. Here is a loop with no shared field in it:
-
-        while (true) {
-            Socket s = server.accept();
-            new Thread(() -> handle(s)).start();
-        }
-
-    It passes every load test you have. At the first real burst it dies with
-    `OutOfMemoryError: unable to create native thread`. Nothing you just learned is wrong,
-    and none of it helps. Happens-before governs which values a read may return. It never
-    says how many threads you may create, or what happens when you run out.
-  teaser_questions:
-    - "Who decides how many threads your program is allowed to create?"
-    - "Where does a task wait when no thread is free to run it?"
-  payoff:
-    anchor: "concepts.md#executors-factory-methods-and-their-pitfalls"
-    claim: >-
-      The next topic must show a factory pool whose maximumPoolSize is Integer.MAX_VALUE
-      (newCachedThreadPool over a SynchronousQueue) creating a thread per burst task until
-      `OutOfMemoryError: unable to create native thread`. Verified present in the
-      un-rewritten destination.
-```
+One per topic, under the `cliffhanger:` key, with `hook`, `teaser_questions` and `payoff:
+{anchor, claim}`. Never a heading (S8 is deleted). **Never author the destination's title or a
+link to it** — the design is that a future renderer resolves both from README row order, so the
+chain tracks reading order forever and the pager and the cliffhanger can never disagree. That
+renderer does not exist yet (see the warning above); the authoring rule holds regardless,
+because a hand-written title is what goes stale.
 
 ### The six patterns — pick by what the topic just did
 
@@ -846,6 +639,9 @@ cliffhanger:
 | **E** | **Pivot** | Non-contiguous adjacency. Do not fake a dependency: name the one genuinely shared mechanism and pose a question on that seam |
 | **F** | **Finale** *(domain-final)* | Close the domain's arc, hand off to real `domain/slug` targets, leave one genuinely unsolved question. No congratulation — celebration closes the loop, which is the opposite of the goal |
 
+Illustrations of all six, and a full shipped hook, are in
+`references/prompts-and-cliffhangers.md`.
+
 ### Hard form limits
 
 **80–140 words. No sentence over 25 words. At most 1 em-dash. Zero exclamation marks. Carries a
@@ -855,11 +651,10 @@ same way, there's a catch, stay tuned, read on*. Read it aloud flat: if it sound
 rewrite; if it sounds like a colleague saying "oh — one thing", it is right.
 
 **Measure the word and sentence limits on the prose only, excluding any code artifact.** A code
-artifact has no sentence terminators, so a naive splitter fuses it with the surrounding prose and
-over-reports both figures. **The shipped example above measures 85 prose words with a longest
-prose sentence of 16** (97 words and a spurious 17-word fusion if you include the artifact) — the
-floor is 80 so that this real, compliant hook passes it. Patterns C and D can be artifact-free by
-construction; for those, the arithmetic or the named unknown *is* the artifact.
+artifact has no sentence terminators, so a naive splitter fuses it with the prose and over-reports
+both figures; the 80-word floor was set from a real compliant hook's prose-only count. Patterns C
+and D can be artifact-free by construction; for those, the arithmetic or the named unknown *is*
+the artifact.
 
 **Calibrate to moderate confidence:** a reader who just finished this topic should be able to
 produce a plausible-but-wrong guess. No idea at all → add one scaffolding sentence inside the
@@ -868,15 +663,13 @@ effect anywhere; it did not replicate. A cliffhanger buys **return**, not retent
 
 ### Verifying the payoff — this is what makes the device work
 
-One broken payoff teaches readers to skip all 459 others. The destination is normally not yet
-rewritten, and that is fine: its **prose is unstable but its headings are frozen** by the
-ADD-only rule. So:
+The destination is normally not yet rewritten, and that is fine: its **prose is unstable but its
+headings are frozen** by the ADD-only rule. So:
 
 1. Read the next topic's H2 list only — with `read_headings`, not by reading the file.
 2. Pick a `payoff.anchor` that **resolves today**, in the un-rewritten destination.
 3. Open the destination at that anchor and confirm the promised mechanism is genuinely there.
-   Record what you saw in `payoff.claim`. The hard-case run did exactly this: it read the
-   destination's lines 89–90 and confirmed the exact error string the hook uses.
+   Record what you saw in `payoff.claim`.
 4. Prefer a **short exact string** that also appears in the destination — that is what the K1
    grep matches when the destination is later rewritten. Do not lengthen it for completeness.
 
@@ -894,88 +687,31 @@ The carry-forward ledger is **`docs/continuity/<domain>.yaml`, committed.** It l
 rather than `topics/` because S3 is *removing* author scaffolding from the reader's tree and the
 fix must not add a new instance.
 
-```yaml
-domain: docker
-schema: 1
-pass: clarity-v1
-reading_order_source: "topics/docker/README.md"   # re-derived every run, never hand-sorted
-position: 4                                       # 3 done; next is entrypoint-vs-cmd
+### The ledger's required fields, and how each is maintained
 
-# PASS 0, written BEFORE topic 1 from every un-rewritten file's H2 list + first 200
-# words. Never edited after. This is what makes a forward cliffhanger possible.
-plan:
-  - { slug: dockerfile-layers-build-cache, covers: "Instruction->layer mapping; cache key +
-      invalidation; ordering; build context; layer additivity and size." }
-  - { slug: entrypoint-vs-cmd, covers: "CMD vs ENTRYPOINT; exec vs shell form; PID 1 and
-      SIGTERM; entrypoint scripts; STOPSIGNAL/tini." }
+| Key | Maintenance rule |
+|---|---|
+| `domain`, `schema: 1`, `pass: clarity-v1` | fixed |
+| `reading_order_source` | the domain README path; **re-derived every run, never hand-sorted** |
+| `position` | the next topic's index. Bumped in the same commit as the rewrite |
+| `plan[]` | `{slug, covers}` for every topic. **Written in Pass 0 before topic 1, from H2 lists plus first 200 words. Never edited after** — it is what makes a forward cliffhanger possible |
+| `canonical_terms` | **append-only. 6 terms per topic, no truncation** — an archival rule would strip exactly the `gloss` and `banned_variants` fields K2's check consumes. Each entry: `{canonical, defined_in, gloss, banned_variants[]}` |
+| `running_example` | **at most 2 per domain**: `{name, established_in, state}`. Numbers may be **extended**, never silently changed |
+| `claims_established` | **rolling compaction every 5 topics**: compress the previous 5 topics' claims into ≤5 domain-level claims, so the ledger stays O(1) rather than O(N). **Cap ~25 live claims** |
+| `approximations_open` | `{id, from, text, correction_owed_by}`. Every entry needs a correction before the domain ends (K5) |
+| `known_defects` | **pre-existing** defects you did not create and did not fix |
+| `owed` | **append-only debts THIS pass created** and could not close: C8 bold collisions with un-rewritten scope, C9 gaps where the hedge was kept, partial-pass leftovers. `file` = who must close it, which is how it reaches them |
+| `exemptions` | per-file rule exemptions with the reason, `{file, rule, terms, reason}`. C9 mainly |
+| `open_cliffhanger` | **exactly one, overwritten every topic**: `{from, to_position, pattern, key_noun_for_K1_grep, gap, payoff_anchor, verified_present}` |
+| `topics[]` | **one line per rewritten topic, ≤25 words, no truncation**: `{position, slug, commit, one_liner, reading_minutes{before,after}, factlines{emitted,verified}, adversarial_signoff}` |
 
-# APPEND-ONLY. 6 terms per topic, NO truncation - an archival rule would strip exactly
-# the gloss and banned_variants fields that K2's check consumes.
-canonical_terms:
-  layer: { canonical: "layer", defined_in: dockerfile-layers-build-cache,
-           gloss: "a filesystem changeset plus metadata, content-addressed by digest",
-           banned_variants: ["diff", "slice"] }
-
-running_example:                                  # at most 2 per domain
-  name: "the 1.2 GB Node API"
-  established_in: images-vs-containers
-  state: "Express API, npm ci, COPY . . above the install, 1.2 GB image, 4-minute rebuilds.
-          Shrunk to 90 MB in multi-stage-builds (topic 5).
-          Numbers may be EXTENDED, never silently changed."
-
-# ROLLING COMPACTION every 5 topics: compress the previous 5 topics' claims into <=5
-# domain-level claims, so this stays O(1) rather than O(N). Cap ~25 live claims.
-claims_established:
-  - "Only RUN, COPY and ADD create filesystem layers; everything else is metadata."
-  - "A cache miss on one instruction busts that instruction and every one after it."
-approximations_open:
-  - { id: APPROX-1, from: images-vs-containers, text: "\"a container is just a process\"",
-      correction_owed_by: runtimes-oci-standards }
-
-known_defects:            # PRE-EXISTING defects you did not create and did not fix
-  - { file: images-vs-containers,
-      note: "opener's byte figures disagree with the layer table; table is canon (an MCQ cites it)" }
-
-owed:                     # DEBTS THIS PASS CREATED and could not close. Append-only.
-                          # Sinks for: C8 bold collisions with un-rewritten scope, C9 gaps
-                          # where the hedge was kept, partial-pass leftovers.
-                          # `file` = who must close it (that is how it reaches them).
-  - { file: dockerfile-layers-build-cache, from: images-vs-containers,
-      kind: c8-bold-collision, token: "layer",
-      note: "also bolded at line 219, outside the rewritten scope; ours is the teaching site" }
-  - { file: dockerfile-layers-build-cache, from: dockerfile-layers-build-cache,
-      kind: c9-unsourced-condition,
-      note: "kept 'on some drivers'; the condition is not in the docs. Routed to prompt p004 (tier C)" }
-
-exemptions:               # PER-FILE rule exemptions, with the reason. C9 mainly.
-  - { file: build-context-and-dockerignore, rule: C9,
-      terms: ["context"], reason: "the topic is about build context; density is the subject" }
-
-# EXACTLY ONE. Overwritten every topic.
-open_cliffhanger:
-  from: dockerfile-layers-build-cache
-  to_position: 4
-  pattern: A
-  key_noun_for_K1_grep: "PID 1"
-  gap: "A correct image can still hang for ten seconds on docker stop, because the last
-        line made a shell PID 1."
-  payoff_anchor: "concepts.md#the-pid-1-sigterm-problem-with-shell-form"
-  verified_present: true                          # checked against the UN-rewritten topic 4
-
-# ONE line per rewritten topic, <=25 words. 1 per topic, no truncation.
-topics:
-  - { position: 3, slug: dockerfile-layers-build-cache, commit: abc1234,
-      one_liner: "established layer/build-cache/build-context/cache-key; owns the 1.2 GB Node API",
-      reading_minutes: { before: 20, after: 27 }, factlines: { emitted: 3, verified: 3 },
-      adversarial_signoff: true }
-```
+A filled-in ledger is in `references/ledger-example.md`.
 
 **Load exactly four slices, never the whole ledger:** (1) the full `canonical_terms` map;
 (2) `running_example`, plus the `known_defects`, `owed` and `exemptions` entries **whose `file`
 is topic N** — that is how a debt owed to you reaches you; (3) the last 3 `topics[]` entries in
 full plus a one-line roll-up of `claims_established`; (4) `plan[N-1] / plan[N] / plan[N+1]`.
-Plus the raw `concepts.md` for N and an **H2-list-only** read of N+1. A 16-topic ledger lands
-around 10–14 KB and it replaces tens of thousands of words of prior topics.
+Plus the raw `concepts.md` for N and an **H2-list-only** read of N+1.
 
 For a 94-topic domain, **shard the ledger by group** (the same group key the site's catalog
 already uses) so each unit stays under ~25 topics.
@@ -1000,52 +736,30 @@ never rewrites a finished topic.
 
 ## Fact safety — the one place this standard can do real damage
 
-### The precedent
-
-Commit `268a063` ran a no-web pedagogy pass over 59 files and **silently downgraded verified AWS
-facts**: SCPs-per-entity 10 → 5 (5 is the RCP limit — a confusion the rewriter *introduced*), and
-the NLB idle timeout rewritten as "fixed at 350s / not tunable" when it is configurable
-60–6000s. **Every gate stayed green.** It was caught only by a second, web-enabled pass that read
-the **diff**.
-
 > [!KEY-TAKEAWAY]
 > **The unit of verification is the DIFF, not the file. A fact-shaped line is immutable unless
 > you explicitly re-verify it. And any sentence whose subject, verb or object differs from the
 > original is a NEW CLAIM — marker word or not.**
 
-### Why a marker grep cannot be the gate
+A no-web pedagogy pass over 59 files once silently downgraded verified AWS service limits with
+every gate green. **These four shapes are the checklist for step 6, and none of them changed a
+number, a version or a citation — which is exactly why nothing mechanical caught them:**
 
-The planned gate greped added sentences for *so, because, which means, therefore, cannot, always,
-never, only*. On the real run, the **highest-severity finding carried no marker word at all**:
+1. **A de-hedge invented a condition the spec does not state.** "on some JVMs" → "on a 32-bit
+   JVM", when the spec conditions the behaviour on the implementation, not on word size. This
+   shape is a **C9 failure** — three of the four regressions on the calibration run were C9
+   de-hedges.
+2. **A mechanism was substituted for an observable property.** "writes them atomically" → "writes
+   them in one instruction": a codegen detail asserted in place of the guarantee the reader needs.
+3. **A qualifier was dropped and an absolute added.** "relatively strong, only store-load is
+   visible" → "nothing else can".
+4. **A call path was asserted from plausibility.** `incrementAndGet()` "calls `compareAndSet`",
+   when since JDK 8 it delegates elsewhere. A model that is sound can still name the wrong API.
 
-> "Which moves are legal at the last stage depends on the chip."
+The worked instances, the marker-free sentence that a 36-item self-audit missed, and what the
+run got right are in `references/fact-safety-cases.md` — useful, not required.
 
-That sentence is an unsourced architectural attribution. It localises all x86-versus-ARM
-difference to one stage of a three-stage pipeline, the original made no stage attribution at all,
-and it **contradicted the file's own tier-C prompt**, which asks the reader about chip dependence
-at a different stage. The writer's own 36-item added-claims audit missed it entirely, because its
-grep was blind to it.
-
-**So: the marker grep is a net, not a gate.** It runs *after* you have built the claim population
-by other means, to catch rows you missed.
-
-### The three other real regressions, all marker-free
-
-Each of these is a shape to hunt, not an anecdote:
-
-| Shape | Original | Rewrite | Why it is wrong |
-|---|---|---|---|
-| **De-hedge invents a condition** | "on some JVMs" | "on a 32-bit JVM" | JLS 17.7 conditions 64-bit splitting on the *implementation*, not on word size — and the rewrite implies 64-bit JVMs are safe by spec, which the spec does not say |
-| **Mechanism substituted for observable property** | `incrementAndGet()` "is a CAS loop" (parenthetical) | "it **calls** `compareAndSet(expected, expected + 1)`" | It routes through `Unsafe.getAndAddInt`, whose loop uses `weakCompareAndSetInt`, and on x86 it may compile to one atomic add with no retry at all |
-| **Qualifier deleted, absolute added** | "x86 is a *relatively strong* TSO model (only store-load reordering is visible)" | "x86 gives you TSO … **nothing else can**" | The guarantee holds for ordinary write-back accesses, not unconditionally |
-
-Note what all three have in common with the SCP regression: **no number changed, no version
-changed, no citation changed.** Nothing mechanical could see them. A fourth of the same family:
-"HotSpot on a 64-bit platform writes a `long` in **one instruction**" replaced the base's "writes
-them **atomically**" — a codegen mechanism swapped in for an observable property, in the same pass
-where the writer had explicitly *rejected* a different codegen claim for being unsourceable.
-
-### The procedure that actually catches them
+### The procedure
 
 **Step 1 — the writer builds a claim-diff table by sentence alignment, not by grep.** Align the
 rewritten section against the original **sentence by sentence**. One row per sentence:
@@ -1064,130 +778,24 @@ recycled. In particular these are always NEW, even when they read as paraphrase:
 **Step 3 — every NEW row needs a source**: an original line number, a sibling `questions.yaml`
 id (open it and read it — do not cite from memory), or a primary-source URL. "It is standard
 architecture" is not a source. If you cannot source it, **apply C9's safety catch: keep the base's
-hedge, or delete the clause, and route the gap to a tier-C prompt.** The hard case did this
-correctly five times — including refusing to invent a cycle count and reverting a spec claim it
-had not opened.
+hedge, or delete the clause, and route the gap to a tier-C prompt.**
 
-**Step 4 — run the marker grep as the net.** `so | because | which means | therefore | cannot |
-always | never | only` over added sentences. Any hit not already in your table is a row you
-missed, and it tells you your alignment was sloppy.
+**Step 4 — run the marker grep as the net, not the gate.** `so | because | which means |
+therefore | cannot | always | never | only` over added sentences. It runs *after* you have built
+the claim population by alignment. Any hit not already in your table is a row you missed, and it
+tells you your alignment was sloppy.
 
 **Step 5 — a separate adversarial verifier, in a fresh context, is mandatory.** It sees only the
 diff, the claim-diff table and the inventory delta. It re-derives the alignment **independently**
-and its job is to name the rows your table does not contain. **A writer cannot audit itself** —
-that is the whole lesson of the run: the writer produced the most honest audit in the effort and
-still missed its own highest-severity claim. The verifier is also not infallible: on the real run
-one of its suggested fixes did not compile. Read its fixes before applying them.
+and its job is to name the rows your table does not contain. **A writer cannot audit itself.**
+The verifier is also not infallible: read its fixes before applying them.
 
 **Step 6 — the web fact-check pass is mandatory, not conditional.** Open **primary sources
 only** — the spec, the RFC, the vendor's own limits page, the actual source file — for every
 fact-shaped line the diff touched. Never fabricate a citation. When a precise value cannot be
 confirmed, soften to a correct range and name the mechanism rather than asserting a wrong precise
 number. Re-derive every arithmetic result in a table or trace. Record unreachable sources
-explicitly as residual risk; the real run reached nine primary sources and had three refuse the
-connection, and saying so is part of the deliverable.
-
----
-
-## Worked example — one real section, before and after
-
-`topics/java-jvm/synchronized-volatile-jmm/concepts.md`, `## Visibility, reordering, and
-atomicity`. This is the file the whole standard was calibrated on: it went through the full
-loop — write, adversarial verify, web fact-check, repair.
-
-### BEFORE (verbatim from the repo)
-
-> **Beginner.** Three distinct concerns are often conflated:
->
-> - **Visibility** — whether a write by one thread is observable by another.
-> - **Ordering / reordering** — whether operations appear to execute in program order.
-> - **Atomicity** — whether a compound operation executes as one indivisible step.
->
-> They are independent. `volatile` gives visibility and ordering but *not* atomicity of
-> compound actions. `synchronized` and atomics give all three (within their scope).
->
-> **Intermediate — the classic infinite loop.** A missing visibility guarantee: […code…]
-> The JIT is allowed to hoist the non-volatile read out of the loop because, in the absence of
-> a happens-before edge, it can prove nothing forces a re-read.
->
-> **Advanced — reordering sources.** Reordering can come from (1) the compiler / JIT, (2) the
-> processor's out-of-order execution, and (3) the memory hierarchy (store buffers, invalidate
-> queues). x86 is a relatively strong TSO model (only store-load reordering is visible);
-> ARM/POWER are weakly ordered and expose far more.
-
-**Named defects:** three audience-tier labels (C10, S1); a naked definition list as the
-explanation, with the instance 12 lines below the abstraction (C4, C7); "(1)…(2)…(3)" as an inline
-enumeration of a three-stage pipeline — a textbook S4 positive test with no diagram; `invalidate
-queues` with no gloss (C2); and quality decaying monotonically down the tiers (C1), the
-`**Beginner.**` list being plainer than the `**Advanced.**` paragraph carrying the harder material.
-
-### AFTER (the shipped rewrite)
-
-> Three different things can go wrong with a shared field, and each one needs a different fix.
-> The smallest case is one `boolean`: […the same code fence, moved up…]
->
-> Main sets `stop = true` and exits. Thread T spins on, pinning a core. No exception, no log
-> line, and the flag was set long ago. The write was not slow. The JIT is allowed to read
-> `stop` once before the loop and reuse that copy, because with no happens-before edge nothing
-> in the program obliges T to look again. Declare `stop` volatile and the edge exists, so T
-> has to re-read. This is a legal compiler optimisation, not a cache that failed to flush.
->
-> That loop is a **visibility** failure: a write by one thread never becomes observable to
-> another. Two more failures can happen to the same field, and neither one is visibility.
->
-> **Ordering** is whether operations appear to run in the order the program wrote them. Write
-> `data = 42` and then `ready = true`, both of them plain fields, and another thread can see
-> `ready` set while `data` is still 0. […]
->
-> **Atomicity** is whether a compound operation runs as one indivisible step. `stop = true`
-> is a single write, so it has nothing to divide; `count++` is a read, an add and a write. […]
->
-> […the "three are independent, each tool covers a different subset" paragraph, keeping every
-> fact from the BEFORE list; then the 64-bit tearing paragraph; then the one `[!WARNING]`…]
->
-> ### Why the simple version is wrong: three machines reorder, not one
->
-> Between the order you wrote and the order another core observes, an access passes three
-> stages, and each one may move it.
->
-> ```mermaid
-> flowchart LR
->     P["program order<br/>you wrote"] --> J["compiler / JIT<br/>reorders while generating code"]
->     J --> C["processor<br/>out-of-order execution"]
->     C --> M["memory hierarchy<br/>store buffers, invalidate queues"]
->     M --> O["order another core observes"]
-> ```
->
-> The hoist in the loop above happened at the first stage, in generated code, which is why no
-> amount of cache-flushing would have fixed it. At the last stage a write can be delayed after it
-> has already executed: a store waits in the core's store buffer, and on many designs an
-> invalidate queue also delays the moment another core learns its copy of the line has gone stale.
->
-> Which moves another core can observe depends on the chip, and the compiler targets that chip
-> too. x86 behaves as **total store order (TSO)**: for ordinary field accesses, store-load is
-> the only reordering it exposes to another core. […]
->
-> `volatile` fixes visibility, ordering and the tearing case with one keyword. It cannot fix
-> `count++`. That keyword is the next section.
-
-### What to notice
-
-- The definition list became **three named failures, each with an instance**, in the order they
-  bite, and the code fence that used to sit 12 lines below the abstraction now opens the section
-  (C4, C7). The `(1)(2)(3)` enumeration is **deleted**, not kept above the diagram (S4). The deep
-  beat is behind a content-named seam. The exit sentence names the next section in 20 flat words
-  (S7).
-- **Every fact survived**, including JLS 17.7, the JSR-133 attribution, both tearing halves, and
-  `invalidate queues` — now glossed and hedged rather than named and dropped.
-- Two H2s went 1,089 → 2,046 words, **+87.9%**. Reported, not gated. The bloat check then cut
-  about 50 words of narration ("You do not have to track any of that", "Here is the first, as
-  small as it gets") — the line between growing because it teaches and growing because it chats.
-- **Three fact regressions and one marker-free added claim were caught after a clean self-audit**,
-  by the verifier and the web pass. Budget for that: it is the normal outcome, not the exception.
-- One thing to notice in the last quoted paragraph: "Which moves another core can observe depends
-  on the chip" is the **repaired** version. The draft said "Which moves are legal at the last
-  stage depends on the chip" — a marker-free stage attribution the original never made. That is
-  the single most important sentence in this whole document's evidence base.
+explicitly as residual risk; saying so is part of the deliverable.
 
 ---
 
@@ -1217,16 +825,10 @@ third file it does not document is a contract violation from commit 1.
    **The information inventory — nothing in this list may drop:** numbers with units, versions,
    `RFC|JEP|JLS|CWE|SP 800-` citations, inline-code identifiers, URLs, table rows, mermaid blocks,
    code fences.
-   **Callout counts are NOT in that list and MAY drop** — but only by documented demotion. Write a
-   **demotion log**: one line per dropped callout naming the body sentence or `## References` line
-   that now carries its content. A drop with no log line fails as information loss. (The list holds
-   information; a callout is typography. On 193 files the S9 budget forces the
-   `[!WARNING]`/`[!INTERVIEW]` count down, so gating on it would fail 42% of the corpus by
-   construction.)
+   **Callout counts are NOT in that list and MAY drop** — but only against S9's demotion log.
 5. **Bloat check.** For each rewritten H2, list the added sentences that teach nothing new —
    narration, reassurance, restatement of the previous sentence — and delete them. Report the
-   count. On the hard case this was about 50 words across two sections. This is the compensating
-   control for having no reading-time ceiling; skipping it is how "let files grow" becomes padding.
+   count. Skipping this is how "let files grow" becomes padding.
 6. **Gates — all must pass:**
 
    ```bash
@@ -1237,19 +839,18 @@ third file it does not document is a contract violation from commit 1.
 
    Plus the anchor check with `read_headings`: **every base heading's `(level, text)` is still
    present and in the same relative order.** Anything extra is an addition and is legal — prefer
-   H3 seams; a new H2 is allowed for genuinely new material. Zero duplicate slugs. Do not gate on
-   "H3 only": `check_lock()` passes additions at any level, and a gate stricter than the repo's own
-   lock will fail compliant files.
+   H3 seams; a new H2 is allowed for genuinely new material. Zero duplicate slugs. **Do not gate on
+   "H3 only":** a gate stricter than the repo's own lock will fail compliant files.
 7. **Adversarial verifier — a separate agent, fresh context. Mandatory, never skipped.** It sees
    the diff, the claim-diff table and the inventory delta, and nothing else. It re-derives the
    sentence alignment independently, runs its own REGISTER SWAP, and reports undisclosed added
    claims by name. It must also check the opposite failure: anything softened, hedged away, or
    vagued.
 8. **Web fact-check pass — mandatory.** Primary sources only, for every fact-shaped line the diff
-   touched, with the four regression shapes as the checklist.
-9. **Repair.** Apply or reject each finding **with a written reason.** Verifier and fact-checker
-   suggestions can themselves be wrong — one suggested fix on the real run did not compile — so
-   read them before applying. Record every rejection.
+   touched, using the **four regression shapes in the fact-safety section above** as the
+   checklist. Worked instances of each are in `references/fact-safety-cases.md`.
+9. **Repair.** Apply or reject each finding **with a written reason**, having read it — verifier
+   and fact-checker suggestions can themselves be wrong. Record every rejection.
 10. **Commit** `concepts.md` + `prompts.yaml` + the ledger append **together, in one commit.**
     Never mix a prose rewrite with an anchor rename or a `questions.yaml` edit: three blast radii,
     three reviews.
@@ -1259,8 +860,8 @@ third file it does not document is a contract violation from commit 1.
 **At the end of every session, not every topic** (`CLAUDE.md` makes this non-optional): update the
 progress checklist in `ROADMAP.md` and the Claude memory index at
 `~/.claude/projects/<this-repo-project-dir>/memory/`. The ledger is the per-file
-completion marker; `ROADMAP.md` is the trail a human reads. On a 460-file wave, per-topic ROADMAP
-edits would be noise, so batch them once per session — but never skip them.
+completion marker; `ROADMAP.md` is the trail a human reads. Batch those edits once per session —
+but never skip them.
 
 Do not rely on the Astro build as a safety net. It will happily render prose that has lost half
 its facts. `validate_content.py` and the two review passes are the authority.
