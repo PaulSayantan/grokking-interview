@@ -109,8 +109,17 @@ citations — if the standard is still a draft, say "IETF draft", not a fake RFC
    add new `## H2`/`### H3` sections. If you add a subtopic worth testing, consider adding
    an MCQ (see `authoring-content`) — but never break an existing `ref: concepts.md#anchor`.
 6. **Callouts, sparingly.** Use the 4 recognized markers only — `> [!TIP]`, `> [!WARNING]`,
-   `> [!INTERVIEW]`, `> [!KEY-TAKEAWAY]` (marker alone on the blockquote's first line). 1–3
-   per file; don't over-decorate.
+   `> [!INTERVIEW]`, `> [!KEY-TAKEAWAY]` (marker alone on the blockquote's first line).
+   **The budget is `clarity-standard`'s S9 and there is only one in this repo:**
+   `max(1, round(1.2 × prose_words / 1000))` per file — 4 on a median file — with a secondary
+   cap of ≤1 per `## H2` to stop clustering; whichever admits fewer governs. The `S6` reading
+   map is exempt.
+
+   This replaces the old "1–3 per file" bar, which the corpus never obeyed: the median file
+   carries ~7 and only 82 of 460 complied. A rule nothing obeys is not a rule. **Never delete
+   a callout's content** to meet the budget — demote it into the stress position of a body
+   paragraph, or move an anecdote to `## References`. Deleting is information loss and fails
+   the gate.
 7. **Validate:** run `python scripts/validate_content.py` — must pass (it checks the sibling
    `questions.yaml` and that every `ref` anchor still resolves; a renamed/removed heading
    will fail here).
