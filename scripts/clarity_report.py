@@ -1447,7 +1447,12 @@ def render_file(rec: dict, sections: bool) -> str:
              "c11_hits", "callouts", "callout_budget", "h2_over_callout_cap",
              "h2", "h2_over_50_lines", "h2_over_50_lines_without_seam",
              "h2_under_2_paragraphs", "c4_sections", "c4_missing", "c4_miss_rate",
-             "c4_weak_only", "c4_marker_only_missing", "c4_offset_median",
+             # Print the legacy-detector control WITH its rescued pair. Alone,
+             # `c4_marker_only_missing 12` beside `c4_missing 1` reads as twelve C4
+             # failures; it is the count the OLD marker-only detector would have missed,
+             # and `c4_marker_only_rescued` is how many of those this detector recovered.
+             "c4_weak_only", "c4_marker_only_missing", "c4_marker_only_rescued",
+             "c4_offset_median",
              "mermaid_blocks",
              "reading_map", "reading_map_required")
     for k in order:

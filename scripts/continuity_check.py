@@ -362,6 +362,91 @@ def check_cliffhangers(
             )
 
 
+def check_open_cliffhanger(
+    led: dict, topics_root: Path, domain: str, slugs: list[str], done: list[str],
+    where: str, f: Findings
+) -> None:
+    """Validate the ledger's `open_cliffhanger` block itself.
+
+    `check_cliffhangers()` above validates the anchor that ships in `prompts.yaml`. Nothing
+    validated the ledger's own copy of it, so the two could silently disagree — and the
+    ledger's copy is what the next topic's operator reads at `--resume`, so a stale one
+    sends them at the wrong section. Four things are checkable while holding only the
+    ledger: that `from` is the topic the ledger says was rewritten last, that `to_position`
+    matches `position`, that `payoff_anchor` resolves in the destination, and that it agrees
+    with the shipped sidecar.
+
+    All warnings, never errors. K7 already establishes that a mid-wave README reorder must
+    not hard-fail two untouched files, and the same reasoning applies here.
+    """
+    oc = led.get("open_cliffhanger")
+    if not isinstance(oc, dict) or not oc:
+        return
+    pos = led.get("position") if isinstance(led.get("position"), int) else None
+    src = str(oc.get("from") or "").strip()
+
+    if not src:
+        f.warn(where, "open_cliffhanger has no 'from' — name the topic that left the loop")
+    elif done and src != done[-1]:
+        f.warn(where, f"open_cliffhanger.from is '{src}' but the last topics[] entry is "
+                      f"'{done[-1]}'. Exactly one cliffhanger is live and it is overwritten "
+                      f"every topic, so this one is stale")
+    elif src not in slugs:
+        f.warn(where, f"open_cliffhanger.from '{src}' is not a topic in plan[]/README order")
+
+    if isinstance(oc.get("to_position"), int) and pos and oc["to_position"] != pos:
+        f.warn(where, f"open_cliffhanger.to_position is {oc['to_position']} but 'position' is "
+                      f"{pos} — the open loop must point at the topic you are about to write")
+
+    anchor = str(oc.get("payoff_anchor") or "").strip()
+    if not anchor:
+        f.warn(where, "open_cliffhanger has no 'payoff_anchor' — the payoff is unverifiable")
+        return
+
+    dest_slug = slugs[pos - 1] if pos and 1 <= pos <= len(slugs) else None
+    if anchor.startswith("concepts.md#"):
+        target_slug, target_anchor = dest_slug, anchor.split("#", 1)[1]
+    else:
+        m = re.match(r"^/?(?:study/)?([a-z0-9][a-z0-9-]*)/([a-z0-9][a-z0-9-]*)#(.+)$", anchor)
+        if not m:
+            f.warn(where, f"open_cliffhanger.payoff_anchor '{anchor}' is neither "
+                          f"'concepts.md#a' nor '<domain>/<slug>#a'")
+            return
+        target_slug, target_anchor = m.group(2), m.group(3)
+        if m.group(1) != domain:
+            target_slug = None  # a cross-domain finale: nothing to check in this ledger
+    if not target_slug:
+        return
+
+    dest = topics_root / domain / target_slug / "concepts.md"
+    if target_anchor not in (anchors_of(dest) or set()):
+        f.warn(where, f"open_cliffhanger.payoff_anchor '#{target_anchor}' does not resolve in "
+                      f"'{domain}/{target_slug}'. A payoff is verified against the "
+                      f"UN-rewritten destination, whose headings are frozen, so this should "
+                      f"never drift — re-read the destination's H2 list")
+    elif oc.get("verified_present") is not True:
+        f.warn(where, f"open_cliffhanger.verified_present is {oc.get('verified_present')!r} — "
+                      f"set it to true only after opening '{domain}/{target_slug}' at "
+                      f"'#{target_anchor}' and reading the promised mechanism")
+
+    # The ledger and the shipped sidecar must name the same anchor, or --resume lies.
+    if src:
+        sidecar = topics_root / domain / src / "prompts.yaml"
+        if sidecar.exists():
+            try:
+                data = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                return  # check_cliffhangers() already reported the parse failure
+            shipped = str(
+                ((data.get("cliffhanger") or {}).get("payoff") or {}).get("anchor") or ""
+            ).strip()
+            if shipped and shipped != anchor:
+                f.warn(where, f"open_cliffhanger.payoff_anchor '{anchor}' disagrees with "
+                              f"topics/{domain}/{src}/prompts.yaml's '{shipped}'. The sidecar "
+                              f"is what readers follow; the ledger is what the next operator "
+                              f"reads. Make them identical")
+
+
 def k1_noun(led: dict, slug: str) -> str:
     """The key noun the ledger says topic `slug`'s cliffhanger promised."""
     oc = led.get("open_cliffhanger")
@@ -486,6 +571,7 @@ def check_ledger(path: Path, topics_root: Path, f: Findings, resume: bool) -> di
     done = [s for s in done if s in scope]
     check_terminology(led, topics_root, domain, done, where, f)
     check_cliffhangers(led, topics_root, domain, done, where, f)
+    check_open_cliffhanger(led, topics_root, domain, slugs or scope, done, where, f)
 
     if resume:
         print(resume_brief(led, slugs or scope, topics_root, domain))

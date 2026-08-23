@@ -88,6 +88,7 @@ Usage:
     python3 scripts/rewrite_audit.py --domain java-jvm
     python3 scripts/rewrite_audit.py --file topics/d/t/concepts.md
     python3 scripts/rewrite_audit.py --json
+    python3 scripts/rewrite_audit.py --show-added --max-rows 200   # the unflagged added rows
     python3 scripts/rewrite_audit.py --emit-factlines      # lines the web pass must check
     python3 scripts/rewrite_audit.py --emit-factlines --factlines-tier all
     python3 scripts/rewrite_audit.py --audit-ledger        # self-check the ledger, no diff
@@ -115,6 +116,18 @@ Exit code: 1 if any HARD finding, else 0. `--audit-ledger` exits 1 on a broken l
     REPORT kinds: H2_ADDED, FENCE_MODIFIED, FENCE_REPLACED, NEW_FILE, and the claim-diff
                   row flags ADDED_SENTENCE, REMOVED_SENTENCE, ADDED_NUMBER, DEHEDGED,
                   ABSOLUTE_ADDED, QUANTIFIER_STRENGTHENED, SVO_SHIFT, CAUSAL_MARKER.
+
+    THE ADDED_SENTENCE BLIND SPOT — read this before trusting a green run.
+    DEHEDGED, ABSOLUTE_ADDED, QUANTIFIER_STRENGTHENED and SVO_SHIFT are COMPARISON flags:
+    `classify()` runs them only when an original sentence exists to compare against. An
+    ADDED sentence therefore carries at most CAUSAL_MARKER, and a sentence that is new,
+    wrong and marker-free carries nothing at all. Those rows are listed only with
+    `--show-added` or `--json`; the default listing prints their count and says so. On the
+    hard-case draft (java-jvm/synchronized-volatile-jmm) two of the four known fact
+    regressions were exactly this shape. The default `--factlines-tier high` net does not
+    reach them either — it selects on numbers, versions, specs and URLs, and none of the
+    four regressions changed one. **Mechanical coverage of a NEW fact regression is the
+    ledger's `forbid:` patterns plus loop steps 7 and 8, not this claim-diff.**
 """
 from __future__ import annotations
 
@@ -1339,7 +1352,7 @@ def flag_histogram(rows: Iterable[Row]) -> dict[str, int]:
     return dict(sorted(hist.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def render_file(res: dict, max_rows: int) -> None:
+def render_file(res: dict, max_rows: int, show_added: bool = False) -> None:
     m = res["metrics"]
     print(f"\n── {res['file']}")
     if res["status"] != "audited":
@@ -1378,9 +1391,23 @@ def render_file(res: dict, max_rows: int) -> None:
     print(f"   claim-diff: {len(rows)} row(s) — "
           + ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items()))
           + (f"; flags: {', '.join(f'{k} {v}' for k, v in hist.items())}" if hist else ""))
-    review = [r for r in rows if r.flags and r.flags != ["ADDED_SENTENCE"]]
+    # An ADDED sentence with no other flag is a claim the base never made, and the
+    # comparison detectors (DEHEDGED / ABSOLUTE_ADDED / QUANTIFIER_STRENGTHENED / SVO_SHIFT)
+    # cannot run on it because there is no original sentence to compare against — see
+    # `classify()`, where all four sit behind `if old is not None`. So these rows are the
+    # LEAST covered ones, not the most. They are withheld from the default listing only
+    # because a real rewrite adds dozens; withholding them SILENTLY was a defect. On the
+    # hard case (topics/java-jvm/synchronized-volatile-jmm, pre-repair draft) two of the four
+    # known fact regressions landed here and nowhere else: the marker-free stage
+    # misattribution "Which moves are legal at the last stage depends on the chip" and the
+    # added absolute "nothing else can". Both were invisible in this report until --json.
+    added_only = [r for r in rows if r.flags == ["ADDED_SENTENCE"]]
+    review = [r for r in rows if r.flags] if show_added \
+        else [r for r in rows if r.flags and r.flags != ["ADDED_SENTENCE"]]
     if review:
-        print(f"   rows to verify ({len(review)}; the SVO/de-hedge/marker net, REPORT-only):")
+        label = ("the SVO/de-hedge/marker net plus every added sentence"
+                 if show_added else "the SVO/de-hedge/marker net")
+        print(f"   rows to verify ({len(review)}; {label}, REPORT-only):")
     for r in review[:max_rows]:
         print(f"     [{r.verdict} {','.join(r.flags)}] L{r.line} «{r.heading}»")
         if r.old:
@@ -1390,6 +1417,15 @@ def render_file(res: dict, max_rows: int) -> None:
             print(f"        why: {r.note}")
     if len(review) > max_rows:
         print(f"     … {len(review) - max_rows} more (raise --max-rows or use --json)")
+    if added_only and not show_added:
+        print(f"   ⚠ {len(added_only)} ADDED sentence(s) carry no other flag and are NOT "
+              f"listed above.\n"
+              f"     No comparison detector can run on an added sentence, so these are the "
+              f"least-covered\n"
+              f"     rows in the diff, not the safest. Every one is a claim the base did not "
+              f"make and owes\n"
+              f"     a source (SKILL.md fact-safety steps 2-3). Read them: --show-added, or "
+              f"--json.")
 
 
 def render_factlines(results: list[dict], scope: str, tier: str) -> int:
@@ -1407,11 +1443,11 @@ def render_factlines(results: list[dict], scope: str, tier: str) -> int:
 
 
 def render(results: list[dict], ledger_findings: list[Finding], base_sha: str,
-           new_label: str, max_rows: int) -> None:
+           new_label: str, max_rows: int, show_added: bool = False) -> None:
     print(f"rewrite audit — base {base_sha}, after = {new_label}, "
           f"{len(results)} concepts.md changed")
     for res in results:
-        render_file(res, max_rows)
+        render_file(res, max_rows, show_added)
 
     print(f"\n{'=' * 86}")
     if ledger_findings:
@@ -1427,8 +1463,11 @@ def render(results: list[dict], ledger_findings: list[Finding], base_sha: str,
     report = [f for res in results for f in res["findings"] if f.severity == "REPORT"]
     review_rows = sum(1 for res in results for r in res["rows"]
                       if r.flags and r.flags != ["ADDED_SENTENCE"])
+    added_only_rows = sum(1 for res in results for r in res["rows"]
+                          if r.flags == ["ADDED_SENTENCE"])
     print(f"\nHARD findings: {len(hard)}   REPORT findings: {len(report)}   "
-          f"rows queued for human/agent verification: {review_rows}")
+          f"rows queued for human/agent verification: {review_rows}"
+          + (f" (+{added_only_rows} unflagged added sentence(s))" if added_only_rows else ""))
     if hard:
         kinds: dict[str, int] = {}
         for f in hard:
@@ -1491,6 +1530,9 @@ def main() -> int:
     ap.add_argument("--ledger", default=str(LEDGER))
     ap.add_argument("--max-rows", type=int, default=12,
                     help="claim-diff rows printed per file (default 12)")
+    ap.add_argument("--show-added", action="store_true",
+                    help="also list ADDED sentences carrying no other flag — the rows no "
+                         "comparison detector can reach (raise --max-rows with it)")
     args = ap.parse_args()
 
     ledger_path = Path(args.ledger)
@@ -1555,7 +1597,8 @@ def main() -> int:
         if not ledger_findings:
             print("verified-facts ledger: ✅ intact.")
     else:
-        render(results, ledger_findings, base_sha, new_label, args.max_rows)
+        render(results, ledger_findings, base_sha, new_label, args.max_rows,
+               args.show_added)
         if args.emit_factlines:
             render_factlines(results, args.factlines_scope, args.factlines_tier)
 
