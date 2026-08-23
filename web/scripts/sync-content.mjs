@@ -40,7 +40,20 @@ const CATALOG_OUT = path.join(WEB_ROOT, "src/data/catalog.json");
 // Astro's content-layer cache. We fully regenerate CONCEPTS_OUT every run, so a
 // stale data store makes the glob loader re-add ids it already cached and emit
 // "[glob-loader] Duplicate id" warnings. Invalidate it whenever we re-sync.
-const ASTRO_DATA_STORE = path.join(WEB_ROOT, ".astro/data-store.json");
+//
+// BOTH PATHS, and this matters far more than the duplicate-id warning: the data
+// store caches each entry's RENDERED HTML, not just its frontmatter. Astro writes
+// it to node_modules/.astro during `astro build` and to .astro during `astro dev`,
+// and only the latter was being cleared — so a build replayed cached HTML and the
+// markdown pipeline never re-ran. That hid a change to a rehype plugin across five
+// consecutive full builds (including after `rm -rf dist`), and it would have hidden
+// a rewritten concepts.md just as effectively. Note also that a rehype plugin that
+// THROWS does not fail the build; Astro swallows it per-entry. So a silently stale
+// render is the failure mode to design against here.
+const ASTRO_DATA_STORES = [
+  path.join(WEB_ROOT, ".astro/data-store.json"),
+  path.join(WEB_ROOT, "node_modules/.astro/data-store.json"),
+];
 
 // --- Domain configuration -------------------------------------------------
 
@@ -324,7 +337,7 @@ async function clean() {
   await rm(CATALOG_OUT, { force: true });
   // Drop the stale content-layer cache so regenerated entries aren't seen as
   // duplicates of previously-cached ids. Astro rebuilds it on the next load.
-  await rm(ASTRO_DATA_STORE, { force: true });
+  for (const store of ASTRO_DATA_STORES) await rm(store, { force: true });
 }
 
 async function processAuthoredDomain(domainSlug) {

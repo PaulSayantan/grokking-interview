@@ -1,0 +1,111 @@
+---
+/**
+ * OpenQuestions — the consolidated end-of-topic panel.
+ *
+ * Every think-prompt in the topic, in reading order, in one place. It is
+ * PROGRESSIVELY POPULATED: an item shows up here once its section's row has been
+ * opened in the text above, so the panel doubles as the reader's own list of what
+ * they left open. "Unlock all" is the escape hatch — for a reader who wants the
+ * whole set now, and for a screen-reader or keyboard user whose scroll pattern may
+ * never satisfy the reading heuristic.
+ *
+ * NO-JS CONTRACT (inverted, per web/CONTRACT.md): the static HTML ships every item
+ * UNLOCKED and visible, and the CSS collapse is gated on the `data-pd="on"` flag the
+ * study page's one inline head script sets. JS only ever removes. The two controls
+ * that are meaningless without JS (the note and the Unlock-all button) are hidden by
+ * the same flag, so a no-JS reader is never offered a dead button.
+ *
+ * `data-pagefind-ignore`: the study page body is the site's ONLY data-pagefind-body,
+ * and these prompts are also present in the prose rows. Indexing them would both
+ * double-count and put think-prompts in front of readers searching for the concept.
+ */
+import type { CollectionEntry } from "astro:content";
+import { renderPromptMarkdown } from "../../plugins/rehype-prompts.mjs";
+
+type Sidecar = NonNullable<CollectionEntry<"concepts">["data"]["prompts"]>;
+type PromptItem = Sidecar["items"][number];
+
+interface Props {
+  items: PromptItem[];
+  /** `headings` from render() — used to find each prompt's owning H2 section. */
+  headings: { depth: number; slug: string; text: string }[];
+}
+
+const { items, headings } = Astro.props;
+
+/**
+ * The section a prompt belongs to = the nearest preceding depth-2 heading of its
+ * ref anchor. Same rule the rehype-prompts plugin uses to place the row, so the
+ * panel item and the row are always keyed identically.
+ */
+function ownerSection(ref: string): { slug: string; text: string } | null {
+  const anchor = /#(.+)$/.exec(ref ?? "")?.[1];
+  if (!anchor) return null;
+  const at = headings.findIndex((h) => h.slug === anchor);
+  if (at < 0) return null;
+  for (let i = at; i >= 0; i--) {
+    if (headings[i].depth === 2) return { slug: headings[i].slug, text: headings[i].text };
+  }
+  return null;
+}
+
+const rows = items.map((p) => ({
+  p,
+  html: renderPromptMarkdown(p.prompt) as string,
+  section: ownerSection(p.ref),
+}));
+---
+
+<section
+  class="pd-panel"
+  aria-labelledby="pd-panel-title"
+  data-pd-panel
+  data-pagefind-ignore
+>
+  <h2 class="pd-panel__title" id="pd-panel-title">Open questions</h2>
+  <p class="pd-panel__note">
+    Each one lands here when you open it in the text above.
+  </p>
+  {/*
+    `value={i + 1}`: the reveal gate hides unrevealed items with display:none, which
+    drops them from the CSS list counter — so a partially-populated panel renumbered
+    the topic's 3rd question as "1.". `value` on an <li> survives hidden siblings.
+
+    An ownerless prompt (its ref anchor did not resolve, so rehype-prompts dropped it
+    from the prose) has no row that could ever unlock it. Ship it already open rather
+    than permanently hidden. validate_content.py makes this unreachable with valid
+    content; open is the safe failure direction.
+  */}
+  <ol class="pd-panel__list">
+    {
+      rows.map(({ p, html, section }, i) => (
+        <li
+          class="pd-panel__item"
+          data-pd-panel-item
+          value={i + 1}
+          data-pd-sec={section?.slug ?? undefined}
+          data-pd-state={section ? undefined : "open"}
+          tabindex="-1"
+        >
+          <div class="pd-q__prompt" set:html={html} />
+          <p class="pd-panel__meta">
+            {/* Links the SECTION, not `#pd-<id>`: after a reload the panel item is
+                visible (reveal persists) while the prose row is back to armed, so a
+                jump to the prompt's own id would land on a display:none target and
+                do nothing. The section heading always exists and always works. */}
+            {section && <a href={`#${section.slug}`}>{section.text}</a>}
+            {section && (p.tier === "A" || p.tier === "B") && p.answerHref && (
+              <span aria-hidden="true"> · </span>
+            )}
+            {(p.tier === "A" || p.tier === "B") && p.answerHref && (
+              <a href={p.answerHref}>Where this gets answered</a>
+            )}
+          </p>
+        </li>
+      ))
+    }
+  </ol>
+  <p class="pd-panel__actions">
+    <button type="button" class="pd-unlock" data-pd-unlock>Unlock all</button>
+  </p>
+</section>

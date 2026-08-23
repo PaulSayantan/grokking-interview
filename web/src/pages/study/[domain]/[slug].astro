@@ -24,6 +24,8 @@
  */
 import BaseLayout from "@/layouts/BaseLayout.astro";
 import DomainSidebar from "@/components/DomainSidebar.astro";
+import OpenQuestions from "@/components/OpenQuestions.astro";
+import Cliffhanger from "@/components/Cliffhanger.astro";
 import { getEntry, render } from "astro:content";
 import {
   getAllSubtopicRefs,
@@ -89,6 +91,40 @@ const practiceCount = Math.min(DEFAULT_SAMPLE_SIZE, questionCount);
 
 const practiceHref = `/practice/${domain}/${slug}`;
 const domainHref = `/domain/${domain}`;
+
+// --- Clarity think-prompts (the optional prompts.yaml sidecar) --------------
+// Present only on clarity-migrated topics; `undefined` on the other ~460, which
+// must keep rendering exactly as before. Everything below is therefore behind a
+// truthiness check, and the reveal machinery (flag script, module script, live
+// region) is emitted ONLY when there is something to reveal.
+const prompts = entry.data.prompts;
+const promptItems = prompts?.items ?? [];
+const cliffhanger = prompts?.cliffhanger;
+// Where THIS topic settles the PREVIOUS topic's open loop (continuity rule K1).
+const resolves = prompts?.resolves;
+const hasReveal = promptItems.length > 0;
+
+/**
+ * THE reveal flag — the one inline script in this feature.
+ *
+ * It is a single string constant, so it is byte-identical on every study page that
+ * carries prompts and gen-csp-headers.mjs gains exactly ONE hash. It runs in <head>
+ * before the body parses, which is why there is no flash of open rows: every CSS
+ * rule that hides anything is gated on this attribute, so with JS off the attribute
+ * never appears and the page simply ships with its questions open.
+ *
+ * The `astro:after-swap` half is the ClientRouter half. ClientRouter resets <html>'s
+ * attributes from the incoming document and does NOT re-run head inline scripts on a
+ * study -> study navigation, so the flag has to be re-applied there — the same pattern
+ * BaseLayout's theme script uses, and for the same reason. The listener is registered
+ * on `document` (never replaced) behind a guard, so repeat visits cannot stack it.
+ *
+ * Deliberately NO watchdog that removes the flag if the module script fails to load.
+ * A timeout would be a second, silent code path whose only job is to un-hide content
+ * — exactly the kind of fallback branch that rots — and its failure mode (everything
+ * flashing open mid-read on a slow phone) is worse than its success mode.
+ */
+const PD_FLAG_SCRIPT = `(function(){document.documentElement.setAttribute("data-pd","on");if(window.__pdFlag)return;window.__pdFlag=1;document.addEventListener("astro:after-swap",function(){if(document.querySelector("[data-pd-row],[data-pd-panel]"))document.documentElement.setAttribute("data-pd","on");});})();`;
 ---
 
 <BaseLayout
@@ -97,7 +133,30 @@ const domainHref = `/domain/${domain}`;
   activeNav="catalog"
   width="wide"
 >
-  <div class="study-page" style={`--topic-accent: ${accent};`}>
+  {
+    /*
+      THE reveal flag. One inline script, byte-identical on every study page that
+      carries prompts (no per-page data in it), so gen-csp-headers.mjs gains exactly
+      ONE hash. It runs in <head> before the body parses, which is why there is no
+      flash of open rows: the CSS collapse in global.css is gated on this attribute,
+      and with JS off the attribute never appears and every row ships open.
+
+      The `astro:after-swap` listener is the ClientRouter half. ClientRouter resets
+      <html>'s attributes from the incoming document and does NOT re-run head inline
+      scripts on a study -> study navigation, so the flag has to be re-applied there
+      — the same pattern BaseLayout's theme script uses. It is registered on
+      `document` (never replaced) and guarded, so repeat visits cannot stack it.
+    */
+  }
+  <Fragment slot="head">
+    {hasReveal && <script is:inline set:html={PD_FLAG_SCRIPT} />}
+  </Fragment>
+
+  <div
+    class="study-page"
+    style={`--topic-accent: ${accent};`}
+    data-pd-topic={`${domain}/${slug}`}
+  >
     {/* Page-top scroll-progress bar — decorative; native scroll-driven CSS. */}
     <div class="scroll-progress" aria-hidden="true"></div>
     {/* Breadcrumb */}
@@ -189,9 +248,40 @@ const domainHref = `/domain/${domain}`;
       }
 
       <article class="study-article" data-pagefind-body>
+        {/* One muted line closing the loop the PREVIOUS topic's cliffhanger opened
+            (sidecar rule K1). Present only when the sidecar records it. */}
+        {
+          resolves && resolves.href && (
+            <p class="pd-resolves" data-pagefind-ignore>
+              Settles the question the previous topic left open —{" "}
+              <a href={resolves.href}>jump to it</a>.
+            </p>
+          )
+        }
+
         <div class="prose study-prose">
           <Content />
         </div>
+
+        {/*
+          Consolidated end-of-topic panel + the cliffhanger, both before the
+          Practice CTA. The panel is progressively populated by the module script
+          below; without JS it simply ships fully unlocked.
+        */}
+        {hasReveal && <OpenQuestions items={promptItems} headings={headings} />}
+        {cliffhanger && <Cliffhanger cliffhanger={cliffhanger} />}
+
+        {/*
+          The page's ONLY live region. Initially empty, populated on the FIRST
+          arming of the visit with one sentence that teaches the mechanic, then
+          silent for good — a per-section announcement would be ~15 per topic,
+          which is why people turn a screen reader off on a site like this.
+        */}
+        {
+          hasReveal && (
+            <p class="sr-only" role="status" aria-live="polite" data-pd-live data-pagefind-ignore></p>
+          )
+        }
 
         {/* Repeat the primary CTA at the end of a long read. */}
         <div class="study-outro">
@@ -408,6 +498,339 @@ const domainHref = `/domain/${domain}`;
         watchTheme();
       });
     })();
+  </script>
+
+  {/*
+    Reveal mechanic — "quiet seed to bloom".
+
+    Bundled (NOT is:inline), so it costs no CSP hash and is evaluated once per
+    session; every navigation is handled through the astro:page-load /
+    astro:before-swap events, like the TOC and mermaid scripts above. It is a
+    plain ES module, not a second Preact island (the site has exactly one, and
+    PracticeSession keeps that seat).
+
+    It only ever sets ATTRIBUTES. The markup is all in the static HTML — built by
+    plugins/rehype-prompts.mjs and the two Astro components — so this script can
+    never be the reason a prompt is missing.
+
+    THE HEURISTIC ARMS; THE TAP OPENS. Nothing here auto-reveals, nothing moves
+    focus except "Unlock all" (a keyboard user would otherwise be stranded), and
+    there is no pushState / scrollIntoView / focus trap, so Back always means
+    "the previous page".
+
+    Reading coverage is written to ip:read:v1 and NOWHERE else: it must never reach
+    computeMastery(), the SRS schedule or the streak — see src/lib/reading.ts.
+  */}
+  <script>
+    import {
+      READ_KEY,
+      REVEAL_KEY,
+      TICK_MS,
+      JUMP_SUSPEND_MS,
+      READ_BAND_MARGIN,
+      BLOCK_SELECTOR,
+      dwellAllowed,
+      sectionRead,
+      readStore,
+      sectionsFor,
+      addSections,
+      markTaught,
+      wasTaught,
+    } from "@lib/reading";
+
+    /** Top of the reading band, in px — mirrors READ_BAND_MARGIN's first value. */
+    const BAND_TOP = 88;
+
+    interface Sec {
+      id: string;
+      row: HTMLElement;
+      blocks: Element[];
+      words: number;
+      /** The next H2 (or, for the last section, the panel/outro that follows it). */
+      dept: Element | null;
+      exited: Set<Element>;
+      visible: Set<Element>;
+      dwellMs: number;
+      departed: boolean;
+      read: boolean;
+    }
+
+    let ac: AbortController | null = null;
+    let observers: IntersectionObserver[] = [];
+    let timer: number | null = null;
+
+    function cleanup() {
+      if (ac) ac.abort();
+      ac = null;
+      observers.forEach((o) => o.disconnect());
+      observers = [];
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+    }
+
+    /** A block has left the band UPWARD — the signal a TOC jump cannot fake. */
+    function exitedUpward(e: IntersectionObserverEntry): boolean {
+      const top = e.rootBounds ? e.rootBounds.top : BAND_TOP;
+      return e.boundingClientRect.bottom <= top;
+    }
+
+    function init() {
+      cleanup();
+      const page = document.querySelector<HTMLElement>(".study-page[data-pd-topic]");
+      if (!page) return;
+      const prose = page.querySelector<HTMLElement>(".study-prose");
+      const rows = Array.from(page.querySelectorAll<HTMLElement>("[data-pd-row]"));
+      const panel = page.querySelector<HTMLElement>("[data-pd-panel]");
+      if (!prose || !rows.length) return;
+
+      const topicKey = page.dataset.pdTopic || "";
+      const live = page.querySelector<HTMLElement>("[data-pd-live]");
+      const panelItems = panel
+        ? Array.from(panel.querySelectorAll<HTMLElement>("[data-pd-panel-item]"))
+        : [];
+
+      ac = new AbortController();
+      const signal = ac.signal;
+      const loadedAt = Date.now();
+
+      // --- sections ------------------------------------------------------
+      // H2s and the blocks that follow them are SIBLINGS, so a section is a run
+      // of root-level children. No sentinel nodes are inserted for this.
+      const kids = Array.from(prose.children);
+      const h2Index: number[] = [];
+      kids.forEach((el, i) => {
+        if (el.tagName === "H2" && el.id) h2Index.push(i);
+      });
+      // The last section departs when the end-of-topic panel (or the outro CTA)
+      // enters the band — both are real elements already on the page.
+      const tail = panel ?? page.querySelector(".study-outro");
+
+      const secs = new Map<string, Sec>();
+      h2Index.forEach((start, n) => {
+        const heading = kids[start] as HTMLElement;
+        const end = n + 1 < h2Index.length ? h2Index[n + 1] : kids.length;
+        const row = rows.find((r) => r.dataset.pdSec === heading.id);
+        if (!row) return; // no prompts in this section — nothing to arm
+        const blocks = kids
+          .slice(start + 1, end)
+          .filter((el) => el.matches(BLOCK_SELECTOR));
+        secs.set(heading.id, {
+          id: heading.id,
+          row,
+          blocks,
+          words: Number(heading.dataset.pdWords || "0"),
+          dept: n + 1 < h2Index.length ? kids[h2Index[n + 1]] : tail,
+          exited: new Set(),
+          visible: new Set(),
+          dwellMs: 0,
+          departed: false,
+          read: false,
+        });
+      });
+      if (!secs.size) return;
+
+      // --- restore ---------------------------------------------------------
+      // Previously-read sections arm immediately: that is a colour + glyph change
+      // inside a fixed-height line, so it costs no layout shift.
+      //
+      // Previously-REVEALED sections are deliberately NOT re-opened in the prose.
+      // Auto-opening a row would move content the reader has already read (and
+      // would shift an anchor landing), which is the one thing this design
+      // forbids. The reveal instead persists into the end-of-topic panel, which
+      // sits below everything and can grow harmlessly.
+      const wasRead = new Set(sectionsFor(readStore(READ_KEY), topicKey));
+      const wasRevealed = new Set(sectionsFor(readStore(REVEAL_KEY), topicKey));
+      for (const sec of secs.values()) {
+        if (wasRead.has(sec.id)) {
+          sec.read = true;
+          arm(sec.row);
+        }
+      }
+      for (const item of panelItems) {
+        if (item.dataset.pdSec && wasRevealed.has(item.dataset.pdSec)) {
+          item.setAttribute("data-pd-state", "open");
+        }
+      }
+
+      function arm(row: HTMLElement) {
+        if (row.getAttribute("data-pd-state") === "locked") {
+          row.setAttribute("data-pd-state", "armed");
+        }
+      }
+
+      /** One sentence, on the first arming of the visit, then silent for good. */
+      let taughtThisVisit = wasTaught();
+      function teach() {
+        if (taughtThisVisit || !live) return;
+        taughtThisVisit = true;
+        live.textContent =
+          "You finished a section — the line at its end now opens the questions it left you.";
+        markTaught();
+      }
+
+      function syncPanel(sectionId: string) {
+        for (const item of panelItems) {
+          if (item.dataset.pdSec === sectionId) {
+            item.setAttribute("data-pd-state", "open");
+          }
+        }
+      }
+
+      function setOpen(row: HTMLElement, open: boolean) {
+        row.setAttribute("data-pd-state", open ? "open" : "armed");
+        const btn = row.querySelector<HTMLElement>("[data-pd-toggle]");
+        if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+        const id = row.dataset.pdSec || "";
+        if (open && id) {
+          // Reveal is monotonic: closing a row again does not un-remember it, so
+          // the panel stays the reader's list of everything they have opened.
+          addSections(REVEAL_KEY, topicKey, [id]);
+          syncPanel(id);
+        }
+      }
+
+      // --- controls --------------------------------------------------------
+      page.addEventListener(
+        "click",
+        (ev) => {
+          const target = ev.target as Element | null;
+          const toggle = target?.closest?.("[data-pd-toggle]") as HTMLElement | null;
+          if (toggle) {
+            const row = toggle.closest("[data-pd-row]") as HTMLElement | null;
+            if (row) setOpen(row, row.getAttribute("data-pd-state") !== "open");
+            return;
+          }
+          const unlock = target?.closest?.("[data-pd-unlock]");
+          if (unlock) {
+            for (const row of rows) {
+              arm(row);
+              setOpen(row, true);
+            }
+            // The ONE place focus moves: without it a keyboard user presses
+            // "Unlock all" and is left standing on a button with no way to reach
+            // what just appeared.
+            const first = panelItems.find(
+              (i) => i.getAttribute("data-pd-state") === "open",
+            );
+            if (first) first.focus();
+          }
+        },
+        { signal },
+      );
+
+      // --- dwell vetoes ----------------------------------------------------
+      let suspendedUntil = 0;
+      let lastActivity = Date.now();
+      let lastScrollY = window.scrollY;
+
+      const activity = () => {
+        lastActivity = Date.now();
+      };
+      for (const ev of ["scroll", "wheel", "pointerdown", "keydown", "touchstart"]) {
+        window.addEventListener(ev, activity, { passive: true, signal });
+      }
+      // A TOC jump (or any in-page anchor) teleports the page. Suspend accrual
+      // briefly so the burst of intersection callbacks it triggers credits nothing.
+      document.addEventListener(
+        "click",
+        (ev) => {
+          const a = (ev.target as Element | null)?.closest?.('a[href^="#"]');
+          if (a) suspendedUntil = Date.now() + JUMP_SUSPEND_MS;
+        },
+        { signal, capture: true },
+      );
+      window.addEventListener(
+        "hashchange",
+        () => {
+          suspendedUntil = Date.now() + JUMP_SUSPEND_MS;
+        },
+        { signal },
+      );
+
+      // --- observers -------------------------------------------------------
+      const secOf = new Map<Element, Sec>();
+      const deptOf = new Map<Element, Sec[]>();
+
+      const blockIO = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            const sec = secOf.get(e.target);
+            if (!sec) continue;
+            if (e.isIntersecting) sec.visible.add(e.target);
+            else {
+              sec.visible.delete(e.target);
+              if (exitedUpward(e)) sec.exited.add(e.target);
+            }
+          }
+        },
+        { rootMargin: READ_BAND_MARGIN, threshold: 0 },
+      );
+      const deptIO = new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            if (!e.isIntersecting) continue;
+            const list = deptOf.get(e.target);
+            if (list) for (const sec of list) sec.departed = true;
+          }
+        },
+        { rootMargin: READ_BAND_MARGIN, threshold: 0 },
+      );
+      observers = [blockIO, deptIO];
+
+      for (const sec of secs.values()) {
+        for (const b of sec.blocks) {
+          secOf.set(b, sec);
+          blockIO.observe(b);
+        }
+        if (sec.dept) {
+          const list = deptOf.get(sec.dept) ?? [];
+          list.push(sec);
+          deptOf.set(sec.dept, list);
+          deptIO.observe(sec.dept);
+        }
+      }
+
+      // --- the single tick -------------------------------------------------
+      timer = window.setInterval(() => {
+        const now = Date.now();
+        const y = window.scrollY;
+        const delta = y - lastScrollY;
+        lastScrollY = y;
+        const accrue = dwellAllowed({
+          hidden: document.hidden,
+          scrollDeltaPx: delta,
+          viewportH: window.innerHeight,
+          suspendedUntil,
+          lastActivity,
+          now,
+        });
+        for (const sec of secs.values()) {
+          if (sec.read) continue;
+          if (accrue && sec.visible.size > 0) sec.dwellMs += TICK_MS;
+          const done = sectionRead(
+            {
+              words: sec.words,
+              blocks: sec.blocks.length,
+              exitedUp: sec.exited.size,
+              dwellMs: sec.dwellMs,
+              departed: sec.departed,
+            },
+            now,
+            loadedAt,
+          );
+          if (!done) continue;
+          sec.read = true;
+          arm(sec.row);
+          addSections(READ_KEY, topicKey, [sec.id]);
+          teach();
+        }
+      }, TICK_MS);
+    }
+
+    document.addEventListener("astro:page-load", init);
+    // Nothing may leak between pages: observers, the interval and every listener
+    // go with the document that owned them.
+    document.addEventListener("astro:before-swap", cleanup);
   </script>
 
   <style is:global>
@@ -820,6 +1243,18 @@ const domainHref = `/domain/${domain}`;
   }
   .study-page .study-prose pre.mermaid[data-mermaid-done] {
     white-space: normal;
+  }
+  /* CLARITY EFFORT (global.css §8, change 5 of 7) — the WIDE measure for diagrams.
+     global.css gives `.prose > pre` --measure-wide at >=1024px, but the
+     `margin: 1.5rem 0` two rules up is more specific and would zero the bleed, so
+     the mermaid case has to be restated here. This is the rule that stops
+     `pre.mermaid svg { max-width: 100% }` from needlessly downscaling ~1,176
+     diagrams that were already sized to be read. */
+  @media (min-width: 1024px) {
+    .study-page .study-prose > pre.mermaid {
+      width: max(var(--measure-wide), calc(100% + var(--prose-bleed)));
+      max-width: none;
+    }
   }
   /* With useMaxWidth:false the SVG carries its natural width/height.
      Default (roomy screens): scale DOWN to fit the column (max-width:100%) so a

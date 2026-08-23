@@ -7,6 +7,8 @@ import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import remarkGfm from "remark-gfm";
 import rehypeCallouts from "./plugins/rehype-callouts.mjs";
 import remarkMermaid from "./plugins/rehype-mermaid.mjs";
+import rehypeLede from "./plugins/rehype-lede.mjs";
+import rehypePrompts from "./plugins/rehype-prompts.mjs";
 
 // Static site (output: "static" is the Astro default — no SSR adapter).
 // `site` is used for canonical URLs / sitemaps; override via env for prod.
@@ -44,6 +46,19 @@ export default defineConfig({
       ],
       // Turns "> [!TIP]" GitHub-alert blockquotes into styled callout boxes.
       rehypeCallouts,
+      // --- clarity effort (CONTRACT.md §1). ORDER IS LOAD-BEARING. -----------
+      // Both run AFTER rehype-slug + autolink-headings, because both need the
+      // heading `id`s (prompts place a row by anchor; lede splits a seam heading's
+      // text while leaving its id untouched).
+      //
+      // rehype-lede marks each section's first paragraph and each tier-3 seam. It
+      // must run BEFORE rehype-prompts so it never mistakes an injected prompt row
+      // for prose.
+      rehypeLede,
+      // rehype-prompts injects the think-prompt rows from the topic's prompts.yaml
+      // sidecar (read via file.data.astro.frontmatter.prompts). A no-op on the ~460
+      // topics that carry no sidecar.
+      rehypePrompts,
     ],
     // Shiki is Astro's built-in syntax highlighter.
     // `defaultColor: false` disables inline color styles entirely — Shiki

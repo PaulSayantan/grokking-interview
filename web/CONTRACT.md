@@ -15,15 +15,21 @@ stated otherwise.
 - **Preact** via `@astrojs/preact` — use islands **only** for the interactive practice quiz
   (`client:load` / `client:visible`). Everything else is static Astro/HTML.
 - **TypeScript** (strict). Path aliases: `@/*` -> `src/*`, `@lib/*` -> `src/lib/*`.
-- Markdown pipeline (configured in `astro.config.mjs`). **Frozen, with one approved
-  pending amendment:** the clarity effort adds `rehype-prompts` (injects think-prompts from
-  `prompts.yaml`) and `rehype-lede` (marks each section's first paragraph). Both were
-  explicitly signed off — see the "frozen-pipeline sign-offs" decision in the clarity plan.
-  Until they land, treat the list below as complete; do not add anything else without a
-  fresh sign-off.
+- Markdown pipeline (configured in `astro.config.mjs`). **Frozen. The clarity effort's two
+  approved plugins are now LANDED** (they were the one pending amendment; the sign-off is the
+  "frozen-pipeline sign-offs" decision in the clarity plan). The list below is complete again —
+  do not add anything else without a fresh sign-off.
   - `remark-gfm` — GFM tables in `concepts.md` comparison sections.
+  - `remark-mermaid` (`plugins/rehype-mermaid.mjs` — misnamed, it is a **remark** plugin) —
+    rewrites ` ```mermaid ` fences to `<pre class="mermaid">` **before** Shiki sees them.
   - `rehype-slug` — GitHub-slugger-compatible heading ids (matches `ref` anchors).
   - `rehype-autolink-headings` (`behavior: "wrap"`, class `heading-anchor`) — anchor affordance.
+  - `rehype-callouts` — the four `> [!TYPE]` callout boxes.
+  - `rehype-lede` — marks each section's first paragraph (`.pd-lede`) and each tier-3 seam
+    heading (`.pd-seam`). Runs **after** slug/autolink (it needs the ids) and **before**
+    `rehype-prompts` (so it never sees an injected prompt row as prose). §11.
+  - `rehype-prompts` — injects the think-prompt rows from the topic's `prompts.yaml` sidecar,
+    read via `file.data.astro.frontmatter.prompts`. A no-op on topics with no sidecar. §11.
   - Shiki built-in highlighting (`github-light` / `github-dark`, `wrap: true`).
 - Sync script is Node ESM (`scripts/sync-content.mjs`), parses YAML with the `yaml` lib.
 
@@ -297,16 +303,30 @@ pre-paint inline script (**no flash of wrong theme**). Page content goes in the 
 Imported by `BaseLayout` — every page gets it. Tailwind layers + design tokens + a
 hand-rolled `.prose` ruleset. Do not rename tokens/classes below.
 
-> **Approved pending amendment (clarity effort):** seven `.prose` typography rules change
-> — `line-height` 1.7 → 1.63, paragraph gap `1em` → `1.15em`, `h2` margins, per-block
-> leading for `li`/`td`/`pre`, a wider `--measure-wide` (80ch) for `pre`/`table`/mermaid at
-> ≥1024px, mobile `overscroll-behavior-x`, and `text-wrap: pretty`. `--measure` stays 68ch.
-> Signed off; not yet landed. **No token or class is renamed.**
+> **LANDED (clarity effort), was the approved pending amendment:** seven `.prose` typography
+> rules changed — `line-height` 1.7 → 1.63; paragraph gap `1em` → `1.15em`; `h2`
+> `margin-top` 2em → 2.75em plus `margin-bottom: 0.75em`; per-block leading (`li` 1.5 with
+> `0.4em` between, `td`/`th` 1.45, `pre` 1.55); `--measure-wide` (80ch) reaching
+> `pre`/`table`/`pre.mermaid` at ≥1024px; mobile `overscroll-behavior-x: contain` on
+> `pre`/`table` plus `tabular-nums` and `tab-size: 2`; and `text-wrap: pretty` on `p`/`li`
+> while headings keep `balance`. **`--measure` stays 68ch. No token or class was renamed.**
+> Every one of the seven numbers is asserted in `src/lib/study-css.test.ts`.
+>
+> **Two traps that were measured, not reasoned about, and must not be re-introduced:**
+> `ch` resolves against the font of the element that *uses* it, so `width: var(--measure-wide)`
+> on a `<pre>` (0.9rem mono) is **narrower** than 68ch of body Inter and made code blocks
+> shrink — the token is therefore a floor inside `max()`, and a right-only `--prose-bleed`
+> does the widening. A *symmetric* bleed is impossible: `main`'s gutter is 16px at exactly
+> 1024px, and a negative `margin-inline-start` there pushed code blocks 36px off the left
+> edge of the viewport, where nothing can scroll them back.
 >
 > Four invariants in this file are guarded by `src/lib/theme-css.test.ts` and fail silently
 > in a browser if regressed: no `background` on `body`, no `background-attachment: fixed`,
 > `--color-primary-contrast` stays dark, and `a:hover` stays de-escalated to
 > `:where(a):hover`. Run `npm test` after touching them.
+>
+> The reveal UI (§11) adds a `CLARITY REVEAL UI` block at the end of this file whose own
+> silent-failure invariants live in `src/lib/study-css.test.ts`.
 
 - **Design tokens** (CSS custom properties on `:root` and `[data-theme="dark"]`):
   `--color-bg`, `--color-surface`, `--color-surface-2`, `--color-border`, `--color-text`,
@@ -358,3 +378,185 @@ for `system-design`; the group is read client-side from the query string. No sep
   use `getAllSubtopicRefs()`. Coming-soon domains have no detail routes (cards are non-clickable).
 - The practice quiz is the **only** Preact island; hydrate with `client:load`. Persist
   score/progress in `localStorage` (static site, no backend).
+
+## 11. Reveal UI — think-prompts, open-questions panel, cliffhanger
+
+The clarity effort's reading layer on `/study/[domain]/[slug]`. It renders **only** when the
+topic carries a `prompts.yaml` sidecar (`entry.data.prompts`, shape frozen in
+`src/content.config.ts`); the other ~460 topics render byte-identically to before except for
+the seven `.prose` changes in §8 and `rehype-lede`'s `.pd-lede` class.
+
+### 11.1 The design in one paragraph
+
+Three states per H2 section. **LOCKED** (~95% of the page) is a hairline plus one muted,
+non-interactive line — "2 open questions · keep reading". **ARMED** (the section has been
+read) is the *same* line at the *same* height and baseline: colour and glyph change only, and
+it becomes a real button. **REVEALED** (the reader tapped) grows **downward only**, so nothing
+already read is displaced. **The heuristic ARMS; the tap OPENS — nothing auto-reveals.**
+Permanent ink added per section: one hairline plus one line. Nothing else.
+
+### 11.2 The inverted no-JS contract (the load-bearing decision)
+
+**The static HTML ships every row OPEN and every panel item unlocked. JS only ever REMOVES
+content, never adds it.** The collapse is pure CSS gated on `data-pd="on"`, set on `<html>` by
+**one** inline head script (`PD_FLAG_SCRIPT`, injected through BaseLayout's `slot="head"`).
+Consequences to preserve:
+
+- No flash of open rows: the flag lands before the body parses.
+- No fallback branch that can rot — with JS off, nothing below the gate ever matches.
+- **`gen-csp-headers.mjs` gains exactly ONE hash.** The script is a single string constant
+  with no per-page data, so all prompted pages share one digest. Verified: 11 → 12 hashes.
+- The script also re-applies the flag on `astro:after-swap`, because ClientRouter resets
+  `<html>`'s attributes from the incoming document and does not re-run head inline scripts on
+  a study → study navigation (same reason BaseLayout's theme script does this).
+- Deliberately **no watchdog** that strips the flag if the module script fails to load: it
+  would be a second silent code path whose failure mode (everything flashing open mid-read on
+  a slow phone) is worse than the risk it covers.
+
+Everything else is a **bundled** `<script>` (no CSP hash, evaluated once per session) that
+registers `astro:page-load` / `astro:before-swap`. It is **not** a second Preact island —
+`PracticeSession.tsx` keeps that seat.
+
+### 11.3 DOM contract
+
+Injected into `.prose` by `rehype-prompts`, at the end of each H2 section that has prompts.
+One row per **section**, not per prompt — the sidecar allows one prompt per *anchor*, and an
+anchor may be an H3 seam, so a row collects every prompt whose ref anchor lives inside the
+section. The row is placed before the next depth ≤ 2 heading, walking **back** over any
+trailing `<hr>` so a section-separating rule keeps separating sections. **No sentinel nodes
+are inserted** — `h2`/`h3` are siblings of their blocks, and the client derives sections from
+root-level children.
+
+```html
+<h2 id="SECTION" data-pd-words="733">…</h2>          <!-- build-time word count -->
+…section blocks…
+<div class="pd-row" data-pd-row data-pd-sec="SECTION"
+     data-pd-state="locked" data-pd-count="2" data-pagefind-ignore>
+  <span class="pd-line pd-line--static"><span class="pd-glyph"></span>
+    <span class="pd-label">2 open questions</span></span>          <!-- no JS at all -->
+  <span class="pd-line pd-line--locked">… 2 open questions · keep reading</span>
+  <button type="button" class="pd-line pd-line--armed"
+          data-pd-toggle aria-expanded="false">… 2 open questions</button>
+  <div class="pd-body" data-pd-body>
+    <ol class="pd-list">
+      <li class="pd-q" id="pd-<promptId>">
+        <div class="pd-q__prompt">…authored Markdown, rendered…</div>
+        <details class="pd-q__more"><summary>Hint</summary>…</details>
+        <p class="pd-q__closure"><a class="pd-q__link" href="…">Where this gets answered →</a></p>
+      </li>
+    </ol>
+  </div>
+</div>
+```
+
+- **All three line variants ship in the HTML; CSS shows exactly one.** A `<span>` cannot become
+  a `<button>` without JS creating a node, and LOCKED must make no interactive promise.
+- **Height parity is the critical invariant.** `.pd-line` owns *every* box property; the state
+  rules change only `display`, `color` and the `::before` glyph, and the glyph sits in a
+  fixed-width slot so swapping it cannot move the label. Row height ≥ 44px. Measured:
+  locked 45px, armed 45px, page shift 0px. `src/lib/study-css.test.ts` asserts no state
+  variant declares a box property.
+- **Prompt bodies are authored Markdown** and are rendered through a nested
+  remark-parse + remark-gfm + remark-rehype pipeline in `rehype-prompts.mjs`, whose
+  `renderPromptMarkdown()` export is the *same* renderer the two Astro components use.
+- **Tier shapes:** A/B get a deep link ("Where this gets answered"), never the answer; C gets
+  its mandatory `success_criterion` plus `search_hint` under "How you'll know you have it";
+  D gets its mandatory `answer_shape` under "What a good answer prices". At most **one**
+  `<details>` per prompt.
+- A prompt whose ref anchor does not exist is dropped from the prose (the dangling ref is
+  `scripts/validate_content.py`'s job to report) but still reaches the reader via the panel.
+
+Other elements, all outside `.prose`, all inside the article:
+
+| Selector | Component | Notes |
+| --- | --- | --- |
+| `.pd-resolves` | study page | one muted line closing the previous topic's loop (`prompts.resolves`) |
+| `.pd-panel` `[data-pd-panel]` | `OpenQuestions.astro` | every prompt, progressively populated; items are `[data-pd-panel-item][data-pd-sec]` with `tabindex="-1"` |
+| `.pd-unlock` `[data-pd-unlock]` | `OpenQuestions.astro` | "Unlock all"; `.pd-panel__note` + `.pd-panel__actions` are hidden until the flag appears (they do nothing without JS) |
+| `.pd-cliff` | `Cliffhanger.astro` | never gated. `cliffhanger.nextTopic` **is nullable** (last topic in a domain) — falls back to `payoffHref`, then to no link. `payoff.claim` is an authoring assertion and is **never rendered** |
+| `[data-pd-live]` | study page | the page's **only** live region: empty `role="status"`, one sentence on the FIRST arming, then silent for good |
+| `.pd-lede`, `h3.pd-seam` + `.pd-seam__eyebrow` / `.pd-seam__rest` | `rehype-lede` | tier marks |
+
+Order at the end of the article: prose → **Open questions panel → cliffhanger** → live region
+→ "Practice this topic" CTA → prev/next pager.
+
+### 11.4 Tier marks
+
+All three tiers share size, colour and measure. Tier 1 is the section's first paragraph at
+`1.12em / 1.5`. A tier-3 seam gets a 2px accent left rule and a small eyebrow — and the
+eyebrow is **the author's own seam prefix**, lifted out of the heading text ("Where it
+breaks: what the keyword does not reach" → eyebrow `WHERE IT BREAKS`, heading `what the
+keyword does not reach`). Never an invented "Advanced" / "Deep dive": the clarity standard
+bans audience labels, and an invented label would rot.
+
+**Heading ids are never touched** — six live MCQ refs target H3 anchors. Seam detection is an
+allowlist of the standard's five seam prefixes (`SEAM_PREFIXES` in `rehype-lede.mjs`), matched
+case-insensitively up to a colon. It matches **zero** of the 460 currently-authored topics, so
+un-migrated content is visually unchanged; an unrecognised seam degrades to a plain H3.
+Adding new seam vocabulary means adding it to that array.
+
+### 11.5 Reading detection — what "read" means
+
+Lives in `src/lib/reading.ts` (pure + testable; `reading.test.ts`). Three signals must ALL
+hold for one section:
+
+1. **Coverage** — ≥ 80% of the section's root-level blocks (`p, ul, ol, pre, table, h3,
+   blockquote`) have exited the reading band **UPWARD**. `IntersectionObserver`,
+   `rootMargin: "-88px 0px -25% 0px"`. Counting only upward exits is what stops a TOC jump
+   *past* a section from crediting it.
+2. **Dwell** — `clamp(words × 60ms, 3s, 20s)`, accrued on ONE 500ms interval. `words` is
+   stamped at build time as `data-pd-words`, so the client never measures text.
+3. **Departure** — the next `h2` has entered the band. The last section uses the
+   Open-questions panel (or the outro CTA) — both real elements, not sentinels.
+
+Four vetoes on dwell accrual: `document.hidden`; fling scrolling faster than ~0.9
+viewport-heights per tick (so a phone fling accrues ≈ 0); a 700ms suspension armed by any
+click on `a[href^="#"]` or a `hashchange`; and 60s idle. **No section may be marked read
+within 1,500ms of `astro:page-load`.**
+
+### 11.6 State
+
+`ip:`-namespaced, versioned, pruned to the **200 most-recently-touched topics**, following the
+`src/lib/progress.ts` conventions.
+
+```
+ip:read:v1     { v: 1, t: { "<domain>/<slug>": { ts, s: [sectionId, …] } } }
+ip:reveal:v1   { v: 1, taught?: 1, t: { "<domain>/<slug>": { ts, s: [sectionId, …] } } }
+```
+
+- **Reading coverage stays OUT of `computeMastery()`, the SRS schedule and the streak.** Those
+  are the site's only honest evidence of RETRIEVAL, and letting passive scrolling feed them
+  corrupts the one signal that matters. The modules do not import each other and
+  `reading.test.ts` asserts it in both directions.
+- On load, previously-**read** sections arm immediately (colour + glyph inside a fixed-height
+  line, so zero layout shift). Previously-**revealed** sections are deliberately **not**
+  re-opened in the prose: auto-opening a row would move content the reader has already read
+  and would shift an anchor landing. The reveal persists into the end-of-topic panel instead,
+  which sits below everything and can grow harmlessly.
+- Reveal is monotonic — closing a row again does not un-remember it, so the panel stays the
+  reader's list of everything they have opened.
+- "Unlock all" opens every row and populates the panel but does **not** write `ip:read:v1`:
+  pressing a button is not evidence of reading.
+
+### 11.7 Accessibility + motion
+
+- `aria-expanded` on the control, never on the target. **`aria-controls` is omitted**
+  deliberately (JAWS-only, and unnecessary when the body follows in source order).
+- Exactly **one** live region per page, initially empty, one sentence on first arming, then
+  silent (`taught` in `ip:reveal:v1` makes it once per browser). 15 announcements per topic is
+  why people leave.
+- Focus is **never** moved on arming or opening. **"Unlock all" DOES move focus** to the first
+  revealed panel item — without it a keyboard user is stranded on a button. No modal, no focus
+  trap, no `scrollIntoView`, no `pushState`: Back always means "previous page".
+- Screen-reader / keyboard readers whose scroll pattern may never satisfy the heuristic always
+  have "Unlock all".
+- **Exactly one 150ms opacity fade**, inside `prefers-reduced-motion: no-preference`. **No
+  height animation anywhere**, so a user stylesheet at 1.5 line-height reflows harmlessly.
+
+### 11.8 Pagefind
+
+The study page body is the site's **only** `data-pagefind-body`. Every prompt row, the panel,
+the cliffhanger, the `.pd-resolves` line and the live region carry `data-pagefind-ignore`.
+**Verified delta from this feature: 0 words, 0 fragments** (460 pages / 95,349 words before,
+and a build with the sidecar removed but the same prose indexes identically). A search for
+"volatile" must not surface a think-prompt.
