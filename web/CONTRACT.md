@@ -473,7 +473,7 @@ Other elements, all outside `.prose`, all inside the article:
 | `.pd-resolves` | study page | one muted line closing the previous topic's loop (`prompts.resolves`) |
 | `.pd-panel` `[data-pd-panel]` | `OpenQuestions.astro` | every prompt, progressively populated; items are `[data-pd-panel-item][data-pd-sec]` with `tabindex="-1"` |
 | `.pd-unlock` `[data-pd-unlock]` | `OpenQuestions.astro` | "Unlock all"; `.pd-panel__note` + `.pd-panel__actions` are hidden until the flag appears (they do nothing without JS) |
-| `.pd-cliff` | `Cliffhanger.astro` | never gated. `cliffhanger.nextTopic` **is nullable** (last topic in a domain) — falls back to `payoffHref`, then to no link. `payoff.claim` is an authoring assertion and is **never rendered** |
+| `.pd-cliff` | `Cliffhanger.astro` | never gated. Renders the eyebrow, hook and teasers only — **no next-topic link**, because the prev/next pager at the page bottom already goes there. `nextTopic`, `payoffHref` and `payoff.claim` are resolved and validated but **never rendered** |
 | `[data-pd-live]` | study page | the page's **only** live region: empty `role="status"`, one sentence on the FIRST arming, then silent for good |
 | `.pd-lede`, `h3.pd-seam` + `.pd-seam__eyebrow` / `.pd-seam__rest` | `rehype-lede` | tier marks |
 
