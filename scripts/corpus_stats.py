@@ -10,87 +10,38 @@ Usage:
 
 Exit code is always 0 (this is a report, not a gate).
 
-=============================================================================
-TOKENIZER CONTRACT (authoritative — restated verbatim in the output document)
-=============================================================================
-
-Everything below is measured with one fence-aware line scan per `concepts.md`.
-It is implemented here, independently of `validate_content.py`, on purpose.
-
-1. FENCES. A line matching `^\\s*(`{3,}|~{3,})(.*)$` opens a fenced block,
-   remembering the char and run length. The block closes on a line whose marker
-   uses the SAME char, is at least as long, and carries no info string. Fence
-   marker lines and everything between them are CODE, never prose and never
-   headings. So `# comment` inside a Dockerfile sample is not an H1.
-
-2. HEADINGS. Outside fences, `^(#{1,6})(?:[ \\t]+(.*))?$`. Anchor slug =
-   lowercase, drop everything except word chars / whitespace / hyphen, then map
-   each single whitespace char to one hyphen WITHOUT collapsing runs (mirrors
-   github-slugger, so `SQL & NoSQL` -> `sql--nosql`). Heading lines are excluded
-   from prose.
-
-3. PROSE vs NON-PROSE. Prose is every line outside fences except: heading lines,
-   table rows (`^\\s*\\|`), thematic breaks (`^\\s*([-*_])\\1{2,}\\s*$`), and
-   whole-line HTML comments. Blockquote `>` markers and list markers
-   (`-`, `*`, `+`, `1.`, `1)`) are stripped from the line start; a callout marker
-   (`[!TIP]`, `[!WARNING]`, `[!INTERVIEW]`, `[!KEY-TAKEAWAY]`) is counted and
-   removed. Mermaid diagrams live in fences, so they are code, not prose.
-
-4. PROSE NORMALIZATION, in this order:
-     images `![alt](url)`      -> removed
-     links  `[text](url)`      -> `text`
-     inline code `` `x` ``     -> the single placeholder word `code`
-     bold/emphasis markers     -> counted (bold), then `**`/`__`/`*`/`_`/`~~` removed
-   Open-paren and word counts are taken AFTER this normalization, so parens and
-   words inside code spans and link URLs do not inflate prose metrics.
-
-5. WORDS (prose). Split the normalized text on whitespace; a token counts as a
-   word only if it contains at least one `[A-Za-z0-9]`. So a bare `—` is not a
-   word. This is `prose_words`, and it is the denominator of every "per 1,000
-   words" figure here.
-
-6. SEGMENTS AND SENTENCES. A new segment starts at a blank line, a list item, a
-   blockquote line, a heading, a table row, or a break; continuation lines join
-   with a single space. Within a segment, a sentence ends at a word-final `.`,
-   `!`, or `?` (optionally followed by quotes/brackets), EXCEPT when the token is
-   a known abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`, `cf.`, `approx.`, `al.`,
-   `Fig.`, `No.`, `Inc.`, `Dr.`, `Mr.`, `Ms.`, `Mrs.`, `St.`, `Jr.`, `Sr.`,
-   `ca.`, `resp.`, `ex.`) or a single-letter initial (`A.`). A segment end always
-   ends a sentence, so an unterminated bullet is one sentence. Sentences of fewer
-   than MIN_SENTENCE_WORDS (3) words are DISCARDED as fragments (table leftovers,
-   labels) and do not enter the mean, the p90, or the >30 / >45 counts.
-
-7. NOMINALIZATIONS. A prose word, lowercased and stripped to `[a-z]`, of length
-   >= 5, ending in `tion`, `ment`, `ance`, `ence`, or `ity` with an optional
-   plural `s`. Reported per 1,000 prose words. CAVEAT: this is a pure suffix
-   heuristic, so it also catches non-nominalizations like "sentence",
-   "instance", "difference", "quality". Use it as a RELATIVE density signal
-   between domains/files, never as an absolute count of bad nouns.
-
-8. RAW WORDS AND READING MINUTES. Separate from prose words: `raw_words` is the
-   whole file whitespace-split (code included), which is what the SITE counts.
-   Reading minutes replicate `web/scripts/sync-content.mjs` exactly — strip a
-   leading `# H1` line, `trim()`, split on whitespace, drop empties, then
-   `max(1, round(words / 200))` with WORDS_PER_MINUTE = 200 and JS-style
-   half-up rounding (`floor(x + 0.5)`), so the number matches what a reader sees.
-
-9. PERCENTILES. `median` is the conventional median (mean of the two middle
-   values for an even count). `p90` / `p95` are NEAREST-RANK on the ascending
-   sorted values: index = ceil(p/100 * n) - 1, clamped to [0, n-1]. No
-   interpolation, so every reported percentile is a value that actually occurs.
+THE TOKENIZER LIVES IN `scripts/prose.py`, not here. Its module docstring is the
+authoritative contract (fences, prose vs non-prose, block boundaries, normalization,
+words, sentences, nominalizations, raw words, reading minutes, percentiles), and
+`METHOD_SECTION` below restates it in the generated document. This script used to carry
+its own copy; it was extracted so that `clarity_report.py` measures the same corpus with
+the same definitions instead of rolling a third splitter. Every number here is therefore
+`prose.metrics()` plus aggregation — change a definition in `prose.py` and re-run.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
-import statistics
 import sys
 from collections import Counter
 from datetime import date
 from pathlib import Path
 from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from prose import (  # noqa: E402  (path shim must run first)
+    CALLOUT_TYPES,
+    LONG_SENTENCE,
+    MIN_SENTENCE_WORDS,
+    VERY_LONG_SENTENCE,
+    WORDS_PER_MINUTE,
+    median,
+    metrics,
+    pctile,
+    per_k,
+    sentence_stats,
+)
 
 try:
     import yaml
@@ -98,40 +49,14 @@ except ImportError:
     sys.exit("PyYAML is required: pip install pyyaml")
 
 # --- Constants that downstream rules are allowed to cite ---------------------
+# The tokenizer's own constants (WORDS_PER_MINUTE, MIN_SENTENCE_WORDS, LONG_SENTENCE,
+# VERY_LONG_SENTENCE, CALLOUT_TYPES) are imported above so there is exactly one
+# definition of each in the repo. Only this report's own presentation knobs live here.
 
-WORDS_PER_MINUTE = 200  # MUST match web/scripts/sync-content.mjs
-MIN_SENTENCE_WORDS = 3  # shorter "sentences" are fragments, not prose
-LONG_SENTENCE = 30
-VERY_LONG_SENTENCE = 45
 CALLOUT_BUDGET = 5  # files strictly above this are reported as outliers
-
-CALLOUT_TYPES = ("TIP", "WARNING", "INTERVIEW", "KEY-TAKEAWAY")
 DIFFICULTIES = ("beginner", "intermediate", "advanced", "expert")
 
-# --- Regexes (see the tokenizer contract above) -------------------------------
-
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
-HEADING_RE = re.compile(r"^(#{1,6})(?:[ \t]+(.*))?$")
-TABLE_RE = re.compile(r"^\s*\|")
-BREAK_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$")
-COMMENT_RE = re.compile(r"^\s*<!--.*-->\s*$")
-LIST_RE = re.compile(r"^([-*+]|\d+[.)])[ \t]+")
-CALLOUT_RE = re.compile(r"^\[!(" + "|".join(map(re.escape, CALLOUT_TYPES)) + r")\]")
-IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
-CODE_SPAN_RE = re.compile(r"`[^`]*`")
-BOLD_RE = re.compile(r"\*\*[^*]+\*\*|__[^_]+__")
-EMPHASIS_RE = re.compile(r"\*\*|__|~~|[*_]")
-WORDISH_RE = re.compile(r"[A-Za-z0-9]")
-NOMINAL_RE = re.compile(r"(tion|ment|ance|ence|ity)s?$")
-H1_STRIP_RE = re.compile(r"^﻿?#\s+.+?\r?\n")
 REF_RE = re.compile(r"^concepts\.md#(.+)$")
-
-ABBREV = {
-    "e.g.", "i.e.", "etc.", "vs.", "cf.", "approx.", "al.", "fig.", "no.",
-    "inc.", "dr.", "mr.", "ms.", "mrs.", "st.", "jr.", "sr.", "ca.", "resp.",
-    "ex.",
-}
 
 
 # --- Static prose blocks of the output document --------------------------------
@@ -149,7 +74,9 @@ SUPERSEDES_BANNER = """> [!WARNING]
 METHOD_SECTION = """## How these numbers are measured (the tokenizer)
 
 Stated here in full because every downstream numeric rule will be written against it and
-must be reproducible. This is the same contract as the script's module docstring.
+must be reproducible. **The implementation is `scripts/prose.py`, and its module docstring
+is the authoritative copy of this contract** — `corpus_stats.py` and `clarity_report.py`
+both import it, so no two reports in this repo can define a prose number differently.
 
 1. **Fences.** A line matching ``^\\s*(`{3,}|~{3,})(.*)$`` opens a fenced block (char +
    run length remembered); it closes on the same char, at least as long, with no info
@@ -163,10 +90,10 @@ must be reproducible. This is the same contract as the script's module docstring
    (`^\\s*\\|`), thematic breaks, and whole-line HTML comments. Leading `>` blockquote
    markers and list markers (`-`, `*`, `+`, `1.`, `1)`) are stripped; a leading callout
    marker is counted and removed. Mermaid diagrams are inside fences, so they are code.
-4. **Normalization order.** images removed → `[text](url)` → `text` → inline code spans →
-   the single placeholder word `code` → bold spans counted → `**`/`__`/`*`/`_`/`~~`
-   removed. Parens and words inside code spans or link URLs therefore never inflate
-   prose metrics.
+4. **Normalization order.** images removed → `[text](url)` → `text` → each inline code
+   span → **one opaque token** → bold spans counted → `**`/`__`/`*`/`_`/`~~` removed.
+   Parens, periods and words inside code spans or link URLs therefore never inflate
+   prose metrics, and an identifier's internal period can never end a sentence.
 5. **Words (prose).** Whitespace split of the normalized text; a token is a word only if
    it contains at least one `[A-Za-z0-9]`. `prose_words` is the denominator of every
    "per 1,000 words" figure below.
@@ -176,8 +103,11 @@ must be reproducible. This is the same contract as the script's module docstring
    the token is a known abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`, `cf.`, `approx.`,
    `al.`, `Fig.`, `No.`, `Inc.`, `Dr.`, `Mr.`, `Ms.`, `Mrs.`, `St.`, `Jr.`, `Sr.`, `ca.`,
    `resp.`, `ex.`) or a single-letter initial. Segment end always ends a sentence, so an
-   unterminated bullet counts as one. **Sentences shorter than %(min_sent)d words are
-   discarded** as fragments and are absent from the mean, p90, and over-30/over-45 counts.
+   unterminated bullet counts as one and a four-item list is four sentences, never one
+   fused monster — converting an inline enumeration *into* a list therefore RAISES p90,
+   which is an artefact of this rule and not a regression. **Sentences shorter than
+   %(min_sent)d words are discarded** as fragments and are absent from the mean, p90, and
+   over-30/over-45 counts.
 7. **Nominalizations.** Prose word, lowercased and stripped to `[a-z]`, length ≥ 5,
    ending `tion|ment|ance|ence|ity` with optional plural `s`. **Caveat:** a pure suffix
    heuristic, so it also catches innocent words ("sentence", "instance", "difference",
@@ -205,23 +135,9 @@ neither is neutral."""
 
 
 # --- Small stats helpers ------------------------------------------------------
-
-
-def pctile(values: list[float], p: float) -> float:
-    """Nearest-rank percentile (no interpolation). See tokenizer contract §9."""
-    if not values:
-        return 0
-    s = sorted(values)
-    i = math.ceil(p / 100 * len(s)) - 1
-    return s[min(max(i, 0), len(s) - 1)]
-
-
-def median(values: list[float]) -> float:
-    return statistics.median(values) if values else 0
-
-
-def per_k(count: int, words: int) -> float:
-    return round(1000 * count / words, 2) if words else 0.0
+#
+# `pctile`, `median` and `per_k` are imported from prose.py (contract §10) so the
+# percentile convention cannot differ between this report and clarity_report.py.
 
 
 def spread(values: list[int], p_hi: float = 90) -> dict:
@@ -231,162 +147,6 @@ def spread(values: list[int], p_hi: float = 90) -> dict:
         "median": round(median(values), 1),
         f"p{int(p_hi)}": pctile(values, p_hi),
         "max": max(values) if values else 0,
-    }
-
-
-def js_round(x: float) -> int:
-    """JS Math.round: half away from zero upward (Python's round() is banker's)."""
-    return math.floor(x + 0.5)
-
-
-def slugify_heading(text: str) -> str:
-    """github-slugger-compatible anchor slug; whitespace runs are NOT collapsed."""
-    text = text.strip().lower()
-    text = re.sub(r"[^\w\s-]", "", text)
-    return re.sub(r"\s", "-", text)
-
-
-# --- The one fence-aware scan -------------------------------------------------
-
-
-def split_sentences(segment_words: list[str]) -> list[int]:
-    """Sentence word-lengths within one segment (contract §6)."""
-    lengths: list[int] = []
-    n = 0
-    for tok in segment_words:
-        n += 1
-        stripped = tok.rstrip("\"')]}»”’")
-        if not stripped or stripped[-1] not in ".!?":
-            continue
-        low = stripped.lower()
-        if low in ABBREV:
-            continue
-        # single-letter initial, e.g. "J. Doe"
-        if len(stripped) == 2 and stripped[0].isalpha() and stripped[1] == ".":
-            continue
-        lengths.append(n)
-        n = 0
-    if n:
-        lengths.append(n)
-    return [ln for ln in lengths if ln >= MIN_SENTENCE_WORDS]
-
-
-def scan_concepts(path: Path) -> dict:
-    """Measure one concepts.md. Returns a flat dict of metrics (contract above)."""
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-
-    headings: list[tuple[int, str, str]] = []
-    mermaid_blocks = 0
-    callouts: Counter[str] = Counter()
-
-    segments: list[str] = []
-    buf: list[str] = []
-
-    def flush() -> None:
-        if buf:
-            segments.append(" ".join(buf))
-            buf.clear()
-
-    # Control measurement: how many lines LOOK like headings if you ignore fences.
-    # The gap is the "phantom heading" count that non-fence-aware tooling reports.
-    naive_headings = sum(1 for line in lines if HEADING_RE.match(line))
-    naive_h2 = sum(1 for line in lines if (hm := HEADING_RE.match(line)) and len(hm.group(1)) == 2)
-
-    fence_char, fence_len = "", 0
-    for line in lines:
-        fence = FENCE_RE.match(line)
-        if fence:
-            marker, info = fence.group(1), fence.group(2)
-            if not fence_char:
-                fence_char, fence_len = marker[0], len(marker)
-                if info.strip().lower().split()[:1] == ["mermaid"]:
-                    mermaid_blocks += 1
-                flush()
-                continue
-            if marker[0] == fence_char and len(marker) >= fence_len and not info.strip():
-                fence_char, fence_len = "", 0
-                continue
-        if fence_char:
-            continue  # inside a fence: code, not prose and not headings
-
-        m = HEADING_RE.match(line)
-        if m:
-            htext = (m.group(2) or "").strip()
-            headings.append((len(m.group(1)), htext, slugify_heading(htext)))
-            flush()
-            continue
-        if TABLE_RE.match(line) or BREAK_RE.match(line) or COMMENT_RE.match(line):
-            flush()
-            continue
-
-        body = line.strip()
-        if not body:
-            flush()
-            continue
-
-        starts_block = False
-        if body.startswith(">"):
-            body = body.lstrip(">").strip()
-            starts_block = True
-            cal = CALLOUT_RE.match(body)
-            if cal:
-                callouts[cal.group(1)] += 1
-                body = body[cal.end():].strip()
-        lm = LIST_RE.match(body)
-        if lm:
-            starts_block = True
-            body = body[lm.end():]
-        if starts_block:
-            flush()
-        if body:
-            buf.append(body)
-    flush()
-
-    prose_words = 0
-    bold_spans = 0
-    open_parens = 0
-    nominalizations = 0
-    sentence_lengths: list[int] = []
-
-    for seg in segments:
-        s = IMAGE_RE.sub(" ", seg)
-        s = LINK_RE.sub(r"\1", s)
-        s = CODE_SPAN_RE.sub(" code ", s)
-        bold_spans += len(BOLD_RE.findall(s))
-        open_parens += s.count("(")
-        s = EMPHASIS_RE.sub("", s)
-        words = [t for t in s.split() if WORDISH_RE.search(t)]
-        prose_words += len(words)
-        for w in words:
-            bare = re.sub(r"[^a-z]", "", w.lower())
-            if len(bare) >= 5 and NOMINAL_RE.search(bare):
-                nominalizations += 1
-        sentence_lengths.extend(split_sentences(words))
-
-    # Site-visible reading time: replicate sync-content.mjs exactly.
-    stripped_body = H1_STRIP_RE.sub("", text, count=1)
-    raw_words = len(stripped_body.strip().split())
-    minutes = max(1, js_round(raw_words / WORDS_PER_MINUTE))
-
-    return {
-        "lines": len(lines),
-        "raw_words": raw_words,
-        "reading_minutes": minutes,
-        "h1": sum(1 for h in headings if h[0] == 1),
-        "h2": sum(1 for h in headings if h[0] == 2),
-        "headings": len(headings),
-        "naive_headings": naive_headings,
-        "naive_h2": naive_h2,
-        "anchors": {h[2]: h[0] for h in reversed(headings) if h[2]},
-        "mermaid_blocks": mermaid_blocks,
-        "callouts": dict(callouts),
-        "callouts_total": sum(callouts.values()),
-        "prose_words": prose_words,
-        "sentences": sentence_lengths,
-        "bold_spans": bold_spans,
-        "open_parens": open_parens,
-        "nominalizations": nominalizations,
     }
 
 
@@ -484,7 +244,7 @@ def collect(topics_dir: Path) -> dict:
         cpath = qpath.parent / "concepts.md"
         anchors: dict[str, int] = {}
         if cpath.exists():
-            m = scan_concepts(cpath)
+            m = metrics(cpath.read_text(encoding="utf-8"))
             anchors = m["anchors"]
             absorb(b, slug, m)
             absorb(overall, f"{domain}/{slug}", m)
@@ -638,13 +398,8 @@ QUOTED_CLAIMS: list[tuple[str, str, int, Callable[[dict], int]]] = [
 
 
 def sent_stats(sentences: list[int]) -> dict:
-    return {
-        "n": len(sentences),
-        "mean": round(sum(sentences) / len(sentences), 1) if sentences else 0,
-        "p90": pctile(sentences, 90),
-        f"over_{LONG_SENTENCE}": sum(1 for s in sentences if s > LONG_SENTENCE),
-        f"over_{VERY_LONG_SENTENCE}": sum(1 for s in sentences if s > VERY_LONG_SENTENCE),
-    }
+    """Alias kept for readability at the call sites; the definition is prose.py's."""
+    return sentence_stats(sentences)
 
 
 def as_json(res: dict) -> dict:

@@ -79,7 +79,9 @@ Not machine-checkable here, but worth flagging by hand:
 ## How these numbers are measured (the tokenizer)
 
 Stated here in full because every downstream numeric rule will be written against it and
-must be reproducible. This is the same contract as the script's module docstring.
+must be reproducible. **The implementation is `scripts/prose.py`, and its module docstring
+is the authoritative copy of this contract** — `corpus_stats.py` and `clarity_report.py`
+both import it, so no two reports in this repo can define a prose number differently.
 
 1. **Fences.** A line matching ``^\s*(`{3,}|~{3,})(.*)$`` opens a fenced block (char +
    run length remembered); it closes on the same char, at least as long, with no info
@@ -93,10 +95,10 @@ must be reproducible. This is the same contract as the script's module docstring
    (`^\s*\|`), thematic breaks, and whole-line HTML comments. Leading `>` blockquote
    markers and list markers (`-`, `*`, `+`, `1.`, `1)`) are stripped; a leading callout
    marker is counted and removed. Mermaid diagrams are inside fences, so they are code.
-4. **Normalization order.** images removed → `[text](url)` → `text` → inline code spans →
-   the single placeholder word `code` → bold spans counted → `**`/`__`/`*`/`_`/`~~`
-   removed. Parens and words inside code spans or link URLs therefore never inflate
-   prose metrics.
+4. **Normalization order.** images removed → `[text](url)` → `text` → each inline code
+   span → **one opaque token** → bold spans counted → `**`/`__`/`*`/`_`/`~~` removed.
+   Parens, periods and words inside code spans or link URLs therefore never inflate
+   prose metrics, and an identifier's internal period can never end a sentence.
 5. **Words (prose).** Whitespace split of the normalized text; a token is a word only if
    it contains at least one `[A-Za-z0-9]`. `prose_words` is the denominator of every
    "per 1,000 words" figure below.
@@ -106,8 +108,11 @@ must be reproducible. This is the same contract as the script's module docstring
    the token is a known abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`, `cf.`, `approx.`,
    `al.`, `Fig.`, `No.`, `Inc.`, `Dr.`, `Mr.`, `Ms.`, `Mrs.`, `St.`, `Jr.`, `Sr.`, `ca.`,
    `resp.`, `ex.`) or a single-letter initial. Segment end always ends a sentence, so an
-   unterminated bullet counts as one. **Sentences shorter than 3 words are
-   discarded** as fragments and are absent from the mean, p90, and over-30/over-45 counts.
+   unterminated bullet counts as one and a four-item list is four sentences, never one
+   fused monster — converting an inline enumeration *into* a list therefore RAISES p90,
+   which is an artefact of this rule and not a regression. **Sentences shorter than
+   3 words are discarded** as fragments and are absent from the mean, p90, and
+   over-30/over-45 counts.
 7. **Nominalizations.** Prose word, lowercased and stripped to `[a-z]`, length ≥ 5,
    ending `tion|ment|ance|ence|ity` with optional plural `s`. **Caveat:** a pure suffix
    heuristic, so it also catches innocent words ("sentence", "instance", "difference",

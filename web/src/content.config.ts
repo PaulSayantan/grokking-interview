@@ -12,6 +12,68 @@
 import { defineCollection, z } from "astro:content";
 import { glob } from "astro/loaders";
 
+/**
+ * The optional `prompts` sidecar, inlined into frontmatter by sync-content.mjs from
+ * topics/<domain>/<slug>/prompts.yaml. Authored fields keep their YAML names (snake_case);
+ * fields sync computes are camelCase (`refHref`, `answerHref`, `nextTopic`, `payoffHref`).
+ *
+ * `.optional()` is load-bearing: the clarity rollout is one domain at a time, so most
+ * topics have no sidecar and must keep building. Never make this required.
+ * Authoritative field docs + constraints: docs/content-schema.md. The GATE is
+ * scripts/validate_content.py — this schema only describes what the page may read.
+ */
+const promptItem = z.object({
+  id: z.string(),
+  /** "concepts.md#<anchor>" — the section this prompt sits after. */
+  ref: z.string(),
+  kind: z.enum([
+    "predict-failure",
+    "name-the-price",
+    "draw-the-boundary",
+    "refute",
+    "notice-in-wild",
+  ]),
+  /** A in-file | B another topic | C primary source | D open. */
+  tier: z.enum(["A", "B", "C", "D"]),
+  prompt: z.string(),
+  hint: z.string().optional(),
+  /** Verbatim pointer; `answerHref` is its resolved link (absent for tier C "external"). */
+  answer_in: z.string().optional(),
+  success_criterion: z.string().optional(),
+  answer_shape: z.string().optional(),
+  search_hint: z.string().optional(),
+  refHref: z.string().nullable(),
+  answerHref: z.string().nullable().optional(),
+});
+
+const promptsSidecar = z.object({
+  schema: z.number().int(),
+  pass: z.string().optional(),
+  /** Where this topic settles the PREVIOUS topic's open loop (rule K1). */
+  resolves: z
+    .object({ anchor: z.string(), href: z.string().nullable() })
+    .optional(),
+  items: z.array(promptItem),
+  cliffhanger: z
+    .object({
+      hook: z.string(),
+      teaser_questions: z.array(z.string()),
+      payoff: z.object({ anchor: z.string(), claim: z.string() }),
+      /** Resolved at build time from README row order — never authored. null on the
+       *  domain's last topic, which is the case the study page must handle. */
+      nextTopic: z
+        .object({
+          domain: z.string(),
+          slug: z.string(),
+          title: z.string(),
+          href: z.string(),
+        })
+        .nullable(),
+      payoffHref: z.string().nullable(),
+    })
+    .optional(),
+});
+
 const concepts = defineCollection({
   loader: glob({
     pattern: "**/*.md",
@@ -29,6 +91,8 @@ const concepts = defineCollection({
     group: z.string(),
     /** Approximate reading time (minutes), computed at sync from the body. */
     readingMinutes: z.number().int().positive(),
+    /** Think-prompts + cliffhanger, present only on clarity-migrated topics. */
+    prompts: promptsSidecar.optional(),
   }),
 });
 

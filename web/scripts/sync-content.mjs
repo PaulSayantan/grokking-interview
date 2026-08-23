@@ -6,6 +6,9 @@
  *
  * Outputs (all under web/):
  *   src/content/concepts/<domain>/<slug>.md         concepts w/ prepended frontmatter
+ *                                                   (incl. the optional `prompts` object —
+ *                                                    see readPrompts/buildPrompts below and
+ *                                                    docs/content-schema.md for the shape)
  *   public/questions/<domain>/<slug>.json           per-subtopic question array
  *   public/questions/<domain>/_all.json             all questions in a domain
  *   public/questions/system-design/_group-<key>.json  per-group pools (core/advanced/aws)
@@ -130,6 +133,135 @@ function readingMinutes(body) {
   return Math.max(1, Math.round(words / WORDS_PER_MINUTE));
 }
 
+// --- prompts.yaml (the optional clarity sidecar) ---------------------------
+//
+// A topic MAY carry a third file, topics/<domain>/<slug>/prompts.yaml: think-prompts keyed
+// by anchor, plus one cliffhanger. It is OPTIONAL and stays optional — the clarity rollout
+// runs one domain at a time, so migrated and un-migrated topics coexist indefinitely.
+//
+// We inline it into the concept entry's frontmatter rather than emitting a separate JSON.
+// Two reasons: the study page already has the entry, so it needs no second import and no
+// fetch (the prompts must render in the static HTML); and src/content/concepts/ is already
+// gitignored as generated, so no new ignore rule can be forgotten. The value is emitted as
+// one line of JSON — YAML is a JSON superset, so JSON.stringify handles every quote,
+// backtick and newline in a prompt body with no hand-rolled escaping.
+//
+// THE SHAPE IS A CONTRACT (docs/content-schema.md, "Generated shape"). Authored fields keep
+// their YAML names verbatim (snake_case: `answer_in`, `success_criterion`, `teaser_questions`);
+// everything sync computes is camelCase (`refHref`, `answerHref`, `nextTopic`, `payoffHref`).
+// The one rename is the list: `prompts:` in YAML becomes `items` here, so the frontmatter key
+// `prompts` holds the whole sidecar rather than nesting `prompts.prompts`.
+//
+// `scripts/validate_content.py` is the GATE for these files (dangling refs, kinds, tiers,
+// caps). Sync is deliberately not a second gate: a malformed sidecar must not block a build,
+// so we warn and drop it. Run the validator in CI, not this script, to catch it.
+
+/** Read a topic's prompts.yaml, or null when there is none / it is unusable. */
+async function readPrompts(subDir, domainSlug, slug) {
+  const p = path.join(subDir, "prompts.yaml");
+  if (!existsSync(p)) return null;
+  try {
+    const parsed = YAML.parse(await readFile(p, "utf8"));
+    if (!parsed || typeof parsed !== "object") throw new Error("not a mapping");
+    return parsed;
+  } catch (err) {
+    console.warn(
+      `[sync-content] WARNING: ${domainSlug}/${slug}/prompts.yaml did not parse ` +
+        `(${err.message}) — the topic renders WITHOUT its think-prompts. ` +
+        `Fix: python3 scripts/validate_content.py`,
+    );
+    return null;
+  }
+}
+
+/** `/study/<domain>/<slug>#<anchor>` — the one link shape the site uses. */
+function studyHref(domain, slug, anchor) {
+  return `/study/${domain}/${slug}${anchor ? `#${anchor}` : ""}`;
+}
+
+/**
+ * Resolve an authored pointer to a site href. Legal forms (mirrors resolve_pointer() in
+ * scripts/validate_content.py): "concepts.md#a" (this topic), "<domain>/<slug>#a" or
+ * "/study/<domain>/<slug>#a" (another topic — the deliberate cross-topic exception),
+ * and the literal "external" (a tier-C hunt, which has no href). null when unresolvable;
+ * the validator is what reports that, so we stay quiet here.
+ */
+function pointerHref(value, domain, slug) {
+  const text = String(value ?? "").trim();
+  if (!text || text === "external") return null;
+  const own = text.match(/^concepts\.md#(.+)$/);
+  if (own) return studyHref(domain, slug, own[1]);
+  const other = text.match(/^\/?(?:study\/)?([a-z0-9][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)#(.+)$/);
+  if (other) return studyHref(other[1], other[2], other[3]);
+  return null;
+}
+
+/**
+ * Build the frontmatter `prompts` object for one topic.
+ *
+ * `next` is the following topic in the domain's learning order ({slug, title} or null),
+ * computed HERE from README row order — never authored into the YAML. That is the whole
+ * point of the design: the cliffhanger and the study pager read the same sequence, so they
+ * cannot drift, and a README reorder needs no content edit. The last topic in a domain gets
+ * `nextTopic: null`, and its payoff href comes from an explicit `<domain>/<slug>#anchor`.
+ */
+function buildPrompts(raw, domain, slug, next) {
+  if (!raw) return null;
+  const authored = Array.isArray(raw.prompts) ? raw.prompts : [];
+  const items = authored
+    .filter((p) => p && typeof p === "object")
+    .map((p) => {
+      const out = {
+        id: p.id,
+        ref: p.ref,
+        kind: p.kind,
+        tier: p.tier,
+        prompt: String(p.prompt ?? "").trim(),
+        refHref: pointerHref(p.ref, domain, slug),
+      };
+      if (p.hint) out.hint = String(p.hint).trim();
+      if (p.answer_in) {
+        out.answer_in = String(p.answer_in).trim();
+        out.answerHref = pointerHref(p.answer_in, domain, slug);
+      }
+      if (p.success_criterion) out.success_criterion = String(p.success_criterion).trim();
+      if (p.answer_shape) out.answer_shape = String(p.answer_shape).trim();
+      if (p.search_hint) out.search_hint = String(p.search_hint).trim();
+      return out;
+    });
+
+  const payload = { schema: raw.schema ?? 1, items };
+  if (raw.pass) payload.pass = String(raw.pass);
+  // Where THIS topic settles the PREVIOUS topic's open loop (continuity rule K1).
+  if (raw.resolves && raw.resolves.anchor) {
+    payload.resolves = {
+      anchor: String(raw.resolves.anchor).trim(),
+      href: pointerHref(raw.resolves.anchor, domain, slug),
+    };
+  }
+
+  const c = raw.cliffhanger;
+  if (c && typeof c === "object" && c.hook) {
+    const anchor = String(c.payoff?.anchor ?? "").trim();
+    // A relative payoff ("concepts.md#a") is relative to the NEXT topic, not to this one.
+    const payoffHref = anchor.startsWith("concepts.md#")
+      ? next
+        ? studyHref(domain, next.slug, anchor.slice("concepts.md#".length))
+        : null
+      : pointerHref(anchor, domain, slug);
+    payload.cliffhanger = {
+      hook: String(c.hook).trim(),
+      teaser_questions: (Array.isArray(c.teaser_questions) ? c.teaser_questions : []).map((q) =>
+        String(q).trim(),
+      ),
+      payoff: { anchor, claim: String(c.payoff?.claim ?? "").trim() },
+      nextTopic: next ? { domain, slug: next.slug, title: next.title, href: studyHref(domain, next.slug) } : null,
+      payoffHref,
+    };
+  }
+  return payload;
+}
+
 /** Slim question payload for the practice island's initial fetch.
  *  Drops explanation + tags (heavy / unused during the quiz); KEEPS difficulty
  *  so the client-side difficulty filter can work without the full pool. */
@@ -205,6 +337,8 @@ async function processAuthoredDomain(domainSlug) {
   );
 
   const domainQuestions = [];
+  /** Phase-1 collection: one entry per subtopic that has a concepts.md (see phase 2). */
+  const records = [];
   /** groupKey -> { key, label, subtopics: [] } */
   const groupMap = new Map();
   /** groupKey -> question[] (system-design only, but harmless generally) */
@@ -261,28 +395,18 @@ async function processAuthoredDomain(domainSlug) {
     if (!groupQuestions.has(groupKey)) groupQuestions.set(groupKey, []);
     groupQuestions.get(groupKey).push(...outQuestions);
 
-    // --- Write concept collection entry (frontmatter + body sans leading H1) ---
+    // --- Defer the concept collection entry to phase 2 -------------------
+    // A cliffhanger's destination is the NEXT topic in the domain's learning order, and
+    // that order is only known once every group is sorted (below). So collect what the
+    // entry needs now and write all of them afterwards, walking the finished sequence.
     if (existsSync(conceptsPath)) {
-      const body = await readFile(conceptsPath, "utf8");
-      const strippedBody = stripLeadingH1(body);
-      const mins = readingMinutes(strippedBody);
-      const fm = [
-        "---",
-        `title: ${yamlStr(subtopicTitle)}`,
-        `domain: ${yamlStr(domainSlug)}`,
-        `slug: ${yamlStr(slug)}`,
-        `group: ${yamlStr(groupKey)}`,
-        `readingMinutes: ${mins}`,
-        "---",
-        "",
-      ].join("\n");
-      const outConceptsDir = path.join(CONCEPTS_OUT, domainSlug);
-      await mkdir(outConceptsDir, { recursive: true });
-      await writeFile(
-        path.join(outConceptsDir, `${slug}.md`),
-        fm + strippedBody,
-        "utf8",
-      );
+      records.push({
+        slug,
+        groupKey,
+        title: subtopicTitle,
+        conceptsPath,
+        prompts: await readPrompts(subDir, domainSlug, slug),
+      });
     }
 
     // --- Warn loudly when the README doesn't place this subtopic ---
@@ -361,7 +485,48 @@ async function processAuthoredDomain(domainSlug) {
     groups = [numberGroup(g)];
   }
 
+  // --- Phase 2: write the concept collection entries, in learning order ------
+  // The flat sequence is groups in display order, subtopics by `position` — byte-identical
+  // to getDomainSequence() in src/lib/catalog.ts, which is what the study pager uses. So
+  // "the next topic" means the same thing to the pager, to the cliffhanger, and to
+  // reading_order() in scripts/validate_content.py (which validates the payoff anchor).
+  const byRecord = new Map(records.map((r) => [r.slug, r]));
+  const sequence = groups.flatMap((g) => g.subtopics.map((s) => s.slug));
+  const outConceptsDir = path.join(CONCEPTS_OUT, domainSlug);
+  await mkdir(outConceptsDir, { recursive: true });
+  let promptedTopics = 0;
+  for (let i = 0; i < sequence.length; i++) {
+    const rec = byRecord.get(sequence[i]);
+    if (!rec) continue; // subtopic with questions but no concepts.md
+    const nextRec = byRecord.get(sequence[i + 1]);
+    const next = nextRec ? { slug: nextRec.slug, title: nextRec.title } : null;
+    const prompts = buildPrompts(rec.prompts, domainSlug, rec.slug, next);
+    if (prompts) promptedTopics++;
+
+    const strippedBody = stripLeadingH1(await readFile(rec.conceptsPath, "utf8"));
+    const fm = [
+      "---",
+      `title: ${yamlStr(rec.title)}`,
+      `domain: ${yamlStr(domainSlug)}`,
+      `slug: ${yamlStr(rec.slug)}`,
+      `group: ${yamlStr(rec.groupKey)}`,
+      `readingMinutes: ${readingMinutes(strippedBody)}`,
+      // One line of JSON (valid YAML). Omitted entirely for a topic with no sidecar, which
+      // is why the Zod field is `.optional()` and un-migrated topics validate forever.
+      ...(prompts ? [`prompts: ${JSON.stringify(prompts)}`] : []),
+      "---",
+      "",
+    ].join("\n");
+    await writeFile(path.join(outConceptsDir, `${rec.slug}.md`), fm + strippedBody, "utf8");
+  }
+
   const subtopicCount = groups.reduce((n, g) => n + g.subtopics.length, 0);
+  if (promptedTopics) {
+    console.log(
+      `[sync-content] ${domainSlug}: ${promptedTopics}/${records.length} topic(s) ship a ` +
+        `prompts.yaml sidecar`,
+    );
+  }
   return {
     slug: domainSlug,
     title,
