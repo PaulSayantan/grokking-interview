@@ -66,16 +66,8 @@ unless a synchronization action bridges them.
 
 ## Visibility, reordering, and atomicity
 
-**Beginner.** Three distinct concerns are often conflated:
-
-- **Visibility** — whether a write by one thread is observable by another.
-- **Ordering / reordering** — whether operations appear to execute in program order.
-- **Atomicity** — whether a compound operation executes as one indivisible step.
-
-They are independent. `volatile` gives visibility and ordering but *not* atomicity of
-compound actions. `synchronized` and atomics give all three (within their scope).
-
-**Intermediate — the classic infinite loop.** A missing visibility guarantee:
+Three different things can go wrong with a shared field, and each one needs a different fix.
+The smallest case is one `boolean`:
 
 ```java
 boolean stop = false;            // not volatile
@@ -87,82 +79,136 @@ while (!stop) { /* spin */ }     // JIT may hoist to: if(!stop) while(true){}
 stop = true;                     // T may never observe this
 ```
 
-The JIT is allowed to hoist the non-volatile read out of the loop because, in the absence of
-a happens-before edge, it can prove nothing forces a re-read. Marking `stop` volatile fixes
-it. This is *not* merely a cache-flush issue — it is a legal compiler optimization.
+Main sets `stop = true` and exits. Thread T spins on, pinning a core. No exception, no log
+line, and the flag was set long ago. The write was not slow. The JIT is allowed to read
+`stop` once before the loop and reuse that copy, because with no happens-before edge nothing
+in the program obliges T to look again. Declare `stop` volatile and the edge exists, so T has
+to re-read. This is a legal compiler optimisation, not a cache that failed to flush.
 
-**Intermediate — 64-bit non-atomicity.** Per JLS 17.7, writes/reads of `long` and `double`
-are permitted to be split into two 32-bit halves on some JVMs, so a non-volatile `long` can
-be read as a "word-torn" mix of two writes. Declaring it `volatile` guarantees atomic 64-bit
-access. (In practice HotSpot on 64-bit platforms writes them atomically anyway, but the spec
-only guarantees it for `volatile`.) References are always read/written atomically.
+That loop is a **visibility** failure: a write by one thread never becomes observable to
+another. Two more failures can happen to the same field, and neither one is visibility.
 
-**Advanced — reordering sources.** Reordering can come from (1) the compiler / JIT,
-(2) the processor's out-of-order execution, and (3) the memory hierarchy (store buffers,
-invalidate queues). x86 is a relatively strong TSO model (only store-load reordering is
-visible); ARM/POWER are weakly ordered and expose far more. The JMM abstracts over all of
-these; correct JMM usage is portable regardless of the underlying hardware memory model.
+**Ordering** is whether operations appear to run in the order the program wrote them. Write
+`data = 42` and then `ready = true`, both of them plain fields, and another thread can see
+`ready` set while `data` is still 0. Nothing forces those two writes to become visible in the
+order you wrote them.
+
+**Atomicity** is whether a compound operation runs as one indivisible step. `stop = true`
+is a single write, so it has nothing to divide; `count++` is a read, an add and a write,
+and another thread can land in the middle of it.
+
+The three are independent, and each tool covers a different subset. `volatile` gives you
+visibility and ordering, and no atomicity of compound actions. `synchronized` and the
+atomic classes give all three, within the block or the variable they cover.
+
+Atomicity has a second and smaller form. A *single* access can be split. Per JLS 17.7 a JVM
+may implement a write of a non-volatile `long` or `double` as two separate writes, one to
+each 32-bit half. A reader can then see a word-torn value: the high half of one write beside
+the low half of another, a number no thread ever stored. Declaring the field `volatile`
+guarantees the 64-bit access is atomic. References are always read and written atomically,
+whatever the platform's word size.
+
+> [!WARNING]
+> You will hear that tearing is theoretical, because HotSpot on a 64-bit platform writes a
+> `long` atomically anyway. That is true of that platform and it is not a guarantee. The
+> specification promises 64-bit atomicity only for a `volatile` field, so identical source is
+> free to tear on any JVM that splits a 64-bit access in two. Historically those have been
+> 32-bit JVMs. Write down the guarantee you need rather than the one your laptop happens to
+> provide.
+
+### Why the simple version is wrong: three machines reorder, not one
+
+Between the order you wrote and the order another core observes, an access passes three
+stages, and each one may move it.
+
+```mermaid
+flowchart LR
+    P["program order<br/>you wrote"] --> J["compiler / JIT<br/>reorders while generating code"]
+    J --> C["processor<br/>out-of-order execution"]
+    C --> M["memory hierarchy<br/>store buffers, invalidate queues"]
+    M --> O["order another core observes"]
+```
+
+The hoist in the loop above happened at the first stage, in generated code, which is why no
+amount of cache-flushing would have fixed it. At the last stage a write can be delayed after
+it has already executed. A store waits in the core's store buffer. On many designs an
+invalidate queue also delays the moment another core learns its copy of the line has gone
+stale.
+
+Which moves another core can observe depends on the chip, and the compiler targets that chip
+too. x86 behaves as **total store order (TSO)**: for ordinary field accesses, store-load is
+the only reordering it exposes to another core. A store followed by a load of a different
+address can appear swapped. ARM and POWER are weakly ordered, and permit reorderings that x86
+forbids. That is why a racy program can pass every run on an x86 laptop and still fail on an
+ARM server running the same bytecode.
+
+The JMM sits above all three stages, and above every hardware model under them. That is what
+makes a correctly synchronised program portable: get the happens-before edges right, and the
+same source is correct on both chips.
+
+`volatile` fixes visibility, ordering and the tearing case with one keyword. It cannot fix
+`count++`. That keyword is the next section.
 
 ---
 
 ## volatile
 
-**Beginner.** `volatile` on a field guarantees:
+`volatile` makes one access to a field behave. It never makes a *sequence* of accesses
+behave.
 
-1. **Visibility** — a read always sees the most recent write (establishes a happens-before
-   edge between the write and subsequent reads).
-2. **Ordering** — reads/writes of the volatile are not reordered with each other, and act as
-   memory barriers for surrounding operations.
-3. **Atomicity of the single read or single write** (including 64-bit `long`/`double`).
-
-It does **NOT** provide atomicity of compound actions like `count++` (which is
-read-modify-write) or `if (x == null) x = ...`.
+Take a counter at `v == 5`, with threads A and B each running `v++` exactly once:
 
 ```java
 volatile int v;
 v++;   // NOT atomic: load v, add 1, store v — lost updates under contention
 ```
 
-**Worked example — why `volatile` cannot save `v++`.** Say `v == 5` and threads A and B each
-run `v++` once. `v++` is three steps: *load*, *add 1*, *store*. `volatile` guarantees each
-individual load and store is visible and atomic — but it does **not** fuse the three into one
-step, so the interleaving below is legal:
+`v++` is three steps: load, add 1, store. `volatile` covers each step and does not fuse
+the three, so this interleaving is legal:
 
-```
-time  Thread A            Thread B            v (in memory)
- t1   load v -> 5                             5
- t2                       load v -> 5         5     <- B reads BEFORE A stores
- t3   add 1  -> 6                             5
- t4                       add 1  -> 6         5
- t5   store 6                                 6
- t6                       store 6             6     <- B overwrites with its stale 6
-```
+| time | Thread A | Thread B | `v` in memory | what just happened |
+|---|---|---|---|---|
+| t1 | load v -> 5 | | 5 | |
+| t2 | | load v -> 5 | 5 | B reads before A stores |
+| t3 | add 1 -> 6 | | 5 | |
+| t4 | | add 1 -> 6 | 5 | |
+| t5 | store 6 | | 6 | |
+| t6 | | store 6 | 6 | B overwrites with its stale 6 |
 
-Two increments happened, yet the final value is `6`, not `7` — one update was **lost**.
-`volatile`'s visibility does not help: B's load at t2 saw a legitimately fresh `5`; the race
-is in the gap between load and store, which no visibility guarantee closes.
+Two increments happened and `v` is 6, not 7. One update was lost. Visibility is not what
+failed: B's load at t2 returned a genuinely fresh 5. The race lives in the gap between a
+load and the store that depends on it, and no visibility guarantee closes a gap.
 
-Now the same race under `AtomicInteger.incrementAndGet()`, which is a CAS loop
-(`compareAndSet(expected, expected+1)`):
+What closes it is a retry. `AtomicInteger.incrementAndGet()` behaves as a compare-and-set
+retry loop. `compareAndSet(expected, expected + 1)` stores the new value only if the field
+still holds the value that was read. If it does not, the increment reads again and retries.
+The same interleaving now ends differently:
 
-```
-time  Thread A                        Thread B                        v
- t1   load v -> 5                                                      5
- t2                                    load v -> 5                     5
- t3   CAS(expect 5, set 6) -> OK                                       6
- t4                                    CAS(expect 5, set 6) -> FAIL (v is 6, not 5)
- t5                                    retry: load v -> 6              6
- t6                                    CAS(expect 6, set 7) -> OK      7
-```
+| time | Thread A | Thread B | `v` |
+|---|---|---|---|
+| t1 | load v -> 5 | | 5 |
+| t2 | | load v -> 5 | 5 |
+| t3 | CAS(expect 5, set 6) -> OK | | 6 |
+| t4 | | CAS(expect 5, set 6) -> FAIL (v is 6, not 5) | 6 |
+| t5 | | retry: load v -> 6 | 6 |
+| t6 | | CAS(expect 6, set 7) -> OK | 7 |
 
-B's first CAS fails because `v` is no longer the `5` it expected, so B *re-reads* and retries
-with the current value — final result `7`, correct. That retry-on-conflict is exactly the
-atomicity `volatile` lacks.
+B's first attempt fails because `v` no longer holds the 5 it expected, so B re-reads and
+retries against the current value, and the count comes out 7. That retry-on-conflict is
+precisely the atomicity `volatile` lacks.
 
-**Intermediate — the piggyback / release-acquire pattern.** Since JSR-133, a volatile write
-acts as a *release* and a volatile read as an *acquire*. Everything a thread wrote *before*
-a volatile write is visible to any thread that *reads* that same volatile afterward — even
-non-volatile fields.
+`volatile` gives you visibility: a read sees the most recent write, because that write
+happens-before every later read of the field. It gives you ordering: the volatile accesses
+are not reordered against each other, and they act as memory barriers for the plain accesses
+around them. It gives you atomicity of one read or one write, a 64-bit `long` or `double`
+included. It does not give you atomicity of a read-modify-write such as `count++`, or of a
+check-then-act such as `if (x == null) x = ...`.
+
+The ordering half is why `volatile` appears on fields whose own value nobody cares about.
+Since JSR-133 the two accesses have names taken from hardware: the volatile write is the
+**release** and the matching volatile read is the acquire. Everything a thread wrote before
+the release is visible to a thread that afterwards reads that same volatile and sees the value
+the release wrote. That includes plain non-volatile fields.
 
 ```java
 int data;                 // plain
@@ -178,37 +224,81 @@ if (ready) {              // (3) volatile read — acquire
 }
 ```
 
-Because (1) hb (2), (2) hb (3), (3) hb (4) by transitivity, the plain write of `data` is
-visible. This "piggybacking" is the single most useful volatile idiom.
+(1) happens-before (2) by program order. (2) happens-before (3) by the volatile rule, and (3)
+happens-before (4) by program order again. Transitivity then carries the plain write of
+`data` all the way to (4). A reader that sees `ready == true` sees 42, never 0. One volatile
+boolean published a field that carries no synchronisation of its own, and that piggybacking
+is the single most useful thing `volatile` does.
 
-**Advanced — barriers HotSpot emits.** A **memory barrier** (fence) is a special instruction
-that forbids the compiler and CPU from moving certain memory operations across it — it does
-not compute anything; it just constrains reordering (and, for StoreLoad, forces buffered
-writes out to where other cores can see them). The four named barriers each pin one
-before→after pair in place:
+> [!WARNING]
+> Performing the volatile read is not what creates the edge. The edge exists only if your
+> read lands after the release, and seeing the value the release wrote is how you know it
+> did. If the reader's `if (ready)` sees the initial `false`, there is no happens-before
+> relationship to the writer at all, and a later read of `data` may return 0. Even
+> `boolean ignored = ready;` forms the edge, as long as the value it read is the one the
+> release wrote.
 
-- **LoadLoad** — a load before the barrier completes before any load after it (no read gets
-  hoisted past the barrier).
-- **LoadStore** — a load before the barrier completes before any store after it.
-- **StoreStore** — a store before the barrier becomes visible before any store after it (used
-  before a volatile write so all the plain writes you did first land first — this is what makes
-  the piggyback pattern work).
-- **StoreLoad** — a store before the barrier becomes visible before any *load* after it.
+### Where it breaks: what the keyword does not reach
 
-Conceptually the JMM requires: LoadLoad + LoadStore after a volatile read; StoreStore +
-LoadStore before a volatile write, and a **StoreLoad** barrier after a volatile write (the
-expensive one — a full fence, e.g. `mfence` / `lock addl` on x86). StoreLoad is costly because
-it must **drain the CPU store buffer**: pending writes sitting in the buffer have to be flushed
-to cache before the next load may proceed, stalling the pipeline. This StoreLoad is what makes
-a volatile write followed by a volatile read of a *different* variable ordered, and is why
-volatile writes are more expensive than volatile reads.
+Declare `volatile int[] arr` and exactly one thing is volatile: the field holding the
+reference. `arr[0] = 1` is a plain write, with no ordering and no visibility guarantee,
+which is why element-level semantics need `AtomicIntegerArray` or a `VarHandle` over the
+array.
 
-**Gotchas:**
+The other two misuses assume the keyword reaches further than one field access. A check built
+from two volatile reads is not one atomic action: `v == 5 && w == 0` loads `v`, then loads
+`w`, and either can change between the two loads. And a volatile field holding a mutable
+object says nothing about that object's internal state; the field access is thread-safe, the
+object is not.
 
-- `volatile` on an array reference makes the *reference* volatile, not the elements.
-  Use `AtomicIntegerArray` / `VarHandle` for element-level volatile semantics.
-- Compound checks (`v == 5 && ...`) built from separate volatile reads are not atomic.
-- `volatile` does not make an object's internal state thread-safe — only the field access.
+### What it costs: the fences HotSpot emits
+
+The expensive part of `volatile` is one instruction, and it sits after a write rather than
+after a read: on x86 a StoreLoad barrier compiles to a full fence such as `mfence` or
+`lock addl`.
+
+A **memory barrier**, or fence, is an instruction that computes nothing. All it does is forbid
+the compiler and the CPU from moving certain memory operations across it. StoreLoad does one
+thing more: it forces buffered writes out to where other cores can see them. Four are named,
+and each pins one before-and-after pair:
+
+| Barrier | What it pins |
+|---|---|
+| LoadLoad | a load before the barrier completes before any load after it, so no read is hoisted past the barrier |
+| LoadStore | a load before the barrier completes before any store after it |
+| StoreStore | a store before the barrier becomes visible before any store after it |
+| StoreLoad | a store before the barrier becomes visible before any load after it |
+
+Conceptually, this is where the JMM requires each of them:
+
+```mermaid
+flowchart TB
+    subgraph WR["volatile write"]
+        direction TB
+        W1["the plain reads and writes you did first"] --> W2["StoreStore + LoadStore"]
+        W2 --> W3["the volatile write"]
+        W3 --> W4["StoreLoad — the full fence"]
+        W4 --> W5["any later load"]
+    end
+    subgraph RD["volatile read"]
+        direction TB
+        R1["the volatile read"] --> R2["LoadLoad + LoadStore"]
+        R2 --> R3["any later load or store"]
+    end
+```
+
+The StoreStore before the write is what makes the piggyback pattern work: the plain write of
+`data` has to become visible before the volatile write of `ready` does, so a reader that
+sees `ready` cannot be looking at a stale `data`.
+
+The StoreLoad after the write is the costly one, and the cost is mechanical. A store does
+not go straight to cache; it waits in the core's store buffer. StoreLoad may not let the
+next load proceed until that buffer has drained to cache, so the pipeline stalls for as long
+as the drain takes. That drain is what orders a volatile write against a later volatile read
+of a *different* variable. It is also why a volatile write costs more than a volatile read.
+
+None of this stops two threads from running `v++` at the same time. Keeping them apart takes
+mutual exclusion, and that is what a monitor provides.
 
 ---
 
