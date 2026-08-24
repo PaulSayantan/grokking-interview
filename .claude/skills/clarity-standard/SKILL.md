@@ -410,20 +410,34 @@ report-only precisely because they are gameable; this one is not, and it is the 
    sentence-length list and move on. That is 12.3% of the corpus's H2 sections, so expect it.
 2. Identify the section's deepest beat: the last `### H3` seam, or **the closing 30% by word
    count** if the section has no seam. (C1 measures the same closing 30%.)
-3. Copy two paragraphs into a scratch buffer, **unlabelled**: the section's first body
-   paragraph, and the deep beat's last body paragraph. Exclude callouts and the S7 exit
-   sentence — the template puts those there, and including them makes the test unsatisfiable.
-4. Read them back to back and answer exactly one question: **from vocabulary and clause depth
-   alone — not subject matter — can you tell which is which?**
-5. If yes, it **FAILS**. Name the axis:
+3. Copy **three** paragraphs into a scratch buffer, **unlabelled**:
+   - **A** — the section's first body paragraph.
+   - **B** — the deep beat's **FIRST** body paragraph. If the deep beat is an `### H3` seam,
+     this is the paragraph immediately under that seam heading.
+   - **C** — the deep beat's **last** body paragraph.
+
+   Exclude callouts and the S7 exit sentence — the template puts those there, and including
+   them makes the test unsatisfiable.
+
+   > **B is not optional, and it is the highest-risk position in the file.** An earlier version
+   > of this procedure sampled only A and C. On the first pilot topic a writer scored itself
+   > 11/11 PASS while the two densest paragraphs in the file — 46-word and 42-word sentences —
+   > sat in B, structurally unreachable by the check. A seam heading is where an author changes
+   > gear into depth, so it is where the register slips first, and a procedure that cannot see
+   > that position will keep reporting PASS.
+4. Read them back to back and answer exactly one question, for **both pairs (A vs B) and
+   (A vs C)**: **from vocabulary and clause depth alone — not subject matter — can you tell
+   which is which?**
+5. If yes for **either pair**, it **FAILS**. Name the pair and the axis:
    - **Vocabulary** — an unearned term, a nominalisation, a passive with a hidden agent, a
      citation inside the sentence, the spec as the actor.
    - **Clause depth** — the deep paragraph's sentences carry more subordinate clauses. Measure
      it: write down each paragraph's sentence lengths as a list.
 6. **Fix by rewriting the deep paragraph. Never by complicating the opener.** Splitting
    sentences moves no content and is the usual repair.
-7. Record both sentence-length lists per section in your report. **They are report-only** — the
-   pass/fail is your answer to step 4, not a threshold on the lists.
+7. Record **all three** sentence-length lists per section in your report, labelled A / B / C.
+   **They are report-only** — the pass/fail is your answer to step 4, not a threshold on the
+   lists. Reporting only two lists is itself a finding: it means B was not measured.
 
 A cheaper tell before you measure: read the deep paragraph aloud. If you run out of breath before
 the verb, it fails. A real failure-then-pass, with the measured lists, is in
@@ -819,8 +833,9 @@ third file it does not document is a contract violation from commit 1.
    N-1's open loop in the opener (K1). Open N's, with the payoff anchor verified against the
    un-rewritten destination.
 4. **Self-audit.** Build the claim-diff table by sentence alignment (Steps 1–4 of Fact safety).
-   Run the REGISTER SWAP on every H2 with two or more body paragraphs, record the two
-   sentence-length lists per section, and record the short ones N/A. Count callouts, bold spans,
+   Run the REGISTER SWAP on every H2 with two or more body paragraphs, record **all three**
+   sentence-length lists per section (A opener / B deep-beat FIRST paragraph / C deep-beat
+   last), and record the short ones N/A. Count callouts, bold spans,
    tier labels.
    **The information inventory — nothing in this list may drop:** numbers with units, versions,
    `RFC|JEP|JLS|CWE|SP 800-` citations, inline-code identifiers, URLs, table rows, mermaid blocks,
@@ -895,8 +910,10 @@ above; if you find a disagreement, the rule text wins and the checklist is a bug
 
 **Clarity**
 
-- [ ] **REGISTER SWAP passes on every H2 with two or more body paragraphs**, on both axes, with the
-      sentence-length lists recorded. Sections with fewer than two body paragraphs recorded **N/A**.
+- [ ] **REGISTER SWAP passes on every H2 with two or more body paragraphs**, on both axes and for
+      **both pairs (A vs B and A vs C)**, with all three sentence-length lists recorded. A report
+      carrying only two lists means the deep beat's FIRST paragraph was never measured — that is a
+      finding, not a pass. Sections with fewer than two body paragraphs recorded **N/A**.
 - [ ] **S1:** every H2 over ~50 lines has ≥1 content-named H3 seam; shorter H2s need none; zero
       audience-named seams.
 - [ ] **C4:** every H2 and every H3 seam reaches a real concrete instance inside 60 words.
