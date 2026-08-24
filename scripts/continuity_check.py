@@ -60,6 +60,7 @@ REQUIRED_KEYS = ("domain", "schema", "pass", "reading_order_source", "position",
 ALLOWED_KEYS = set(REQUIRED_KEYS) | {
     "group",
     "canonical_terms",
+    "assumed_prior_knowledge",
     "running_example",
     "claims_established",
     "approximations_open",

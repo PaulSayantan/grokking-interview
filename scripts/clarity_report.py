@@ -228,6 +228,27 @@ S7_TEASER_STRICT_RE = re.compile(
     r"\bstay tuned|you'?ll never look at|coming up (?:next|in the next)", re.I)
 S8_HEADING_RE = re.compile(r"^## (What breaks next|Where this goes next)")
 S3_RE = re.compile(r"Boundaries|Cross-references|don't duplicate|do not duplicate")
+
+# C12: the punt shapes — the file handing an explanation to an outside source instead of
+# writing the sentence. Reported PER HIT, not as zero tolerance, because the shape has
+# honest instances: "traded some testability for brevity" prices a design decision, while
+# "pods are out of scope here" is about the document. The corpus baseline is 7 hits in 7
+# of 460 files (`## References` excluded), so a spike is a rewrite regression, not a
+# pre-existing condition. Keep this pattern byte-identical to SKILL.md's C12 fence.
+C12_PUNT_RE = re.compile(
+    r"(?i)\b(?:see|refer to|consult|check) the "
+    r"(?:docs\b|documentation|official docs|man page|manual\b)"
+    r"|for (?:more|further) (?:details|reading|information),? (?:see|refer|consult)"
+    r"|(?:beyond|outside) the scope of (?:this|the)"
+    r"|out of scope (?:here|for this|in this)"
+    r"|not covered (?:here|in this)"
+    r"|we (?:won'?t|will not|do not|don'?t) (?:cover|go into|discuss)"
+    r"|left as an exercise|the reader is encouraged|we leave (?:this|that|it) to"
+    r"|(?:you|just|simply) (?:can |could |should )?look (?:it|this|that) up"
+    r"|read more (?:about|on) (?:this|it)"
+    r"|for brevity|space (?:does not|doesn'?t) permit|suffice it to say"
+    r"|the (?:full|whole) story is|the details are (?:involved|beyond|elsewhere)"
+    r"|is well[- ]documented|for the curious")
 S3_XREF_RE = re.compile(r"`[a-z0-9-]+/[a-z0-9-]+`")
 NOTE_CALLOUT_RE = re.compile(r"^\s*>\s*\[!([A-Za-z-]+)\]")
 C5_DEMONSTRATIVES = ("This", "That", "These", "Those", "It")
@@ -602,6 +623,14 @@ def measure_file(path: Path, text: str) -> dict:
     s8 = sum(1 for _, ln, _ in lines if S8_HEADING_RE.match(ln))
     s3 = sum(1 for _, ln, _ in lines if S3_RE.search(ln))
     s3_xref = len(S3_XREF_RE.findall(joined_body))
+    # `## References` is exempt from C12: a bibliography line points outward by design.
+    # Everything from that heading to EOF is skipped, which matches how the rule is run
+    # by hand. A file with no References section skips nothing.
+    refs_at = max((h.line for h in doc.headings
+                   if h.level == 2 and h.text.strip().lower() == "references"),
+                  default=None)
+    c12_punt = sum(len(C12_PUNT_RE.findall(ln)) for n, ln, _ in lines
+                   if refs_at is None or n < refs_at)
     bad_callouts = Counter()
     for _, ln, _cal in lines:
         m = NOTE_CALLOUT_RE.match(ln)
@@ -686,6 +715,7 @@ def measure_file(path: Path, text: str) -> dict:
         "s8_headings": s8,
         "s3_slab_hits": s3,
         "s3_xrefs": s3_xref,
+        "c12_punt_hits": c12_punt,
         "unsupported_callouts": dict(bad_callouts),
         "mermaid_blocks": base["mermaid_blocks"],
     }
@@ -732,6 +762,7 @@ SUM_KEYS = (
     "s2_opener_hits_loose", "teaser_hits", "s8_headings", "s3_slab_hits", "s3_xrefs",
     "paragraphs_over_bold_cap", "bold_terms_repeated", "bold_naked_first_use",
     "teaser_hits_strict", "c11_probe_want_expect", "c11_in_an_interview",
+    "c12_punt_hits",
     "blocks", "blocks_non_quote",
     "c3_multi_gloss_sentences", "c5_demonstrative_openers",
     "c5_demonstrative_verb_openers", "h2", "h2_over_50_lines",
@@ -979,6 +1010,11 @@ def flags(rec: dict) -> list:
         out.append("C10 %d audience-tier label(s)" % rec["audience_labels"])
     if rec["c11_hits"]:
         out.append("C11 %d interviewer-substitution hit(s)" % rec["c11_hits"])
+    if rec["c12_punt_hits"]:
+        # Not a failure on its own — each hit is settled by asking whether the sentence
+        # is about the subject matter or about the document. Surfaced so it cannot be
+        # settled by never looking.
+        out.append("C12 %d punt-shape hit(s) to judge" % rec["c12_punt_hits"])
     if rec["s2_opener_hits"]:
         out.append("S2 %d 'This topic covers' opener(s)" % rec["s2_opener_hits"])
     if rec["teaser_hits"]:
@@ -1440,6 +1476,7 @@ def render_file(rec: dict, sections: bool) -> str:
              "sentences_over_45", "passive_per_100_sentences", "bold_per_1k",
              "paragraphs_over_bold_cap", "bold_terms_repeated", "bold_naked_first_use",
     "teaser_hits_strict", "c11_probe_want_expect", "c11_in_an_interview",
+    "c12_punt_hits",
     "blocks", "blocks_non_quote",
              "open_parens_per_1k", "nominalizations_per_1k", "hedges_per_1k",
              "metaconcepts_per_1k", "metadiscourse_per_1k", "c3_multi_gloss_sentences",

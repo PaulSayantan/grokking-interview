@@ -116,6 +116,45 @@ and is evaded by renaming `**Trade-offs.**` to `**Trade-off.**`, which 94 instan
 motivation: the reason to understand happens-before becomes "it will be asked" rather than "your
 loop will never terminate."
 
+**C12 — the file owes the whole explanation.** This rule came from the reader feedback directly,
+and later than the others, so it is worth recording what it added. The original brief was that the
+concepts were *hard to read*; C1–C11 all attack that. The sharpened version was that they were
+*incomplete* — "the explanations shouldn't be clumsy or lazy such that students have to ponder on
+the internet again to understand the concept from other different sources." Those are different
+defects, and a rewrite can fix the first while making the second worse: plainer sentences make it
+easier to move a hard link out of the prose and into a footnote, a citation or a prompt.
+
+The punt regex is calibrated rather than invented. Across all 460 `concepts.md` files, fence-aware
+and with each file's `## References` section excluded, it fires **6 times in 6 files** — so it is
+not a find-and-replace sweep, it is a tripwire for something a rewrite introduced. Four distinct
+phrases account for all 6: `out of scope here` ×2, `for brevity` ×2, `left as an exercise` ×1,
+`not covered here` ×1. Two of those are false positives on inspection, which is exactly why the
+check is per-hit and not zero-hits: `"traded some testability for brevity"` prices a design
+decision, and `is "left as an exercise" and underspecified` is quoting the Paxos paper's own
+famous omission. The distinguishing question — *about the subject, or about the document?* —
+separates all four cleanly.
+
+The 6 has a small history worth keeping, because it is a live instance of the rule that SKILL.md's
+constraint 5 states. The first calibration was run with a hand-rolled regex over the raw file text
+and read **7**. The seventh hit was `// Skeleton inlines the shuffle in the constructor for
+brevity` — a comment inside a fenced code block in `lld-and-ood/design-card-game`. Prose rules do
+not measure code comments, and every other grep in `clarity_report.py` goes through the
+fence-aware `grep_lines`, so 6 is the number and the hand-rolled 7 was the artefact. This is why
+the metric is wired into the script instead of being left as a grep in the author's terminal.
+
+Why the closure set is derived from S5, S7, the callouts, the opener and the prompts rather than
+from "the important claims": a rewriter asked to audit the important claims will audit the ones
+they already understand. Deriving the set from structures the standard *already* requires makes
+it enumerable, makes it the same set for the writer and the adversarial verifier, and — the point
+— catches the claims the file has publicly committed to, which are precisely the ones a reader
+will notice going unpaid.
+
+Why three steps and not "until bedrock": unbounded, the ladder either terminates immediately
+(useless) or descends into first principles (a different book). Three steps is deep enough to
+reach the mechanism under a mechanism, which is where the corpus's gaps actually sat, and shallow
+enough that hitting the bound is itself diagnostic — a claim still descending at step four is a
+claim in the wrong topic.
+
 ---
 
 ## Why the structure rules are shaped the way they are

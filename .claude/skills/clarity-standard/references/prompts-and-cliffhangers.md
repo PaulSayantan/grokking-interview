@@ -71,6 +71,14 @@ instead of dissolving into "yes, I knew that". p002's `success_criterion` names 
 deliberately does *not* say, which is what makes an external hunt finishable. p005 has nothing
 to get wrong, and its `answer_shape` still gives the reader a way to grade themselves.
 
+p002 also sits close to the line C12's subordination rule draws, so it is worth seeing why it
+falls on the legal side. The claim the file makes is that the racy cache breaks on ARM, and the
+*reason* — ARM permits reorderings x86 forbids — is in the prose. Delete p002 and that claim is
+still followable. What the hunt adds is *which* reordering and *which* barrier, one level below
+the file's floor. Had the prose said only "this can break on other architectures" and left the
+mechanism to the `success_criterion`, the same prompt would be carrying the explanation, and the
+fix would have been the prose sentence rather than a better prompt.
+
 ### The failure mode every existing file has
 
 All 460 files inline the answer today. The canonical instance:

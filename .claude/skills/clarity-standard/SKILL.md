@@ -23,6 +23,13 @@ this concept for the first time follow it on one read, without re-reading and wi
 looking up anything the file has not already given them?** If not, the sentence is wrong,
 not the reader.
 
+That last clause is the sharpest thing the reader feedback asked for, and it is a rule rather
+than an aspiration: *"the explanations shouldn't be clumsy or lazy such that students have to
+ponder on the internet again to understand the concept from other different sources."* **A
+topic is understandable from the file alone.** Think-prompts, the References list and the
+cliffhanger may all send a reader past the file's edge; none of them may stand in for an
+explanation the file owes. That is **C12**, and it outranks every convenience below it.
+
 ## The normative/illustrative invariant — where a rule may live
 
 > **SKILL.md is NORMATIVE. `references/` is ILLUSTRATIVE.**
@@ -111,7 +118,7 @@ is binding on judgement and report-only as a count, its Check line says which is
 
 **There is no reading-time ceiling.** The user's decision is "let files grow." Reading
 minutes are **reported before and after, never gated.** Padding is still a defect, caught by
-the **bloat check** (loop step 5), not by a time limit.
+the **bloat check** (loop step 6), not by a time limit.
 
 ---
 
@@ -262,8 +269,10 @@ are **one edit, never two**.
 > "on some JVMs" is spec-accurate; "on a 32-bit JVM" is not.
 
 **Check. REPORT-ONLY** density; **BINDING** per hit: either the condition or the magnitude
-appears in the same sentence, or the hedge is retained and **the gap is logged in the ledger's
-`owed:` list and routed to a tier-C prompt.** Hard exemptions, never find-and-replaced: SQL
+appears in the same sentence, or the hedge is retained, **the prose states the shape of the
+uncertainty rather than only hedging** (C12 bounds this route), and **the gap is logged in the
+ledger's `owed:` list** — as a tier-C prompt as well if it is worth hunting, never instead of
+the prose. Hard exemptions, never find-and-replaced: SQL
 *isolation level*, consistency *model*, threat *model*, Kubernetes *workload*, statistical
 *variable*. Per-file exemptions go in the ledger's **`exemptions:`** list — a topic about
 *context* propagation cannot be gated on the density of the word "context".
@@ -289,6 +298,77 @@ only as a question — never as the reason a thing is true.
 
 **Check. BINDING, zero hits outside an `[!INTERVIEW]` block.** Grep
 `[Ii]nterviewer(s)?\s+(probe|want|expect|ask|love|use|listen)|in an interview|the (senior|strong) (probe|signal|answer)|high-signal|[Cc]oncepts you must name|The bar is not|come up in interviews|commonly asked|a favourite question|worth being able to say out loud`.
+
+### C12 — The file owes the whole explanation
+
+**Rule.** A reader who finishes a section understands the claim it made, **using only this file
+and what the ledger records they already have.** No claim may rest on a fact the file leaves
+them to fetch. When you notice a missing link, the fix is to **write the missing sentence** —
+never to name where that sentence lives.
+
+C2 governs a **term's** first mention: one gloss, one instance. C12 governs a **claim's**
+completeness, and the two come apart constantly. "A whiteout is a tombstone entry in the upper
+layer" is a clean C2 gloss and still leaves the reader with no idea why the deleted bytes keep
+shipping — which was the actual claim.
+
+**The closure set.** The claims this rule is checked against are the ones the file's own
+structure has already declared load-bearing, so the set is enumerable rather than an argument
+about which claims matter:
+
+1. each content H2's first body line — the S5 claim;
+2. the problem each S7 exit sentence names;
+3. every `[!KEY-TAKEAWAY]` and `[!WARNING]` assertion;
+4. the question the opener promises to answer (S2);
+5. the expected answer to every prompt in `prompts.yaml`.
+
+**The why-ladder and its three floors.** Take each claim in the closure set and ask *why* until
+you hit bedrock — **at most three steps.** Still descending after three and the section is
+trying to teach two topics; split the depth behind an S1 seam or hand it to the topic that owns
+it. A step is closed when the file states it. The ladder may bottom out in exactly three places:
+
+- **`claims_established`** — an earlier topic in this domain taught it. K3 then applies: one
+  clause and a link, never a re-derivation.
+- **`assumed_prior_knowledge`** — the domain's stated entry bar, written once in Pass 0 (docker
+  assumes processes, file descriptors and filesystems). **If what you need is not on that list
+  and no earlier topic taught it, you may not assume it.** Explain it, or add it to the list —
+  and adding it is a decision about every topic in the domain, so say so in your report instead
+  of doing it quietly.
+- **a stated requirement.** A citation is provenance, not explanation. `JLS 17.7` is a floor
+  only where the file says *what 17.7 requires*; "per JLS 17.7, this is unsafe" is an unclosed
+  step wearing a citation.
+
+Bottoming out in "and you can look that up" is the defect this rule exists to catch.
+
+The cliffhanger is **not** an exception and does not need one: it withholds the *next* topic's
+payoff, not a link in this topic's chain. If deleting the cliffhanger would leave a claim here
+unfollowable, it has become a carrier — the same defect as a load-bearing prompt.
+
+**Check. BINDING, zero unclosed steps** across the closure set, every ladder terminating in one
+of the three floors, and **every termination named** in the report as `ledger` / `prior` /
+`stated`. Plus the punt grep — **BINDING per hit**, not zero-hits, because the shape has honest
+instances:
+
+```
+(?i)\b(?:see|refer to|consult|check) the (?:docs\b|documentation|official docs|man page|manual\b)|for (?:more|further) (?:details|reading|information),? (?:see|refer|consult)|(?:beyond|outside) the scope of (?:this|the)|out of scope (?:here|for this|in this)|not covered (?:here|in this)|we (?:won'?t|will not|do not|don'?t) (?:cover|go into|discuss)|left as an exercise|the reader is encouraged|we leave (?:this|that|it) to|(?:you|just|simply) (?:can |could |should )?look (?:it|this|that) up|read more (?:about|on) (?:this|it)|for brevity|space (?:does not|doesn'?t) permit|suffice it to say|the (?:full|whole) story is|the details are (?:involved|beyond|elsewhere)|is well[- ]documented|for the curious
+```
+
+One question settles each hit: **is the sentence about the subject matter, or about this
+document?** "Public package versions are out of scope entirely" describes how a registry is
+bound — keep it. "Pods are out of scope here" describes the document — that is a punt, and it
+is a real one, at `topics/docker/debugging-troubleshooting/concepts.md:15`. The regex is
+calibrated, not invented — it fires **6 times across all 460 files**, so more than a hit or two
+in one rewrite means the rewrite introduced them (the breakdown is in `references/rationale.md`).
+
+**Do not run it by hand.** `scripts/clarity_report.py` reports it as `c12_punt_hits`, fence-aware
+and with `## References` already excluded, which is the number above. A hand-rolled grep over the
+raw text reads 7, because it counts a `// … for brevity` comment inside a code fence — the same
+trap constraint 5 warns about, walked into while writing this rule. A `search_hint` in
+`prompts.yaml` is outside the metric's scope entirely.
+
+A step you genuinely cannot close is a **content gap, not a style waiver.** Keep the reader
+oriented — say what is missing and why it is missing — log it in the ledger's `owed`, and
+report it. That path exists for a fact the primary source does not state. It is not for one you
+did not go and find.
 
 ---
 
@@ -442,7 +522,7 @@ report-only precisely because they are gameable; this one is not, and it is the 
 A cheaper tell before you measure: read the deep paragraph aloud. If you run out of breath before
 the verb, it fails. A real failure-then-pass, with the measured lists, is in
 `references/examples.md` — including why a writer measuring its own swap understates it, which is
-why loop step 7 hands this to a separate verifier.
+why loop step 8 hands this to a separate verifier.
 
 ---
 
@@ -604,6 +684,38 @@ A full three-prompt file with the tier-C and tier-D fields filled in is in
   tier-C hunt per topic**, in the deepest section.
 - **D — genuinely open.** **Mandatory `answer_shape`.**
 
+### Prompts are provocation, never carriage
+
+Tiers C and D send a reader outside the file on purpose, which puts them one careless step from
+the exact failure C12 exists to stop. The line is not where the reader ends up — it is **what
+the file still owes when they leave.**
+
+**Rule. Delete every prompt and the topic still teaches itself completely.** A prompt asks the
+reader to *do something with* what the file gave them. It never supplies what the file withheld.
+Three bans, all the same failure in different clothes:
+
+- A tier-C `success_criterion` may not be the definition, the magnitude or the condition of
+  anything the prose uses **as a reason**. When it is, the prose sentence is the defect: move the
+  fact up into it, then re-aim the prompt past the file's edge.
+- **No caveat, boundary or number may exist only in `prompts.yaml`.** A prompt may ask the reader
+  to *derive* one the file states. It may not be the file's only statement of it.
+- A tier-B prompt pointing at a **later** topic is a promise, so the claim it hangs off must
+  stand on this file alone. Pointing **backward** is free — the reader already has that topic.
+
+C9's tier-C route stays legal and means one specific thing: **the condition is missing from the
+primary source, not merely missing from your notes.** The prose still owes the shape of the
+uncertainty, which is itself usable knowledge:
+
+> "Whether that write lands atomically depends on the allocator, and neither the spec nor the
+> JDK docs commit to one" — self-sufficient. The reader knows exactly what is unsettled, and why.
+>
+> "Typically that write is atomic", plus a prompt asking them to go find out — lazy. This is the
+> shape the reader feedback named.
+
+**Check. BINDING.** For every tier-C and tier-D prompt, name the closure-set claim it
+interrogates and confirm that claim is still followable with the prompt deleted. Zero prompts
+carry a fact the prose lacks.
+
 ### Density, placement, and the one absolute rule
 
 - **Primary: a hard cap of 14 prompts per topic, regardless of file length.** This is the one
@@ -711,6 +823,7 @@ fix must not add a new instance.
 | `plan[]` | `{slug, covers}` for every topic. **Written in Pass 0 before topic 1, from H2 lists plus first 200 words. Never edited after** — it is what makes a forward cliffhanger possible |
 | `canonical_terms` | **append-only. 6 terms per topic, no truncation** — an archival rule would strip exactly the `gloss` and `banned_variants` fields K2's check consumes. Each entry: `{canonical, defined_in, gloss, banned_variants[]}` |
 | `running_example` | **at most 2 per domain**: `{name, established_in, state}`. Numbers may be **extended**, never silently changed |
+| `assumed_prior_knowledge` | the domain's entry bar — what every topic may take as given without teaching it. **Written once in Pass 0**, a flat list of short phrases. Append only with a stated reason in your report, because an addition silently changes what all 16 topics are allowed to assume. C12's second floor reads this list |
 | `claims_established` | **rolling compaction every 5 topics**: compress the previous 5 topics' claims into ≤5 domain-level claims, so the ledger stays O(1) rather than O(N). **Cap ~25 live claims** |
 | `approximations_open` | `{id, from, text, correction_owed_by}`. Every entry needs a correction before the domain ends (K5) |
 | `known_defects` | **pre-existing** defects you did not create and did not fix |
@@ -721,7 +834,9 @@ fix must not add a new instance.
 
 A filled-in ledger is in `references/ledger-example.md`.
 
-**Load exactly four slices, never the whole ledger:** (1) the full `canonical_terms` map;
+**Load exactly four slices, never the whole ledger:** (1) the full `canonical_terms` map and the
+full `assumed_prior_knowledge` list — together these are everything you may name without
+teaching it, so both are read whole;
 (2) `running_example`, plus the `known_defects`, `owed` and `exemptions` entries **whose `file`
 is topic N** — that is how a debt owed to you reaches you; (3) the last 3 `topics[]` entries in
 full plus a one-line roll-up of `claims_established`; (4) `plan[N-1] / plan[N] / plan[N+1]`.
@@ -761,6 +876,7 @@ ledger that looks updated and is not is worse than one that fails loudly.
 | `open_cliffhanger` | replaces — yours supersedes the one you just settled |
 | `topics` | appends **exactly one** entry, yours |
 | `claims_established`, `approximations_open`, `owed`, `exemptions` | append |
+| `assumed_prior_knowledge` | appends — and only with the reason in your report (C12's second floor) |
 | `canonical_terms` | a **mapping**, merged key-by-key — only terms this topic is the teaching site for |
 | `known_defects_closed` | a list of the defect notes you fixed; the orchestrator removes them |
 
@@ -842,8 +958,10 @@ explicitly as residual risk; saying so is part of the deliverable.
 third file it does not document is a contract violation from commit 1.
 
 **Pass 0, once per domain, before topic 1.** Read every un-rewritten topic's H2 list and first
-200 words. Write `docs/continuity/<domain>.yaml`'s `plan[]` in full; seed `canonical_terms` and
-`running_example`. Cheap, and it is the only reason a cliffhanger can be forward-accurate.
+200 words. Write `docs/continuity/<domain>.yaml`'s `plan[]` in full; seed `canonical_terms`,
+`running_example` and **`assumed_prior_knowledge`** — the last one is C12's second floor, and a
+domain without it has no defensible answer to "may I assume the reader knows what an inode is?".
+Cheap, and it is the only reason a cliffhanger can be forward-accurate.
 
 **Then, per topic, in README row order:**
 
@@ -863,10 +981,20 @@ third file it does not document is a contract violation from commit 1.
    `RFC|JEP|JLS|CWE|SP 800-` citations, inline-code identifiers, URLs, table rows, mermaid blocks,
    code fences.
    **Callout counts are NOT in that list and MAY drop** — but only against S9's demotion log.
-5. **Bloat check.** For each rewritten H2, list the added sentences that teach nothing new —
+5. **Closure ladder (C12).** Enumerate the closure set, run the why-ladder on each claim, and
+   record every termination as `ledger` / `prior` / `stated`. Then the punt check — read
+   `c12_punt_hits` off `python3 scripts/clarity_report.py --file <path>`, never a hand grep — and
+   the prompt subordination check: **delete every prompt mentally and confirm the topic still
+   teaches itself.** This is the step that answers the reader complaint the whole standard exists
+   for, so it is a step and not a bullet inside one. An unclosed step is either fixed here or
+   logged in `owed`, with what is missing said out loud in the prose.
+6. **Bloat check.** For each rewritten H2, list the added sentences that teach nothing new —
    narration, reassurance, restatement of the previous sentence — and delete them. Report the
-   count. Skipping this is how "let files grow" becomes padding.
-6. **Gates — all must pass:**
+   count. Skipping this is how "let files grow" becomes padding. Note the interaction with the
+   step above: closing a ladder step **adds** a load-bearing sentence, and deleting it as "new
+   words" is the wrong call. Bloat is a sentence that teaches nothing, never a sentence that made
+   the file self-sufficient.
+7. **Gates — all must pass:**
 
    ```bash
    python3 scripts/validate_content.py
@@ -878,21 +1006,23 @@ third file it does not document is a contract violation from commit 1.
    present and in the same relative order.** Anything extra is an addition and is legal — prefer
    H3 seams; a new H2 is allowed for genuinely new material. Zero duplicate slugs. **Do not gate on
    "H3 only":** a gate stricter than the repo's own lock will fail compliant files.
-7. **Adversarial verifier — a separate agent, fresh context. Mandatory, never skipped.** It sees
+8. **Adversarial verifier — a separate agent, fresh context. Mandatory, never skipped.** It sees
    the diff, the claim-diff table and the inventory delta, and nothing else. It re-derives the
    sentence alignment independently, runs its own REGISTER SWAP, and reports undisclosed added
    claims by name. It must also check the opposite failure: anything softened, hedged away, or
-   vagued.
-8. **Web fact-check pass — mandatory.** Primary sources only, for every fact-shaped line the diff
+   vagued. **It re-runs the closure ladder on the closure set too** — a writer who left a step
+   open is the writer least able to see it, which is the same reason the register swap is here.
+9. **Web fact-check pass — mandatory.** Primary sources only, for every fact-shaped line the diff
    touched, using the **four regression shapes in the fact-safety section above** as the
    checklist. Worked instances of each are in `references/fact-safety-cases.md`.
-9. **Repair.** Apply or reject each finding **with a written reason**, having read it — verifier
-   and fact-checker suggestions can themselves be wrong. Record every rejection.
-10. **Commit** `concepts.md` + `prompts.yaml` + the ledger append **together, in one commit.**
+10. **Repair.** Apply or reject each finding **with a written reason**, having read it — verifier
+    and fact-checker suggestions can themselves be wrong. Record every rejection.
+11. **Commit** `concepts.md` + `prompts.yaml` + the ledger append **together, in one commit.**
     Never mix a prose rewrite with an anchor rename or a `questions.yaml` edit: three blast radii,
     three reviews.
-11. **Report** reading minutes before/after, word delta, the inventory delta, the demotion log, the
-    bloat-check count, and the REGISTER SWAP measurements. Reading minutes are reported, not gated.
+12. **Report** reading minutes before/after, word delta, the inventory delta, the demotion log, the
+    bloat-check count, the REGISTER SWAP measurements, and the **closure-ladder table** (claim →
+    depth → floor). Reading minutes are reported, not gated.
 
 **At the end of every session, not every topic** (`CLAUDE.md` makes this non-optional): update the
 progress checklist in `ROADMAP.md` and the Claude memory index at
@@ -951,6 +1081,18 @@ above; if you find a disagreement, the rule text wins and the checklist is a bug
 - [ ] **C10 + S1:** zero audience-tier labels; zero slot labels on the shape regex; every
       trade-off states a cost-for-benefit relation and a condition that flips the decision.
 - [ ] **C11:** zero interviewer-substitution hits outside an `[!INTERVIEW]` callout.
+- [ ] **C12 — self-sufficiency.** The closure set is enumerated (S5 first lines, S7 exit problems,
+      every KEY-TAKEAWAY and WARNING, the opener's question, every prompt's expected answer); the
+      why-ladder is run on each claim at **at most three steps**; **zero steps unclosed**; every
+      termination is named `ledger` / `prior` / `stated`. Every `c12_punt_hits` hit reported by
+      `clarity_report.py` is settled as *about the subject*, not *about the document* — never by a
+      hand-rolled grep, which reads fences. No citation stands in for the requirement it cites.
+      Any step that could not be closed is stated out loud in the prose and logged in `owed`.
+- [ ] **C12 — prompt subordination.** With every prompt deleted, the topic still teaches itself:
+      no tier-C `success_criterion` carries a definition, magnitude or condition the prose uses as
+      a reason; no caveat, boundary or number exists only in `prompts.yaml`; every forward tier-B
+      prompt hangs off a claim that stands on this file alone; deleting the cliffhanger leaves no
+      claim unfollowable.
 - [ ] **C5, C6, C7:** zero **sentence-initial** bare demonstratives on the C5 regex; every clause
       over ~8 words sits at its sentence's end; no sentence carrying more payloads than it has
       closures; every 5+ item list is preceded by the question it answers and grouped by the answer,
@@ -997,6 +1139,9 @@ above; if you find a disagreement, the rule text wins and the checklist is a bug
       concept, each with a non-empty breakdown.
 - [ ] **K7:** the destination is the real next topic (or a warning is recorded with a remediation
       note after a README reorder).
+- [ ] **`assumed_prior_knowledge` respected:** every ladder step that terminated in `prior` names
+      an entry already on that list. Any addition to the list is called out in the report with its
+      reason, never merged quietly — it changes what every topic in the domain may assume.
 - [ ] **Ledger updated in the same commit:** `position` bumped, `open_cliffhanger` overwritten,
       a `topics[]` entry appended, terms/claims appended, every new debt appended to `owed` and
       every new exemption to `exemptions`, `plan[]` untouched, rolling compaction run if this is a
