@@ -746,6 +746,28 @@ already uses) so each unit stays under ~25 topics.
 list is the durable per-file completion marker, so an interrupted run resumes additively and
 never rewrites a finished topic.
 
+### The ledger append — use these exact key names
+
+You do not edit the ledger. You write a separate `ledger-append.yaml`, and the orchestrator
+merges it. **Use the ledger's own key names, with no suffix.** Pilot topics 1 and 2 used two
+different shapes — bare names versus `topics_append` / `claims_established_append` /
+`known_defects_close` / `approximations_open_update` — and the second silently merged nothing but
+`position`, because a merge keyed on the documented names could not see the invented ones. A
+ledger that looks updated and is not is worse than one that fails loudly.
+
+| Key in your append | Merge behaviour |
+|---|---|
+| `position` | replaces — set it to your topic's position **+ 1** |
+| `open_cliffhanger` | replaces — yours supersedes the one you just settled |
+| `topics` | appends **exactly one** entry, yours |
+| `claims_established`, `approximations_open`, `owed`, `exemptions` | append |
+| `canonical_terms` | a **mapping**, merged key-by-key — only terms this topic is the teaching site for |
+| `known_defects_closed` | a list of the defect notes you fixed; the orchestrator removes them |
+
+Anything else is dropped. If you believe a field is missing from the ledger, say so in your
+report rather than inventing a key — nothing reads an unknown key, and `continuity_check.py`
+warns about it precisely so this cannot pass unnoticed.
+
 ---
 
 ## Fact safety — the one place this standard can do real damage

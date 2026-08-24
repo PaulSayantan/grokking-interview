@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 2
+position: 3
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across
@@ -397,10 +397,12 @@ canonical_terms:
   grace period:
     canonical: grace period
     defined_in: container-lifecycle
-    gloss: the interval docker stop waits after SIGTERM before sending SIGKILL; 10 seconds by default
+    gloss: the interval `docker stop` gives PID 1 after SIGTERM before it resorts to SIGKILL; 10 seconds
+      by default on Linux, 30 on Windows
     banned_variants: []
-    note: '''stop grace period'' (2 uses) and ''stop timeout'' (1 use) are both spelled-out identifier
-      names (`stop_grace_period`, `--stop-timeout`) and are not banned. Prose says ''grace period''.'
+    note: '`stop grace period` and `stop timeout` stay legal as spelled-out identifiers (`stop_grace_period`,
+      `--stop-timeout`, `docker stop -t`). Prose says grace period. The term is bolded once, in `#stopping-sigterm-the-grace-period-then-sigkill`;
+      the file opener names it unbolded to pay K1.'
   build context:
     canonical: build context
     defined_in: dockerfile-layers-build-cache
@@ -465,6 +467,46 @@ canonical_terms:
     gloss: a per-container private view of one kind of kernel resource — its own PID numbers, mounts,
       network interfaces, hostname, users
     banned_variants: []
+  restart policy:
+    canonical: restart policy
+    defined_in: container-lifecycle
+    gloss: a standing instruction on the container that automates the `exited → running` edge, so a crash
+      or a host reboot brings it back with no external supervisor
+    banned_variants: []
+    note: Compose's `restart:` key and Kubernetes' pod `restartPolicy` are named as spellings of the same
+      idea at a different layer, not as variants to canonicalise.
+  exit code:
+    canonical: exit code
+    defined_in: container-lifecycle
+    gloss: PID 1's exit status, handed up unchanged as the container's, with signal deaths encoded as
+      128 + N
+    banned_variants: []
+    note: 'Bounded in its own file: 125, 126 and 127 are reported for a container in which no program
+      of yours ever ran, so for those three the gloss''s "PID 1''s exit status" does not hold. Any later
+      topic quoting the rule should quote the boundary with it.'
+  zombie:
+    canonical: zombie
+    defined_in: container-lifecycle
+    gloss: a process that has finished but whose exit status no parent has collected yet, so it occupies
+      a process-table slot and nothing else
+    banned_variants: []
+    note: The verb is "reap". `<defunct>` is the `ps` rendering, not a second name.
+  freezer cgroup:
+    canonical: freezer cgroup
+    defined_in: container-lifecycle
+    gloss: the kernel control that suspends every task in a cgroup without terminating any of them, which
+      is what `docker pause` uses
+    banned_variants: []
+    note: Under cgroup v2 the interface file is `cgroup.freeze`. The file does not name it, because the
+      wording could not be verified this pass — see owed[] below.
+  OOM killer:
+    canonical: OOM killer
+    defined_in: container-lifecycle
+    gloss: the kernel routine that frees memory by terminating a process outright, choosing the highest
+      `oom_score` in the cgroup rather than PID 1
+    banned_variants: []
+    note: 'Two spellings coexist in the corpus: prose says "OOM killer", and `OOMKilled` / `memory.oom.group`
+      are identifiers. Not variants.'
 running_example:
   name: the 1.2 GB Node API
   established_in: dockerfile-layers-build-cache
@@ -487,6 +529,23 @@ claims_established:
   the manifest, and a tag usually names an image index.
 - A container is a host process in namespaces under cgroups over a union rootfs, with no kernel container
   object; it lives exactly as long as PID 1.
+- A container is in exactly one state at a time, and there is no `stopped` string — a container you stopped
+  and one that finished on its own both report `exited`. The daemon's status vocabulary is `created`,
+  `running`, `paused`, `restarting`, `removing`, `exited`, `dead` (Engine API `ContainerState.Status`,
+  seven values).
+- '`docker run` is `create` plus `start`: `create` builds the writable layer and freezes ports, env and
+  the command; `start` re-runs the same container with that layer intact, so only `rm` plus a fresh `run`
+  can change those, while resource limits and the restart policy can be changed live with `docker update`.'
+- Stopping is a wait for one event, not a timer — SIGTERM to PID 1, then SIGKILL if and only if PID 1
+  is still alive when the grace period expires, so an idle container that ignores SIGTERM costs the full
+  10 seconds exactly as a busy one does.
+- A process running as PID 1 gets no default signal action from the kernel and inherits re-parented orphans,
+  so an app with no SIGTERM handler ignores the signal and an app that forks accumulates zombies; `--init`
+  fixes delivery and reaping, never the missing handler.
+- Limits are cgroup enforcement with two different teeth — `--memory` is a kill (the OOM killer takes
+  the highest `oom_score` in the cgroup, so a multi-process container can lose a child and stay `up` while
+  `OOMKilled` is already true, since the flag records a kill of any process in the cgroup), while `--cpus`
+  throttles and `--cpu-shares` only breaks ties under contention.
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -533,6 +592,13 @@ approximations_open:
     and re-derived 5 × 197 = 985, 985 − 197 = 788. Still an approximation: sum-of-uncompressed-layers
     is not exactly what `docker images` reports on an extracted overlay2 tree, and the tag drifts with
     every base-image release. Any topic that can run a daemon should re-derive all three numbers together.'
+- id: APPROX-3
+  status: still open, restated in canonical terms
+  note: '"the container lives exactly as long as its main process" is now "A container lasts exactly as
+    long as its PID 1" (`#the-container-as-a-process-model`), and the six `main process` occurrences are
+    gone. The claim is deliberately NOT bounded here — entrypoint-vs-cmd still owes the correction. The
+    shell-form WARNING in `#stopping-…` remains symptom-level (PID 1 is `sh`; `sh` does not forward) and
+    points at `entrypoint-vs-cmd` for the mechanism.'
 known_defects:
 - file: volumes-and-storage
   note: Frozen H2 'Copy-on-write and why databases must not use the container layer' contains 'container
@@ -547,8 +613,6 @@ known_defects:
   note: Frozen H2 'Copy-on-write and copy_up' is the current teaching site for both terms, but the reading
     order needs them at topic 1. Under K3 this section must REFERENCE the topic-1 definitions and go deeper
     (whiteouts, opaque dirs, the metadata copy_up at line 295), not re-derive them.
-- file: container-lifecycle
-  note: Dangling `operating-systems` cross-reference (line 14). See the images-vs-containers entry.
 - file: entrypoint-vs-cmd
   note: Dangling `operating-systems` cross-reference (line 21). See the images-vs-containers entry.
 - file: docker-networking
@@ -628,6 +692,55 @@ owed:
   note: 'CLOSED. Verified live this run against registry-1.docker.io: nginx:1.27, nginx:latest and nginx:1.27-alpine
     all return application/vnd.oci.image.index.v1+json with 16 entries, and the tag''s docker-content-digest
     is the index digest. Nothing owed; kept as the evidence trail.'
+- file: container-lifecycle
+  from: container-lifecycle
+  kind: c9-hedge-kept-unsourced-mechanism
+  token: stop on a paused container
+  note: 'The `exec` half is now stated as a hard failure, which Docker documents ("If the container is
+    paused, then the `docker exec` command fails with an error", plus the daemon''s "unpause the container
+    before exec" message). The `stop` half keeps the base''s hedge: "`stop` does not act cleanly on one
+    either". A draft added "because both of those need its processes to be schedulable"; that invents
+    a condition — cgroup v2 says a frozen task can still be killed by a fatal signal — so it was cut.
+    Whoever verifies cgroup-v2 freezer semantics should return and state whether a `stop` on a paused
+    container simply burns the whole grace period before SIGKILL.'
+- file: container-lifecycle
+  from: container-lifecycle
+  kind: fact-corrected-then-residual
+  token: tini binary size
+  note: 'The base''s `~10KB` was WRONG and is now removed, not restated. Docker builds `docker-init` as
+    the STATIC tini (moby Dockerfile runs `make tini-static` at TINI_VERSION v0.19.0): 870,496 B on amd64,
+    546,456 B on arm64; the smallest tini artifact of any arch/linkage is 15,036 B. The file now says
+    "a small static init binary, installed as `docker-init`" and "under a megabyte" with no exact figure.
+    Residual debt: the `docker-init` = tini binding is a moby implementation detail, so re-check it if
+    a later topic leans on the name.'
+- file: container-lifecycle
+  from: container-lifecycle
+  kind: fact-needs-bench-test
+  token: OOMKilled on a multi-process container
+  note: 'The base said `OOMKilled` "may not flip" when the OOM killer takes a child rather than PID 1.
+    The Engine API contract (`OOMKilled`: "Whether a process within this container has been killed") and
+    moby `daemon/monitor.go` (sets it unconditionally on the containerd StateOOM event, which is raised
+    from the cgroup, not per-PID) both say it DOES flip. The file now teaches the documented behaviour
+    — `OOMKilled=true` on a still-`running` container as the tell — and drops the base''s "may never flip".
+    Nobody has bench-tested it; do that before a later topic builds a diagnostic on it.'
+- file: entrypoint-vs-cmd
+  from: container-lifecycle
+  kind: k5-boundary-owed-to-a-later-topic
+  token: exec form / shell form
+  note: Topic 2 states the shell-form symptom (PID 1 is `sh`, SIGTERM not forwarded, every stop takes
+    10 s) and names `entrypoint-vs-cmd` for the mechanism. Topic 4 must therefore explain *why* `sh -c`
+    does not forward, and must close APPROX-3 by bounding "a container lasts exactly as long as its PID
+    1". Do not re-gloss `grace period`, `exit code` or `PID 1`; all three are established.
+- file: production-healthchecks-logging
+  from: container-lifecycle
+  kind: s3-reference-budget-casualty
+  token: logging drivers, HEALTHCHECK
+  note: 'S3''s ≤2 slug refs cost this file its pointer to you. The claims survive in prose (the default
+    `json-file` driver captures stdout/stderr, and the daemon keeps a local cache so `docker logs` still
+    works under a driver that cannot replay logs itself; an app logging to a file inside the container
+    produces an empty `docker logs`), but a reader is no longer sent to you for the driver detail. You
+    own the specifics this file deliberately does not name: which drivers read natively (`local`, `json-file`,
+    `journald`) and that dual logging is what covers the rest. Add the link from your side.'
 exemptions:
 - file: dockerfile-layers-build-cache
   rule: C9
@@ -701,18 +814,77 @@ topics:
     - 'HEDGED: a metadata-only change ''can'' trigger a full `copy_up` — the storage-driver docs'' own
       ''can'', restored in place of the deleted causal clause.'
   adversarial_signoff: pending
+- position: 2
+  slug: container-lifecycle
+  commit: null
+  one_liner: Every lifecycle command is a move on one process; stopping is a wait for PID 1, not a timer.
+  reading_minutes:
+    before: 21
+    after: 42
+  factlines:
+    emitted: 53
+    verified: 45
+    hedged: 4
+    unverified: 6
+    reasoned_not_sourced: 2
+    derivation: audit.md section 5 has 53 NEW rows built by sentence alignment. 45 SOURCED (an original
+      line number, the retained mermaid/table, or a named primary source); 2 REASONED (rows 28 and 38
+      — my argument, not a source); 6 needing the web pass (rows 19, 20, 33, 46, 48, 51). The 4 hedged
+      are base hedges deliberately KEPT, so they are carried rather than emitted, and are counted separately
+      from the 53. Three drafted claims were cut before shipping (an asserted `execve`, an invented freezer/signal
+      condition, an nsenter availability claim) and one was corrected (the JVM "plans a heap for 64 GB",
+      which is false). The web pass then ran and closed rows 19, 20, 33, 46 and 51 as CONFIRMED, sent
+      row 48 (dmesg) back to a hedge, and found 4 WRONG claims the 53-row self-audit had missed or half-disclosed
+      — see repair-log.md. Post-repair the file carries 10 corrected claims and 2 open debts (tini/`docker-init`
+      naming, `OOMKilled` bench test), neither of which is asserted in the prose.
+  adversarial_signoff: SHIP AFTER FIXES. H2s byte-identical (repo `read_headings`), 52/52 questions.yaml
+    refs resolve, 52/52 MCQs still answerable, mermaid/fence/table-row/URL inventory intact, zero dumbing-down,
+    register-swap PASS on independent re-derivation. Two high findings (a false six-state count, a false
+    "only live-changeable config" absolute), one false absolute on PID 1 liveness and one continuity defect
+    in the cliffhanger recap — all four applied in the repair pass.
+  web_factcheck: RUN. 22 checks against Docker docs, Engine API v1.51, moby + containerd source, kernel
+    cgroup-v2 docs, man7, nginx.org, the GNU Bash manual, the JDK 21 java man page and the tini release
+    manifest. 4 WRONG (tini ~10KB; "one part of the config not frozen"; six states; JVM thread pools from
+    the memory limit), 4 IMPRECISE (OOMKilled multi-process; restart backoff cap/reset and its arithmetic;
+    `docker logs` driver attribution; the closing recap's bare "one process"), 2 UNVERIFIABLE (dmesg always-logs;
+    "exits in about a second"). All applied. Everything the brief listed as uncertain CONFIRMED, including
+    the `on-failure`/daemon-restart cell, 10s/30s grace, all seven exit codes, 128+N, the 100ms backoff
+    constant, freezer-cgroup pause, paused-exec failure, `oom_score` selection, `memory.oom.group` default
+    0, `--cpu-shares` 1024, `--cpus` as CFS quota, nginx signal semantics, `docker debug`, and all 8 reference
+    URLs (HTTP 200).
+  note: 'Word delta +99% (4,249 → 8,453 raw words; 21 → 42 minutes; the repair pass added 175 words of
+    correction and one table row, `removing`). 10 H3 seams added, 15 H2 byte-identical. Callouts 15 →
+    7 (one is the exempt S6 map) with a 9-line demotion log; bold spans 95 → 15. This is the pilot''s
+    test result: the standard bought 10 new Beat-3 claims and full C2/C4/C7 compliance on a file that
+    already read well, and it cost a doubling of length. That trade is the orchestrator''s to judge.'
 open_cliffhanger:
-  from: images-vs-containers
-  to_position: 2
-  pattern: A
-  key_noun_for_K1_grep: grace period
-  gap: 'Topic 1 closes on disposability: the container IS its process, so kill it and recreate it. The
-    hook shows `time docker stop web` taking 10.3 s on an idle container and states only that the stop
-    was not a kill. Topic 2 owes the mechanism — SIGTERM to PID 1, the wait, then SIGKILL — and must name
-    `grace period` in its opener (K1).'
-  payoff_anchor: concepts.md#stopping-sigterm-the-grace-period-then-sigkill
+  from: container-lifecycle
+  to_position: 3
+  pattern: E
+  key_noun_for_K1_grep: whiteout
+  gap: 'Runtime to build time is a genuine pivot, and the shared mechanism is deleting inside a stack
+    of layers. Topic 2 closes on `docker rm` / `docker container prune` / `docker system prune` reclaiming
+    the container''s writable layer and nothing under it, and its hook gives the arithmetic: a hundred
+    containers on one 1.19 GB image return 41.6 MB, and a Dockerfile that deletes a 400 MB toolchain on
+    the next line still ships a 1.19 GB image. Topic 3 owes why — the whiteout marker, the bytes that
+    stay in the earlier layer, and the rule that no later instruction can shrink an earlier one. The hook
+    says none of those three things, and does not mention multi-stage builds. K1 token caution: `whiteout`
+    is the mechanically correct token (it is in the section at `payoff_anchor`), but topic 1 used the
+    word three times and this hook names it once, so topic 3''s opener should pair it with the size figure
+    — "the whiteout that still ships 400 MB" — or the grep cannot tell which loop is being named.'
+  payoff_anchor: concepts.md#why-each-layer-adds-size-deleting-in-a-later-layer
   verified_present: true
-  payoff_evidence: 'Two-phase graceful stop: stop signal (default SIGTERM) to PID 1, a grace period of
-    10 s on Linux (30 s on Windows), then SIGKILL if PID 1 is still alive.'
-  under_paid_on_purpose: This file's follow-up item still names shell vs exec form, PID 1, the 10-second
-    wait and the SIGKILL, unexpanded, as brief §6 requires. Do not read it as a leak.
+  payoff_evidence: 'Read at line 332 of the un-rewritten destination (8th of its 12 content H2s): layers
+    are additive diffs stacked by a union filesystem (overlay2); a file deleted in a later layer is a
+    whiteout marker, so it appears gone in the merged view while the original bytes still exist in the
+    earlier layer and still ship in the image; "You cannot shrink an existing layer from a later one."
+    Lines 351-354 then name `RUN rm -rf /some/big/thing` in a separate later `RUN`, and `RUN apt-get purge
+    …` after an earlier install, as things that do not reduce final image size. Verified with read_headings,
+    not by grep.'
+  under_paid_on_purpose: 'Topic 1 taught the whiteout mechanism explicitly, so the reader''s transfer
+    to image layers is RIGHT, not a wrong guess, and the hook now says so rather than pretending the mechanism
+    is news. What is unpaid is permanence and its arithmetic: a container''s whiteout dies with the writable
+    layer, an image''s whiteout ships forever, and the hidden bytes keep their size in the earlier layer.
+    The plausible-but-wrong guess available to a careful reader is that the build reclaims them, or that
+    the delete rewrites the earlier layer. Do not read the 41.6 MB / 1.19 GB figures as a leak — they
+    are the question, not the answer.'
