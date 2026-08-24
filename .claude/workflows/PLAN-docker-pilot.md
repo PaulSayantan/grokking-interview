@@ -18,7 +18,7 @@ everything you need to resume.
 |---|---|---|---|---|---|---|
 | 1 | images-vs-containers | ✅ | ✅ `?` | +60.8% | 0 | pre-C12 |
 | 2 | container-lifecycle | ✅ | ✅ `0580baf` | +98.8% | 0 | pre-C12 |
-| 3 | dockerfile-layers-build-cache | 🏃 `wf_f9e7ccc0-75c` | — | — | — | **first topic under C12**; establishes the running example; owes topic 2's `whiteout` payoff |
+| 3 | dockerfile-layers-build-cache | ✅ | ✅ `57c43d7` | +134% | 0 | first under C12 — rule validated; 3 blockers + 2 highs + 6 fact fixes caught; 89 min |
 | 4 | entrypoint-vs-cmd | — | — | — | — | payoff anchor has a DOUBLE hyphen (see ledger note) |
 | 5 | multi-stage-builds-image-optimization | — | — | — | — | ledger compaction due after this one |
 | 6 | volumes-and-storage | — | — | — | — | |
@@ -92,4 +92,16 @@ and the topic count is what flexes.
 
 Append every departure from this plan, with the reason. An empty log after 8 hours is suspicious.
 
-- _(none yet)_
+- **Topic 3, +134% growth** (20→47 min) vs the wave's ~80%. Not a deviation — growth is
+  uncapped by decision — but logged because it is the number to challenge. Attributable to 16 new
+  H3 seams; bloat pass ran 4× and cut ~34 items; `c12_punt_hits` 0, FLAGS none.
+- **Topic 3 took 89 min of workflow time, not 70**, plus ~25 min of landing. One agent stalled
+  once and self-retried (verify, 262s, retry 1/5). **Revised estimate: ~100 min/topic**, so the
+  realistic horizon for this run is topics 3–7, not 3–9.
+- **Two standard defects found by running it**, both fixed in SKILL.md before topic 4:
+  `approximations_open` had no id-keyed update rule (topic 3 reused a live id for a different
+  fact; a documented replace would have deleted a live debt), and `owed` had no rule that a
+  closure report is not a debt (3 phantom debts avoided). `running_example` gained a merge row.
+- **Topic 1's `adversarial_signoff` is still `pending`** in the ledger — stale, since topic 1 did
+  go through the verifier. Left alone deliberately: I no longer hold its verdict text and will not
+  assert a signoff I cannot substantiate. Flagged for the review doc.

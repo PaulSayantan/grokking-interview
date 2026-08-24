@@ -875,10 +875,30 @@ ledger that looks updated and is not is worse than one that fails loudly.
 | `position` | replaces — set it to your topic's position **+ 1** |
 | `open_cliffhanger` | replaces — yours supersedes the one you just settled |
 | `topics` | appends **exactly one** entry, yours |
-| `claims_established`, `approximations_open`, `owed`, `exemptions` | append |
+| `claims_established`, `exemptions` | append |
+| `owed` | appends — **genuine open debts only**, see below |
+| `approximations_open` | **keyed by `id`** — see below. Never a bare append |
+| `running_example` | `{state: "…"}` **extends** the existing state string; the orchestrator appends your sentence. Numbers may be extended, **never changed** |
 | `assumed_prior_knowledge` | appends — and only with the reason in your report (C12's second floor) |
 | `canonical_terms` | a **mapping**, merged key-by-key — only terms this topic is the teaching site for |
-| `known_defects_closed` | a list of the defect notes you fixed; the orchestrator removes them |
+| `known_defects_closed` | a list of the defect notes you fixed; the orchestrator removes them. A note that matches no `known_defects` row removes nothing — say so rather than assuming it landed |
+
+**`approximations_open` is keyed by `id`, and this is not a formality.** A matching id is an
+**update** of that entry; a new id is a new entry. **Never reuse a live id for a different fact.**
+Topic 3's append gave a brand-new approximation (two digests, owed to
+`image-internals-storage-drivers`) the id `APPROX-5`, which was already held by a live nginx sizing
+debt owed to `registries-and-distribution`. Merged as a documented replace, it would have deleted
+that debt silently. **Before writing an id, read the live ids and take the next free number.**
+Conversely topic 2 wrote a *status update* to `APPROX-3` and it was appended, so the ledger carried
+`APPROX-3` twice with the second entry missing `from` and `correction_owed_by`. Both shapes are the
+same missing rule.
+
+**An `owed` entry is a debt someone must still pay.** It is **not** the place to report that you
+closed something. Never append an `owed` entry whose `file` is the topic you have just finished —
+nobody will ever read it, because that file is done. Topic 3's append carried three such entries
+("C9 gap CLOSED in repair", "No longer owed"); they would have become permanent phantom debts.
+Closures belong in your report and the commit message. If you closed a debt the ledger recorded,
+name it in `known_defects_closed` or say so in the report so the orchestrator can remove the row.
 
 Anything else is dropped. If you believe a field is missing from the ledger, say so in your
 report rather than inventing a key — nothing reads an unknown key, and `continuity_check.py`
