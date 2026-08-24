@@ -115,6 +115,39 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 47 (2026-08-24) — clarity machinery MERGED TO MAIN; docker pilot 2/16.**
+  **`main` fast-forwarded to `1619705`: 15 infra commits, no content rewrites.** Includes a live
+  site bug fix — `system-design-case-studies/README.md` had 1 table row for 23 directories, so 22
+  topics were sorting on the `Infinity` fallback and that domain's learning order was an
+  alphabetical accident across 7 companies. Gates on main: validator 460/28,064, anchors lock
+  8,702, astro check 0 errors, 88/88 tests, build 460 pages. **No git remote, so merging main does
+  not deploy** — deploy stays a manual Vercel push.
+  - **Phase A** hardened the validator (fence-aware headings — 425 phantom headings across 96
+    files were `#` comments inside code fences; four new structural gates, zero corpus
+    violations; 26 dead H1-refs migrated to H2), added `topics/.anchors.lock` (8,702 headings,
+    `--check-lock` in CI, 0.33s) and `docs/corpus-stats.md` as the authoritative count source.
+  - **Phase B** shipped the machinery: `scripts/prose.py` (ONE normative tokenizer — three
+    documents had reported three different figures for the same file), `clarity_report.py`
+    (report-only, with a self-test asserting 0/11 good passages flagged and 5/5 bad caught),
+    `rewrite_audit.py` + `docs/verified-facts.yaml` (**proven to fire on the real Session 44
+    regression commit `268a063`**), `prompts.yaml` as a validated first-class file, and the
+    study-page reveal UI (**CLS measured 0.00000**; no-JS ships every row open because JS only
+    ever removes content). Tests 31 → 88.
+  - **`.claude/skills/clarity-standard`** is the single authoritative standard, split into a
+    normative `SKILL.md` (10,698 words) + illustrative `references/`. Invariant: a reference file
+    may not contain a rule or a threshold.
+  - **Docker pilot 2/16** on `clarity-pilot-docker` (NOT merged — topic N's cliffhanger promises
+    what N+1 delivers, so a partial merge ships hooks that never pay off). Topic 1
+    `images-vs-containers`, topic 2 `container-lifecycle`. Continuity chain verified: topic 1 left
+    a named loop (`grace period`) and topic 2's opener settles it. **Measured ~62–71 min/topic.**
+  - **Growth accepted at ~+80%** (topic 1 +60.8%, topic 2 +98.8%). The user's bar is now
+    **self-sufficiency**: lengthy is fine, but a student must not have to search the internet to
+    understand the concept. See Claude memory `clarity-effort.md` for the unresolved tension with
+    tier-C/D prompts, which is the first thing to fix next session.
+  - The loop that makes this safe: **brief → writer → (adversarial verifier ‖ web fact-check) →
+    repair**. It has caught a false claim the writer's own audit missed on **4 of 4** topics,
+    including one that was the exact misconception its topic exists to destroy.
+  **Next:** encode the self-sufficiency rule, then topics 3–16 sequentially.
 - **Session 46 (2026-08-22/23) — landed the stalled redesign, then opened the CLARITY effort.**
   Two efforts. (1) **Landed 3 weeks of finished-but-uncommitted landing-page work** on
   `landing-3d-depth-2026-08` (`a470c5c`, `c0ebf91`): the 3D depth system (sticky deck,
