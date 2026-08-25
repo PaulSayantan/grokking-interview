@@ -874,7 +874,7 @@ ledger that looks updated and is not is worse than one that fails loudly.
 |---|---|
 | `position` | replaces — set it to your topic's position **+ 1** |
 | `open_cliffhanger` | replaces — yours supersedes the one you just settled |
-| `topics` | appends **exactly one** entry, yours |
+| `topics` | appends **exactly one** entry, yours. **MANDATORY — see below** |
 | `claims_established`, `exemptions` | append |
 | `owed` | appends — **genuine open debts only**, see below |
 | `approximations_open` | **keyed by `id`** — see below. Never a bare append |
@@ -882,6 +882,16 @@ ledger that looks updated and is not is worse than one that fails loudly.
 | `assumed_prior_knowledge` | appends — and only with the reason in your report (C12's second floor) |
 | `canonical_terms` | a **mapping**, merged key-by-key — only terms this topic is the teaching site for |
 | `known_defects_closed` | a list of the defect notes you fixed; the orchestrator removes them. A note that matches no `known_defects` row removes nothing — say so rather than assuming it landed |
+
+**Three keys are mandatory in every append: `position`, `open_cliffhanger`, `topics`.** A missing
+`topics` entry is the worst of the three, because it is the **durable per-file completion marker**
+and `continuity_check.py` counts it — omit it and the domain reads as one topic less than it is,
+forever, while every gate stays green. Topic 7's append left it out. The orchestrator's merge
+asserted and failed loudly, and the entry had to be rebuilt from the run reports; a merge that
+tolerated the omission would have silently reported 6 of 16 after 7 topics landed. **Write it before
+you write anything else in the append**, with all seven fields: `position`, `slug`, `commit`
+(`TBD-orchestrator`), `one_liner`, `reading_minutes{before,after}`, `factlines{emitted,verified}`,
+`adversarial_signoff`.
 
 **`approximations_open` is keyed by `id`, and this is not a formality.** A matching id is an
 **update** of that entry; a new id is a new entry. **Never reuse a live id for a different fact.**

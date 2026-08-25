@@ -22,8 +22,8 @@ everything you need to resume.
 | 4 | entrypoint-vs-cmd | ✅ (resumed) | ✅ `2e1c91b` | +176% | 0 | central `sh -c` mechanism was WRONG in base AND draft; fixed from dash/ash/kernel source. Opened an MCQ-drift defect (4 questions) |
 | 5 | multi-stage-builds-image-optimization | ✅ | ✅ `3cc2484` | +105% | 0 | cleanest run yet (register swap passed first read); closed a 2-topic arithmetic contradiction; **compaction done 28→6 claims** |
 | 6 | volumes-and-storage | ✅ | ✅ `3f62cf6` | +179% | 0 | 47-item closure set, 0 unclosed; 2 blockers (`$DATA_DIR`, `EROFS` vs `EACCES`); 2 new fact guards |
-| 7 | docker-networking | 🏃 `wf_feba0ca4-3be` | — | — | — | inherits the `embedded DNS` loop |
-| 8 | docker-compose | — | — | — | — | |
+| 7 | docker-networking | ✅ | ✅ `18bca7c` | +192% | 0 | Engine 28 iptables section CONFIRMED clean; blocker was a broken callout invisible to every gate; append omitted `topics[]` |
+| 8 | docker-compose | 🏃 `wf_05afdafc-988` | — | — | — | inherits the `readiness` loop (`depends_on` ordering vs readiness) |
 | 9 | registries-and-distribution | — | — | — | — | |
 | 10 | production-healthchecks-logging | — | — | — | — | **compaction due at 10**; carries a frozen `container layer` H2 → needs its own K2 exemption |
 | 11 | debugging-troubleshooting | — | — | — | — | holds the corpus's one real C12 punt (`pods are out of scope here`, line 15) — fix it |
@@ -176,6 +176,17 @@ Append every departure from this plan, with the reason. An empty log after 8 hou
   topics carry the same wording.
 - **Writer self-audit miss rate is now 6/6.** Not improving with practice. The separate verifier and the
   web fact-check are load-bearing, not belt-and-braces.
+- **Topic 7's append omitted `topics[]`** — the durable completion marker that `continuity_check`
+  counts. A tolerant merge would have left the domain reporting 6/16 after 7 landed, forever, with every
+  gate green. Now guarded mechanically: `continuity_check` errors when `position` outruns the recorded
+  rows. Proved both directions — passes on the real ledger, exits 1 on a simulated missing row.
+- **Topic 7's blocker was a broken markdown callout**: a stray `>` plus two lines missing their
+  blockquote prefix in the host-mode SECURITY warning. CommonMark lazy continuation kept the file valid,
+  so `validate_content` passed and `clarity_report` said FLAGS: none while the callout rendered a literal
+  ">". Swept all 16 docker topics for the same shape — clean elsewhere.
+- **I wrote an allowlist reason I did not actually believe** and caught it on re-read: I explained
+  `container:CONTAINER` as the `--network container:` mode. It is not — it is the other half of the
+  `host:HOST` port-mapping notation. Corrected. A reason I cannot defend is worth less than no entry.
 - **Topic 1's `adversarial_signoff` is still `pending`** in the ledger — stale, since topic 1 did
   go through the verifier. Left alone deliberately: I no longer hold its verdict text and will not
   assert a signoff I cannot substantiate. Flagged for the review doc.

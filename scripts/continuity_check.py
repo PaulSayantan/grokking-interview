@@ -259,6 +259,25 @@ def check_position(led: dict, slugs: list[str], where: str, f: Findings) -> None
     if ahead:
         f.warn(where, f"topics[] records {ahead} at or after position {pos} — bump 'position'")
 
+    # A landed topic must leave a topics[] row. `position` is bumped by the same merge, so
+    # the two numbers move together and any gap means a row was never written.
+    #
+    # This is not hypothetical: topic 7's ledger-append.yaml omitted `topics` entirely. The
+    # merge caught it only because it happened to assert; without that, `position` would have
+    # advanced to 8 while topics[] held 6 rows, and the domain would have reported "6/16
+    # rewritten" forever with every other gate green. topics[] is the durable per-file
+    # completion marker and the thing a resumed session trusts, so a silent gap is the one
+    # ledger defect that cannot be recovered from the ledger itself.
+    recorded = {t["position"] for t in done if isinstance(t.get("position"), int)}
+    gaps = sorted(set(range(1, pos)) - recorded)
+    if gaps:
+        f.error(
+            where,
+            f"position is {pos} but topics[] has no row for position(s) {gaps} — a landed topic "
+            f"left no completion marker. Rebuild the row from that run's reports; do not just "
+            f"bump 'position'.",
+        )
+
 
 def check_terminology(
     led: dict, topics_root: Path, domain: str, done: list[str], where: str, f: Findings
