@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 7
+position: 8
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -395,8 +395,10 @@ canonical_terms:
     defined_in: docker-networking
     gloss: the name the engine's embedded DNS resolver at 127.0.0.11 answers for, on a user-defined network only
     banned_variants: []
-    note: Paired with 'service name' below. docker-networking currently mixes them and once writes 'service/container
-      name' (line 270). They are different objects and must stay different; see owed[].
+    note: Teaching site is now live, in H2 'Default bridge vs user-defined bridge'. The line-270 'service/container
+      name' collapse is FIXED — H2 'localhost inside a container is not the host' says 'container name' only, and
+      'service name' appears in this file solely inside H2 'Compose networks', used and never defined, so docker-compose
+      keeps the teaching site. The Pass 0 `note` about the collapse can be dropped when this merges.
   service name:
     canonical: service name
     defined_in: docker-compose
@@ -603,6 +605,56 @@ canonical_terms:
     banned_variants:
     - prod dep
     - run dep
+  network namespace:
+    canonical: network namespace
+    defined_in: docker-networking
+    gloss: an independent instance of everything the kernel knows about networking — interfaces, addresses, routing
+      and ARP tables, /proc/net, the port space, iptables rules — attached to a set of processes rather than to
+      the machine
+    banned_variants:
+    - netns
+    note: 'Specialises `namespace`, which images-vs-containers owns and which this file does not re-derive. The
+      seam ''### What the namespace leaves alone: the other seven kinds'' is the K3 back-reference: it names all
+      eight kinds and states that --network host moves only this one. TWO EXCEPTIONS, both deliberate. (1) `netns`
+      appears twice inside the byte-identical mermaid diagram carried from the base ("Container A netns", "Container
+      B netns"); it is grandfathered because the diagram is reproduced unchanged, and the label is glossed by the
+      prose beside it. (2) `sandbox` is NOT a banned variant of this term. It is the engine''s own name for a container''s
+      whole networking setup (namespace plus the interfaces, addresses and rules inside it), which is why Docker''s
+      source calls 127.0.0.11 `resolverIPSandbox`. The file glosses it at first use under ''### How 127.0.0.11 can
+      be a loopback address and a server at once'' and keeps it distinct from the namespace itself; do not collapse
+      the two.'
+  source NAT:
+    canonical: source NAT
+    defined_in: docker-networking
+    gloss: the host substituting its own address for the container's on the way out, and undoing the substitution
+      on the replies; also called masquerading
+    banned_variants:
+    - IP masquerade
+    - NAT-ing
+  network alias:
+    canonical: network alias
+    defined_in: docker-networking
+    gloss: an extra name for the same container on one network, set with --network-alias at run time or --alias
+      when attaching; several containers may share one, so a lookup returns several addresses
+    banned_variants:
+    - DNS alias
+    - service alias
+  veth pair:
+    canonical: veth pair
+    defined_in: docker-networking
+    gloss: two virtual network cards created together and permanently connected, so a frame pushed into one comes
+      out of the other; one end moves into the container's namespace as eth0
+    banned_variants:
+    - virtual ethernet cable
+    - veth link
+  virtual IP:
+    canonical: virtual IP
+    defined_in: docker-networking
+    gloss: an address a swarm owns that belongs to no container; a service name resolves to it and the swarm forwards
+      each connection to one of the service's tasks
+    banned_variants:
+    - VIP address
+    - service IP
 assumed_prior_knowledge:
 - 'a Unix process: a PID, a parent, fork+exec, its own environment and working directory'
 - a signal is a number delivered to a process, and a process may install a handler for it
@@ -647,7 +699,11 @@ running_example:
     6 adds the API''s runtime storage without touching any image arithmetic: its uploads directory is named as a
     volume candidate, and its `./src` tree is the bind-mount example (`--mount type=bind,src="$(pwd)"/src,dst=/app/src`,
     `node:20 npm run dev`). Its `node_modules` tree is the named instance of the Docker Desktop file-sharing cost,
-    as a directory of tens of thousands of small files. No number from topic 5''s itemisation was changed or extended.'
+    as a directory of tens of thousands of small files. No number from topic 5''s itemisation was changed or extended.
+    docker-networking reuses it with no new arithmetic: the API runs as the container `api` from image `node-api`
+    beside `db` on `postgres:16`, reached as `db:5432` over a user-defined bridge named `appnet`, and as `http://api:3000`
+    from a browser-facing peer. The frontend/backend example adds `proxy` on `nginx` with the only published port.
+    No image-size figure is touched and `node:20` is not retagged.'
 claims_established:
 - 'IMAGE AND LAYER MODEL (topics 1, 3, 5). An image is read-only layers plus an image config; a container is that
   stack plus one thin writable layer plus a host process with runtime state. Layers are immutable content-addressed
@@ -733,6 +789,43 @@ claims_established:
   bind mount or a tmpfs mount obscures the image's files instead.
 - Mounts carry numeric UID/GID ownership, not user names. Under user-namespace remapping or rootless Docker, container
   UID n is host UID base + n, where base comes from `/etc/subuid`.
+- A container's network namespace is one of eight kinds the kernel has; the other seven (mount, UTS, IPC, PID, user,
+  cgroup, time) are independent, so --network host moves only the network one and leaves the container its own PID
+  and mount namespaces.
+- Traffic between containers on one bridge is forwarded by MAC address out of the bridge's forwarding database,
+  with no routing decision and no NAT rule consulted, which is why east-west traffic needs no -p; two separate bridges
+  are two forwarding databases, so nothing crosses between them.
+- The engine's DNS resolver listens on 127.0.0.11 on sockets opened inside the container's own network namespace
+  by the engine process outside it, with nat rules in that namespace redirecting port 53; it knows every answer
+  because it assigned the addresses at attach time, before any process in the container ran.
+- EXPOSE writes the port into the image config's ExposedPorts field, which the OCI image spec defines as defaults
+  merged with whatever the run command specifies; -p installs the kernel rule and is the only thing that makes a
+  port reachable from outside the host. Compose's `expose:` is the spelling of `docker run --expose` rather than
+  of the Dockerfile instruction — it adds to the CONTAINER's exposed set at creation time, on top of the image's
+  defaults, and never edits the image.
+- Docker's DNAT runs in nat/PREROUTING, so the routing decision that follows sees the container's address and sends
+  the packet to filter/FORWARD; a host firewall whose rules sit in filter/INPUT is never consulted, and DOCKER-USER
+  is the chain Docker leaves for the operator, jumped to from FORWARD before Docker's own rules.
+- Packets reaching DOCKER-USER have already been DNAT-ed, so a published-port match must use conntrack --ctorigdstport
+  rather than --dport.
+- Docker Engine 28 blocks packets addressed directly at a container's IP for ports that were not published, enforcing
+  it in the raw table's PREROUTING chain, ahead of filter; 28.2 added two ways to grant it back. allow-direct-routing
+  is a DAEMON-WIDE boolean; only com.docker.network.bridge.trusted_host_interfaces is per interface, taking a list
+  of host interface names. Do not attribute per-interface scope to allow-direct-routing.
+- docker-proxy exists for loopback traffic, because RFC 1122 forbids 127.0.0.0/8 addresses appearing outside a host
+  and a destination-only rewrite would strand the reply; --userland-proxy defaults to true, and Engine 28.0 made
+  the proxy and the equivalent nat/POSTROUTING masquerade rule mutually exclusive.
+- Overlay wraps a container frame in UDP to port 4789 between hosts, which costs 50 bytes over IPv4 (20 outer IP
+  + 8 UDP + 8 VXLAN + the 14-byte INNER Ethernet header the tunnel carries). An MTU bounds the IP packet and excludes
+  the Ethernet header around it, so a 1500-byte underlay carries 1464 bytes of inner frame and 1450 bytes of inner
+  IP packet; RFC 7348 forbids the sender fragmenting and lets the receiver discard fragments, so the symptom is
+  a stall on the first full-size transfer. Do not re-derive this by subtracting an OUTER Ethernet header from 1500
+  — that reaches 1450 by the wrong route and was a defect caught in this topic's verify pass.
+- Swarm's manager nodes hold the overlay's addressing state under Raft with a quorum of (N/2)+1; losing quorum stops
+  scheduling and rebalancing while already-running containers keep talking.
+- Docker writes no packet-filter rules for macvlan, ipvlan or host networking, and a macvlan container is unreachable
+  from its own host by a Linux kernel restriction, fixable with a second bridge attachment or a host-side macvlan
+  interface on the same parent.
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -819,6 +912,18 @@ approximations_open:
   note: Topic 15 owns storage drivers and is the only topic positioned to measure this. If it lands a number, extend
     the two paragraphs under `#what-it-costs-the-part-docker-measures-and-the-part-it-does-not`; do not contradict
     them, because "Docker publishes no figure" is a true statement about the documentation.
+- id: APPROX-10
+  from: docker-networking
+  text: The overlay MTU is given as a derivation, not as the engine's value. The file states the 50-byte IPv4 VXLAN
+    wrapper with its arithmetic (20 outer IP + 8 UDP + 8 VXLAN + 14 inner Ethernet), the resulting 1464-byte inner
+    frame and 1450-byte inner-IP ceiling on a 1500-byte underlay, and the RFC 7348 requirements that produce a stall
+    rather than a clean failure. It then says out loud that the engine sets an MTU on overlay interfaces, that `-o
+    com.docker.network.driver.mtu=` overrides it, and that Docker's documentation states no default value — so the
+    figure in force is whatever `docker network inspect` prints on your engine. The uncertainty is stated in the
+    prose, not only in prompts.yaml; tier-C prompt docker-networking-p008 is the bounded hunt.
+  correction_owed_by: docker-compose
+  note: Any topic that measures a live swarm can close it. Extend the paragraph under `#what-every-node-has-to-know-the-overlays-shared-state`;
+    do not contradict the arithmetic, which is RFC-sourced and independent of whatever default the engine picks.
 known_defects:
 - file: volumes-and-storage
   note: Frozen H2 'Copy-on-write and why databases must not use the container layer' contains 'container layer',
@@ -1084,6 +1189,47 @@ owed:
   note: 'C8 tension the corpus owns, not this file: the `## Common follow-up questions` bullets are bolded quoted
     questions in every docker topic, and C8 forbids bolding a question. Changing it here alone would break the rendered
     Q/A structure and diverge from 15 siblings. Needs one corpus-wide decision.'
+- file: topics/docker/docker-networking/concepts.md
+  note: The 802.11 reason macvlan fails over Wi-Fi is a deliberate non-claim. The base asserted "Wi-Fi NICs block
+    promiscuous/multiple-MAC mode"; no primary source was reachable in this pass, so the sentence now derives wireless
+    failure from the stated multiple-MAC requirement instead of naming a mechanism. A future pass with an 802.11
+    source (four-address mode, or a station's single associated address) can name the cause in one clause in H2
+    'Macvlan and ipvlan'.
+- file: topics/docker/docker-networking/concepts.md
+  note: Which filter-table chain refuses forwarding between two bridge networks is not named. The chain list (DOCKER,
+    DOCKER-FORWARD, DOCKER-BRIDGE, DOCKER-INTERNAL, DOCKER-CT, DOCKER-INGRESS) is sourced from the Docker-and-iptables
+    page, but that page gives no per-chain semantics for inter-network isolation, so the seam under H2 'The bridge
+    network driver (default)' says "filter-table rules that refuse exactly that forwarding" without naming one.
+    Close it from iptables-save output on a live host, or from moby's bridge driver source.
+- file: topics/docker/docker-networking/concepts.md
+  note: Whether `docker network rm` also refuses for a STOPPED attached container is still open. The rewrite briefly
+    asserted "running or stopped"; the verify pass reverted it, because the CLI reference says only "you must first
+    disconnect any containers connected to it" and moby's check is on remaining endpoints, which a stopped container
+    has released. The prose in H2 'Managing networks and connecting containers' now carries the base's unconditioned
+    wording. Close it from a live engine (`docker network rm` against a network with one exited container) or from
+    a source that states the endpoint lifecycle, and only then add the condition.
+- file: topics/docker/docker-networking/concepts.md
+  note: 'The default address pool''s composition is sourced from moby source (daemon/libnetwork/ipamutils, localScopeDefaultNetworks:
+    172.17/16, 172.18/16, 172.19/16, 172.20/14, 172.24/14, 172.28/14, plus 192.168.0.0/16 split into /20s), not
+    from the docs. H2 ''Managing networks and connecting containers'' therefore says "mostly inside 172.16.0.0/12,
+    with chunks of 192.168.0.0/16 behind them" rather than naming the exact blocks. A docs page that states the
+    pool would let a later pass be exact; do not re-narrow it to /12 only, which was a defect caught in this topic''s
+    verify pass.'
+- file: topics/docker/docker-networking/concepts.md
+  note: The `macvlan_mode` gloss (bridge = containers on one parent talk locally; vepa = each frame is pushed out
+    to the switch and back) comes from ip-link(8), not from Docker's macvlan page, which states only the value list
+    and that bridge is the default. Recorded because the rewrite first glossed `bridge` with vepa's behaviour and
+    the verify pass corrected it.
+- file: topics/docker/docker-networking/concepts.md
+  note: docker0's default subnet is carried as a base fact, not a sourced one. Neither the bridge driver page nor
+    the dockerd reference states a default; the docs' examples show containers at 172.17.0.2/16, which pins the
+    prefix and implies the .1 gateway. The prose attaches the override condition (bip, default-address-pools) rather
+    than asserting a law. A source that states the default explicitly would close it.
+- file: topics/docker/*/concepts.md
+  note: LENGTH. This rewrite went 3,617 to 10,326 raw words (+185%) against a stated ~80% expectation, with a bloat
+    pass run and reported (43 replacements, p90 44 to 34, word count flat). The growth is the 14 C12 gaps plus 11
+    new seams plus 68 sourced conditions, not padding — but if the wave needs a ceiling, decide it domain-wide rather
+    than per topic, because every later docker topic will hit the same arithmetic.
 exemptions:
 - file: dockerfile-layers-build-cache
   rule: C9
@@ -1276,16 +1422,40 @@ topics:
     emitted: 47
     verified: 42
   adversarial_signoff: applied
+- position: 7
+  slug: docker-networking
+  commit: TBD-orchestrator
+  one_liner: Namespaces to iptables rewritten plainly; Engine 28 packet filtering, the 127.0.0.11 resolver and the
+    VXLAN MTU arithmetic all closed against primary sources.
+  reading_minutes:
+    before: 18
+    after: 53
+  factlines:
+    emitted: 68
+    verified: 23
+  adversarial_signoff: 'SHIP AFTER FIXES, all applied. Verifier: zero information loss, zero dumbing-down, 52/52
+    MCQs survive, H2s byte-identical, register swap PASS, payoff verified in docker-compose; it web-verified the
+    riskiest added claim (auto-generated container names are not in DNS) as verbatim accurate. Found 1 blocker (a
+    stray `>` breaking the host-mode security WARNING, held valid by CommonMark lazy continuation so every gate
+    passed), 2 highs (host-mode guidance stated inverted; ARP flooding wrongly attributed to a MAC-learning miss
+    rather than broadcast semantics) and 8 lower. Web fact-check: 15 CONFIRMED, 3 WRONG, 3 IMPRECISE, 2 UNVERIFIABLE;
+    the WRONGs were the VXLAN byte arithmetic, the macvlan `bridge` gloss (it described vepa) and Compose `expose:`.
+    16 findings applied, 5 rejected with stated reasons. Entry reconstructed by the orchestrator: the append omitted
+    `topics`.'
+  note: topics[] was missing from this topic's ledger-append.yaml and was rebuilt from the run reports.
 open_cliffhanger:
-  from: volumes-and-storage
-  to_position: 7
-  pattern: E
-  key_noun_for_K1_grep: embedded DNS
-  gap: 'The writer and reader containers share bytes through one volume and have no way to address each other. The
-    hook names the one genuinely shared mechanism (both a mount and a published port are per-container kernel arrangements
-    the host wires in from outside) and poses the question on that seam: what does one container call another when
-    the ID changes on every recreate. It does not say DNS, 127.0.0.11, bridge, network or -p.'
-  payoff_anchor: concepts.md#the-embedded-dns-resolver
+  from: docker-networking
+  to_position: 8
+  pattern: A
+  key_noun_for_K1_grep: connection refused
+  gap: 'The invariant this topic taught is that a name resolves to a peer''s current address on a shared user-defined
+    network. The boundary is timing: the engine records the name-to-address mapping when it attaches the container
+    to the network, which is before any process inside has run, so a name can resolve while the socket behind it
+    is closed. The hook shows both containers up, the name resolving, and `Error: connect ECONNREFUSED 172.18.0.3:5432`
+    coming back, then asks what a tool that starts containers for you actually promises about order. It does not
+    say depends_on, condition:, service_healthy, healthcheck, readiness, retry or backoff, and it does not name
+    the destination topic''s title.'
+  payoff_anchor: concepts.md#depends_on-ordering-not-readiness
   verified_present: true
 claims_compaction_log:
 - '2026-08-25, after topic 5 (position 6): 28 per-topic claims from topics 1-5 compacted to 5 domain-level claims,
