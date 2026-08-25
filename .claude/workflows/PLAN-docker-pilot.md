@@ -25,10 +25,37 @@ everything you need to resume.
 | 7 | docker-networking | 🏃 `wf_feba0ca4-3be` | — | — | — | inherits the `embedded DNS` loop |
 | 8 | docker-compose | — | — | — | — | |
 | 9 | registries-and-distribution | — | — | — | — | |
-| 10–16 | … | — | — | — | — | beyond this run's horizon |
+| 10 | production-healthchecks-logging | — | — | — | — | **compaction due at 10**; carries a frozen `container layer` H2 → needs its own K2 exemption |
+| 11 | debugging-troubleshooting | — | — | — | — | holds the corpus's one real C12 punt (`pods are out of scope here`, line 15) — fix it |
+| 12 | docker-security | — | — | — | — | frozen H2 defect in ledger `known_defects` |
+| 13 | image-scanning-supply-chain | — | — | — | — | |
+| 14 | buildkit-advanced-builds | — | — | — | — | owed 2 C9 gaps from topic 3 |
+| 15 | image-internals-storage-drivers | — | — | — | — | owns **APPROX-4** (containerd image store) + frozen `container layer` H2 |
+| 16 | runtimes-oci-standards | — | — | — | — | last topic: closes the arc, no forward cliffhanger |
 
-**Target: topics 3–9 (7). Realistic base: 3–7 (5).** Under-promise; the gates are not negotiable
-and the topic count is what flexes.
+## After topic 16 — the close-out sequence
+
+1. Reviewer summary at `.claude/workflows/REVIEW-docker-pilot.md`; user reviews the domain.
+2. **Merge to main only on explicit sign-off.** Never partial.
+3. **Debt pass, one commit each:** the ~9 drifted MCQs, then the domain-wide `node:20` retag
+   starting at its establishing site (topic 3), carrying the measurement already in `owed`.
+4. Delete `clarity-preview-observability`.
+
+**Run 1 (done): topics 3–6 landed + 7 in flight.** Hit the base case, not the stretch — ~100
+min/topic, plus an auth dropout that cost topic 4 three agents.
+
+**Run 2 (current): finish topics 7–16.** 9 topics after 7 lands, ~15 h. Then the domain is
+mergeable and the debt pass follows. The gates are not negotiable; the topic count is what flexes.
+
+## Decisions confirmed 2026-08-25 (second round) — binding
+
+1. **Growth stays uncapped.** Mean under C12 is **+148%**, not the +80% originally accepted, and the
+   user re-confirmed with the number in front of them: *a 45-min topic that needs no other source
+   beats a 20-min one that sends students to Google.* Docker will land near 12 h of reading for 16
+   topics (was 5.2 h). Report per topic, never gate. **Do not raise this again.**
+2. **Finish topics 7–16 before clearing debt.** Continuity stays hot (each cliffhanger promises the
+   next topic) and the domain reaches a mergeable state. The ~9 drifted MCQs and the domain-wide
+   `node:20` retag are cleared in ONE pass afterwards, not interleaved.
 
 ## The per-topic cycle
 
