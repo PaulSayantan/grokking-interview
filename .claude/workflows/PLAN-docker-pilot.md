@@ -114,6 +114,17 @@ Append every departure from this plan, with the reason. An empty log after 8 hou
   `CMD ["bash"]`). Both were present in better form — the `chown` case as the problem it solves, and
   privilege-dropping expanded into a whole H3. Corrected before allowlisting. Lesson: read the file
   before believing the detector, in both directions.
+- **Visual check done after topic 4** (the one the user approved). Everything the reveal UI
+  promises holds with 4 topics live: rows locked with an empty panel, "Unlock all" 0 -> 12 visible,
+  row height 45px in BOTH locked and armed (zero CLS), no-JS ships all 7 bodies + 7 panel items
+  open with the dead controls hidden, console clean. **It also found a real bug no gate could see**
+  (`2052f23`): cliffhanger teasers were interpolated as text, so code spans rendered as literal
+  backticks under a hook where they rendered as chips. Fixed with a shared inline renderer, a
+  rescoped CSS rule, and an 11-assertion guard. Worth the 20 minutes.
+- **Two false alarms of my own during that check**, both from measuring the wrong element: a row
+  contains three `.pd-line` variants and I measured the hidden one (reported 0 height); and 12
+  prompts against 11 rows is correct, because rows are keyed per H2 SECTION and two prompts share
+  `base-images-from-scratch-tags-and-digests`. Neither was a defect.
 - **Topic 1's `adversarial_signoff` is still `pending`** in the ledger — stale, since topic 1 did
   go through the verifier. Left alone deliberately: I no longer hold its verdict text and will not
   assert a signoff I cannot substantiate. Flagged for the review doc.
