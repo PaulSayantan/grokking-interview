@@ -80,6 +80,29 @@ export function renderPromptMarkdown(md) {
   return toHtml({ type: "root", children });
 }
 
+/**
+ * Same renderer, unwrapped to INLINE html, for a string that goes inside an element
+ * that already owns its own block box — a cliffhanger teaser inside an `<li>`.
+ *
+ * Without this the teasers were interpolated as plain text, so authored code spans
+ * rendered as literal backticks three lines under a hook where the same spans rendered
+ * as chips. Neither `astro check`, the test suite nor the build can see that: the
+ * markup is valid and the types are right, the page is just wrong. It was caught by
+ * looking at a screenshot.
+ *
+ * Only a lone top-level paragraph is unwrapped. Anything else (a list, a fence, two
+ * paragraphs) is returned as blocks, because those need their own boxes — a teaser
+ * should never be that shape, and silently flattening one would lose content.
+ */
+export function renderPromptInline(md) {
+  const children = promptMarkdownToHast(md);
+  if (!children.length) return "";
+  if (children.length === 1 && children[0].type === "element" && children[0].tagName === "p") {
+    return toHtml({ type: "root", children: children[0].children });
+  }
+  return toHtml({ type: "root", children });
+}
+
 // --- helpers ---------------------------------------------------------------
 
 const HEADING = /^h([1-6])$/;
