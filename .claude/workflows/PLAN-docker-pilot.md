@@ -23,7 +23,7 @@ everything you need to resume.
 | 5 | multi-stage-builds-image-optimization | ✅ | ✅ `3cc2484` | +105% | 0 | cleanest run yet (register swap passed first read); closed a 2-topic arithmetic contradiction; **compaction done 28→6 claims** |
 | 6 | volumes-and-storage | ✅ | ✅ `3f62cf6` | +179% | 0 | 47-item closure set, 0 unclosed; 2 blockers (`$DATA_DIR`, `EROFS` vs `EACCES`); 2 new fact guards |
 | 7 | docker-networking | ✅ | ✅ `18bca7c` | +192% | 0 | Engine 28 iptables section CONFIRMED clean; blocker was a broken callout invisible to every gate; append omitted `topics[]` |
-| 8 | docker-compose | 🏃 `wf_05afdafc-988` | — | — | — | inherits the `readiness` loop (`depends_on` ordering vs readiness) |
+| 8 | docker-compose | 🏃 resumed `wf_05afdafc-988` | — | — | — | interrupted mid-run (process exit); brief+writer cached, verify/factcheck/repair re-running |
 | 9 | registries-and-distribution | — | — | — | — | |
 | 10 | production-healthchecks-logging | — | — | — | — | **compaction due at 10**; carries a frozen `container layer` H2 → needs its own K2 exemption |
 | 11 | debugging-troubleshooting | — | — | — | — | holds the corpus's one real C12 punt (`pods are out of scope here`, line 15) — fix it |
@@ -187,6 +187,11 @@ Append every departure from this plan, with the reason. An empty log after 8 hou
 - **I wrote an allowlist reason I did not actually believe** and caught it on re-read: I explained
   `container:CONTAINER` as the `--network container:` mode. It is not — it is the other half of the
   `host:HOST` port-mapping notation. Corrected. A reason I cannot defend is worth less than no entry.
+- **Topic 8 workflow was interrupted** by a process exit between the writer and verify phases (also
+  a brief MCP disconnect, unrelated). No unverified work landed — tree clean, ledger still at position
+  8, topic 8 NOT committed. Resumed with `resumeFromRunId`: brief + writer replay from cache, only
+  verify/factcheck/repair run live. Same recovery as topic 4's auth dropout; the cache makes an
+  interruption cost only the unfinished phases.
 - **Topic 1's `adversarial_signoff` is still `pending`** in the ledger — stale, since topic 1 did
   go through the verifier. Left alone deliberately: I no longer hold its verdict text and will not
   assert a signoff I cannot substantiate. Flagged for the review doc.
