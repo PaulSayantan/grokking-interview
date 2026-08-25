@@ -1,0 +1,136 @@
+topic: "Multi-Stage Builds & Image Optimization"
+domain: docker
+topic_slug: multi-stage-builds-image-optimization
+schema: 1
+pass: clarity-v1
+
+prompts:
+  - id: multi-stage-builds-image-optimization-p001
+    ref: "concepts.md#why-image-size-matters"
+    kind: notice-in-wild
+    tier: A
+    prompt: |
+      Next time a deploy feels slow, time the pull on one cache-cold node, then multiply it
+      by your node count and your deploys per day.
+    hint: "Your fleet's node count times deploys per day is the multiplier that turns seconds into a bill."
+    answer_in: "concepts.md#putting-money-on-it-200-nodes-ten-deploys-a-day"
+
+  - id: multi-stage-builds-image-optimization-p002
+    ref: "concepts.md#the-fat-image-anti-pattern"
+    kind: refute
+    tier: A
+    prompt: |
+      A colleague's review comment: "Added `RUN rm -rf /root/.npm /var/lib/apt/lists/*` as the
+      last line, so the image is smaller now." Name what is wrong with that claim.
+    hint: "Ask which layer holds those bytes, and which layer the `rm` writes into."
+    answer_in: "concepts.md#minimizing-layers-and-cleaning-caches"
+
+  - id: multi-stage-builds-image-optimization-p003
+    ref: "concepts.md#build-time-vs-runtime-dependencies"
+    kind: predict-failure
+    tier: A
+    prompt: |
+      Your Python builder installs `libpq-dev` and pip compiles `psycopg2` from source. The
+      final stage copies site-packages only. The import fails at start. Name what is missing.
+    hint: "The table splits headers from the thing the compiled extension loads at run time."
+    answer_in: "concepts.md#build-time-vs-runtime-dependencies"
+
+  - id: multi-stage-builds-image-optimization-p004
+    ref: "concepts.md#choosing-a-base-image-full-slim-alpine-distroless-scratch"
+    kind: name-the-price
+    tier: B
+    prompt: |
+      Alpine gives you single-digit megabytes. Name what that costs a Python service with one
+      wheel-shipping dependency, and which Alpine release removed half of the DNS problem.
+    hint: "One cost is measured in build minutes, the other in a version number."
+    answer_in: "/study/docker/dockerfile-layers-build-cache#what-alpines-musl-libc-costs"
+
+  - id: multi-stage-builds-image-optimization-p005
+    ref: "concepts.md#distroless-images"
+    kind: refute
+    tier: A
+    prompt: |
+      A colleague writes: "We moved to distroless, so remote code execution is no longer a
+      risk for this service." Name the confusion in that sentence.
+    hint: "Separate how an attacker gets code running from what they find once it runs."
+    answer_in: "concepts.md#why-image-size-matters"
+
+  - id: multi-stage-builds-image-optimization-p006
+    ref: "concepts.md#static-binaries-and-scratch"
+    kind: predict-failure
+    tier: C
+    prompt: |
+      Your Go service is built with `CGO_ENABLED=0` and calls `os/user.Current()` on startup.
+      Predict what that call returns inside a `scratch` image, then go check.
+    hint: "The pure-Go implementation has to read the same file `scratch` does not have."
+    answer_in: external
+    search_hint: "Go standard library docs for `os/user` — read the package overview on the cgo and pure-Go implementations, plus the `osusergo` build tag."
+    success_criterion: |
+      You can say which implementation of `os/user` a `CGO_ENABLED=0` build uses, name the
+      file it reads, and state what the call returns when that file is absent — quoting the
+      package documentation rather than a blog post.
+
+  - id: multi-stage-builds-image-optimization-p007
+    ref: "concepts.md#minimizing-layers-and-cleaning-caches"
+    kind: notice-in-wild
+    tier: A
+    prompt: |
+      Next time a build finishes, run `docker history --human` on the result and find the
+      largest row whose bytes a cleanup in the same instruction would have zeroed.
+    hint: "Package-manager rows are the usual candidates; check whether the cleanup was chained or separate."
+    answer_in: "concepts.md#minimizing-layers-and-cleaning-caches"
+
+  - id: multi-stage-builds-image-optimization-p008
+    ref: "concepts.md#layer-reuse-across-images-and-caching"
+    kind: name-the-price
+    tier: D
+    prompt: |
+      Your platform team proposes one internal base image for 40 services, so every node
+      caches its layers once. Name what that standardisation costs the 40 teams.
+    hint: "Think about who is blocked when one service needs a runtime version the base does not carry."
+    answer_in: external
+    answer_shape: |
+      A credible answer prices at least three dimensions: how much of the 40 services'
+      runtimes is genuinely common rather than assumed common; the blast radius of a base
+      rebuild across 40 pipelines and their tests; and who absorbs the delay when one service
+      needs a newer runtime than the shared base ships.
+
+  - id: multi-stage-builds-image-optimization-p009
+    ref: "concepts.md#auditing-and-measuring-image-size"
+    kind: notice-in-wild
+    tier: A
+    prompt: |
+      Run `dive` on an image you own and note its efficiency score, then check with
+      `docker history` whether the largest layer is one the score counts as wasted.
+    hint: "The score counts bytes that were duplicated, moved or hidden — not bytes that are merely large."
+    answer_in: "concepts.md#auditing-and-measuring-image-size"
+
+cliffhanger:
+  pattern: B
+  hook: |
+    Every number in this topic is an image number. 580 MB of layers down to 20 MB, ten
+    seconds of pull down to 0.2 s. All of it prices bytes that arrive before your process
+    starts.
+
+    Now run that 20 MB image and let it work. It appends to a log, unpacks a 200 MB upload,
+    and rewrites one byte inside a 2 GB data file. None of those bytes are in any layer you
+    built. They land somewhere this topic never costed, and it bills in three units. One is
+    latency on the first write to a file that already exists. One is a tax on every write
+    after that: none of them reach the node's disk directly. The third is the data itself,
+    gone the moment someone runs `docker rm`.
+
+    Nothing here priced any of the three.
+  teaser_questions:
+    - "Which of the three does a write-heavy database pay on every write, and which one bites once per file?"
+    - "Why should rewriting one byte of a 2 GB file cost more than appending one byte to a log?"
+  payoff:
+    anchor: "concepts.md#copy-on-write-and-why-databases-must-not-use-the-container-layer"
+    claim: |
+      Read it and confirmed. That section names exactly the three units: "First-write
+      latency. Modifying a large file triggers a full copy-up, even if you change one byte";
+      "Storage-driver overhead. All writable-layer I/O passes through the union filesystem,
+      which is slower than native filesystem I/O for random writes and `fsync`-heavy
+      workloads"; and "Data lives with the container. No persistence, no sharing, no backup
+      story", with its INTERVIEW callout naming destruction on `docker rm`. The H2 just above
+      it, `#the-ephemeral-writable-layer`, states the `docker rm` unit in full, so the reader
+      passes through it on the way. All three units of the bill are present today.

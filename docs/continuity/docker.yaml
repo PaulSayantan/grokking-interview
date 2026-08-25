@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 5
+position: 6
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -549,6 +549,60 @@ canonical_terms:
     note: '`--init`, `docker-init` and `tini` are identifiers for particular implementations and stay in backticks.
       Do NOT ban "init system" or "init container" — systemd and the Kubernetes object are different things and
       erasing the distinction is also a failure.'
+  multi-stage build:
+    canonical: multi-stage build
+    defined_in: multi-stage-builds-image-optimization
+    gloss: a Dockerfile with several `FROM` instructions, of which only the last becomes the published image
+    banned_variants:
+    - multistage build
+    - multi-step build
+    - two-stage build
+  stage:
+    canonical: stage
+    defined_in: multi-stage-builds-image-optimization
+    gloss: 'everything one `FROM` starts: a fresh filesystem seeded from that line''s base image, sharing nothing
+      with the stage above it except what a `COPY --from` moves'
+    banned_variants:
+    - intermediate image
+    - sub-build
+    note: '`build step` was listed as a banned variant and is NOT one: a build step is one Dockerfile instruction
+      (one `docker history` row), while a stage is everything one FROM starts, and a stage contains many steps.
+      Enforcing it would have made dockerfile-layers-build-cache''s `history` explanation false at its line 145
+      (''the rows are not layers; they are build steps''). Removed after continuity_check flagged two already-rewritten
+      topics. K2''s own rule says not to over-enforce where there is a real distinction.'
+  distroless:
+    canonical: distroless
+    defined_in: multi-stage-builds-image-optimization
+    gloss: an image holding an application and its runtime libraries and nothing else — no shell, no package manager,
+      none of the rest of a Linux userland
+    banned_variants:
+    - distro-less
+    - shell-less image
+  scratch:
+    canonical: scratch
+    defined_in: multi-stage-builds-image-optimization
+    gloss: 'the empty base image: zero bytes and no files, so `FROM scratch` hands the next instruction an empty
+      filesystem'
+    banned_variants:
+    - empty base
+    - null image
+    - blank image
+  build-time dependency:
+    canonical: build-time dependency
+    defined_in: multi-stage-builds-image-optimization
+    gloss: anything needed to produce the artifact but never called after the process starts, so it belongs in the
+      builder stage only
+    banned_variants:
+    - build dep
+    - compile-time package
+  runtime dependency:
+    canonical: runtime dependency
+    defined_in: multi-stage-builds-image-optimization
+    gloss: anything the running process calls or loads — the artifact, the interpreter or JRE, the shared libraries
+      it links, config, CA certificates — so it must be in the final stage
+    banned_variants:
+    - prod dep
+    - run dep
 assumed_prior_knowledge:
 - 'a Unix process: a PID, a parent, fork+exec, its own environment and working directory'
 - a signal is a number delivered to a process, and a process may install a handler for it
@@ -581,71 +635,81 @@ running_example:
     context, 1.2 GB fat vs 80 MB done right, and a 500 MB file deleted two lines later still shipping. Topic 4 reuses
     it and adds no figures. Its startup line is the spine of the PID 1 material. `CMD ["node", "server.js"]` puts
     node at PID 1, `CMD npm start` puts npm there with `server.js` below it, and `CMD node server.js | tee -a /var/log/app.log`
-    is the case where `/bin/sh` provably stays. No size arithmetic is restated.'
+    is the case where `/bin/sh` provably stays. No size arithmetic is restated. Topic 5 re-derived the whole breakdown
+    by hand: 75 + 120 + 45 + 300 + 40 = 580 MB. It now says out loud that the trace is a teaching simplification
+    — the 75 MB bottom row is one rounded line standing in for `node:20`''s own layer stack, which is nearer a gigabyte
+    unpacked — so what the Dockerfile itself added is 120 + 45 + 300 + 40 = 505 MB and the published image is the
+    base plus that, which is how a single-stage build of a small service lands over a gigabyte. It also prices the
+    fat image at 200 nodes × 10 deploys/day: 2,000 GB/day and about $5,400/month at $0.09/GB, against 40 GB/day
+    and about $108/month for a 20 MB image, with pulls of 10 s and 0.2 s at an assumed 100 MB/s — and it says those
+    are unpacked-byte ceilings, because a pull transfers the compressed form. The layer-reuse illustration deliberately
+    uses a fresh 700 MB / 8 MB pair so it cannot be confused with the 900 MB → 12 MB multi-stage figures.'
 claims_established:
-- An image is read-only layers plus an image config; a container is that stack plus one thin writable layer plus
-  a host process with runtime state.
-- Layers are content-addressed, so identical layers are stored, transferred and read once — across containers, across
-  images, and across a pull.
-- Reads from a lower layer are free; the first write to such a file copies the whole file up, metadata-only changes
-  included; deletes become whiteouts.
-- A tag is a movable label, a digest is not; the image ID is the config's digest while `@sha256:` addresses the
-  manifest, and a tag usually names an image index.
-- A container is a host process in namespaces under cgroups over a union rootfs, with no kernel container object;
-  it lives exactly as long as PID 1.
-- A container is in exactly one state at a time, and there is no `stopped` string — a container you stopped and
-  one that finished on its own both report `exited`. The daemon's status vocabulary is `created`, `running`, `paused`,
-  `restarting`, `removing`, `exited`, `dead` (Engine API `ContainerState.Status`, seven values).
-- '`docker run` is `create` plus `start`: `create` builds the writable layer and freezes ports, env and the command;
-  `start` re-runs the same container with that layer intact, so only `rm` plus a fresh `run` can change those, while
-  resource limits and the restart policy can be changed live with `docker update`.'
-- Stopping is a wait for one event, not a timer — SIGTERM to PID 1, then SIGKILL if and only if PID 1 is still alive
-  when the grace period expires, so an idle container that ignores SIGTERM costs the full 10 seconds exactly as
-  a busy one does.
-- A process running as PID 1 gets no default signal action from the kernel and inherits re-parented orphans, so
-  an app with no SIGTERM handler ignores the signal and an app that forks accumulates zombies; `--init` fixes delivery
-  and reaping, never the missing handler.
-- Limits are cgroup enforcement with two different teeth — `--memory` is a kill (the OOM killer takes the highest
-  `oom_score` in the cgroup, so a multi-process container can lose a child and stay `up` while `OOMKilled` is already
-  true, since the flag records a kill of any process in the cgroup), while `--cpus` throttles and `--cpu-shares`
-  only breaks ties under contention.
-- Only RUN, COPY and ADD add layers; FROM contributes the base image's layers; every other instruction writes a
-  field into the image config and adds no bytes.
-- A cache key is parent layer + instruction text + inputs. RUN is keyed on the command string alone (a bind-mounting
-  RUN excepted); COPY/ADD on a checksum over the copied files, mtime excluded; metadata instructions on their own
-  text. A miss re-runs every instruction below it.
-- 'The build context is transferred before the first instruction runs, so its size is a toll paid before the cache
-  can help: a cold build (first on a machine, every fresh CI runner) ships the whole tree, while a warm builder
-  loads context files on demand and sends less. .dockerignore is the lever on both that size and COPY''s cache stability.'
-- A layer is an immutable content-addressed blob, so no later instruction can shrink an earlier one. A delete during
-  a build writes a whiteout into an image layer, which ships forever, and the hidden bytes keep their full size
-  in the layer below. Multi-stage is the reliable fix.
-- A cache mount survives across builds and never enters the image; the layer cache decides whether an instruction
-  runs, a cache mount decides how much work it does when it runs.
-- ARG is build-time only and visible in docker history (predefined proxy args excepted); ENV persists into the image
-  config and overrides an ARG of the same name; neither holds secrets.
-- A tag can be moved to different contents, silently changing base layers and busting the cache below FROM; a digest
-  pin fixes the bytes and never receives patches on its own.
-- '`docker run` arguments replace CMD outright and are appended to ENTRYPOINT; the final command line is ENTRYPOINT
-  elements plus either the run arguments or CMD, never both.'
-- Exec form (JSON array) executes your list directly; shell form (bare string) is recorded as `/bin/sh -c "<string>"`,
-  and the wrapping happens per instruction, before the two are combined — which is why an exec ENTRYPOINT with a
-  shell CMD puts a literal `/bin/sh -c` into your argument vector.
-- 'Shell form does not decide which process ends up at PID 1 — the shell does. A shell invoked with `-c` execs the
-  LAST command of its string in place: dash and busybox `ash` do this even for `&&` and `;`, and bash from version
-  5, so your app can end up at PID 1 after all. Nothing hands over for a pipeline, for a string that installs a
-  trap, or for a command written after your app, and a trailing `&` is worse still because PID 1 exits at once and
-  the container stops. No shell documents any of it, so it is never a design basis.'
-- 'Two rules combine to discard a signal at PID 1. `sh -c` installs no SIGTERM handler, and Linux exempts PID 1
-  from the default action of any signal it has not handled. The exemption does not cover SIGKILL or SIGSTOP sent
-  from an ancestor PID namespace, which is where the container runtime sits: that is what makes the second stage
-  of `docker stop` always work, while `kill -9 1` from inside the container does nothing.'
-- A shell-form ENTRYPOINT discards CMD and every `docker run` argument, because the recorded entrypoint is the three-element
-  list `/bin/sh`, `-c`, `<whole string>`, and words appended after a `sh -c` command string are positional parameters
-  for the shell rather than arguments to the command inside it.
-- '`--entrypoint` takes one binary, never a command line, never `sh -c`, and clears the image''s CMD unconditionally;
-  `--entrypoint=""` removes the entrypoint entirely. Compose keeps the Dockerfile names while Kubernetes inverts
-  them, so `command:` is ENTRYPOINT and `args:` is CMD.'
+- 'IMAGE AND LAYER MODEL (topics 1, 3, 5). An image is read-only layers plus an image config; a container is that
+  stack plus one thin writable layer plus a host process with runtime state. Layers are immutable content-addressed
+  blobs, so identical layers are stored, transferred and read once across containers, images and pulls. Reads from
+  a lower layer are free; the first write to such a file copies the whole file up, metadata-only changes included;
+  deletes become whiteouts. Therefore no later instruction can shrink an earlier one: a delete during a build writes
+  a whiteout that ships forever while the hidden bytes keep full size in the layer below, and multi-stage is the
+  reliable fix. A tag is a movable label and a digest is not; the image ID is the config''s digest while `@sha256:`
+  addresses the manifest, and a tag usually names an image index. A pull fetches that small JSON document, compares
+  each layer digest against blobs the node already holds and downloads only the misses - it never reads names or
+  tags - so deploy speed tracks the delta a node lacks, a shared base dedupes fleet-wide, a one-byte layer change
+  re-downloads all of it, and `--squash` yields one unmatchable blob while its base layers still share.'
+- 'CONTAINER LIFECYCLE (topics 1, 2). A container is a host process in namespaces under cgroups over a union rootfs,
+  with no kernel container object, and it lives exactly as long as PID 1. It is in exactly one state at a time and
+  there is no `stopped` status - a container you stopped and one that exited on its own both report `exited`. `docker
+  run` is `create` plus `start`: `create` builds the writable layer and freezes ports, env and command, so only
+  `rm` plus a fresh `run` changes those, while resource limits and the restart policy change live via `docker update`.
+  Stopping waits for one event rather than running a timer - SIGTERM to PID 1, then SIGKILL if and only if PID 1
+  is still alive when the grace period expires - so an idle container that ignores SIGTERM costs the full 10 seconds
+  exactly as a busy one does.'
+- 'PID 1 AND SIGNALS (topics 2, 4). Two rules combine to discard a signal at PID 1: `sh -c` installs no SIGTERM
+  handler, and Linux exempts PID 1 from the default action of any signal it has not handled. That exemption does
+  NOT cover SIGKILL or SIGSTOP from an ancestor PID namespace, which is where the runtime sits - hence `docker stop`''s
+  second stage always works while `kill -9 1` from inside does nothing. PID 1 also inherits re-parented orphans,
+  so a forking app accumulates zombies; `--init` fixes delivery and reaping, never a missing handler. Shell form
+  does not decide who is PID 1 - the shell does: a shell invoked with `-c` execs the LAST command of its string
+  in place (dash and busybox `ash` even for `&&` and `;`, bash from version 5), so your app can end up at PID 1
+  after all. Nothing hands over for a pipeline, a string installing a trap, or a command written after your app;
+  a trailing `&` is worse because PID 1 exits at once and the container stops. No shell documents any of it, so
+  it is never a design basis.'
+- ARGUMENT PASSING (topic 4). `docker run` arguments replace CMD outright and are appended to ENTRYPOINT; the final
+  command line is ENTRYPOINT elements plus either the run arguments or CMD, never both. Exec form (JSON array) executes
+  your list directly; shell form (bare string) is recorded as `/bin/sh -c "<string>"`, and the wrapping happens
+  per instruction before the two are combined - which is why an exec ENTRYPOINT with a shell CMD puts a literal
+  `/bin/sh -c` into the argument vector. A shell-form ENTRYPOINT discards CMD and every run argument, because the
+  recorded entrypoint is the three-element list `/bin/sh`, `-c`, `<whole string>` and words appended after a `sh
+  -c` string are positional parameters for the shell, not arguments to the command inside it. `--entrypoint` takes
+  one binary, never a command line and never `sh -c`, and clears the image's CMD unconditionally; `--entrypoint=""`
+  removes the entrypoint entirely. Compose keeps the Dockerfile names while Kubernetes inverts them, so `command:`
+  is ENTRYPOINT and `args:` is CMD.
+- 'BUILD, CACHE AND MINIMAL BASES (topics 3, 5). Only RUN, COPY and ADD add layers; FROM contributes the base image''s
+  layers; every other instruction writes a config field and adds no bytes. A cache key is parent layer + instruction
+  text + inputs - RUN on its command string alone (a bind-mounting RUN excepted), COPY/ADD on a checksum over the
+  copied files with mtime excluded - and a miss re-runs every instruction below it. The build context transfers
+  before the first instruction runs, so a cold build ships the whole tree while a warm builder loads files on demand;
+  `.dockerignore` is the lever on both. A cache mount survives across builds and never enters the image: the layer
+  cache decides whether an instruction runs, a cache mount how much work it does when it does. ARG is build-time
+  only and visible in `docker history` (predefined proxy args excepted); ENV persists into the config and overrides
+  a same-named ARG; neither holds secrets. A moved tag silently changes base layers and busts the cache below FROM;
+  a digest pin fixes bytes and never receives patches. Only the last stage is published and nothing crosses a FROM
+  except what a `COPY --from` names - not WORKDIR, ENV, packages or user - while the cache is tracked per stage,
+  so an untouched builder stage is still a hit; `--from` also accepts an image reference. BuildKit SKIPS a stage
+  nothing copies from or builds FROM, so a `test` stage gates nothing unless CI runs `--target test` or a `COPY
+  --from=test` makes the dependency real (the legacy builder ran it by accident). Distroless has no `/bin/sh`, which
+  removes four things at once: shell form, an entrypoint script (its shebang names a missing interpreter and `exec
+  "$@"` is a shell builtin), `docker exec -it <c> sh`, and RUN in that stage - so every install, compile and permission
+  fix happens earlier and arrives as a `COPY --from`. `:nonroot` runs as uid 65532 and resolves the name; `scratch`
+  has no `/etc/passwd`, so only a numeric `--chown` works there, and on either base ownership cannot be corrected
+  afterwards because `RUN chown` needs a shell. `scratch` is zero bytes, so each missing provision is one error:
+  x509 unknown-authority means no CA bundle, `USER <name>` failing means no `/etc/passwd`, and "no such file or
+  directory" on a binary plainly present means its ELF interpreter (`/lib64/ld-linux-x86-64.so.2` on x86-64 glibc)
+  is absent - another way of saying the binary is not static.'
+- 'RESOURCE LIMITS (topic 2). Limits are cgroup enforcement with two different teeth. `--memory` is a kill: the
+  OOM killer takes the highest `oom_score` in the cgroup, so a multi-process container can lose a child and stay
+  `up` while `OOMKilled` is already true, because the flag records a kill of any process in the cgroup. `--cpus`
+  throttles, and `--cpu-shares` only breaks ties under contention.'
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -703,6 +767,22 @@ approximations_open:
     or why a registry needs both.
   correction_owed_by: image-internals-storage-drivers
   renumbered_from: 'APPROX-5 (id collision: the writer reused a live id for a different fact)'
+- id: APPROX-7
+  from: multi-stage-builds-image-optimization
+  text: Explains registry dedup as a per-layer digest comparison against blobs the node already holds, and stops
+    there. Names the multi-platform *index* in one clause — enough that a reader is not surprised by the first document
+    a pull fetches — but teaches nothing about it. Does not cover cross-repository blob mounting, registry-side
+    dedup and garbage collection, platform selection, or the compressed-versus-uncompressed digest distinction APPROX-6
+    already owes. `manifest` and `index` are both glossed inline and deliberately not bolded, so the teaching site
+    is still free.
+  correction_owed_by: registries-and-distribution
+- id: APPROX-8
+  from: multi-stage-builds-image-optimization
+  text: 'States that a vulnerability scanner enumerates the packages installed in the image and matches them against
+    advisories, so fewer packages means fewer rows to triage rather than a safer application. One clause only: no
+    scanner types, no reachability analysis, no severity handling, and no claim about what a scanner does with unpackaged
+    binaries copied in by `COPY --from`.'
+  correction_owed_by: image-scanning-supply-chain
 known_defects:
 - file: volumes-and-storage
   note: Frozen H2 'Copy-on-write and why databases must not use the container layer' contains 'container layer',
@@ -876,6 +956,51 @@ owed:
     dash and busybox `ash` exec in place — the keyed answer holds only on bash before 5. All four keys stay identifiable
     from their distractors, so the bank is still answerable. Fix them in the MCQ pass; do NOT soften the prose to
     protect a key.
+- file: multi-stage-builds-image-optimization/questions.yaml
+  from: multi-stage-builds-image-optimization
+  kind: mcq-banned-variant-in-question-text
+  token: exec (vector) form
+  note: A question under `#distroless-images` spells the canonical term as "exec (vector) form". `vector form` is
+    a banned variant of `exec form`, whose teaching site is topic 4, and the prose now says `exec form` everywhere.
+    Out of scope for a concepts-only pass, so recorded rather than fixed. The key stays identifiable from its distractors,
+    so the bank is still answerable. Fix it in the MCQ pass.
+- file: multi-stage-builds-image-optimization/questions.yaml
+  from: multi-stage-builds-image-optimization
+  kind: mcq-stale-tag-in-option-text
+  token: debian:slim
+  note: An option under `#choosing-a-base-image…` still writes `debian:slim`, which is not a published tag. The
+    prose now says `debian:bookworm-slim` everywhere, so the two read inconsistently. Cosmetic — the key stays identifiable.
+    Fix it in the MCQ pass.
+- file: topics/docker/*/concepts.md
+  from: multi-stage-builds-image-optimization
+  kind: domain-wide-stale-tag-sweep
+  token: node:20 / gcr.io/distroless/nodejs20-debian12
+  note: Web fact-check verdict WRONG, and deliberately NOT applied in this topic. Distroless now publishes only
+    nodejs22/24/26-debian13; under Debian 12 only static, base, base-nossl and cc remain; Node 20 reached end of
+    life on 2026-04-30. `node:20` is the domain running example, established in `dockerfile-layers-build-cache`
+    and named in the ledger's own `running_example`, and 8 docker topics use it — retagging one file would split
+    the example, and bumping only the distroless half would pair a Node 20 builder with a Node 22 runtime. Retag
+    the whole domain in one pass starting at the establishing site, and re-verify the "around a gigabyte unpacked"
+    figure for whichever major is chosen (node:22 measures 408 MB compressed on amd64 against node:20's 398 MB,
+    so the figure should survive).
+- file: topics/docker/multi-stage-builds-image-optimization/concepts.md
+  from: multi-stage-builds-image-optimization
+  kind: content-gap-hedged
+  token: musl locale behaviour
+  note: The base's "some locale behavior differs" was dropped by the writer and is restored here as a hedge that
+    names the surfaces at risk — formatting, sorting, `setlocale` — and tells the reader to test on Alpine. Which
+    musl versions and which cases actually differ could not be sourced this pass, so no mechanism was invented.
+    Close it against a primary source (musl's own functional-differences page) in a later pass.
+- file: topics/docker/multi-stage-builds-image-optimization/concepts.md
+  from: multi-stage-builds-image-optimization
+  kind: content-gap-hedged
+  token: glibc with no /etc/nsswitch.conf
+  note: 'The writer''s mechanism was factually inverted: glibc''s compiled-in default for the `hosts` database IS
+    `files dns`, the same order distributions ship, and a missing file is tolerated (glibc `nss/nss_database.c`;
+    `nss_database_reload` ignores ENOENT). Replaced with what is sourced — the default order does not change, the
+    path is barely tested, glibc crashed on a missing `nsswitch.conf` in a chroot until 2.34 (bug 27343), and `CGO_ENABLED=0`
+    sidesteps the question. What a glibc-linked binary actually does for name lookups in an empty image is still
+    open.'
 exemptions:
 - file: dockerfile-layers-build-cache
   rule: C9
@@ -910,6 +1035,13 @@ exemptions:
   terms:
   - model
   reason: Frozen H2 'The image supply-chain threat model'; same standing exemption.
+- file: topics/docker/multi-stage-builds-image-optimization/concepts.md
+  rule: C9
+  terms:
+  - context
+  reason: The frozen H2 `.dockerignore and the build context` makes `build context` load-bearing vocabulary, and
+    it is topic 3's canonical term, so the word cannot be gated on density here. (Exemption already on record for
+    this file; restated so the merge is idempotent.)
 topics:
 - position: 1
   slug: images-vs-containers
@@ -1018,15 +1150,51 @@ topics:
     signal forwarding is now pinned, Node''s re-raising default handler no longer counts as "fine", the PID 1 exemption
     is namespace- conditioned, SHELL''s scope is the stage, and the "four lines"/"nine combinations" counts are
     fixed. One finding rejected with reason (see repair-log.md).'
+- position: 5
+  slug: multi-stage-builds-image-optimization
+  commit: pending
+  one_liner: Closed ten C12 gaps here — distroless's nodejs ENTRYPOINT, the ELF-interpreter ENOENT, scanner rows,
+    squash digests — and paid topic 4's no-shell loop in full.
+  reading_minutes:
+    before: 21
+    after: 43
+  factlines:
+    emitted: 36
+    verified: 23
+  adversarial_signoff: 'Both passes ran, and a repair pass applied them. Adversarial verifier: "DO NOT SHIP AS-IS
+    — fix pass required, but the rewrite is fundamentally sound"; register swap PASS on both pairs in all 14 measurable
+    sections on independent re-measurement, with H2 integrity, information inventory, prompt subordination, callout
+    discipline, the S7 exit chain and all 52 MCQs intact. Web fact-check: 23 claims checked against primary sources
+    only — 11 CONFIRMED (`/nodejs/bin/node` in nodejs.bzl, NONROOT = 65532, musl 1.2.4 in Alpine 3.18, `execve`
+    ENOENT naming the ELF interpreter, `/lib64/ld-linux-x86-64.so.2`, BuildKit vs legacy stage skipping, every piece
+    of arithmetic re-derived, 8/8 URLs 200 with both deep anchors present), 3 WRONG, 8 IMPRECISE, 1 UNVERIFIABLE-but-hedged.
+    The repair pass fixed 4 highs and 8 mediums/lows from the verifier and applied every WRONG and IMPRECISE verdict
+    except the deprecated-Node-tag bump, which is rejected with reason and re-opened as a domain-wide `owed` sweep
+    below. Two invented mechanisms were replaced by hedges plus recorded content gaps (musl locale specifics; glibc
+    with no `nsswitch.conf`). Full log: /tmp/pilot/05-multi-stage-builds-image-optimization/repair-log.md.'
 open_cliffhanger:
-  from: entrypoint-vs-cmd
-  to_position: 5
-  pattern: A
-  key_noun_for_K1_grep: no shell
-  gap: 'Every repair topic 4 taught assumes a shell exists somewhere: exec form against shell form as a choice at
-    all, an entrypoint script with a shebang line, `exec "$@"` as a builtin, and `docker exec -it <c> sh` for debugging.
-    Topic 5 asks for a final image with no `/bin/sh` in it, so shell form cannot run, `RUN` is impossible in that
-    stage, and nobody can open a prompt inside the container. The rule "pick whichever form suits you" has a base-image
-    boundary. The boundary is stated; that multi-stage builds are the fix is not.'
-  payoff_anchor: concepts.md#distroless-images
+  from: multi-stage-builds-image-optimization
+  to_position: 6
+  pattern: B
+  key_noun_for_K1_grep: first write
+  gap: 'Every number in topic 5 is an image number: 580 MB of layers down to 20 MB, 10 s of pull down to 0.2 s.
+    All of it prices bytes that arrive before the process starts. Nothing in it prices the bytes a container writes
+    afterwards — a log it appends to, a 200 MB upload it unpacks, one byte rewritten inside a 2 GB file. The hook
+    gives the bill''s existence and its three units (latency on the first write to a file that already exists; a
+    tax on every write after that, because they do not reach the node''s disk directly; and the data itself, gone
+    on `docker rm`) and withholds where those bytes land and what fixes it. It does not say writable layer, volume,
+    mount or `-v`.'
+  payoff_anchor: concepts.md#copy-on-write-and-why-databases-must-not-use-the-container-layer
   verified_present: true
+  verified_note: 'Re-checked line by line in the repair pass. The destination H2 lists exactly these three as "Implications
+    that interviewers probe": first-write latency from a full copy-up, storage-driver overhead on random writes
+    and `fsync`, and data living with the container; its INTERVIEW callout names destruction on `docker rm`. The
+    anchor was moved here from `#the-ephemeral-writable-layer`, which pays only the `docker rm` unit and forward-points
+    at copy-on-write; the reader still passes through it, since it is the H2 immediately above.'
+claims_compaction_log:
+- '2026-08-25, after topic 5 (position 6): 28 per-topic claims from topics 1-5 compacted to 5 domain-level claims,
+  per the rolling-compaction rule. Nothing mechanically load-bearing was dropped; what went is cross-claim restatement
+  and two enumerations reproduced verbatim from their own topics (the seven `ContainerState.Status` strings - the
+  ''there is no stopped status'' rule is kept - and the OOM/cpu-shares detail, retained as its own claim below).
+  The topic-4 correction that a `-c` shell execs the LAST command in place is preserved verbatim, because it is
+  the one claim on this list that contradicts what the un-rewritten topics still say.'

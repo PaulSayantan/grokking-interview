@@ -61,6 +61,11 @@ ALLOWED_KEYS = set(REQUIRED_KEYS) | {
     "group",
     "canonical_terms",
     "assumed_prior_knowledge",
+    # Written by the rolling compaction (every 5 topics) so a reader can tell what was
+    # folded into a domain-level claim and what was deliberately dropped. Nothing reads
+    # it; losing the record of a compaction is how a later topic contradicts a claim
+    # nobody can find any more.
+    "claims_compaction_log",
     "running_example",
     "claims_established",
     "approximations_open",
