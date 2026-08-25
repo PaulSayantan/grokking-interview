@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 4
+position: 5
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -530,6 +530,25 @@ canonical_terms:
     banned_variants:
     - build cache directory
     - persistent mount
+  entrypoint script:
+    canonical: entrypoint script
+    defined_in: entrypoint-vs-cmd
+    gloss: a script named by ENTRYPOINT that does the container's one-time setup and then runs whatever command
+      it was handed, normally with `exec "$@"` as its last line
+    banned_variants:
+    - wrapper script
+    note: The file it lives in is conventionally `docker-entrypoint.sh`; that is a filename, not a second name for
+      the concept, and stays in backticks.
+  init process:
+    canonical: init process
+    defined_in: entrypoint-vs-cmd
+    gloss: the program a Unix system expects at PID 1, whose two jobs are forwarding signals to its children and
+      reaping orphans so their process entries do not accumulate
+    banned_variants:
+    - pid 1 process
+    note: '`--init`, `docker-init` and `tini` are identifiers for particular implementations and stay in backticks.
+      Do NOT ban "init system" or "init container" — systemd and the Kubernetes object are different things and
+      erasing the distinction is also a failure.'
 assumed_prior_knowledge:
 - 'a Unix process: a PID, a parent, fork+exec, its own environment and working directory'
 - a signal is a number delivered to a process, and a process may install a handler for it
@@ -559,7 +578,10 @@ running_example:
     ~10 s to 0.2 s and egress from $180/day to $3.60/day at 200 nodes x 10 deploys x $0.09/GB (lines 41-51). Every
     one of those figures is load-bearing arithmetic: re-derive, never restate from memory. Topic 3 is the establishing
     site and confirms every figure against its own prose: 8 min vs 2 s for the wrong COPY order, 1.83 GB unignored
-    context, 1.2 GB fat vs 80 MB done right, and a 500 MB file deleted two lines later still shipping.'
+    context, 1.2 GB fat vs 80 MB done right, and a 500 MB file deleted two lines later still shipping. Topic 4 reuses
+    it and adds no figures. Its startup line is the spine of the PID 1 material. `CMD ["node", "server.js"]` puts
+    node at PID 1, `CMD npm start` puts npm there with `server.js` below it, and `CMD node server.js | tee -a /var/log/app.log`
+    is the case where `/bin/sh` provably stays. No size arithmetic is restated.'
 claims_established:
 - An image is read-only layers plus an image config; a container is that stack plus one thin writable layer plus
   a host process with runtime state.
@@ -604,6 +626,26 @@ claims_established:
   config and overrides an ARG of the same name; neither holds secrets.
 - A tag can be moved to different contents, silently changing base layers and busting the cache below FROM; a digest
   pin fixes the bytes and never receives patches on its own.
+- '`docker run` arguments replace CMD outright and are appended to ENTRYPOINT; the final command line is ENTRYPOINT
+  elements plus either the run arguments or CMD, never both.'
+- Exec form (JSON array) executes your list directly; shell form (bare string) is recorded as `/bin/sh -c "<string>"`,
+  and the wrapping happens per instruction, before the two are combined — which is why an exec ENTRYPOINT with a
+  shell CMD puts a literal `/bin/sh -c` into your argument vector.
+- 'Shell form does not decide which process ends up at PID 1 — the shell does. A shell invoked with `-c` execs the
+  LAST command of its string in place: dash and busybox `ash` do this even for `&&` and `;`, and bash from version
+  5, so your app can end up at PID 1 after all. Nothing hands over for a pipeline, for a string that installs a
+  trap, or for a command written after your app, and a trailing `&` is worse still because PID 1 exits at once and
+  the container stops. No shell documents any of it, so it is never a design basis.'
+- 'Two rules combine to discard a signal at PID 1. `sh -c` installs no SIGTERM handler, and Linux exempts PID 1
+  from the default action of any signal it has not handled. The exemption does not cover SIGKILL or SIGSTOP sent
+  from an ancestor PID namespace, which is where the container runtime sits: that is what makes the second stage
+  of `docker stop` always work, while `kill -9 1` from inside the container does nothing.'
+- A shell-form ENTRYPOINT discards CMD and every `docker run` argument, because the recorded entrypoint is the three-element
+  list `/bin/sh`, `-c`, `<whole string>`, and words appended after a `sh -c` command string are positional parameters
+  for the shell rather than arguments to the command inside it.
+- '`--entrypoint` takes one binary, never a command line, never `sh -c`, and clears the image''s CMD unconditionally;
+  `--entrypoint=""` removes the entrypoint entirely. Compose keeps the Dockerfile names while Kubernetes inverts
+  them, so `command:` is ENTRYPOINT and `args:` is CMD.'
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -622,13 +664,13 @@ approximations_open:
   from: container-lifecycle
   text: '"the container lives exactly as long as its main process"'
   correction_owed_by: entrypoint-vs-cmd
-  note: Under shell form the process that lives is /bin/sh, not the app — which is the whole of topic 4's PID 1
-    section. Bound explicitly there, and note it is a bounding, not a contradiction (K5).
-  status: still open, restated in canonical terms
-  status_note: '"the container lives exactly as long as its main process" is now "A container lasts exactly as long
-    as its PID 1" (`#the-container-as-a-process-model`), and the six `main process` occurrences are gone. The claim
-    is deliberately NOT bounded here — entrypoint-vs-cmd still owes the correction. The shell-form WARNING in `#stopping-…`
-    remains symptom-level (PID 1 is `sh`; `sh` does not forward) and points at `entrypoint-vs-cmd` for the mechanism.'
+  status: CLOSED in entrypoint-vs-cmd
+  status_note: 'Bounded, not contradicted (K5), in `#the-pid-1--sigterm-problem-with-shell-form`. The rule holds,
+    but under shell form the lifetime the container tracks is the shell''s, so (a) the exit status `docker inspect`
+    reports is the shell''s, which under `CMD node server.js | tee -a /var/log/app.log` is `tee`''s status and therefore
+    0 even when node crashed, and (b) a string with a command after your app keeps the container Running with nothing
+    serving once your app dies. Topic 2 is named out loud and what was approximate is stated. Orchestrator: this
+    entry can now be retired.'
 - id: APPROX-4
   from: images-vs-containers
   text: '"Of the storage drivers it is the one Docker picks by default on every supported distribution — Ubuntu,
@@ -674,8 +716,6 @@ known_defects:
   note: Frozen H2 'Copy-on-write and copy_up' is the current teaching site for both terms, but the reading order
     needs them at topic 1. Under K3 this section must REFERENCE the topic-1 definitions and go deeper (whiteouts,
     opaque dirs, the metadata copy_up at line 295), not re-derive them.
-- file: entrypoint-vs-cmd
-  note: Dangling `operating-systems` cross-reference (line 21). See the images-vs-containers entry.
 - file: docker-networking
   note: Dangling `operating-systems` cross-references (lines 17 and 74). See the images-vs-containers entry.
 - file: docker-security
@@ -778,14 +818,6 @@ owed:
     say it DOES flip. The file now teaches the documented behaviour — `OOMKilled=true` on a still-`running` container
     as the tell — and drops the base''s "may never flip". Nobody has bench-tested it; do that before a later topic
     builds a diagnostic on it.'
-- file: entrypoint-vs-cmd
-  from: container-lifecycle
-  kind: k5-boundary-owed-to-a-later-topic
-  token: exec form / shell form
-  note: Topic 2 states the shell-form symptom (PID 1 is `sh`, SIGTERM not forwarded, every stop takes 10 s) and
-    names `entrypoint-vs-cmd` for the mechanism. Topic 4 must therefore explain *why* `sh -c` does not forward,
-    and must close APPROX-3 by bounding "a container lasts exactly as long as its PID 1". Do not re-gloss `grace
-    period`, `exit code` or `PID 1`; all three are established.
 - file: production-healthchecks-logging
   from: container-lifecycle
   kind: s3-reference-budget-casualty
@@ -804,6 +836,46 @@ owed:
   note: 'C9 gap kept as a hedge: the invalidation docs say build arguments invalidate the cache, and their own CACHEBUST
     example declares the ARG without referencing it, but they never say whether declaring is sufficient or an instruction
     must consume the value. The prose says so out loud and gives the placement that is correct under either reading.'
+- file: debugging-troubleshooting
+  from: entrypoint-vs-cmd
+  kind: c9-gap-closed-in-source
+  token: sh -c exec optimisation
+  note: 'Settled during topic 4''s fact-check, so this is no longer an open hedge. dash (`src/eval.c`) and busybox
+    `ash` (`shell/ash.c`, the complete mirror copy) both exec the LAST command of the `-c` string in place, including
+    the last command of `&&`, `||` and `;`, unless a trap is installed; bash forked for those until version 5. Measured
+    directly on dash: `true && sleep 3` and `true; sleep 3` leave no shell, a pipeline and a `trap` both do, and
+    `sleep 3 &` exits immediately. Neither shell documents the behaviour, so topic 4 states it and still forbids
+    designing on it. You own `docker top`, so one confirmation inside a real Alpine container is still worth printing
+    when you are rewritten: `docker run -d alpine sh -c ''sleep 300''` then `docker top`.'
+- file: production-healthchecks-logging
+  from: entrypoint-vs-cmd
+  kind: s3-reference-budget-spend
+  token: grace period budget
+  note: 'Topic 4 spent one of its two slug refs on you, from `#graceful-shutdown-docker-stop-stopsignal-and-inittini`,
+    for the operational half of the drain budget: what a drain should actually do and how you watch it. Topic 4
+    states the mechanism (a handler, draining inside the window, and `docker stop -t 30` or a longer orchestrator
+    timeout when 25 s of drain meets a 10 s grace period) and deliberately stops there. The debt container-lifecycle
+    recorded against you is therefore now partly paid from this side.'
+- file: multi-stage-builds-image-optimization
+  from: entrypoint-vs-cmd
+  kind: k2-banned-variant-in-un-rewritten-scope
+  token: exec (vector) form
+  note: Line 309 spells the canonical term as "exec (vector) form"; `vector form` is a banned variant of `exec form`,
+    whose teaching site is topic 4. Not editable from topic 4's scope. Fix it when you are rewritten, and note that
+    topic 4's cliffhanger points its payoff at your `#distroless-images`, so that section is already load-bearing
+    for the chain.
+- file: entrypoint-vs-cmd/questions.yaml
+  from: entrypoint-vs-cmd
+  kind: mcq-drift-exposed-by-clarity-pass
+  token: four items disagree with the corrected prose
+  note: Out of scope for a concepts-only pass, so recorded rather than fixed. q018's explanation calls `STOPSIGNAL
+    SIGQUIT` nginx's *fast* shutdown; nginx.org's signal table has QUIT graceful and TERM/INT fast, so the explanation
+    is inverted and the prose now says graceful. q026's keyed option still reads that `--entrypoint` "typically
+    resets CMD"; the docs clear the image's default command unconditionally and the prose is de-hedged to match.
+    q006 and q029 both key "/bin/sh is PID 1" for `ENTRYPOINT java -jar /app.jar`, a single simple command, which
+    dash and busybox `ash` exec in place — the keyed answer holds only on bash before 5. All four keys stay identifiable
+    from their distractors, so the bank is still answerable. Fix them in the MCQ pass; do NOT soften the prose to
+    protect a key.
 exemptions:
 - file: dockerfile-layers-build-cache
   rule: C9
@@ -928,13 +1000,33 @@ topics:
     emitted: 48
     verified: 31
   adversarial_signoff: signed-after-repair
+- position: 4
+  slug: entrypoint-vs-cmd
+  commit: pending
+  one_liner: Closed the six structural gaps under CMD and ENTRYPOINT, including when `sh -c` swallows the stop signal
+    and why it always swallows arguments, and bounded APPROX-3.
+  reading_minutes:
+    before: 16
+    after: 40
+  factlines:
+    emitted: 41
+    verified: 41
+  adversarial_signoff: 'Applied. Two blockers fixed (the `sh -c` exec-optimisation condition list, which was wrong
+    on dash and busybox ash, and the mangled-argv trace, which listed five elements instead of four), two high findings
+    fixed (a bridge sentence that contradicted the section above it, and the table/code-fence/diagram cells that
+    still asserted `/bin/sh` is PID 1 unconditionally), plus every WRONG or IMPRECISE fact-check verdict: npm 7''s
+    signal forwarding is now pinned, Node''s re-raising default handler no longer counts as "fine", the PID 1 exemption
+    is namespace- conditioned, SHELL''s scope is the stage, and the "four lines"/"nine combinations" counts are
+    fixed. One finding rejected with reason (see repair-log.md).'
 open_cliffhanger:
-  from: dockerfile-layers-build-cache
-  to_position: 4
+  from: entrypoint-vs-cmd
+  to_position: 5
   pattern: A
-  key_noun_for_K1_grep: PID 1
-  gap: The topic hands over a correct, fast, small image whose last instruction is a CMD, and never says that the
-    form of that CMD decides which process becomes PID 1, whether SIGTERM reaches the application, and whether docker
-    stop takes 10 seconds.
-  payoff_anchor: concepts.md#the-pid-1--sigterm-problem-with-shell-form
+  key_noun_for_K1_grep: no shell
+  gap: 'Every repair topic 4 taught assumes a shell exists somewhere: exec form against shell form as a choice at
+    all, an entrypoint script with a shebang line, `exec "$@"` as a builtin, and `docker exec -it <c> sh` for debugging.
+    Topic 5 asks for a final image with no `/bin/sh` in it, so shell form cannot run, `RUN` is impossible in that
+    stage, and nobody can open a prompt inside the container. The rule "pick whichever form suits you" has a base-image
+    boundary. The boundary is stated; that multi-stage builds are the fix is not.'
+  payoff_anchor: concepts.md#distroless-images
   verified_present: true
