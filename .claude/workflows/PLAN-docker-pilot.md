@@ -21,8 +21,8 @@ everything you need to resume.
 | 3 | dockerfile-layers-build-cache | ✅ | ✅ `57c43d7` | +134% | 0 | first under C12 — rule validated; 3 blockers + 2 highs + 6 fact fixes caught; 89 min |
 | 4 | entrypoint-vs-cmd | ✅ (resumed) | ✅ `2e1c91b` | +176% | 0 | central `sh -c` mechanism was WRONG in base AND draft; fixed from dash/ash/kernel source. Opened an MCQ-drift defect (4 questions) |
 | 5 | multi-stage-builds-image-optimization | ✅ | ✅ `3cc2484` | +105% | 0 | cleanest run yet (register swap passed first read); closed a 2-topic arithmetic contradiction; **compaction done 28→6 claims** |
-| 6 | volumes-and-storage | 🏃 `wf_ef9fb6c8-bec` | — | — | — | inherits the `first write` loop |
-| 7 | docker-networking | — | — | — | — | |
+| 6 | volumes-and-storage | ✅ | ✅ `3f62cf6` | +179% | 0 | 47-item closure set, 0 unclosed; 2 blockers (`$DATA_DIR`, `EROFS` vs `EACCES`); 2 new fact guards |
+| 7 | docker-networking | 🏃 `wf_feba0ca4-3be` | — | — | — | inherits the `embedded DNS` loop |
 | 8 | docker-compose | — | — | — | — | |
 | 9 | registries-and-distribution | — | — | — | — | |
 | 10–16 | … | — | — | — | — | beyond this run's horizon |
@@ -139,6 +139,16 @@ Append every departure from this plan, with the reason. An empty log after 8 hou
   domain running example pinned in the ledger across 8 topics, 4 already rewritten. Bumping one file
   splits the example; bumping only the distroless half pairs a Node 20 builder with a Node 22 runtime.
   Re-opened as a domain-wide sweep carrying the measurement a future pass needs.
+- **Two more silent-loss hazards caught at the topic-6 merge**, both now handled in the merge I run:
+  (a) `canonical_terms` collides on a topic's OWN teaching-site terms because Pass 0 pre-declares them,
+  and a blind replace deleted the live `bind mount` entry's `note`. Merge field-wise. (b) Six `owed`
+  entries named the finished file itself — kept, correctly, under the rule I fixed after topic 5. Had I
+  not fixed it, six real hedges would have vanished.
+- **K2 exemption instead of a chase** (topic 6): the only `container layer` hit is the FROZEN H2, which
+  is an MCQ anchor and cannot be renamed. Recorded as an exemption with a note that two un-rewritten
+  topics carry the same wording.
+- **Writer self-audit miss rate is now 6/6.** Not improving with practice. The separate verifier and the
+  web fact-check are load-bearing, not belt-and-braces.
 - **Topic 1's `adversarial_signoff` is still `pending`** in the ledger — stale, since topic 1 did
   go through the verifier. Left alone deliberately: I no longer hold its verdict text and will not
   assert a signoff I cannot substantiate. Flagged for the review doc.
