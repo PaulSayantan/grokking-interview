@@ -23,8 +23,8 @@ everything you need to resume.
 | 5 | multi-stage-builds-image-optimization | ✅ | ✅ `3cc2484` | +105% | 0 | cleanest run yet (register swap passed first read); closed a 2-topic arithmetic contradiction; **compaction done 28→6 claims** |
 | 6 | volumes-and-storage | ✅ | ✅ `3f62cf6` | +179% | 0 | 47-item closure set, 0 unclosed; 2 blockers (`$DATA_DIR`, `EROFS` vs `EACCES`); 2 new fact guards |
 | 7 | docker-networking | ✅ | ✅ `18bca7c` | +192% | 0 | Engine 28 iptables section CONFIRMED clean; blocker was a broken callout invisible to every gate; append omitted `topics[]` |
-| 8 | docker-compose | 🏃 resumed `wf_05afdafc-988` | — | — | — | interrupted mid-run (process exit); brief+writer cached, verify/factcheck/repair re-running |
-| 9 | registries-and-distribution | — | — | — | — | |
+| 8 | docker-compose | ✅ | ✅ `4994dd4` | +57% | 0 | **first clean sign-off, 0 blockers/highs**; smallest growth (base already near floor); re-pointed APPROX-10 |
+| 9 | registries-and-distribution | 🏃 `wf_f6aa5540-314` | — | — | — | inherits the `pointer` loop (tags are mutable) |
 | 10 | production-healthchecks-logging | — | — | — | — | **compaction due at 10**; carries a frozen `container layer` H2 → needs its own K2 exemption |
 | 11 | debugging-troubleshooting | — | — | — | — | holds the corpus's one real C12 punt (`pods are out of scope here`, line 15) — fix it |
 | 12 | docker-security | — | — | — | — | frozen H2 defect in ledger `known_defects` |
