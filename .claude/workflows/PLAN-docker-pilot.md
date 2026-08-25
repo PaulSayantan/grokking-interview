@@ -19,8 +19,8 @@ everything you need to resume.
 | 1 | images-vs-containers | ✅ | ✅ `?` | +60.8% | 0 | pre-C12 |
 | 2 | container-lifecycle | ✅ | ✅ `0580baf` | +98.8% | 0 | pre-C12 |
 | 3 | dockerfile-layers-build-cache | ✅ | ✅ `57c43d7` | +134% | 0 | first under C12 — rule validated; 3 blockers + 2 highs + 6 fact fixes caught; 89 min |
-| 4 | entrypoint-vs-cmd | — | — | — | — | payoff anchor has a DOUBLE hyphen (see ledger note) |
-| 5 | multi-stage-builds-image-optimization | — | — | — | — | ledger compaction due after this one |
+| 4 | entrypoint-vs-cmd | ✅ (resumed) | ✅ `2e1c91b` | +176% | 0 | central `sh -c` mechanism was WRONG in base AND draft; fixed from dash/ash/kernel source. Opened an MCQ-drift defect (4 questions) |
+| 5 | multi-stage-builds-image-optimization | 🏃 `wf_fc059f5f-4b4` | — | — | — | ledger compaction due after this one; claims_established at 23/25 |
 | 6 | volumes-and-storage | — | — | — | — | |
 | 7 | docker-networking | — | — | — | — | |
 | 8 | docker-compose | — | — | — | — | |
@@ -102,6 +102,18 @@ Append every departure from this plan, with the reason. An empty log after 8 hou
   `approximations_open` had no id-keyed update rule (topic 3 reused a live id for a different
   fact; a documented replace would have deleted a live debt), and `owed` had no rule that a
   closure report is not a debt (3 phantom debts avoided). `running_example` gained a merge row.
+- **Topic 4: environment auth dropout.** `API Error: Could not load credentials from any providers`
+  killed verify + factcheck + repair after brief and writer had succeeded. Recovered with
+  `resumeFromRunId` — brief and writer replayed from cache, only the 3 dead agents re-ran (40 min).
+  **The draft was NOT landed while unverified**, which was the right call: the verifier and
+  fact-checker then found 2 blockers and 4 wrong facts in it, including the topic's central mechanism.
+- **Topic 4 opened a real MCQ defect**, recorded in `owed`, needs a later MCQ pass: 4 questions now
+  disagree with corrected prose (nginx SIGQUIT called "fast"; `--entrypoint` "typically resets CMD";
+  two keying "/bin/sh is PID 1" for a single simple command). Prose was NOT softened to protect a key.
+- **I mis-called two `rewrite_audit` findings as information loss before checking** (`chown` and
+  `CMD ["bash"]`). Both were present in better form — the `chown` case as the problem it solves, and
+  privilege-dropping expanded into a whole H3. Corrected before allowlisting. Lesson: read the file
+  before believing the detector, in both directions.
 - **Topic 1's `adversarial_signoff` is still `pending`** in the ledger — stale, since topic 1 did
   go through the verifier. Left alone deliberately: I no longer hold its verdict text and will not
   assert a signoff I cannot substantiate. Flagged for the review doc.
