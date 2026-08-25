@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 6
+position: 7
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -643,7 +643,11 @@ running_example:
     fat image at 200 nodes × 10 deploys/day: 2,000 GB/day and about $5,400/month at $0.09/GB, against 40 GB/day
     and about $108/month for a 20 MB image, with pulls of 10 s and 0.2 s at an assumed 100 MB/s — and it says those
     are unpacked-byte ceilings, because a pull transfers the compressed form. The layer-reuse illustration deliberately
-    uses a fresh 700 MB / 8 MB pair so it cannot be confused with the 900 MB → 12 MB multi-stage figures.'
+    uses a fresh 700 MB / 8 MB pair so it cannot be confused with the 900 MB → 12 MB multi-stage figures. Topic
+    6 adds the API''s runtime storage without touching any image arithmetic: its uploads directory is named as a
+    volume candidate, and its `./src` tree is the bind-mount example (`--mount type=bind,src="$(pwd)"/src,dst=/app/src`,
+    `node:20 npm run dev`). Its `node_modules` tree is the named instance of the Docker Desktop file-sharing cost,
+    as a directory of tens of thousands of small files. No number from topic 5''s itemisation was changed or extended.'
 claims_established:
 - 'IMAGE AND LAYER MODEL (topics 1, 3, 5). An image is read-only layers plus an image config; a container is that
   stack plus one thin writable layer plus a host process with runtime state. Layers are immutable content-addressed
@@ -710,6 +714,25 @@ claims_established:
   OOM killer takes the highest `oom_score` in the cgroup, so a multi-process container can lose a child and stay
   `up` while `OOMKilled` is already true, because the flag records a kill of any process in the cgroup. `--cpus`
   throttles, and `--cpu-shares` only breaks ties under contention.'
+- The writable layer is a per-container directory on the host, created when the container is created and deleted
+  when it is removed; `docker rm`, `docker run --rm` and `docker compose down` are the same loss event, and `docker
+  stop` is not one.
+- A mount takes its paths out of the layer stack, because path resolution leaves one filesystem at a mount point
+  and continues in the one mounted there. Nothing under a volume, a bind mount or a tmpfs mount pays a `copy_up`.
+- A `copy_up` costs O(file size) regardless of how many bytes are written, is charged once per file per container,
+  and *can* be triggered by a metadata change (`chmod`, `chown`) as well as by a data write — the docs' verb is
+  "can also result in", not "does". The unit is the whole file because a union mount resolves one path to one file
+  in one layer, so there is no way to take part of a file from the image layer and part from the writable one.
+- The `copy_up` hazard for databases is conditioned on *pre-existing* data in a read-only layer. The official `postgres`
+  and `mysql` images ship an empty data directory and run `initdb` at first start, creating their files new in the
+  writable layer with no lower-layer original, so no `copy_up` fires. The trap is a dataset baked into an image
+  (a `COPY`, or `docker commit`).
+- A named volume's lifecycle is independent of every container. Only `docker volume rm`, `docker volume prune -a`
+  or `docker compose down -v` deletes one; `docker rm -v` deletes only anonymous volumes.
+- An empty volume mounted over a populated image directory is seeded from that directory on first mount only; a
+  bind mount or a tmpfs mount obscures the image's files instead.
+- Mounts carry numeric UID/GID ownership, not user names. Under user-namespace remapping or rootless Docker, container
+  UID n is host UID base + n, where base comes from `/etc/subuid`.
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -783,6 +806,19 @@ approximations_open:
     scanner types, no reachability analysis, no severity handling, and no claim about what a scanner does with unpackaged
     binaries copied in by `COPY --from`.'
   correction_owed_by: image-scanning-supply-chain
+- id: APPROX-9
+  from: volumes-and-storage
+  text: 'The steady-state cost of writing to the writable layer versus a volume is given as a direction with no
+    magnitude. The file separates two things explicitly: what Docker documents (the layer search runs newest-to-oldest,
+    and its results are cached) from the file''s own inference (the search price therefore tracks layer depth rather
+    than bytes written, and the cache means it is paid on a path''s first lookup). The inference is labelled as
+    such in the prose. The file also states out loud that Docker publishes no figure, that the answer varies with
+    the host filesystem, layer depth and file sizes, and that the only priced cost is the `copy_up`. The base''s
+    `fsync`-heavy claim is retained with its mechanism explicitly marked unpublished.'
+  correction_owed_by: image-internals-storage-drivers
+  note: Topic 15 owns storage drivers and is the only topic positioned to measure this. If it lands a number, extend
+    the two paragraphs under `#what-it-costs-the-part-docker-measures-and-the-part-it-does-not`; do not contradict
+    them, because "Docker publishes no figure" is a true statement about the documentation.
 known_defects:
 - file: volumes-and-storage
   note: Frozen H2 'Copy-on-write and why databases must not use the container layer' contains 'container layer',
@@ -1001,6 +1037,53 @@ owed:
     path is barely tested, glibc crashed on a missing `nsswitch.conf` in a chroot until 2.34 (bug 27343), and `CGO_ENABLED=0`
     sidesteps the question. What a glibc-linked binary actually does for name lookups in an empty image is still
     open.'
+- file: topics/docker/volumes-and-storage/concepts.md
+  note: 'C9 gap kept as a hedge: no primary source gives a magnitude for steady-state writable-layer versus volume
+    write throughput. The prose states the shape of the uncertainty instead. Also tracked as APPROX-9.'
+- file: topics/docker/volumes-and-storage/concepts.md
+  note: 'C9 gap kept as a hedge: the base named `fsync`-heavy workloads as a cause and Docker names no mechanism
+    by which the layer stack changes what `fsync` costs. The prose says so rather than inventing one.'
+- file: topics/docker/volumes-and-storage/concepts.md
+  note: Docker's volumes documentation never mentions ownership, so the first-mount copy carrying the image directory's
+    owner, group and mode is stated as observed `local`-driver behaviour rather than a guarantee. Routed to the
+    topic's single tier-C prompt (volumes-and-storage-p010). Closing it needs the moby/moby copy path read.
+- file: topics/docker/volumes-and-storage/concepts.md
+  note: Docker publishes no volume-versus-bind-mount figure for Docker Desktop either. The prose says so, and reframes
+    the "up to 98%" quotation as what it actually measures — VirtioFS against the older gRPC FUSE implementation,
+    i.e. how much of the *old* cost was the old implementation, not how much of the residual cost is the VM boundary.
+    VirtioFS is now Desktop's default on Mac, so a current install has already been handed that reduction.
+- file: topics/docker/volumes-and-storage/concepts.md
+  note: 'Not in any Docker doc, kept because it is true in practice and stated without attributing it to the docs:
+    that `docker stop` unmounts the layer stack while leaving the directory, and that `docker volume rm` refuses
+    for a *stopped* container because the reference lives in the container''s configuration. `docker volume rm`''s
+    page says only "you can''t remove a volume that''s in use by a container" and does not distinguish stopped from
+    running.'
+- file: topics/docker/volumes-and-storage/concepts.md
+  note: 'The CIS Docker Benchmark''s sensitive-host-directory list (`/`, `/boot`, `/dev`, `/etc`, `/lib`, `/proc`,
+    `/sys`, `/usr`) is now confirmed verbatim against `docker/docker-bench-security` `tests/5_container_runtime.sh`,
+    check 5.5 (`sensitive_dirs=''/ /boot /dev /etc /lib /proc /sys /usr''`), and the prose is softened to the benchmark''s
+    own scope ("especially in read-write mode"; the automated check only flags a mount with `RW` true). Still owed:
+    the benchmark PDF is behind a registration wall, so no recommendation number is cited and the wording is taken
+    from the automated test rather than from the document.'
+- file: topics/docker/volumes-and-storage/questions.yaml
+  note: MCQ drift, not fixable by a concepts-only pass. The question on a `RUN` after a `VOLUME` losing its writes
+    is now scoped in prose to the legacy builder, because the Dockerfile reference states BuildKit keeps such changes.
+    The prose supports the MCQ's answer, but the MCQ stem does not name a builder. A questions pass should add that
+    scope.
+- file: topics/docker/volumes-and-storage/questions.yaml
+  note: Second MCQ drift, same shape. `volumes-and-storage-005`'s keyed option credits copy-on-write overhead with
+    hurting `fsync` performance, and the prose now says out loud that no published mechanism supports the `fsync`
+    sharpening. The option is still the only one carrying both halves so it remains selectable, but a questions
+    pass should drop the `fsync` clause from it.
+- file: topics/docker/volumes-and-storage/questions.yaml
+  note: Third MCQ drift. `volumes-and-storage-017` keys `docker volume prune` as removing all unreferenced volumes,
+    which the prose contradicts for Engine 23.0 and later. Pre-existing in the base, not introduced by this pass,
+    and it survives only because no option offers `-a`. A questions pass should add `-a` or scope the stem to an
+    engine older than 23.0.
+- file: topics/docker/*/concepts.md
+  note: 'C8 tension the corpus owns, not this file: the `## Common follow-up questions` bullets are bolded quoted
+    questions in every docker topic, and C8 forbids bolding a question. Changing it here alone would break the rendered
+    Q/A structure and diverge from 15 siblings. Needs one corpus-wide decision.'
 exemptions:
 - file: dockerfile-layers-build-cache
   rule: C9
@@ -1042,6 +1125,15 @@ exemptions:
   reason: The frozen H2 `.dockerignore and the build context` makes `build context` load-bearing vocabulary, and
     it is topic 3's canonical term, so the word cannot be gated on density here. (Exemption already on record for
     this file; restated so the merge is idempotent.)
+- file: volumes-and-storage
+  rule: K2
+  terms:
+  - container layer
+  reason: 'The ONLY occurrence is the frozen H2 ''Copy-on-write and why databases must not use the container layer''
+    (line 74; it was line 54 before the rewrite). H2 text is an MCQ anchor target and renaming it is build-breaking,
+    so this warning is permanent and correct to silence rather than chase. Prose is clean: `writable layer` everywhere.
+    The same frozen wording exists in production-healthchecks-logging and image-internals-storage-drivers, which
+    will need their own exemption rows when they are rewritten.'
 topics:
 - position: 1
   slug: images-vs-containers
@@ -1172,25 +1264,29 @@ topics:
     except the deprecated-Node-tag bump, which is rejected with reason and re-opened as a domain-wide `owed` sweep
     below. Two invented mechanisms were replaced by hedges plus recorded content gaps (musl locale specifics; glibc
     with no `nsswitch.conf`). Full log: /tmp/pilot/05-multi-stage-builds-image-optimization/repair-log.md.'
+- position: 6
+  slug: volumes-and-storage
+  commit: TBD
+  one_liner: Funded nine asserted-but-unexplained claims — the volume's mount mechanism, copy_up's magnitude, userns
+    arithmetic, Desktop's VM crossing — and paid topic 5's three-part bill.
+  reading_minutes:
+    before: 18
+    after: 45
+  factlines:
+    emitted: 47
+    verified: 42
+  adversarial_signoff: applied
 open_cliffhanger:
-  from: multi-stage-builds-image-optimization
-  to_position: 6
-  pattern: B
-  key_noun_for_K1_grep: first write
-  gap: 'Every number in topic 5 is an image number: 580 MB of layers down to 20 MB, 10 s of pull down to 0.2 s.
-    All of it prices bytes that arrive before the process starts. Nothing in it prices the bytes a container writes
-    afterwards — a log it appends to, a 200 MB upload it unpacks, one byte rewritten inside a 2 GB file. The hook
-    gives the bill''s existence and its three units (latency on the first write to a file that already exists; a
-    tax on every write after that, because they do not reach the node''s disk directly; and the data itself, gone
-    on `docker rm`) and withholds where those bytes land and what fixes it. It does not say writable layer, volume,
-    mount or `-v`.'
-  payoff_anchor: concepts.md#copy-on-write-and-why-databases-must-not-use-the-container-layer
+  from: volumes-and-storage
+  to_position: 7
+  pattern: E
+  key_noun_for_K1_grep: embedded DNS
+  gap: 'The writer and reader containers share bytes through one volume and have no way to address each other. The
+    hook names the one genuinely shared mechanism (both a mount and a published port are per-container kernel arrangements
+    the host wires in from outside) and poses the question on that seam: what does one container call another when
+    the ID changes on every recreate. It does not say DNS, 127.0.0.11, bridge, network or -p.'
+  payoff_anchor: concepts.md#the-embedded-dns-resolver
   verified_present: true
-  verified_note: 'Re-checked line by line in the repair pass. The destination H2 lists exactly these three as "Implications
-    that interviewers probe": first-write latency from a full copy-up, storage-driver overhead on random writes
-    and `fsync`, and data living with the container; its INTERVIEW callout names destruction on `docker rm`. The
-    anchor was moved here from `#the-ephemeral-writable-layer`, which pays only the `docker rm` unit and forward-points
-    at copy-on-write; the reader still passes through it, since it is the H2 immediately above.'
 claims_compaction_log:
 - '2026-08-25, after topic 5 (position 6): 28 per-topic claims from topics 1-5 compacted to 5 domain-level claims,
   per the rolling-compaction rule. Nothing mechanically load-bearing was dropped; what went is cross-claim restatement
