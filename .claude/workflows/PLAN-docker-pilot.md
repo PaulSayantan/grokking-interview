@@ -20,8 +20,8 @@ everything you need to resume.
 | 2 | container-lifecycle | ✅ | ✅ `0580baf` | +98.8% | 0 | pre-C12 |
 | 3 | dockerfile-layers-build-cache | ✅ | ✅ `57c43d7` | +134% | 0 | first under C12 — rule validated; 3 blockers + 2 highs + 6 fact fixes caught; 89 min |
 | 4 | entrypoint-vs-cmd | ✅ (resumed) | ✅ `2e1c91b` | +176% | 0 | central `sh -c` mechanism was WRONG in base AND draft; fixed from dash/ash/kernel source. Opened an MCQ-drift defect (4 questions) |
-| 5 | multi-stage-builds-image-optimization | 🏃 `wf_fc059f5f-4b4` | — | — | — | ledger compaction due after this one; claims_established at 23/25 |
-| 6 | volumes-and-storage | — | — | — | — | |
+| 5 | multi-stage-builds-image-optimization | ✅ | ✅ `3cc2484` | +105% | 0 | cleanest run yet (register swap passed first read); closed a 2-topic arithmetic contradiction; **compaction done 28→6 claims** |
+| 6 | volumes-and-storage | 🏃 `wf_ef9fb6c8-bec` | — | — | — | inherits the `first write` loop |
 | 7 | docker-networking | — | — | — | — | |
 | 8 | docker-compose | — | — | — | — | |
 | 9 | registries-and-distribution | — | — | — | — | |
@@ -125,6 +125,20 @@ Append every departure from this plan, with the reason. An empty log after 8 hou
   contains three `.pd-line` variants and I measured the hidden one (reported 0 height); and 12
   prompts against 11 rows is correct, because rows are keyed per H2 SECTION and two prompts share
   `base-images-from-scratch-tags-and-digests`. Neither was a defect.
+- **Topic 5 exposed a bug in MY OWN rule from topic 3.** I had written "never append an `owed` entry
+  whose `file` is the topic you just finished" — keyed on the wrong thing. Topic 5 filed two genuine
+  standing content gaps against its own file (glibc NSS order with no `/etc/nsswitch.conf`; which musl
+  versions differ on locale) and my rule would have silently discarded both. Rewritten to test
+  *whether work remains*, not which file is named.
+- **The ledger itself had a wrong entry, caught by continuity_check flagging two ALREADY-REWRITTEN
+  topics.** Topic 5 declared `build step` a banned variant of `stage`. It is not one — a build step is
+  one Dockerfile instruction (one `docker history` row) and a stage contains many. Enforcing it would
+  have made topic 3's history explanation false. Variant removed, reason recorded on the term. This is
+  the K2 "do not over-enforce a real distinction" case, arriving for real.
+- **Rejected a fact-check WRONG with a stated reason** (topic 5): `node:20` is deprecated, but it is the
+  domain running example pinned in the ledger across 8 topics, 4 already rewritten. Bumping one file
+  splits the example; bumping only the distroless half pairs a Node 20 builder with a Node 22 runtime.
+  Re-opened as a domain-wide sweep carrying the measurement a future pass needs.
 - **Topic 1's `adversarial_signoff` is still `pending`** in the ledger — stale, since topic 1 did
   go through the verifier. Left alone deliberately: I no longer hold its verdict text and will not
   assert a signoff I cannot substantiate. Flagged for the review doc.

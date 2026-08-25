@@ -894,11 +894,21 @@ Conversely topic 2 wrote a *status update* to `APPROX-3` and it was appended, so
 same missing rule.
 
 **An `owed` entry is a debt someone must still pay.** It is **not** the place to report that you
-closed something. Never append an `owed` entry whose `file` is the topic you have just finished —
-nobody will ever read it, because that file is done. Topic 3's append carried three such entries
-("C9 gap CLOSED in repair", "No longer owed"); they would have become permanent phantom debts.
-Closures belong in your report and the commit message. If you closed a debt the ledger recorded,
-name it in `known_defects_closed` or say so in the report so the orchestrator can remove the row.
+closed something. The test is *whether work remains*, not which file the entry names:
+
+- **Drop it** if the note says the thing is done — "CLOSED in repair", "No longer owed", "no longer
+  an open hedge". Topic 3's append carried three of these and they would have become permanent
+  phantom debts. Closures belong in your report and the commit message, and if you closed a debt
+  the ledger recorded, name it in `known_defects_closed` so the orchestrator removes that row.
+- **Keep it** if work remains, **even when the `file` is the topic you just finished.** A C9 gap
+  you hedged honestly, or a C12 step you could not close, is a standing content gap that a future
+  refinement pass on that same file has to pay. Topic 5 filed two of these (glibc's NSS order in an
+  image with no `/etc/nsswitch.conf`; which musl versions differ on locale) and both are legitimate.
+
+An earlier version of this rule said "never append an entry whose `file` is the topic you just
+finished." That was keyed on the wrong thing and would have silently discarded those two real gaps.
+A `file` may also be a glob (`topics/docker/*/concepts.md`) for a debt that spans the domain, or a
+`questions.yaml` path for MCQ drift a concepts-only pass must not fix.
 
 Anything else is dropped. If you believe a field is missing from the ledger, say so in your
 report rather than inventing a key — nothing reads an unknown key, and `continuity_check.py`
