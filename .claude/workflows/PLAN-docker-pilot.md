@@ -26,8 +26,8 @@ everything you need to resume.
 | 8 | docker-compose | ✅ | ✅ `4994dd4` | +57% | 0 | **first clean sign-off, 0 blockers/highs**; smallest growth (base already near floor); re-pointed APPROX-10 |
 | 9 | registries-and-distribution | 🏃 `wf_f6aa5540-314` | — | — | — | inherits the `pointer` loop (tags are mutable) |
 | 10 | production-healthchecks-logging | ✅ | ✅ `a4ff43d` | +30% | 0 | settled 502 loop; blocker=renamed LOCKED H3 (restored); base-carried dual-logging FALSE fixed; **compaction 39→11 claims** |
-| 11 | debugging-troubleshooting | 🏃 launching | — | — | — | holds the corpus's one real C12 punt (`pods are out of scope here`) — MUST fix; owns exit codes 137/143 (topic 10's cliffhanger payoff) |
-| 12 | docker-security | — | — | — | — | frozen H2 defect in ledger `known_defects` |
+| 11 | debugging-troubleshooting | ✅ | ✅ `0d626f5` | +55% | 0 | **C12 punt removed**; blocker=`sh -c` exec-optimization backwards AGAIN (topic-4 landmine, fixed); owns 137/143 |
+| 12 | docker-security | 🏃 launching | — | — | — | frozen H2 defect in ledger; owns container-escape-threat-model (topic 11 payoff) |
 | 13 | image-scanning-supply-chain | — | — | — | — | |
 | 14 | buildkit-advanced-builds | — | — | — | — | owed 2 C9 gaps from topic 3 |
 | 15 | image-internals-storage-drivers | — | — | — | — | owns **APPROX-4** (containerd image store) + frozen `container layer` H2 |
