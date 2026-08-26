@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 13
+position: 14
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -707,7 +707,11 @@ running_example:
     reached as db:5432) and adds proxy/frontend/backend network segmentation, myorg/api tags and a redis:7 cache;
     no image-size arithmetic introduced. Topic 10 reused the Node API for the HEALTHCHECK Dockerfile (node:20-alpine,
     port 3000, /healthz, CMD ["node","server.js"]) and the SIGTERM drain snippet; no image sizes or exit codes were
-    introduced, per the seam constraint.'
+    introduced, per the seam constraint. image-scanning-supply-chain reused it with no new arithmetic and did not
+    retag node:20: `FROM node:20` / `node:20-slim` is the CVE-laden base being scanned and pinned, and `myorg/api:1.4.2`
+    is the artifact scanned, signed and pinned by digest. The Debian 12.5 scan table (CVE-2024-6119 libssl3 etc.)
+    and the distroless Go multi-stage Dockerfile are labelled illustrative and introduce no size figures; no number
+    from topic 5''s itemisation was touched.'
 claims_established:
 - 'IMAGE AND LAYER MODEL (topics 1, 3, 5). An image is read-only layers plus an image config; a container is that
   stack plus one thin writable layer plus a host process with runtime state. Layers are immutable content-addressed
@@ -840,6 +844,30 @@ claims_established:
   secret mounts and runtime secret stores keep secrets out of layers and ENV.
 - gVisor (userspace second kernel) and Kata (per-container VM) are the only controls here that add a boundary surviving
   a host-kernel bug; everything else shares one kernel.
+- 'A container image is a supply chain (base image + OS packages + language dependencies, all pulled remotely);
+  scanning+SBOM answer "what known-vulnerable things are inside" and signing+digest-pinning answer "is this the
+  exact image my pipeline built", and the two guarantees are orthogonal — neither implies the other.
+
+  '
+- 'Scanning is a static read of the image''s package DB and language manifests, matched against advisory feeds (NVD,
+  plus distro feeds Red Hat OVAL / Alpine secdb / Amazon ALAS and the GitHub Advisory Database); it sees no zero-day,
+  no logic bug, and no component that left no record — a statically linked C binary on scratch is invisible, though
+  a Go binary''s embedded module info is still inventoried. Distro OVAL feeds also defeat the backported-fix false
+  positive.
+
+  '
+- 'cosign signs the digest, never a mutable tag, storing the signature as a separate OCI image at a tag derived
+  from the digest (sha256:<hex> -> sha256-<hex>.sig); keyless signing uses Fulcio (a 10-minute cert bound to an
+  OIDC identity) + Rekor (append-only transparency log). A signature is worthless without deploy-time verification,
+  which an admission controller enforces.
+
+  '
+- 'Digest pinning makes a base content-addressed and defeats tag hijack but never auto-updates, so it must be paired
+  with an automated bump+rescan loop (Renovate/Dependabot); CI gates on CVSS severity (Critical/High = score >=
+  7.0) with --ignore-unfixed and VEX as documented trade-offs, and continuous registry scanning re-checks already-published
+  images against a fresh database.
+
+  '
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -919,8 +947,22 @@ approximations_open:
   text: 'States that a vulnerability scanner enumerates the packages installed in the image and matches them against
     advisories, so fewer packages means fewer rows to triage rather than a safer application. One clause only: no
     scanner types, no reachability analysis, no severity handling, and no claim about what a scanner does with unpackaged
-    binaries copied in by `COPY --from`.'
+    binaries copied in by `COPY --from`.
+
+    '
   correction_owed_by: image-scanning-supply-chain
+  status: CLOSED in image-scanning-supply-chain
+  status_note: 'Fully corrected. Scanner types are the landscape table + prose (Trivy/Grype+Syft/Docker Scout/Clair);
+    severity handling is `#scanning-in-ci-and-at-the-registry--gating-on-severity` (CVSS bands, --severity, --ignore-unfixed,
+    VEX); reachability is `#scanner-accuracy-false-positives--limitations` (presence != reachability). The unpackaged-
+    binary gap the base owed is closed explicitly in the seam `#base-image-vulnerabilities--minimal--distroless-bases`
+    > "What a distroless image hides from the scanner": on distroless/scratch there is no `/var/lib/dpkg/status`,
+    so the OS-package class returns empty; a Go static binary''s embedded build info is still parsed by Syft/Trivy,
+    but a statically linked C/C++ binary `COPY --from`''d in carries no package DB row and no language manifest,
+    so a scanner reading the final image has nothing to match it against and it is invisible. Orchestrator: this
+    entry can now be retired.
+
+    '
 - id: APPROX-9
   from: volumes-and-storage
   text: 'The steady-state cost of writing to the writable layer versus a volume is given as a direction with no
@@ -1549,17 +1591,31 @@ topics:
     emitted: 12
     verified: 12
   adversarial_signoff: pass
-open_cliffhanger:
-  from: docker-security
-  to_position: 13
-  pattern: A
-  key_noun_for_K1_grep: base image
-  gap: 'Every runtime control assumes the image contains what you think it does; a hijacked base image or a dependency
-    published yesterday is inside the boundary before seccomp/caps/read-only apply. Withheld: that an image is a
-    supply chain, and base-image/OS-package CVEs are the first threat in it.
+- position: 13
+  slug: image-scanning-supply-chain
+  commit: TBD-orchestrator
+  one_liner: 'Two orthogonal image guarantees: scanning+SBOM for what-is-inside, signing+digest-pinning for is-this-the-built-image;
+    scanners read package DBs/manifests, cosign signs the digest, admission control enforces at deploy.
 
     '
-  payoff_anchor: concepts.md#the-image-supply-chain-threat-model
+  reading_minutes:
+    before: 20
+    after: 33
+  factlines:
+    emitted: 8
+    verified: 8
+  adversarial_signoff: PASS
+open_cliffhanger:
+  from: image-scanning-supply-chain
+  to_position: 14
+  pattern: B
+  key_noun_for_K1_grep: attestation
+  gap: 'Topic 13 makes two build-time demands and funds neither: attach an SBOM and provenance to every image, and
+    keep every secret out of every layer. The legacy builder can emit no in-toto attestation and has nowhere to
+    put a secret but a layer. Topic 14 is the engine that pays both bills.
+
+    '
+  payoff_anchor: concepts.md#provenance--sbom-attestations
   verified_present: true
 claims_compaction_log:
 - '2026-08-25, after topic 5 (position 6): 28 per-topic claims from topics 1-5 compacted to 5 domain-level claims,
