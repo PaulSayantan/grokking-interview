@@ -25,8 +25,8 @@ everything you need to resume.
 | 7 | docker-networking | ✅ | ✅ `18bca7c` | +192% | 0 | Engine 28 iptables section CONFIRMED clean; blocker was a broken callout invisible to every gate; append omitted `topics[]` |
 | 8 | docker-compose | ✅ | ✅ `4994dd4` | +57% | 0 | **first clean sign-off, 0 blockers/highs**; smallest growth (base already near floor); re-pointed APPROX-10 |
 | 9 | registries-and-distribution | 🏃 `wf_f6aa5540-314` | — | — | — | inherits the `pointer` loop (tags are mutable) |
-| 10 | production-healthchecks-logging | 🏃 launching | — | — | — | **compaction due**; frozen `container layer` H2 → K2 exemption; owns the 502-timeline payoff topic 9 promised |
-| 11 | debugging-troubleshooting | — | — | — | — | holds the corpus's one real C12 punt (`pods are out of scope here`, line 15) — fix it |
+| 10 | production-healthchecks-logging | ✅ | ✅ `a4ff43d` | +30% | 0 | settled 502 loop; blocker=renamed LOCKED H3 (restored); base-carried dual-logging FALSE fixed; **compaction 39→11 claims** |
+| 11 | debugging-troubleshooting | 🏃 launching | — | — | — | holds the corpus's one real C12 punt (`pods are out of scope here`) — MUST fix; owns exit codes 137/143 (topic 10's cliffhanger payoff) |
 | 12 | docker-security | — | — | — | — | frozen H2 defect in ledger `known_defects` |
 | 13 | image-scanning-supply-chain | — | — | — | — | |
 | 14 | buildkit-advanced-builds | — | — | — | — | owed 2 C9 gaps from topic 3 |
