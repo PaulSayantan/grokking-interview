@@ -29,8 +29,8 @@ everything you need to resume.
 | 11 | debugging-troubleshooting | ✅ | ✅ `0d626f5` | +55% | 0 | **C12 punt removed**; blocker=`sh -c` exec-optimization backwards AGAIN (topic-4 landmine, fixed); owns 137/143 |
 | 12 | docker-security | ✅ | ✅ `74acd8e` | +77% | 0 | clean sign-off; caps counts web-verified; fixed a corpus-wide exemption-path bug (4 inert exemptions) |
 | 13 | image-scanning-supply-chain | ✅ | ✅ `4ef5ab2` | +63% | 0 | clean sign-off; closed APPROX-8 (distroless static-binary scan); openers were the density risk here |
-| 14 | buildkit-advanced-builds | 🏃 launching | — | — | — | owes 2 C9 gaps from topic 3 (cache-checksum metadata, ARG-declare-vs-consume); owns provenance/SBOM + secret-mount payoffs |
-| 15 | image-internals-storage-drivers | — | — | — | — | owns **APPROX-4** (containerd image store) + frozen `container layer` H2 |
+| 14 | buildkit-advanced-builds | ✅ | ✅ `f45b494` | +65% | 0 | clean sign-off; QEMU/in-toto/solver gaps closed; 2 topic-3 C9 gaps are permanent docs-silent source-gaps (kept) |
+| 15 | image-internals-storage-drivers | 🏃 launching | — | — | — | **compaction due**; owns APPROX-4 (containerd store), APPROX-5 (nginx sizing), APPROX-6 (diff_id); frozen `container layer` H2 → K2 exemption |
 | 16 | runtimes-oci-standards | — | — | — | — | last topic: closes the arc, no forward cliffhanger |
 
 ## After topic 16 — the close-out sequence
