@@ -1173,14 +1173,6 @@ def fence_tokens(body: str) -> set[str]:
     return {t for t in re.findall(r"[A-Za-z0-9_$.]{2,}", body)}
 
 
-def floor_finding(rel: str, what: str, before: int, after: int) -> Finding | None:
-    if after >= before:
-        return None
-    return Finding("HARD", "COUNT_DROPPED", rel,
-                   f"{what}: {before} -> {after} (a drop of {before - after}); "
-                   f"restore them or move the content, do not delete it")
-
-
 def audit_file(rel: str, base_ref: str, new_ref: str | None, ledger: dict,
                factlines_scope: str, factlines_tier: str,
                want_factlines: bool) -> dict:
@@ -1234,15 +1226,28 @@ def audit_file(rel: str, base_ref: str, new_ref: str | None, ledger: dict,
                 f"raw words {b['raw_words']} -> {n['raw_words']} ({drop:.1f}% down, "
                 f"floor is {WORD_FLOOR_PCT:.0f}%). A shorter rewrite has lost content, "
                 f"not burden"))
-    for f in (
-        floor_finding(rel, "table rows", b["table_rows"], n["table_rows"]),
-        floor_finding(rel, "code fences", len(b["fences"]), len(n["fences"])),
-        floor_finding(rel, "mermaid blocks",
-                      sum(1 for x in b["fences"] if x.is_mermaid),
-                      sum(1 for x in n["fences"] if x.is_mermaid)),
+    # COUNT_DROPPED is allowlistable, keyed on the specific `what` label so a sign-off for
+    # "code fences" cannot silently clear a "table rows" drop. The finding's own message
+    # says "restore them OR move the content" — moving content into prose or a table is a
+    # legitimate resolution, and this is how it gets recorded (a reason, like every LOST_*).
+    for what, before, after in (
+        ("table rows", b["table_rows"], n["table_rows"]),
+        ("code fences", len(b["fences"]), len(n["fences"])),
+        ("mermaid blocks",
+         sum(1 for x in b["fences"] if x.is_mermaid),
+         sum(1 for x in n["fences"] if x.is_mermaid)),
     ):
-        if f:
-            findings.append(f)
+        if after >= before:
+            continue
+        reason = allowlisted(ledger, rel, "COUNT_DROPPED", what)
+        if reason:
+            allowed_notes.append(
+                f"COUNT_DROPPED {what}: {before} -> {after} — allowlisted: {reason}")
+            continue
+        findings.append(Finding(
+            "HARD", "COUNT_DROPPED", rel,
+            f"{what}: {before} -> {after} (a drop of {before - after}); "
+            f"restore them or move the content, do not delete it"))
 
     n_digests = {x.digest for x in n["fences"]}
     n_tokens = set().union(*[fence_tokens(x.body) for x in n["fences"]]) if n["fences"] else set()
