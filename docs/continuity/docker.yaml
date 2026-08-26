@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 15
+position: 16
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -655,6 +655,36 @@ canonical_terms:
     banned_variants:
     - VIP address
     - service IP
+  diff_id:
+    canonical: diff_id
+    defined_in: image-internals-storage-drivers
+    gloss: the SHA-256 hash of a layer's UNCOMPRESSED tar, listed in the config's rootfs.diff_ids[]; distinct from
+      the (compressed) digest in the manifest
+    banned_variants: []
+  whiteout:
+    canonical: whiteout
+    defined_in: image-internals-storage-drivers
+    gloss: a marker in the upper layer that hides a deleted lower-layer file from the merged view; a .wh.<name>
+      file in the OCI tar, a 0/0 char device on-disk overlayfs
+    banned_variants: []
+  opaque directory:
+    canonical: opaque directory
+    defined_in: image-internals-storage-drivers
+    gloss: an upper-layer marker (.wh..wh..opq in the tar) that hides ALL lower-layer contents of a directory, not
+      just named files
+    banned_variants: []
+  snapshotter:
+    canonical: snapshotter
+    defined_in: image-internals-storage-drivers
+    gloss: containerd's equivalent of a graph driver; the overlayfs snapshotter mirrors overlay2 (same lowerdir/upperdir
+      union, same copy_up)
+    banned_variants: []
+  containerd image store:
+    canonical: containerd image store
+    defined_in: image-internals-storage-drivers
+    gloss: containerd's content-addressed blob store plus snapshotters; default in Docker Engine 29.0+, replacing
+      the classic graph-driver store; keys layers by content so it can hold a multi-arch index locally
+    banned_variants: []
 assumed_prior_knowledge:
 - 'a Unix process: a PID, a parent, fork+exec, its own environment and working directory'
 - a signal is a number delivered to a process, and a process may install a handler for it
@@ -822,61 +852,51 @@ claims_established:
   Blocking delivery back-pressures the app; `mode=non-blocking` drops instead. `docker stop` = SIGTERM → 10s grace
   → SIGKILL; exec form puts the app at PID 1 so SIGTERM lands, shell form swallows it; a deregistration-vs-SIGTERM
   race is what produces 502s during a deploy.'
-- A container's exit code is PID 1's exit code, with signal deaths encoded as 128+N; but 125/126/127 are Docker
-  daemon / OCI-runtime errors where no program of yours ever ran, so the "PID 1 exit status" framing does not hold
-  for those three.
-- 'Exit 137 (SIGKILL) splits by .State.OOMKilled: true = memory-limit kill by the kernel OOM-killer; false = SIGKILL
-  after docker stop''s grace period (10s default on Linux) elapsed. 143 (SIGTERM) = the app caught the signal and
-  exited cleanly — the observable topic 10 lacked.'
-- docker logs reads only stdout/stderr captured by a local driver (json-file default, or local); remote drivers
-  (syslog/gelf/awslogs/fluentd) return "does not support reading" and the logs live in the destination system.
-- Debugging a shell-less/distroless container means joining its namespaces (--pid/--network container:<name>) and
-  reading its filesystem via /proc/1/root — the same isolation-opening primitives docker-security prices as container-escape
-  vectors.
-- A container shares the host kernel with no hypervisor boundary, so its security equals shrinking what a compromised
-  process may do; a kernel bug reachable inside is reachable on the host.
-- Container UID 0 is host root unless user namespaces remap it; non-root USER (advisory), userns-remap, and rootless
-  Docker each reduce that identity, and only run-time/orchestrator enforcement makes non-root binding.
-- Hardening composes independent controls (cap-drop ALL, seccomp, LSM, read-only, no-new-privileges, resource limits)
-  because each ends at the shared kernel; --privileged and a mounted docker.sock each defeat all of them and are
-  equivalent to host root.
-- A secret written into an image layer is permanent and ships on every pull (rm only adds a whiteout); BuildKit
-  secret mounts and runtime secret stores keep secrets out of layers and ENV.
-- gVisor (userspace second kernel) and Kata (per-container VM) are the only controls here that add a boundary surviving
-  a host-kernel bug; everything else shares one kernel.
-- 'A container image is a supply chain (base image + OS packages + language dependencies, all pulled remotely);
-  scanning+SBOM answer "what known-vulnerable things are inside" and signing+digest-pinning answer "is this the
-  exact image my pipeline built", and the two guarantees are orthogonal — neither implies the other.
-
-  '
-- 'Scanning is a static read of the image''s package DB and language manifests, matched against advisory feeds (NVD,
-  plus distro feeds Red Hat OVAL / Alpine secdb / Amazon ALAS and the GitHub Advisory Database); it sees no zero-day,
-  no logic bug, and no component that left no record — a statically linked C binary on scratch is invisible, though
-  a Go binary''s embedded module info is still inventoried. Distro OVAL feeds also defeat the backported-fix false
-  positive.
-
-  '
-- 'cosign signs the digest, never a mutable tag, storing the signature as a separate OCI image at a tag derived
-  from the digest (sha256:<hex> -> sha256-<hex>.sig); keyless signing uses Fulcio (a 10-minute cert bound to an
-  OIDC identity) + Rekor (append-only transparency log). A signature is worthless without deploy-time verification,
-  which an admission controller enforces.
-
-  '
-- 'Digest pinning makes a base content-addressed and defeats tag hijack but never auto-updates, so it must be paired
-  with an automated bump+rescan loop (Renovate/Dependabot); CI gates on CVSS severity (Critical/High = score >=
-  7.0) with --ignore-unfixed and VEX as documented trade-offs, and continuous registry scanning re-checks already-published
-  images against a fresh database.
-
-  '
-- BuildKit compiles a Dockerfile to an LLB dependency graph via a frontend and runs it via the solver, which yields
-  automatic parallelism, checksum-based caching, and pruning of stages nothing depends on.
-- 'BuildKit mount types keep build-time state out of image layers: cache (persistent scratch), bind (context without
-  a COPY layer), secret (/run/secrets/<id>), and ssh (host agent socket only).'
-- Multi-platform images are a manifest list (OCI image index) built via QEMU emulation, native nodes, or cross-compilation
-  ($BUILDPLATFORM/$TARGETARCH); the default docker driver needs docker-container or the containerd image store,
-  and a list must be --pushed.
-- Build attestations (provenance, SBOM) are signed in-toto manifests in the image index, requiring an OCI-index-aware
-  exporter; --cache-to/--cache-from export build cache (registry mode=max is the CI recipe).
+- 'DEBUGGING AND EXIT CODES (topic 11). A container''s exit code is PID 1''s exit code; a signal death is encoded
+  128+N (SIGTERM 143, SIGKILL 137), while 125/126/127 are Docker-reserved (daemon/permission/not-found). Exit 137
+  splits on `.State.OOMKilled`: true = the kernel OOM-killer hit the memory limit, false = SIGKILL after a stop-timeout.
+  `docker logs` reads back only what a local-capable driver (json-file default, or local/journald) captured from
+  stdout/stderr; a remote driver relies on the dual-logging cache. Debugging a shell-less/distroless container means
+  joining its namespaces (`--pid`/`--network container:<name>`, `nsenter`, `/proc/1/root`) or `docker debug` — and
+  `docker top` reads the process tree from outside, which is how you confirm whether your process or `/bin/sh` is
+  PID 1.'
+- 'SECURITY (topic 12). A container shares the host kernel with no hypervisor boundary, so its security is the strength
+  of that one shared kernel: a syscall runs on the host. Container UID 0 IS host root unless user namespaces remap
+  it (subordinate range from /etc/subuid); a non-root `USER` is advisory, userns-remap and rootless move the daemon/root
+  off the host''s root. Hardening composes independent controls — cap-drop ALL then add back (default ~14 of ~40
+  caps is too broad), a seccomp profile (default blocks ~44/~300 syscalls), an LSM (AppArmor/SELinux), read-only
+  rootfs, no-new-privileges, resource limits. `--privileged` drops all of them at once (all caps, all devices, no
+  seccomp/AppArmor) and opens escapes (release_agent, /dev/sda mount, mounted docker.sock = host root). A secret
+  written into a layer ships forever (rm only adds a whiteout). Only gVisor (userspace kernel) and Kata (per-container
+  VM) add a real boundary rather than a taller fence.'
+- IMAGE SUPPLY CHAIN (topic 13). A container image is a supply chain — base image + OS packages + language dependencies,
+  all pulled remotely — and most CVEs come from the base, not your code. Scanning (Trivy/Grype/Docker Scout) is
+  a STATIC read of the package DB and language manifests matched against advisory feeds (NVD/OVAL/distro secdb/GHSA);
+  it finds only known, catalogued CVEs, and distro backports mean a version-string match can lie. A distroless/scratch
+  image hides a static C binary from the scanner (no package DB, no manifest) while a Go binary stays visible via
+  embedded build info. cosign signs the DIGEST, never a mutable tag, storing the signature as a separate OCI image
+  at a derived tag (sha256-<hex>.sig); keyless uses Fulcio (short-lived ~10-min OIDC cert) + Rekor (transparency
+  log). Digest pinning defeats tag hijack but never auto-updates, so it needs a patch cadence. Signing proves origin,
+  not vuln status; DCT/TUF timestamp metadata catches rollback.
+- 'BUILDKIT (topic 14). BuildKit compiles a Dockerfile to an LLB dependency graph via a frontend and runs it through
+  the solver (which executes each graph node), giving parallelism and checksum-based caching over the classic builder''s
+  linear intermediate-image chain. Mount types keep build-time state OUT of image layers: `cache` (persistent scratch
+  across builds), `bind` (context files), `secret` (never written to a layer/image/cache), `ssh`. Multi-platform
+  images are a manifest list (OCI image index) built by QEMU user-mode emulation (several times slower, workload-dependent),
+  native nodes, or cross-compilation with `--platform=$BUILDPLATFORM`; the classic local store cannot hold one,
+  so it must be pushed to a registry or use the containerd image store. Build attestations (provenance, SBOM) are
+  signed in-toto documents stored as extra manifests in the index, requiring an OCI-index exporter.'
+- 'IMAGE INTERNALS AND STORAGE DRIVERS (topic 15). An image on disk is a graph of content-addressed objects: an
+  ordered layer list + a JSON config + a manifest, stored in a content-addressable store keyed by digest. A layer
+  has TWO SHA-256 names — the digest (over the compressed blob, listed in the manifest) and the diff_id (over the
+  uncompressed tar, listed in the config''s rootfs.diff_ids); the ImageID is the config''s own digest. A storage
+  driver unions read-only image layers under one writable layer; the first write to a lower-layer file triggers
+  a whole-file copy_up, a deletion is a `.wh.` whiteout and a replaced directory is marked opaque (`.wh..wh..opq`),
+  so committed bytes are never reclaimed by a later layer. overlay2 (lowerdir/upperdir/merged/workdir, needs d_type
+  on the backing fs) is the default WITHIN the classic graph-driver store; the containerd image store — snapshotters
+  keyed by a chain ID over uncompressed content — is the Engine 29.0+ default on fresh installs and is what unlocks
+  native multi-arch local storage. Identical layers dedup once on disk and wire, and Dockerfile layer order controls
+  both build-cache hits and dedup.'
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -891,6 +911,9 @@ approximations_open:
   note: Topic 15 splits the one word 'digest' into diff_id (uncompressed content) and digest (the stored, compressed
     blob), which topic 1's single-identity framing hides. Topic 9 gets there first for the index-vs-manifest digest
     split (line 258).
+  status: CLOSED in image-internals-storage-drivers
+  status_note: Closed. §'diff_id vs digest' splits the single 'digest' identity into diff_id (uncompressed content)
+    vs digest (stored/compressed blob), and §CAS grounds immutability in content addressing; ImageID = config digest.
 - id: APPROX-3
   from: container-lifecycle
   text: '"the container lives exactly as long as its main process"'
@@ -914,6 +937,10 @@ approximations_open:
     Topic 15 owns that shift (brief §8 forbids pre-empting it here), which is why topic 1 hedges the tense rather
     than naming the snapshotter. When topic 15 lands, extend these sentences; they are true of both worlds and must
     not be contradicted.
+  status: CLOSED in image-internals-storage-drivers
+  status_note: Closed. §'Graph drivers vs containerd snapshotters' states Engine 29.0+ defaults to the containerd
+    image store and reconciles it with 'overlay2 is the default' (mechanism vs management layer). Extends topic
+    1's hedge; does not contradict it.
 - id: APPROX-5
   from: images-vs-containers
   text: '"roughly 197 MB" for the Debian-based nginx:1.27 tag, and the 985 MB / ~788 MB arithmetic derived from
@@ -930,6 +957,11 @@ approximations_open:
     figures in-file (only to close if re-derived live). Its owner is now landed, so the correction moves to the
     image-internals topic, which owns image sizing/layers. The live-measured value (196.6 MB linux/amd64 nginx:1.27)
     is already recorded in this entry's note for whoever closes it.
+  status: OPEN — needs a running-daemon pass
+  status_note: 'NOT re-derived: this concepts-only pass had no daemon. Per brief §4 the topic does not restate topic
+    1''s 197 MB / 985 / 788 figures at all; it uses fresh per-layer nginx:1.27 `docker history` figures (97.2/118/1.62k,
+    hedged as a per-pull snapshot) and generic python:3.12 350 MB round numbers. Live re-derivation (ledger measured
+    196.6 MB uncompressed / 72.4 MB compressed) still owed to a daemon pass.'
 - id: APPROX-6
   from: dockerfile-layers-build-cache
   text: Names the two digests in one parenthesis (the digest an image's own layer list records, over the layer's
@@ -938,6 +970,9 @@ approximations_open:
     or why a registry needs both.
   correction_owed_by: image-internals-storage-drivers
   renumbered_from: 'APPROX-5 (id collision: the writer reused a live id for a different fact)'
+  status: CLOSED in image-internals-storage-drivers
+  status_note: Closed. §'diff_id vs digest' distinguishes the two digests (compressed blob digest in the manifest
+    vs uncompressed diff_id in the config) with a worked side-by-side example.
 - id: APPROX-7
   from: multi-stage-builds-image-optimization
   text: Explains registry dedup as a per-layer digest comparison against blobs the node already holds, and stops
@@ -985,6 +1020,10 @@ approximations_open:
   note: Topic 15 owns storage drivers and is the only topic positioned to measure this. If it lands a number, extend
     the two paragraphs under `#what-it-costs-the-part-docker-measures-and-the-part-it-does-not`; do not contradict
     them, because "Docker publishes no figure" is a true statement about the documentation.
+  status: OPEN — needs a running-daemon pass
+  status_note: No steady-state write magnitude landed. §copy_up gives the first-write copy_up cost (whole file,
+    2 GB example) and the volume-bypass direction, but not a measured steady-state writable-layer-vs-volume number;
+    that needs a daemon.
 - id: APPROX-10
   from: docker-networking
   text: The overlay MTU is given as a derivation, not as the engine's value. The file states the 50-byte IPv4 VXLAN
@@ -1292,6 +1331,13 @@ owed:
     workload-dependent") because no single published factor exists; it is arch-pair- and workload-specific. Kept
     as an honest hedge and routed to tier-C prompt p013 (measure your own). A future pass MUST NOT replace this
     with a precise number.
+- file: topics/docker/*/concepts.md
+  from: image-internals-storage-drivers
+  kind: daemon-measurement-owed
+  token: size figures
+  note: APPROX-5 (nginx:1.27 live sizing) and APPROX-9 (steady-state writable-layer-vs-volume write magnitude) both
+    need a running daemon to re-derive; this text-only pass kept hedged/illustrative numbers rather than invent
+    measured ones. Owed to a daemon-equipped refinement pass.
 exemptions:
 - file: dockerfile-layers-build-cache
   rule: C9
@@ -1386,6 +1432,14 @@ exemptions:
     step (:38) — and the BuildKit-vs-legacy table contrasts 'leftover intermediate images/containers' (:53). That
     is per-instruction committed state, unrelated to a multi-stage `stage`. K2 says not to over-enforce a genuine
     distinction; same judgment as the `stage`/`config blob`/`shell-less` exemptions.
+- file: image-internals-storage-drivers
+  rule: K2
+  terms:
+  - config blob
+  reason: 'Same real distinction exempted for registries-and-distribution: `image config` is the JSON content; a
+    `config blob` is the content-addressed CAS object that holds it. This topic is explicitly about the on-disk
+    graph of blobs (the config is stored and digested as a blob), so ''config blob'' is the precise term for the
+    storage object, not a variant of the config concept. K2: do not over-enforce a genuine distinction.'
 topics:
 - position: 1
   slug: images-vs-containers
@@ -1641,15 +1695,28 @@ topics:
     emitted: 7
     verified: 7
   adversarial_signoff: pass
+- position: 15
+  slug: image-internals-storage-drivers
+  commit: TBD-orchestrator
+  one_liner: An image is content-addressed layers + config + manifest; a storage driver (overlay2) unions them by
+    copy-on-write. Digests, whiteouts, dedup, multi-arch, the containerd-store shift.
+  reading_minutes:
+    before: 24
+    after: 31
+  factlines:
+    emitted: 6
+    verified: 4
+  adversarial_signoff: pending
 open_cliffhanger:
-  from: buildkit-advanced-builds
-  to_position: 15
+  from: image-internals-storage-drivers
+  to_position: 16
   pattern: A
-  key_noun_for_K1_grep: containerd image store
-  gap: Topic 14 states three times that a multi-platform manifest (and attestation index) must be pushed to a registry,
-    or the containerd image store switched on, because the classic local store cannot hold one — but never says
-    why a local store cares about a list of manifests.
-  payoff_anchor: concepts.md#graph-drivers-vs-containerd-snapshotters-the-modern-shift
+  key_noun_for_K1_grep: OCI bundle
+  gap: Topic 15 assembles the whole root filesystem — overlay2 mounts the read-only lowerdirs and the writable upperdir
+    into one merged directory — but never names what turns a mounted rootfs into a running, isolated container.
+    That directory plus a config.json is an OCI bundle, and a low-level runtime reads the config to make the kernel
+    calls.
+  payoff_anchor: concepts.md#runc-and-the-oci-runtime-flow
   verified_present: true
 claims_compaction_log:
 - '2026-08-25, after topic 5 (position 6): 28 per-topic claims from topics 1-5 compacted to 5 domain-level claims,
@@ -1666,3 +1733,11 @@ claims_compaction_log:
   since 20.10, and docker-stop 10s grace all survive verbatim in substance. 137/143 exit codes are deliberately
   NOT introduced (topic 11 owns them; the open cliffhanger withholds them). The 6 domain claims from the topic-5
   compaction are untouched.'
+- '2026-08-26, after topic 15 (position 16): 22 per-topic claims from topics 11-15 compacted to 5 domain-level claims
+  (debugging+exit-codes / security / supply-chain / buildkit / image-internals). Nothing mechanically load-bearing
+  dropped: 128+N and 125/126/127 and the 137 OOMKilled split; UID-0=host-root-unless-userns and the ~14/~40 caps
+  and ~44/~300 seccomp figures; the gVisor/Kata-only-real-boundary line; cosign-signs-digest-not-tag + Fulcio ~10-min
+  + Rekor; the distroless static-C-invisible/Go-visible split; LLB+solver and the four mount types and secret-never-hits-a-layer;
+  QEMU emulation cost as a hedged range; the two SHA-256 names (compressed digest vs uncompressed diff_id); .wh.
+  whiteout and .wh..wh..opq opaque marker; overlay2=classic-default vs containerd-store=Engine-29.0+-default. The
+  11 domain claims from the topic-5 and topic-10 compactions are untouched.'
