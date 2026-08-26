@@ -87,8 +87,8 @@ questions:
     difficulty: intermediate
     tags: [shell-form, pid1, signals]
     question: |
-      With `ENTRYPOINT java -jar /app.jar` (shell form), what is PID 1 and why is that a
-      problem for `docker stop`?
+      With `ENTRYPOINT java -jar /app.jar | tee /var/log/app.log` (shell form, a pipeline),
+      what is PID 1 and why is that a problem for `docker stop`?
     options:
       - "java is PID 1, and the JVM's built-in SIGTERM handler means docker stop shuts it down cleanly"
       - "dockerd is PID 1 inside the container and swallows SIGTERM, so the signal never reaches java"
@@ -96,9 +96,12 @@ questions:
       - "/bin/sh is PID 1; it often doesn't forward SIGTERM to java, so java is SIGKILLed after the grace period"
     answer: 3
     explanation: |
-      Shell form runs `/bin/sh -c "java -jar /app.jar"`, so the shell is PID 1 and java is
-      its child. `docker stop` sends SIGTERM to PID 1 (the shell), which typically doesn't
-      forward it, so java never shuts down gracefully and gets SIGKILLed after the timeout.
+      Shell form runs `/bin/sh -c "java -jar /app.jar | tee /var/log/app.log"`. A shell exec-
+      replaces itself with a *single* command, but a pipeline forks both stages and the shell
+      stays to manage them — so `/bin/sh` is PID 1 and java is its child. `docker stop` sends
+      SIGTERM to PID 1 (the shell), which doesn't forward it, so java never drains and gets
+      SIGKILLed after the timeout. (A bare `ENTRYPOINT java -jar /app.jar` is the opposite case:
+      the shell execs java, so java IS PID 1 and receives SIGTERM directly.)
     ref: "concepts.md#the-pid-1--sigterm-problem-with-shell-form"
   - id: entrypoint-vs-cmd-007
     difficulty: intermediate
@@ -293,7 +296,7 @@ questions:
     answer: 1
     explanation: |
       STOPSIGNAL sets the image's stop signal, changing which signal `docker stop` sends
-      (e.g. `STOPSIGNAL SIGQUIT` for nginx fast shutdown). The grace period is controlled
+      (e.g. `STOPSIGNAL SIGQUIT` for nginx's graceful shutdown). The grace period is controlled
       separately by `docker stop -t`. `--stop-signal` / `docker stop -s` override it.
     ref: "concepts.md#graceful-shutdown-docker-stop-stopsignal-and-inittini"
   - id: entrypoint-vs-cmd-019
@@ -415,15 +418,15 @@ questions:
     question: |
       Which statement about `docker run --entrypoint` is correct?
     options:
-      - "It can only set the binary to exec (no sh -c is used) and typically resets CMD"
+      - "It can only set the binary to exec (no sh -c is used) and clears the image's CMD"
       - "It always wraps the given command in /bin/sh -c automatically before executing it"
       - "It appends its value to the existing ENTRYPOINT tokens rather than replacing them"
       - "It can only be used with images that define no ENTRYPOINT of their own already"
     answer: 0
     explanation: |
       `--entrypoint` replaces the entrypoint and can only set the executable to run directly
-      (no shell wrapping). Any tokens after the image name become the new CMD; the previous
-      CMD is typically reset.
+      (no shell wrapping). Any tokens after the image name become the new CMD; the image's
+      previous CMD is cleared unconditionally.
     ref: "concepts.md#overriding-cmd-and-entrypoint-at-runtime"
   - id: entrypoint-vs-cmd-027
     difficulty: advanced
@@ -462,7 +465,8 @@ questions:
     tags: [graceful-shutdown, deploy, scenario]
     question: |
       A team reports every deploy takes ~10 extra seconds per container and drops in-flight
-      requests. The Dockerfile ends with `ENTRYPOINT java -jar /app.jar`. Most likely cause?
+      requests. The Dockerfile ends with `ENTRYPOINT java -jar /app.jar | tee /var/log/app.log`.
+      Most likely cause?
     options:
       - "Shell-form ENTRYPOINT means java isn't PID 1, never gets SIGTERM, and is SIGKILLed after the 10s grace period"
       - "The container image is simply too large, so tearing it down and unmounting layers takes ten seconds"
@@ -470,9 +474,11 @@ questions:
       - "The JVM cannot handle the SIGTERM signal at all and must be stopped with an explicit SIGKILL instead"
     answer: 0
     explanation: |
-      Shell form makes `/bin/sh` PID 1; SIGTERM goes to the shell, not java. java never
-      drains, so after the 10s grace period it's SIGKILLed — hence the delay and dropped
-      requests. Fix: exec form `["java","-jar","/app.jar"]` (plus a SIGTERM handler).
+      A pipeline forces the shell to stay — it forks both stages and manages them — so `/bin/sh`
+      is PID 1, not java. SIGTERM goes to the shell, which doesn't forward it, so java never
+      drains and is SIGKILLed after the 10s grace period — hence the delay and dropped requests.
+      Fix: exec form `["java","-jar","/app.jar"]` (plus a SIGTERM handler). Note a bare
+      `ENTRYPOINT java -jar /app.jar` would NOT show this: the shell execs java, making it PID 1.
     ref: "concepts.md#the-pid-1--sigterm-problem-with-shell-form"
   - id: entrypoint-vs-cmd-030
     difficulty: beginner
