@@ -31,7 +31,7 @@ everything you need to resume.
 | 13 | image-scanning-supply-chain | ✅ | ✅ `4ef5ab2` | +63% | 0 | clean sign-off; closed APPROX-8 (distroless static-binary scan); openers were the density risk here |
 | 14 | buildkit-advanced-builds | ✅ | ✅ `f45b494` | +65% | 0 | clean sign-off; QEMU/in-toto/solver gaps closed; 2 topic-3 C9 gaps are permanent docs-silent source-gaps (kept) |
 | 15 | image-internals-storage-drivers | ✅ | ✅ `3e3f21e` | +34% | 0 | **compaction 33→16 claims**; APPROX-2/4/6 CLOSED, APPROX-5/9 need a daemon pass (honest residual); Engine-29.0 default fact guard |
-| 16 | runtimes-oci-standards | 🏃 launching | — | — | — | **LAST**: closes the arc (no forward cliffhanger); owns runc/OCI bundle (topic 15 payoff); backstop owner of APPROX-10 |
+| 16 | runtimes-oci-standards | ✅ | ✅ `dbdd317` | +45% | 0 | **DOMAIN FINALE**; APPROX-1 CLOSED (arc close); Java version hedged UNVERIFIABLE → JDK-8146115 + `PrintFlagsFinal` recipe |
 
 ## After topic 16 — the close-out sequence
 
