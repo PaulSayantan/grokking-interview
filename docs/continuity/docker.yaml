@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 11
+position: 12
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -818,6 +818,17 @@ claims_established:
   Blocking delivery back-pressures the app; `mode=non-blocking` drops instead. `docker stop` = SIGTERM → 10s grace
   → SIGKILL; exec form puts the app at PID 1 so SIGTERM lands, shell form swallows it; a deregistration-vs-SIGTERM
   race is what produces 502s during a deploy.'
+- A container's exit code is PID 1's exit code, with signal deaths encoded as 128+N; but 125/126/127 are Docker
+  daemon / OCI-runtime errors where no program of yours ever ran, so the "PID 1 exit status" framing does not hold
+  for those three.
+- 'Exit 137 (SIGKILL) splits by .State.OOMKilled: true = memory-limit kill by the kernel OOM-killer; false = SIGKILL
+  after docker stop''s grace period (10s default on Linux) elapsed. 143 (SIGTERM) = the app caught the signal and
+  exited cleanly — the observable topic 10 lacked.'
+- docker logs reads only stdout/stderr captured by a local driver (json-file default, or local); remote drivers
+  (syslog/gelf/awslogs/fluentd) return "does not support reading" and the logs live in the destination system.
+- Debugging a shell-less/distroless container means joining its namespaces (--pid/--network container:<name>) and
+  reading its filesystem via /proc/1/root — the same isolation-opening primitives docker-security prices as container-escape
+  vectors.
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -1043,17 +1054,6 @@ owed:
   note: 'C9 gap kept as a hedge: the invalidation docs say build arguments invalidate the cache, and their own CACHEBUST
     example declares the ARG without referencing it, but they never say whether declaring is sufficient or an instruction
     must consume the value. The prose says so out loud and gives the placement that is correct under either reading.'
-- file: debugging-troubleshooting
-  from: entrypoint-vs-cmd
-  kind: c9-gap-closed-in-source
-  token: sh -c exec optimisation
-  note: 'Settled during topic 4''s fact-check, so this is no longer an open hedge. dash (`src/eval.c`) and busybox
-    `ash` (`shell/ash.c`, the complete mirror copy) both exec the LAST command of the `-c` string in place, including
-    the last command of `&&`, `||` and `;`, unless a trap is installed; bash forked for those until version 5. Measured
-    directly on dash: `true && sleep 3` and `true; sleep 3` leave no shell, a pipeline and a `trap` both do, and
-    `sleep 3 &` exits immediately. Neither shell documents the behaviour, so topic 4 states it and still forbids
-    designing on it. You own `docker top`, so one confirmation inside a real Alpine container is still worth printing
-    when you are rewritten: `docker run -d alpine sh -c ''sleep 300''` then `docker top`.'
 - file: multi-stage-builds-image-optimization
   from: entrypoint-vs-cmd
   kind: k2-banned-variant-in-un-rewritten-scope
@@ -1315,6 +1315,15 @@ exemptions:
     match the banned variant "healthcheck" only because the K2 scan is case-insensitive. These are the Dockerfile
     instruction / Compose key (identifiers), not the concept. Expected warnings; do not weaken canonical_terms to
     silence them.
+- file: debugging-troubleshooting
+  rule: K2
+  terms:
+  - shell-less image
+  reason: A real distinction, not a variant. `distroless` is one specific base-image family; 'shell-less' is the
+    BROADER category (scratch, distroless, and stripped alpine all lack a shell), and the file uses 'distroless
+    & shell-less' precisely to name both. It also appears in the FROZEN H2 'Debugging distroless & shell-less images'
+    (slug debugging-distroless--shell-less-images, an MCQ anchor), which cannot be renamed. K2 says not to over-enforce
+    a genuine distinction; same judgment as the `stage`/`config blob` exemptions.
 topics:
 - position: 1
   slug: images-vs-containers
@@ -1518,16 +1527,29 @@ topics:
     plainer "detection-latency arithmetic" wording moved into its first body sentence. Fact-check WRONG (docker
     logs vs default dual logging) applied as an honest hedge that keeps MCQ-018 answerable; IMPRECISE ("compact
     binary format" → "compact internal format" for the local driver) applied.'
+- position: 11
+  slug: debugging-troubleshooting
+  commit: TBD-orchestrator
+  one_liner: The debug toolbox (logs/exec/top/inspect/stats/events/diff/debug) and a fixed diagnosis order; exit
+    codes as the observable, escalations that open the isolation boundary.
+  reading_minutes:
+    before: 18
+    after: 28
+  factlines:
+    emitted: 11
+    verified: 11
+  adversarial_signoff: pending
 open_cliffhanger:
-  from: production-healthchecks-logging
-  to_position: 11
+  from: debugging-troubleshooting
+  to_position: 12
   pattern: A
-  key_noun_for_K1_grep: '137'
-  gap: Topic 10 teaches the whole shutdown negotiation — trap SIGTERM, stop accepting, drain, exit inside the grace
-    period — but never says how you observe whether the app actually caught the signal. Its rule "handle SIGTERM
-    and you shut down cleanly" has no observable attached (137 and 143 appear nowhere in the file, verified). Topic
-    11 supplies the exit code that separates a clean SIGTERM death from a container that ignored it and was killed.
-  payoff_anchor: concepts.md#exit-codes-oomkilled-137-sigterm-143-and-friends
+  key_noun_for_K1_grep: docker.sock
+  gap: Topic 11's debug ladder opens the isolation boundary on purpose — a toolbox joined to the target's PID and
+    network namespaces, its filesystem read through /proc/1/root, and in CI a runner reaching the daemon through
+    a mounted /var/run/docker.sock. Topic 12 lists those same primitives (mounted docker.sock, --privileged, CAP_SYS_ADMIN)
+    as escape vectors and prices them. The rule "to debug it, join it" is mechanically the attack; 12 is where intent
+    is separated from mechanism.
+  payoff_anchor: concepts.md#container-escape-threat-model
   verified_present: true
 claims_compaction_log:
 - '2026-08-25, after topic 5 (position 6): 28 per-topic claims from topics 1-5 compacted to 5 domain-level claims,

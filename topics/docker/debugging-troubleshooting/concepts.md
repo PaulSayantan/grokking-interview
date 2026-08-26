@@ -1,66 +1,77 @@
 # Debugging & Troubleshooting Containers
 
-This page is a **field guide to figuring out why a container is misbehaving** — it won't
-start, it exits immediately, it gets killed, it can't reach the network, or it's eating
-memory. The toolkit is small and you should know it cold for interviews: `docker logs`,
-`docker exec`, `docker inspect`, `docker stats`, `docker events`, `docker diff`, exit-code
-reading, and the newer `docker debug` for shell-less images.
+The previous topic, `production-healthchecks-logging`, left one thing you could not observe
+from the outside. It taught you to handle SIGTERM so the process shuts down cleanly, but not
+how to check afterwards whether your app actually caught the signal or was killed ignoring it. The exit code is that missing
+observable, and `137` versus `143` is the whole tell — [Exit codes](#exit-codes-oomkilled-137-sigterm-143-and-friends)
+is where it settles.
 
-It is concept-first and hands-on. Neighbouring topics own the deeper theory:
-the lifecycle state machine and signal/exit-code semantics live in `container-lifecycle`;
-`HEALTHCHECK` states and log drivers live in `production-healthchecks-logging`; network
-driver internals live in `docker-networking`; `ENTRYPOINT`/`CMD` exec-vs-shell mechanics
-live in `entrypoint-vs-cmd`; image layers/CoW live in `image-internals-storage-drivers`.
-Kubernetes is the downstream *consumer* — `kubectl logs`/`kubectl debug` mirror these
-commands but pods are out of scope here.
+A container you deployed an hour ago is gone. `docker ps` shows nothing and the service is
+down. That is where most container debugging starts: a process that ended, and a status line
+you have not read yet. Run `docker ps -a` and it reappears — `Exited (137) 3 seconds ago` —
+and that number already names the failure class before you open a single log line. So the
+real skill here is not a big toolbox; it is a fixed order for reading a symptom like that one
+back to its cause. Which command do you reach for, in what sequence, and what can each of them
+actually see?
 
-> [!KEY-TAKEAWAY]
-> Debugging containers is a disciplined loop, not guesswork. **(1) Read the exit code and
-> state first** (`docker ps -a`, `docker inspect`) — it tells you *how* it died (137 =
-> SIGKILL/OOM, 143 = SIGTERM, 127 = command not found, 126 = not executable, "exec format
-> error" = wrong CPU arch). **(2) Read the logs** (`docker logs`) — apps log to stdout/stderr,
-> not files, by design. **(3) Get inside** (`docker exec` for fat images, `docker debug` for
-> distroless/slim ones). **(4) Inspect config vs reality** (`docker inspect`, `docker diff`,
-> `docker stats`, `docker events`). Most "mystery" bugs are a process that ended, a missing
-> file, a permission denial, a port clash, or a memory limit.
+> [!TIP]
+> **Reading map.** About 20 minutes. This is a tour of eight commands and one diagnosis order.
+> Read the methodology and the exit-codes sections closely; treat the rest as a per-symptom
+> reference you dip into. If you already read exit codes cold (`137`, `143`, `126`, `127`) and
+> have shelled into containers before, skip to
+> [Debugging distroless & shell-less images](#debugging-distroless--shell-less-images) — that
+> section and the daemon-connection errors are the only genuinely new material; everything
+> else is command detail you can look up here when you hit it.
 
 ---
 
 ## A debugging methodology for containers
 
-Before reaching for any single command, have a mental order of operations. Containers fail in
-a small number of characteristic ways, and the diagnosis path is almost always the same.
+The fastest way to a cause is to ask the same five questions in the same order, and the first
+one is always `docker ps -a`: the exited container that plain `docker ps` hid is sitting right
+there, its exit code in the `STATUS` column as `Exited (137) 3 seconds ago`. Almost every
+container mystery resolves to one of five plain things — a process that ended, a missing file,
+a permission denial, a port already taken, or a memory limit — and the order below finds which
+one it is without guessing.
 
-1. **What state is it in?** `docker ps` shows *running* containers; `docker ps -a` shows
-   *all*, including exited ones. A container that "isn't there" usually exited — look at the
-   `STATUS` column (`Exited (137) 3 seconds ago`).
-2. **How did it die?** The exit code in that status (or `docker inspect --format '{{.State.ExitCode}}'`)
-   tells you the failure class before you read a single log line.
-3. **What did it say?** `docker logs <c>` shows what the process wrote to stdout/stderr —
-   stack traces, "bind: address already in use", "permission denied".
-4. **Is the config what I think?** `docker inspect` reveals the *actual* resolved command,
-   env, mounts, networks, and restart policy — often different from what you assumed.
-5. **Get inside / reproduce.** `docker exec` (or `docker debug`) to poke at the live
-   filesystem, DNS, and processes; `docker run --entrypoint sh -it <image>` to interrogate a
-   broken image without running its real command.
+Each rung answers one question and narrows the next:
+
+1. What state is it in? `docker ps` lists only running containers; `docker ps -a` lists all
+   of them, including exited ones. A container that "isn't there" almost always exited — the
+   `STATUS` column tells you when and with what code.
+2. How did it die? The exit code in that status line — or `docker inspect --format
+   '{{.State.ExitCode}}'` — names the failure class before you read a single log line. `137`
+   points at a kill, `127` at a missing command, and so on down the table two sections below.
+3. What did it say? `docker logs <c>` shows what the process wrote to stdout and stderr:
+   the stack trace, the `bind: address already in use`, the `permission denied`.
+4. Is the config what I think it is? `docker inspect` shows the *resolved* command, env,
+   mounts, networks, and restart policy — routinely not what you assumed you configured.
+5. Get inside, or reproduce. `docker exec` (or `docker debug`) pokes at the live
+   filesystem, DNS, and process tree; `docker run --entrypoint sh -it <image>` gives you the
+   image's exact filesystem without running the command that is failing.
 
 > [!INTERVIEW]
-> A great answer to "how do you debug a container that won't stay up?" walks this ladder:
-> *check `docker ps -a` for the exit code → `docker logs` → `docker inspect` the resolved
-> command/mounts → override the entrypoint with a shell to poke around.* Naming the exit
-> codes (137/143/126/127) signals real operational experience.
+> Asked "how do you debug a container that won't stay up?", walk this ladder out loud: check
+> `docker ps -a` for the exit code, read `docker logs`, `docker inspect` the resolved
+> command and mounts, then override the entrypoint with a shell to poke around. Naming the
+> exit codes — `137`, `143`, `126`, `127` — is what signals you have actually done this.
+
+Rung three is where most answers live, so logs come first: what `docker logs` shows, and the
+short list of reasons it sometimes shows nothing at all.
 
 ---
 
 ## Reading container logs (docker logs)
 
-`docker logs <container>` prints whatever the container's main process wrote to **stdout and
-stderr**. This is the single most important debugging habit and it depends on a design
-convention: **containerised apps should log to stdout/stderr, not to files inside the
-container.** The runtime captures those streams via the logging driver; writing to a file
-buries the logs inside an ephemeral layer where `docker logs` can't see them.
+`docker logs <container>` prints only what `PID 1` and its children wrote to two streams,
+stdout and stderr — the `Listening on :8080` line your server logs at boot, say, or the stack
+trace it printed on the way down. It reads nothing else, and that one fact is the most
+important logging habit in containers: apps should log to stdout and stderr, not to a file
+inside the container. The runtime captures those two streams through the logging driver. A file
+written inside the container instead lands in the writable layer, which the driver never reads
+and which vanishes when the container is removed.
 
-Key flags:
+The flags all answer the same question — which slice of the stream do you want to see?
 
 ```bash
 docker logs my-app                 # dump everything captured so far
@@ -72,61 +83,101 @@ docker logs --until 5m my-app      # logs older than 5 minutes ago
 docker logs -t my-app              # prepend RFC3339Nano timestamps
 ```
 
-- **stdout and stderr are both shown** and interleaved; redirect if you need only one:
-  `docker logs my-app 2>/dev/null` keeps stdout, `1>/dev/null` keeps stderr.
-- `docker logs` only works with logging drivers that keep a local copy — **`json-file`
-  (the default) and `local`.** If you configure a remote driver like `syslog`, `gelf`,
-  `awslogs`, or `fluentd`, `docker logs` returns an error (`configured logging driver does
-  not support reading`) — you read logs in the destination system instead.
-- Logs live under `/var/lib/docker/containers/<id>/<id>-json.log` on the host for the
-  default driver. Unbounded, this fills the disk — cap it with `--log-opt max-size=10m
-  --log-opt max-file=3` (or `daemon.json` defaults).
+stdout and stderr both come out, interleaved. There is no `--stderr` flag; to keep only one
+stream you redirect at the shell — `docker logs my-app 2>/dev/null` keeps stdout, and
+`docker logs my-app 1>/dev/null` keeps stderr.
+
+Two things decide whether `docker logs` can show you anything. The first is the logging driver.
+Only drivers that keep a local copy can be read back: `json-file` (the default) and `local`.
+Point the container at a remote driver — `syslog`, `gelf`, `awslogs`, `fluentd` — and
+`docker logs` fails outright with `configured logging driver does not support reading`, because
+there is no local copy to read; the logs are in the destination system instead. The second is
+where those local logs live: `/var/lib/docker/containers/<id>/<id>-json.log` on the host for
+the default driver, which grows without bound until you cap it with `--log-opt max-size=10m
+--log-opt max-file=3` (or the same keys as `daemon.json` defaults).
 
 > [!WARNING]
-> If `docker logs` is empty for a service you *know* is chatty, the usual culprit is that the
-> app logs to a file (e.g. `/var/log/app.log`) or that output is buffered. For Python, set
-> `PYTHONUNBUFFERED=1` (or `python -u`); many runtimes buffer stdout when it isn't a TTY, so
-> logs appear only in bursts or on exit.
+> "`docker logs` shows nothing, but the app is clearly running" is the classic false alarm,
+> and it is almost never a Docker problem. Either the app writes to a file such as
+> `/var/log/app.log` instead of stdout, or its output is buffered — many runtimes buffer
+> stdout when it is not a terminal, so lines appear only in bursts or at exit. For Python,
+> `PYTHONUNBUFFERED=1` (or `python -u`) turns the buffering off and the logs reappear.
+
+When the logs do come through, the next question is why the process is running as it is —
+which means getting a shell inside the container while it is still alive.
 
 ---
 
 ## Getting a shell inside a running container (docker exec)
 
-`docker exec` runs a **new process inside an already-running container**, sharing its
-namespaces (PID, network, mount, etc.). It is the workhorse for interactive debugging:
+`docker exec -it my-app sh` drops you into a shell inside a container that is already running,
+as a brand-new process that shares the container's namespaces — its `PID`, network, and mount
+views of the world. That word "running" is the whole catch: `exec` cannot touch a container
+that has already exited, or one that crash-loops faster than you can type. It is the workhorse
+of live debugging, so long as the thing you want to debug is still alive.
 
 ```bash
-docker exec -it my-app sh          # interactive shell (sh is safest — always present-ish)
-docker exec -it my-app bash        # bash if the image has it
+docker exec -it my-app sh          # interactive shell (sh is the safest bet — usually present)
+docker exec -it my-app bash        # bash if the image ships it
 docker exec -it my-app /bin/sh -c 'ps aux; ls -la /app'
-docker exec -u root -it my-app sh  # exec as root even if the container runs as non-root
+docker exec -u root -it my-app sh  # run the shell as root even if the container runs non-root
 docker exec my-app env             # one-off command, no TTY needed
 ```
 
-- **`-i` keeps stdin open, `-t` allocates a pseudo-TTY.** For an interactive shell you need
-  both (`-it`). For a scripted one-off command you need neither.
-- `docker exec` requires the container to be **running**. It cannot help you debug a container
-  that has already exited or that crash-loops before you can attach — for those, override the
-  entrypoint at `run` time or use ephemeral debug containers.
-- `exec` vs `attach`: **`exec` starts a *new* process** (a fresh shell), while **`attach`
-  connects to the *existing* PID 1's stdio.** Typing `exit` in an `attach`ed shell can kill
-  PID 1 and stop the container; `exec` is almost always what you want for debugging.
-- The extra process shares the container's environment but **`docker exec` env/user overrides
-  do not persist** and don't change the container's declared config.
+The two flags you always reach for are `-i`, which keeps stdin open, and `-t`, which allocates
+a pseudo-terminal; an interactive shell needs both (`-it`), while a scripted one-off command
+such as `docker exec my-app env` needs neither. Anything you override at `exec` time — a
+different user with `-u root`, an extra env var — applies to that one new process only and
+never rewrites the container's declared config.
 
-> [!TIP]
-> To debug an image whose entrypoint crashes immediately, don't fight `exec` — start a shell
-> instead of the real command: `docker run --rm -it --entrypoint sh myimage`. You get the
-> exact filesystem and env of the image with a prompt, so you can run the failing command by
-> hand and read the real error.
+There is a second command that looks similar and does something dangerous. `docker attach`
+does not start a process; it connects your terminal to the *existing* `PID 1`'s stdin, stdout,
+and stderr. Type `exit` in an `attach`ed session and you send end-of-input straight to `PID 1`,
+which can stop it and take the whole container down with it. `exec` starts a separate process,
+so leaving its shell touches nothing else — which is why `exec`, not `attach`, is what you want
+for a debug shell almost every time.
+
+One case `exec` cannot help with is an image whose entrypoint crashes on startup: there is no
+running container to enter. Do not fight it — start a shell *instead of* the failing command
+with `docker run --rm -it --entrypoint sh <image>`. You get the image's exact filesystem and
+environment at a prompt, and you run the real command by hand to read the actual error.
+
+### Confirming what is really PID 1: docker top
+
+`docker top <container>` reads the container's process tree from outside, as the host kernel
+sees it, without opening a shell at all — the cleanest way to settle which process is actually
+`PID 1`. Start a container whose shell has more than one thing to do and look:
+
+```bash
+docker run -d alpine sh -c 'sleep 300; true'   # shell form, two commands
+docker top <container>
+# PID 1 is /bin/sh; the sleep 300 you asked for is its CHILD, not PID 1
+```
+
+The number of commands you hand the shell decides the outcome. Give it a single command —
+`sh -c 'sleep 300'` — and the shell does not stick around: it replaces itself with that command,
+so `sleep` becomes `PID 1` and a `SIGTERM` reaches it directly. Give it more than one thing to
+do, as above, and the shell must stay to run them in order, so `/bin/sh` keeps `PID 1` and
+`sleep` runs as its child. That second case is the trap: a `SIGTERM` now lands on the shell,
+which does not forward it, so your real process never sees the signal. The exec form
+(`sh -c 'exec sleep 300'`) or a JSON-array `CMD` settles it either way — your command is `PID 1`
+regardless of how many commands there are. It is the same PID-1 rule from `entrypoint-vs-cmd`,
+the one that decides whether a `SIGTERM` reaches your app or dies at an unforwarding shell, and
+`docker top` is how you confirm which case you have on a live container.
+
+A live shell answers "what is it doing?"; the next question — what the container was actually
+configured to run and how it ended — is answered by reading its metadata rather than looking
+inside it, and that is what `docker inspect` dumps.
 
 ---
 
 ## docker inspect: config, state, mounts, networks, exit code
 
-`docker inspect` dumps the full JSON metadata for a container or image — the **source of
-truth** for what Docker *actually* configured, which is frequently not what you assumed. Use
-Go-template `--format` to extract exactly what you need:
+`docker inspect --format '{{.State.ExitCode}}' my-app` prints one number — the exit code of
+the last run — pulled from the full JSON blob the daemon holds for every container and image.
+That JSON is the source of truth for what Docker actually resolved, which is regularly not what
+you thought you configured; the Go-template `--format` flag lets you lift out exactly one field
+instead of reading all of it:
 
 ```bash
 docker inspect my-app                                        # full JSON
@@ -140,31 +191,40 @@ docker inspect --format '{{.NetworkSettings.IPAddress}}' my-app
 docker inspect --format '{{json .HostConfig.RestartPolicy}}' my-app
 ```
 
-The most useful fields for debugging:
+The split that trips people up is `State` versus `Config`. `Config` is what the container was
+*built and asked* to be — its `Entrypoint`, `Cmd`, `Env`, `User`. `State` is what happened when
+it *ran* — its status, its exit code, whether the kernel OOM-killed it. So the exit code is
+`.State.ExitCode`, never `.Config.ExitCode`; a container's configuration has no exit code,
+only its run does. The fields worth knowing by name:
 
 | Path | Tells you |
 |---|---|
 | `.State.Status` / `.State.Running` | current lifecycle state |
 | `.State.ExitCode` | how the last run ended |
-| `.State.OOMKilled` | whether the kernel OOM-killer fired (distinguishes real OOM from a plain SIGKILL) |
-| `.State.Error` | daemon-side start error (e.g. exec/mount failure) |
-| `.State.Health` | HEALTHCHECK status + last probe output (if defined) |
+| `.State.OOMKilled` | whether the kernel OOM-killer fired — this is what splits a real OOM from a plain `SIGKILL` |
+| `.State.Error` | daemon-side start error (an exec or mount failure, say) |
+| `.State.Health` | `HEALTHCHECK` status and last probe output, if one is defined |
 | `.Config.Entrypoint` / `.Config.Cmd` / `.Config.Env` | the resolved startup command and env |
-| `.Mounts` | every volume/bind mount and its source/destination/RW flag |
-| `.NetworkSettings` | IP, ports, and which networks it's attached to |
-| `.HostConfig.RestartPolicy` | why it may be crash-looping (`always`/`on-failure`) |
+| `.Mounts` | every volume and bind mount, with source, destination, and read/write flag |
+| `.NetworkSettings` | IP, ports, and which networks it is attached to |
+| `.HostConfig.RestartPolicy` | why it may be crash-looping (`always` / `on-failure`) |
 
-> [!TIP]
-> `docker inspect` works on **images too**: `docker inspect --format '{{json .Config}}' myimage`
-> shows the baked-in `Entrypoint`, `Cmd`, `Env`, `User`, `WorkingDir`, and exposed ports —
-> invaluable when a pulled image behaves unexpectedly and you don't have its Dockerfile.
+The same command works on an image, not just a running container: `docker inspect --format
+'{{json .Config}}' myimage` shows the baked-in `Entrypoint`, `Cmd`, `Env`, `User`,
+`WorkingDir`, and exposed ports. That is how you find out what a pulled image will do before you
+run it, when you have no Dockerfile to read.
+
+`inspect` freezes a snapshot of config and last state; when the container is still up but slow
+or heading for a kill, the live numbers — CPU, memory, PID count as they move — come from
+`docker stats` instead.
 
 ---
 
 ## Live resource usage with docker stats
 
-`docker stats` streams a live view of per-container CPU, memory, network, and block I/O —
-your first stop for "why is it slow / why did it get killed?"
+`docker stats` streams a live, in-place table — one row per running container — of CPU %,
+memory used against its limit, network, and block I/O. It is the first place to look when a
+container is up but slow, or when you want to watch it climb toward the OOM kill that is coming.
 
 ```bash
 docker stats                       # live table for all running containers
@@ -173,28 +233,33 @@ docker stats --no-stream           # single snapshot (scriptable, exits immediat
 docker stats --format '{{.Name}} {{.MemUsage}} {{.CPUPerc}}'
 ```
 
-Reading it:
+Four columns carry the diagnosis. `MEM USAGE / LIMIT` shows the memory used against the ceiling
+the container is allowed; sit pinned at that ceiling and an OOM kill is on the way. The limit
+shown is the cgroup limit set by `--memory`, or the host's total when you set none. `MEM %` is
+just usage over that limit, so a figure near 100% is the same warning stated as a percentage.
+`CPU %` is measured against a single core, so it runs past 100% on a multi-core host: `320%`
+is roughly 3.2 cores of work on an 8-core machine. A container capped at `--cpus=1` and pinned
+at `100%` is being throttled at its ceiling. `PIDS` counts the
+processes and threads inside the container, and a count that only ever climbs is the signature
+of a fork bomb, or of `PID 1` not reaping its children so zombies pile up.
 
-- **`MEM USAGE / LIMIT`** — if usage sits pinned at the limit, you're heading for an OOM kill.
-  The limit shown is the cgroup limit (from `--memory`), or the host total if none was set.
-- **`MEM %`** is usage ÷ limit — near 100% is the warning sign.
-- **`CPU %`** can exceed 100% on multi-core hosts (100% = one full core). A container capped
-  with `--cpus=1` that's pinned at 100% is CPU-throttled.
-- **`PIDS`** — number of processes/threads; a runaway climbing PID count hints at a fork bomb
-  or a zombie-reaping problem (PID 1 not reaping children).
+`docker stats` reads these numbers straight from the container's own cgroup accounting —
+`memory.current`, `cpu.stat`, and the rest — which is why they reflect the limits enforced on
+that container rather than the host's raw usage. For heavier profiling you still `exec` in and
+run `top` or `ps`; `stats` is the fast triage glance, not the microscope.
 
-Under the hood `docker stats` reads the container's **cgroup** accounting (`memory.current`,
-`cpu.stat`, etc.), which is why the numbers reflect the enforced limits, not the host's raw
-usage. For deeper profiling you still `exec` in and run `top`/`ps`, but `stats` is the fast
-triage view.
+`stats` only helps once the container stays up long enough to have live numbers. The harder
+case is the container that exits the instant you start it, and reading that is next.
 
 ---
 
 ## Why a container won't start or exits immediately
 
-This is the most common real-world and interview scenario. Because **a container lives exactly
-as long as its main (PID 1) process**, "exits immediately" almost always means *the main
-process ended right away*. Work through the causes:
+A container lives exactly as long as its `PID 1`, so "exits immediately" almost always means
+`PID 1` finished right away and the runtime had nothing left to supervise. `docker run ubuntu`
+exiting `0` the moment you start it is the harmless version: `bash` came up, found no command
+to run and no terminal to read a command from, and returned. The rest sort by the code they
+leave behind:
 
 | Symptom / exit | Likely cause | How to confirm |
 |---|---|---|
@@ -205,9 +270,11 @@ process ended right away*. Work through the causes:
 | `exec format error` | Architecture mismatch (arm64 image on amd64 host, or a script missing its `#!` shebang) | `docker inspect img` / `docker image inspect --format '{{.Architecture}}'`; rebuild with `--platform` |
 | Won't start, `docker: Error response from daemon: ... mount` | A bind-mount source path doesn't exist on the host | check the `-v`/`--mount` path |
 
-The classic "daemonize" trap: a container running `service nginx start` exits because that
-command **backgrounds** nginx and returns, so PID 1 finishes. The fix is to run the process in
-the **foreground**: `nginx -g 'daemon off;'`, `postgres` directly, `java -jar app.jar`, etc.
+The subtler trap is a container that runs `service nginx start` and exits anyway. That command
+starts nginx in the background and returns, so `PID 1` — the init script, not nginx — has
+nothing left to do and finishes, taking the container down with it. The fix is to run the real
+process in the foreground so it *is* `PID 1` for as long as the service should live:
+`nginx -g 'daemon off;'`, or `postgres` directly, or `java -jar app.jar`.
 
 ```bash
 # Triage a crash-looping container
@@ -217,19 +284,22 @@ docker run --rm -it --entrypoint sh <image>    # get a shell WITHOUT running the
 # ...then run the real command by hand to see the actual failure
 ```
 
-> [!WARNING]
-> A container in a `restart: always` policy that crashes on startup will **crash-loop** —
-> `docker ps` shows `Restarting`, and the logs scroll the same error forever. Temporarily
-> remove the restart policy (or run the image with `--entrypoint sh`) to break the loop and
-> investigate calmly.
+A crash on startup under a `restart: always` policy turns into a crash-loop: `docker ps` shows
+`Restarting` and the logs scroll the same error forever. Break the loop before you investigate
+— temporarily drop the restart policy, or run the image with `--entrypoint sh` — so the
+container sits still long enough to read.
+
+Every row in that table is at heart an exit code, and two of them, `137` and `143`, carry far
+more meaning than "it failed" — which is the section that finally settles the `137` question.
 
 ---
 
 ## Exit codes: OOMKilled (137), SIGTERM (143), and friends
 
-A container's exit code is its **main process's exit code**, and for signal deaths Linux
-encodes it as **128 + signal number**. Memorising the common ones is the fastest way to
-classify a failure:
+A container's exit code is its `PID 1`'s exit code, handed straight up. When `PID 1` dies from
+a signal, Linux reports `128 + the signal number`: `137` is `128 + 9`, which is `SIGKILL`, and
+`143` is `128 + 15`, which is `SIGTERM`. That one convention turns a bare number into a failure
+class you can read at a glance:
 
 | Exit code | Meaning | Typical cause |
 |---|---|---|
@@ -242,16 +312,21 @@ classify a failure:
 | `139` | 128 + 11 = SIGSEGV | Segmentation fault (native crash) |
 | `143` | 128 + 15 = SIGTERM | Graceful stop — `docker stop` sent SIGTERM and the app exited on it |
 
-**137 is the interview favourite.** It means the process received **SIGKILL**. Two distinct
-scenarios produce it, and you distinguish them with `docker inspect`:
+Three of those codes break the "it is `PID 1`'s exit status" rule, and it is worth knowing why.
+`125`, `126`, and `127` are not your program's exit status at all: `125` is the Docker daemon
+refusing to start the run — a bad flag, a broken image reference; `126` is the runtime finding
+your entrypoint but unable to execute it; `127` is the runtime never finding the entrypoint. In
+all three, no program of yours ever ran, so there is no `PID 1` status to hand up — the number
+is Docker or the OCI runtime telling you it stopped before your code began.
 
-- **OOMKilled:** the container exceeded its `--memory` cgroup limit and the kernel's
-  OOM-killer terminated it. Confirm with `docker inspect --format '{{.State.OOMKilled}}' <c>`
-  → `true`. Fix by raising `--memory`, fixing the leak, or tuning the app's heap
-  (e.g. JVM `-XX:MaxRAMPercentage`).
-- **Kill timeout:** `docker stop` sends SIGTERM, waits the grace period (default 10s), then
-  SIGKILLs a process that ignored SIGTERM → also exit 137, but `OOMKilled` is `false`. Fix by
-  handling SIGTERM for graceful shutdown.
+### Telling the two 137s apart: OOM versus a stop-timeout
+
+`137` is the one you will actually chase, and two very different events both leave it. In the
+first, the container blew past its `--memory` cgroup limit and the kernel's OOM-killer
+terminated it. The killer picks the process with the highest `oom_score` in the cgroup, which
+need not be `PID 1`. In the second, `docker stop` sent `SIGTERM`, waited the grace period —
+10 seconds by default on Linux — and escalated to `SIGKILL` because the app never exited on its
+own. One field separates them:
 
 ```bash
 docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' my-app
@@ -260,64 +335,96 @@ docker inspect --format 'exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' my-a
 # exit=143            → clean SIGTERM shutdown
 ```
 
+This is the observable the shutdown story was missing. You were told to handle `SIGTERM` for a
+clean exit, but never how to check, from outside, whether your handler actually ran.
+Now you can read it off the exit code: `143` means the app caught `SIGTERM` and exited on its
+own — the clean death you were aiming for. `137` with `OOMKilled: false` is the opposite
+verdict: the app sat through the whole grace period ignoring `SIGTERM` and was `SIGKILL`ed for
+it. Fix the OOM case by raising `--memory`, fixing the leak, or tuning the runtime's heap (the
+JVM's `-XX:MaxRAMPercentage`, say); fix the timeout case by making the app honour `SIGTERM`
+inside the grace period.
+
 > [!INTERVIEW]
-> "A container keeps dying with exit 137 — what's happening and how do you confirm?" Answer:
-> 137 = 128+9 = SIGKILL. Most often the cgroup memory limit was hit and the OOM-killer fired;
-> confirm with `docker inspect ... .State.OOMKilled`. If false, it was a SIGKILL escalation
-> after a `stop`/`kill`, meaning the app didn't honour SIGTERM in time.
+> "A container keeps dying with exit `137` — what is happening, and how do you confirm?"
+> Answer: `137` is `128 + 9`, a `SIGKILL`. Most often the cgroup memory limit was hit and the
+> OOM-killer fired — confirm with `docker inspect` on `.State.OOMKilled`. If that is `false`,
+> it was a `SIGKILL` escalation after a `stop` or `kill`, which means the app did not honour
+> `SIGTERM` in time.
+
+Reading exit codes and logs both assume you can get at the container's output and, when needed,
+a shell inside it. Images built to have no shell at all break that assumption, and handling them
+is next.
 
 ---
 
 ## Debugging distroless & shell-less images
 
-Minimal images — **distroless**, `scratch`, or `-slim`/`alpine` stripped further — deliberately
-ship **no shell and no tools** (no `sh`, `bash`, `ps`, `curl`) to shrink attack surface and
-size. That makes `docker exec -it <c> sh` fail with `exec: "sh": executable file not found`.
-Options, in order of preference:
+Minimal images — distroless, `scratch`, or `alpine` stripped down further — ship no shell and
+no tools on purpose (`sh`, `bash`, `ps`, `curl` are all absent), to shrink both attack surface
+and size. The immediate cost lands the first time you debug one: `docker exec -it <c> sh` fails
+with `exec: "sh": executable file not found`, and every habit from the last five sections stops
+working. Three ways in, in order of how little they ask of you:
 
-1. **`docker debug <container-or-image>`** (Docker Desktop feature) — attaches a debug shell
-   with a *built-in toolbox* (`vim`, `curl`, `htop`, install more from nixos) into **any**
-   container or image, **even one with no shell**, without modifying the image. Filesystem
-   changes on a running container are live; on images/stopped containers they're discarded on
-   exit. This is the modern, purpose-built answer.
+1. `docker debug <container-or-image>` — a Docker Desktop feature that attaches a debug
+   shell carrying its own toolbox (`vim`, `curl`, `htop`, and more you install from the Nix
+   package set) to *any* container or image, even one with no shell, and without modifying it.
+   On a running container the filesystem changes you make are live; on an image or a stopped
+   container they are discarded when you leave the shell. This is the modern, purpose-built
+   answer.
 
    ```bash
    docker debug my-distroless-app        # shell into a shell-less container
    docker debug --command 'ls -la /app' my-distroless-app
    ```
 
-2. **Ephemeral debug container sharing namespaces** — run a *fat* toolbox image joined to the
-   target's namespaces so you can inspect its process tree, network, and (via `/proc`) its
-   filesystem:
+2. An ephemeral debug container joined to the target's namespaces — run a *fat* toolbox
+   image welded onto the target so its process tree, network, and filesystem are all reachable:
 
    ```bash
    docker run --rm -it \
      --pid container:my-app \
      --network container:my-app \
      nicolaka/netshoot sh
-   # now `ps`, `nsenter`, `curl`, `tcpdump`, `dig` all work against the target
+   # now ps, nsenter, curl, tcpdump, dig all work against the target
    ```
 
-   Its root filesystem is reachable via `/proc/1/root` (or another PID) inside the debug
-   container. In Kubernetes the equivalent is `kubectl debug --target` (ephemeral containers).
+   In Kubernetes the same move is `kubectl debug --target` (ephemeral containers).
 
-3. **Copy tools in / build a debug variant** — a multi-stage `debug` build target that adds
-   busybox, or `docker cp` a static busybox binary into the container. Cruder, but works
-   without Docker Desktop.
+3. Build a debug variant, or copy tools in. A multi-stage build with a `FROM production AS
+   debug` stage that adds busybox or curl lets you ship the distroless `production` stage by
+   default and reach for `docker build --target debug` only when you need to poke around — a
+   small attack surface in prod, a usable shell on demand. Cruder but Desktop-free: `docker cp`
+   a static busybox binary into the running container.
 
-> [!TIP]
-> Build lean *and* debuggable: keep the production stage distroless, but add a
-> `FROM production AS debug` stage that installs busybox/curl. Ship `production` by default;
-> `docker build --target debug` when you need to poke around. You get a small attack surface
-> in prod and a usable shell on demand.
+### Why "join it" works: shared namespaces and /proc/1/root
+
+The second option can look like sleight of hand — a separate container running `ps` against
+another container's processes — but it is only namespaces, from `images-vs-containers`, used
+deliberately.
+`--pid container:my-app` puts the debug container in the *same* PID namespace as the target, so
+the target's `PID 1` is simply visible from inside the toolbox. `--network container:my-app`
+shares the network namespace the same way, which is why `curl localhost:8080` and `tcpdump`
+reach the target's own ports and traffic.
+
+The filesystem is the one thing those flags do not share, and `/proc/1/root` is how you get it
+anyway. The kernel publishes every process's root directory at `/proc/<pid>/root`; once the
+target's `PID 1` is visible in your shared PID namespace, `/proc/1/root` is a live window onto
+that process's filesystem root. So you read a distroless image's files through the toolbox
+container's own tools, and neither image ever needed a shell. Every one of these routes works by
+opening the isolation boundary on purpose — you join the very namespaces that were built to keep
+the container apart.
+
+`docker debug` and namespace-joining tell you what is inside a container right now; when the
+question is what the daemon *did* to it, and exactly when, `docker events` is the record.
 
 ---
 
 ## Watching the daemon with docker events
 
-`docker events` streams **real-time events from the Docker daemon** — container
-create/start/die/oom/kill, image pulls, network connects, volume mounts, health-status
-changes. It answers "*what just happened?*" when a container vanishes or restarts on its own.
+`docker events --filter container=my-app` streams a live feed of everything the Docker daemon
+does to that container — `create`, `start`, `die`, `kill`, `oom` — as it happens, alongside
+image pulls, network connects, and volume mounts for the whole host. It answers "what just
+happened?" for a container that vanished or restarted with no one watching:
 
 ```bash
 docker events                                   # live stream of everything
@@ -327,20 +434,24 @@ docker events --since 1h --until 10m            # historical window
 docker events --filter type=container --format '{{.Time}} {{.Action}} {{.Actor.Attributes.name}}'
 ```
 
-- Emits an explicit **`oom`** event when the kernel OOM-kills a container — a clean signal
-  distinct from the eventual `die`.
-- Shows **`health_status:` transitions** (from `HEALTHCHECK`), so you can watch a container
-  flip `unhealthy` in real time.
-- Because it's daemon-wide and time-filterable, it's the tool for catching *intermittent*
-  restarts you'd otherwise miss — leave `docker events --filter event=die` running and wait.
+Two of those actions do real diagnostic work. When the kernel OOM-kills a container, the daemon
+emits an explicit `oom` event, separate from the `die` that follows. That lets you tell a
+memory kill from an ordinary crash straight from the stream, without waiting to inspect the
+corpse.
+And a container with a `HEALTHCHECK` emits `health_status` events, letting you watch it flip to
+`unhealthy` the instant it does. Because the stream is daemon-wide and accepts `--since` and
+`--until` windows, it is how you catch the *intermittent* restart you would otherwise miss:
+leave `docker events --filter event=die` running and wait for it to fire.
+
+Events tell you that a container restarted or died; when the question is what it wrote to disk
+while it was alive, `docker diff` shows the file-level changes.
 
 ---
 
 ## Inspecting filesystem changes with docker diff
 
-`docker diff <container>` lists every file/directory that has been **Added, Changed, or
-Deleted** in the container's writable layer relative to its image, using the copy-on-write
-storage layer's records:
+`docker diff my-app` lists every path added, changed, or deleted in the container's writable
+layer since it started from its image, read from the copy-on-write layer's own change records:
 
 ```bash
 docker diff my-app
@@ -349,21 +460,28 @@ docker diff my-app
 # D /var/run/foo.pid
 ```
 
-- **`A`** = added, **`C`** = changed, **`D`** = deleted (relative to the image layers).
-- It's a quick way to answer "*what has this container written to its filesystem?*" —
-  useful for spotting apps that write logs/state into the container (an anti-pattern; those
-  belong in volumes) or to see what a `RUN`/entrypoint mutated.
-- **Volume and bind-mount paths do not appear** in `docker diff`: those live outside the
-  container's writable layer (they're separate mounts), so writes there are invisible to
-  `diff`. If a path you expect is missing from the output, it's probably a mount.
-- Pairs well with `docker commit` when reverse-engineering an image, but the real lesson is
-  usually "move this mutable path to a volume."
+`A` is added, `C` is changed, `D` is deleted, each relative to the image layers underneath. It
+answers "what has this container written to its own filesystem?" — which is how you catch an app
+quietly writing logs or state into the container instead of a volume, or see what a `RUN` step
+or entrypoint mutated on the way up.
+
+One category is missing on purpose: volume and bind-mount paths never appear in `docker diff`.
+Those paths live outside the writable layer — they are separate mounts grafted onto the tree —
+so writes into them are invisible to a tool that only reads the copy-on-write layer's records.
+A path you expected to see and cannot find is almost always one of those mounts. `docker diff`
+pairs with `docker commit` when you are reverse-engineering an image, but the lesson it usually
+hands you is plainer: the mutable path it keeps flagging belongs in a volume.
+
+`docker diff` and everything before it assume the container at least started. The last section
+collects the errors that stop you before that — a port already taken, a pull that fails, a full
+disk, and a daemon you cannot even reach.
 
 ---
 
 ## Common errors and their fixes
 
-A cheat-sheet of the errors you'll see most, and what each actually means:
+Most of the errors you hit before a container even runs come from a small, memorisable set. The
+message tells you which one, and each has a fix that follows directly from what it means:
 
 | Error message | Meaning | Fix |
 |---|---|---|
@@ -385,13 +503,27 @@ sudo lsof -i :8080                             # or a non-docker process on the 
 docker image inspect --format '{{.Os}}/{{.Architecture}}' myimage   # vs `docker version`
 ```
 
+`Cannot connect to the Docker daemon` is a different animal from the rest, because nothing of
+yours ever reached the daemon. The CLI talks to it over a Unix socket, `/var/run/docker.sock`
+(or whatever `DOCKER_HOST` points at). So the error means one of three things: the daemon is
+down, the socket path is wrong, or your user lacks permission on it — start Docker, check
+`DOCKER_HOST`, or add your user to the `docker` group. It is the usual failure in CI too. A job
+that runs Docker commands from inside a container reaches the daemon only because that same
+`/var/run/docker.sock` was mounted into the runner, so a missing mount is exactly why it cannot
+connect. That mounting one socket lets a container drive the whole daemon is worth holding onto.
+
 > [!WARNING]
 > `docker system prune` reclaims space by deleting **stopped containers, dangling images, and
-> unused networks**; add `-a` and it removes *all* unused images, and `--volumes` deletes
-> unused volumes — which can wipe data you meant to keep. Read the prompt before confirming;
-> in production, prune explicitly and narrowly rather than with `-a --volumes`.
+> unused networks**; add `-a` and it removes *all* unused images, and `--volumes` deletes unused
+> volumes — which can wipe data you meant to keep. Run `docker system df` first to see where the
+> space actually went, read the confirmation prompt, and in production prune narrowly rather than
+> reaching for `-a --volumes`.
 
----
+That is the whole toolbox: read the state and exit code, read the logs, get inside or reproduce,
+and check config against reality. Every escalation you learned for a stubborn container — joining
+its namespaces, reading it through `/proc/1/root`, reaching the daemon through a mounted socket —
+works by prying open the isolation that normally keeps containers apart. The debug move and an
+attack move use the identical primitives; the difference between them is only intent.
 
 ## Common follow-up questions
 
@@ -401,9 +533,9 @@ docker image inspect --format '{{.Os}}/{{.Architecture}}' myimage   # vs `docker
 - **"`docker logs` shows nothing but the app is clearly running — why?"** Either the app logs
   to a file instead of stdout/stderr, output is buffered (set `PYTHONUNBUFFERED=1`), or a
   remote logging driver is configured so `docker logs` can't read local logs.
-- **"Exit 137 vs 143 — what's the difference?"** 137 = SIGKILL (OOM or forced kill after stop
-  timeout); 143 = SIGTERM (graceful stop the app honoured). Check `.State.OOMKilled` to tell
-  OOM from a kill-timeout.
+- **"Exit 137 vs 143 — what's the difference?"** `137` = SIGKILL (OOM or forced kill after a
+  stop timeout); `143` = SIGTERM (a graceful stop the app honoured). Check `.State.OOMKilled` to
+  tell OOM from a kill-timeout.
 - **"How do you get a shell into a distroless image with no `sh`?"** `docker debug`, or run a
   toolbox image (`nicolaka/netshoot`) joined to the target's PID/network namespaces, or ship a
   separate `debug` build stage.
@@ -411,7 +543,7 @@ docker image inspect --format '{{.Os}}/{{.Architecture}}' myimage   # vs `docker
   `docker inspect --format '{{.State.OOMKilled}}'` → `true` means OOM; also watch for an `oom`
   event in `docker events`.
 - **"What's the difference between `docker exec` and `docker attach`?"** `exec` starts a new
-  process (safe for a debug shell); `attach` connects to PID 1's stdio and can accidentally
+  process (safe for a debug shell); `attach` connects to `PID 1`'s stdio and can accidentally
   kill the container on exit.
 
 ## References
