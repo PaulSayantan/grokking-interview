@@ -2,7 +2,7 @@ domain: docker
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/docker/README.md
-position: 10
+position: 11
 plan:
 - slug: images-vs-containers
   covers: Image vs container (class/instance); copy-on-write + thin writable layer; layer sharing across containers;
@@ -705,7 +705,9 @@ running_example:
     from a browser-facing peer. The frontend/backend example adds `proxy` on `nginx` with the only published port.
     No image-size figure is touched and `node:20` is not retagged. docker-compose reuses api + db (image postgres:16,
     reached as db:5432) and adds proxy/frontend/backend network segmentation, myorg/api tags and a redis:7 cache;
-    no image-size arithmetic introduced.'
+    no image-size arithmetic introduced. Topic 10 reused the Node API for the HEALTHCHECK Dockerfile (node:20-alpine,
+    port 3000, /healthz, CMD ["node","server.js"]) and the SIGTERM drain snippet; no image sizes or exit codes were
+    introduced, per the seam constraint.'
 claims_established:
 - 'IMAGE AND LAYER MODEL (topics 1, 3, 5). An image is read-only layers plus an image config; a container is that
   stack plus one thin writable layer plus a host process with runtime state. Layers are immutable content-addressed
@@ -772,82 +774,50 @@ claims_established:
   OOM killer takes the highest `oom_score` in the cgroup, so a multi-process container can lose a child and stay
   `up` while `OOMKilled` is already true, because the flag records a kill of any process in the cgroup. `--cpus`
   throttles, and `--cpu-shares` only breaks ties under contention.'
-- The writable layer is a per-container directory on the host, created when the container is created and deleted
-  when it is removed; `docker rm`, `docker run --rm` and `docker compose down` are the same loss event, and `docker
-  stop` is not one.
-- A mount takes its paths out of the layer stack, because path resolution leaves one filesystem at a mount point
-  and continues in the one mounted there. Nothing under a volume, a bind mount or a tmpfs mount pays a `copy_up`.
-- A `copy_up` costs O(file size) regardless of how many bytes are written, is charged once per file per container,
-  and *can* be triggered by a metadata change (`chmod`, `chown`) as well as by a data write — the docs' verb is
-  "can also result in", not "does". The unit is the whole file because a union mount resolves one path to one file
-  in one layer, so there is no way to take part of a file from the image layer and part from the writable one.
-- The `copy_up` hazard for databases is conditioned on *pre-existing* data in a read-only layer. The official `postgres`
-  and `mysql` images ship an empty data directory and run `initdb` at first start, creating their files new in the
-  writable layer with no lower-layer original, so no `copy_up` fires. The trap is a dataset baked into an image
-  (a `COPY`, or `docker commit`).
-- A named volume's lifecycle is independent of every container. Only `docker volume rm`, `docker volume prune -a`
-  or `docker compose down -v` deletes one; `docker rm -v` deletes only anonymous volumes.
-- An empty volume mounted over a populated image directory is seeded from that directory on first mount only; a
-  bind mount or a tmpfs mount obscures the image's files instead.
-- Mounts carry numeric UID/GID ownership, not user names. Under user-namespace remapping or rootless Docker, container
-  UID n is host UID base + n, where base comes from `/etc/subuid`.
-- A container's network namespace is one of eight kinds the kernel has; the other seven (mount, UTS, IPC, PID, user,
-  cgroup, time) are independent, so --network host moves only the network one and leaves the container its own PID
-  and mount namespaces.
-- Traffic between containers on one bridge is forwarded by MAC address out of the bridge's forwarding database,
-  with no routing decision and no NAT rule consulted, which is why east-west traffic needs no -p; two separate bridges
-  are two forwarding databases, so nothing crosses between them.
-- The engine's DNS resolver listens on 127.0.0.11 on sockets opened inside the container's own network namespace
-  by the engine process outside it, with nat rules in that namespace redirecting port 53; it knows every answer
-  because it assigned the addresses at attach time, before any process in the container ran.
-- EXPOSE writes the port into the image config's ExposedPorts field, which the OCI image spec defines as defaults
-  merged with whatever the run command specifies; -p installs the kernel rule and is the only thing that makes a
-  port reachable from outside the host. Compose's `expose:` is the spelling of `docker run --expose` rather than
-  of the Dockerfile instruction — it adds to the CONTAINER's exposed set at creation time, on top of the image's
-  defaults, and never edits the image.
-- Docker's DNAT runs in nat/PREROUTING, so the routing decision that follows sees the container's address and sends
-  the packet to filter/FORWARD; a host firewall whose rules sit in filter/INPUT is never consulted, and DOCKER-USER
-  is the chain Docker leaves for the operator, jumped to from FORWARD before Docker's own rules.
-- Packets reaching DOCKER-USER have already been DNAT-ed, so a published-port match must use conntrack --ctorigdstport
-  rather than --dport.
-- Docker Engine 28 blocks packets addressed directly at a container's IP for ports that were not published, enforcing
-  it in the raw table's PREROUTING chain, ahead of filter; 28.2 added two ways to grant it back. allow-direct-routing
-  is a DAEMON-WIDE boolean; only com.docker.network.bridge.trusted_host_interfaces is per interface, taking a list
-  of host interface names. Do not attribute per-interface scope to allow-direct-routing.
-- docker-proxy exists for loopback traffic, because RFC 1122 forbids 127.0.0.0/8 addresses appearing outside a host
-  and a destination-only rewrite would strand the reply; --userland-proxy defaults to true, and Engine 28.0 made
-  the proxy and the equivalent nat/POSTROUTING masquerade rule mutually exclusive.
-- Overlay wraps a container frame in UDP to port 4789 between hosts, which costs 50 bytes over IPv4 (20 outer IP
-  + 8 UDP + 8 VXLAN + the 14-byte INNER Ethernet header the tunnel carries). An MTU bounds the IP packet and excludes
-  the Ethernet header around it, so a 1500-byte underlay carries 1464 bytes of inner frame and 1450 bytes of inner
-  IP packet; RFC 7348 forbids the sender fragmenting and lets the receiver discard fragments, so the symptom is
-  a stall on the first full-size transfer. Do not re-derive this by subtracting an OUTER Ethernet header from 1500
-  — that reaches 1450 by the wrong route and was a defect caught in this topic's verify pass.
-- Swarm's manager nodes hold the overlay's addressing state under Raft with a quorum of (N/2)+1; losing quorum stops
-  scheduling and rebalancing while already-running containers keep talking.
-- Docker writes no packet-filter rules for macvlan, ipvlan or host networking, and a macvlan container is unreachable
-  from its own host by a Linux kernel restriction, fixable with a second bridge attachment or a host-side macvlan
-  interface on the same parent.
-- Compose runs a multi-container app declaratively on ONE host as a single project, reconciling only the containers
-  that changed.
-- Services resolve each other by service name over a shared network via embedded DNS (127.0.0.11); localhost inside
-  a container is the container itself.
-- 'depends_on gives start ORDER, not readiness; condition: service_healthy needs a health check; app-level connection
-  retry is the portable fix and survives mid-life failures depends_on never watches.'
-- A health check is an engine-run command deciding healthy/unhealthy from exit code (formal teaching site is production-healthchecks-logging,
-  topic 10).
-- 'Compose stops at one host (no scheduler, self-healing or autoscaling); env-var precedence is CLI --env > interpolated
-  > static environment: > env_file: > image ENV.'
-- A tag is a mutable pointer to a manifest digest; re-pushing the tag moves it, so two hosts can pull different
-  bytes and a checked-in tag is reproducible in shape, not content.
-- Pinning repo@sha256 (or enforcing immutable tags) makes a reference resolve to fixed bytes; that is what admission
-  control and reproducible builds require.
-- 'Distribution moves content-addressed blobs: push HEAD-checks each blob and skips those present, pull fetches
-  only missing layers, shared bases store once, and cross-repo blob mount avoids re-upload.'
-- An image index maps platform to a per-arch manifest; docker pull selects the host arch; legacy docker build is
-  single-arch and fails other arches with exec format error.
-- Image ID = config-blob hash (local), RepoDigest = manifest hash (registry); untagging frees no space — reclaiming
-  needs delete-by-digest plus mark-and-sweep GC over reference-counted blobs.
+- VOLUMES AND STORAGE (topic 6). The writable layer is a per-container host directory, created at create and deleted
+  at rm; a mount takes its paths OUT of the layer stack (resolution leaves the union fs at the mount point). A `copy_up`
+  costs O(file size) regardless of bytes written, once per file per container, and cannot be undone — but the database
+  hazard is conditioned on PRE-EXISTING data in a read-only layer, which is why the official postgres/mysql images
+  with an empty data dir are fine. A named volume's lifecycle is independent of any container (only `docker volume
+  rm`/`prune`/`prune -a` frees it — and prune's anonymous-only default arrived in Engine 23.0). An empty volume
+  mounted over a populated image dir is seeded from it on FIRST mount only; a bind mount never seeds. Mounts carry
+  numeric UID/GID, not names, so userns-remap or rootless shifts ownership. A read-only mount that a write hits
+  fails `EROFS` (not `EACCES`).
+- NETWORKING (topic 7). A container's network namespace is one of eight kinds (the time namespace is newest, since
+  Linux 5.6). On one bridge, container traffic is forwarded by MAC (a bridge floods a broadcast unconditionally).
+  The engine's DNS resolver listens on 127.0.0.11 on sockets opened inside the container's own netns; EXPOSE only
+  writes the config's ExposedPorts (a default), while `-p` publishes. DNAT runs in nat/PREROUTING so the routing
+  decision sees the container IP; a DOCKER-USER published-port match must use conntrack `--ctorigdstport` because
+  packets there are already DNAT-ed; Engine 28 blocks packets aimed directly at a container IP on unpublished ports
+  via a raw-table PREROUTING rule a DOCKER-USER rule cannot re-permit. docker-proxy exists for loopback (RFC 1122).
+  Overlay wraps frames in UDP:4789, costing 50 bytes over IPv4 (20 IP + 8 UDP + 8 VXLAN + 14 inner Ethernet → 1464-byte
+  inner frame on a 1500 path); swarm managers hold addressing under Raft with a quorum of (N/2)+1. No packet-filter
+  rules are written for macvlan/ipvlan/host.
+- 'COMPOSE (topic 8). Compose runs a multi-container app declaratively on ONE host as a single project, reconciling
+  only the containers that changed. Services resolve each other by service name over a shared network via the embedded
+  DNS (127.0.0.11); localhost inside a container is the container itself. `depends_on` gives start ORDER, not readiness
+  — `condition: service_healthy` needs a health check, and app-level connection retries are the real fix. It stops
+  at one host (no scheduler, self-healing or autoscaling); env-var precedence is CLI `--env` > interpolated `environment:`
+  > `env_file` > image ENV, and a static `environment:` value beats the host shell.'
+- 'REGISTRIES AND DISTRIBUTION (topic 9). A tag is a mutable pointer to a manifest digest; re-pushing moves it,
+  so two hosts can pull different bytes — pinning `repo@sha256` (or immutable tags) fixes the bytes. Distribution
+  moves content-addressed blobs: push HEAD-checks and skips blobs the registry holds, pull fetches only missing
+  layers, and cross-repo blob mount (`?mount=&from=`) copies without re-upload. An image index maps platform → per-arch
+  manifest; `docker pull` selects the host arch and legacy `docker build` is single-arch (wrong-arch → `exec format
+  error`). Image ID = config-blob hash (local); RepoDigest = manifest hash, or the INDEX digest for a multi-arch
+  tag. Post-download SHA-256 verification is a spec SHOULD that the Docker/containerd clients enforce. Untagging
+  frees nothing; the registry''s mark-and-sweep GC reclaims unreferenced blobs, and deleting a shared blob corrupts
+  the images that still reference it.'
+- 'HEALTH CHECKS, LOGGING AND SHUTDOWN (topic 10). A health check is an engine-run command inside the container:
+  exit 0 = healthy, any non-zero = a failed check (exit 2 reserved); Docker only REPORTS health — it never restarts
+  on it (a restart policy reacts to the process exiting, not to health flipping). Detection latency ≈ interval ×
+  retries, and the probe runs in the container netns so it targets localhost. `--start-interval` was added in Engine
+  25.0. Containers log to stdout/stderr; `json-file` (default) never rotates → disk-fill, `local` rotates by default
+  (20 MB × 5) in a compact daemon-only format; `docker logs` reads back only `json-file`/`local`/`journald`, and
+  for a remote driver relies on the default dual-logging cache (auto-enabled since Engine 20.10) unless disabled.
+  Blocking delivery back-pressures the app; `mode=non-blocking` drops instead. `docker stop` = SIGTERM → 10s grace
+  → SIGKILL; exec form puts the app at PID 1 so SIGTERM lands, shell form swallows it; a deregistration-vs-SIGTERM
+  race is what produces 502s during a deploy.'
 approximations_open:
 - id: APPROX-1
   from: images-vs-containers
@@ -1065,16 +1035,6 @@ owed:
     say it DOES flip. The file now teaches the documented behaviour — `OOMKilled=true` on a still-`running` container
     as the tell — and drops the base''s "may never flip". Nobody has bench-tested it; do that before a later topic
     builds a diagnostic on it.'
-- file: production-healthchecks-logging
-  from: container-lifecycle
-  kind: s3-reference-budget-casualty
-  token: logging drivers, HEALTHCHECK
-  note: 'S3''s ≤2 slug refs cost this file its pointer to you. The claims survive in prose (the default `json-file`
-    driver captures stdout/stderr, and the daemon keeps a local cache so `docker logs` still works under a driver
-    that cannot replay logs itself; an app logging to a file inside the container produces an empty `docker logs`),
-    but a reader is no longer sent to you for the driver detail. You own the specifics this file deliberately does
-    not name: which drivers read natively (`local`, `json-file`, `journald`) and that dual logging is what covers
-    the rest. Add the link from your side.'
 - file: buildkit-advanced-builds
   note: 'C9 gap kept as a hedge: docs.docker.com/build/cache/invalidation/ says a COPY/ADD cache checksum is computed
     "from file metadata" and excludes mtime, but never enumerates which attributes count. The prose states the operating
@@ -1094,15 +1054,6 @@ owed:
     `sleep 3 &` exits immediately. Neither shell documents the behaviour, so topic 4 states it and still forbids
     designing on it. You own `docker top`, so one confirmation inside a real Alpine container is still worth printing
     when you are rewritten: `docker run -d alpine sh -c ''sleep 300''` then `docker top`.'
-- file: production-healthchecks-logging
-  from: entrypoint-vs-cmd
-  kind: s3-reference-budget-spend
-  token: grace period budget
-  note: 'Topic 4 spent one of its two slug refs on you, from `#graceful-shutdown-docker-stop-stopsignal-and-inittini`,
-    for the operational half of the drain budget: what a drain should actually do and how you watch it. Topic 4
-    states the mechanism (a handler, draining inside the window, and `docker stop -t 30` or a longer orchestrator
-    timeout when 25 s of drain meets a 10 s grace period) and deliberately stops there. The debt container-lifecycle
-    recorded against you is therefore now partly paid from this side.'
 - file: multi-stage-builds-image-optimization
   from: entrypoint-vs-cmd
   kind: k2-banned-variant-in-un-rewritten-scope
@@ -1267,6 +1218,20 @@ owed:
     page (web fact-check), but rated low-risk and historically accurate (deploy originated in the v3 / docker stack
     deploy schema). Retained because it closes the C12 gap that explains why only some deploy: keys apply under
     plain Compose; not hardened beyond that. A future pass can cite a primary source for the Swarm origin.'
+- file: topics/docker/production-healthchecks-logging/concepts.md
+  rule: C9
+  text: The local logging driver's exact on-disk encoding is stated only as a "compact internal format" the daemon
+    reads; docs.docker.com never names it (protobuf? custom framing?). Prose states the shape and compression honestly
+    and routes the precise encoding to tier-C prompt p008. A future pass can pin it from the Docker Engine source
+    (daemon/logger/local/).
+- file: topics/docker/production-healthchecks-logging/concepts.md
+  rule: C9
+  text: 'docker logs and remote drivers. This clarity pass hedged the carried claim to reflect default dual logging
+    (auto-enabled since Docker Engine 20.10): for a remote driver Docker keeps a bounded local cache so `docker
+    logs` can replay recent lines unless the cache is disabled. The fully de-hedged fact would contradict MCQ-018
+    (whose answer and the scenario "awslogs → docker logs returns nothing" assume the pre-dual-logging behaviour),
+    so this pass left the MCQ''s best answer intact. A future CONTENT-correctness pass should update MCQ-018 (question
+    premise + explanation) and then de-hedge the prose fully.'
 exemptions:
 - file: dockerfile-layers-build-cache
   rule: C9
@@ -1342,6 +1307,14 @@ exemptions:
     move. The section (:178-182) is explicitly about blobs as transfer units ('references one config blob and an
     ordered set of layer blobs, every one addressed by its digest'), so 'config blob' is the precise term. K2 says
     not to over-enforce a genuine distinction. Same judgment as the `stage`/`build step` exemption.
+- file: topics/docker/production-healthchecks-logging/concepts.md
+  rule: K2
+  terms:
+  - healthcheck
+  reason: Frozen H2s "The HEALTHCHECK instruction" and "HEALTHCHECK options and defaults", plus the follow-up questions,
+    match the banned variant "healthcheck" only because the K2 scan is case-insensitive. These are the Dockerfile
+    instruction / Compose key (identifiers), not the concept. Expected warnings; do not weaken canonical_terms to
+    silence them.
 topics:
 - position: 1
   slug: images-vs-containers
@@ -1529,14 +1502,32 @@ topics:
     emitted: 8
     verified: 7
   adversarial_signoff: pass
+- position: 10
+  slug: production-healthchecks-logging
+  commit: TBD-orchestrator
+  one_liner: Health checks, logging drivers, and graceful shutdown; closes topic 9's 502 loop with a full deploy
+    timeline mapping each 502 to one pillar.
+  reading_minutes:
+    before: 23
+    after: 29
+  factlines:
+    emitted: 9
+    verified: 9
+  adversarial_signoff: 'pass — the one blocker (rewrite dropped the locked level-3 heading "Worked example: how
+    long until a dead backend is declared `unhealthy`?") is fixed by restoring that heading byte-identically; the
+    plainer "detection-latency arithmetic" wording moved into its first body sentence. Fact-check WRONG (docker
+    logs vs default dual logging) applied as an honest hedge that keeps MCQ-018 answerable; IMPRECISE ("compact
+    binary format" → "compact internal format" for the local driver) applied.'
 open_cliffhanger:
-  from: registries-and-distribution
-  to_position: 10
-  pattern: B
-  key_noun_for_K1_grep: '502'
-  gap: Distribution puts exactly the right bytes on every host but says nothing about the ~2s swap window during
-    a deploy, when a provably-correct image still emits 502s.
-  payoff_anchor: concepts.md#putting-it-together-anatomy-of-a-deploy-the-502-timeline
+  from: production-healthchecks-logging
+  to_position: 11
+  pattern: A
+  key_noun_for_K1_grep: '137'
+  gap: Topic 10 teaches the whole shutdown negotiation — trap SIGTERM, stop accepting, drain, exit inside the grace
+    period — but never says how you observe whether the app actually caught the signal. Its rule "handle SIGTERM
+    and you shut down cleanly" has no observable attached (137 and 143 appear nowhere in the file, verified). Topic
+    11 supplies the exit code that separates a clean SIGTERM death from a container that ignored it and was killed.
+  payoff_anchor: concepts.md#exit-codes-oomkilled-137-sigterm-143-and-friends
   verified_present: true
 claims_compaction_log:
 - '2026-08-25, after topic 5 (position 6): 28 per-topic claims from topics 1-5 compacted to 5 domain-level claims,
@@ -1545,3 +1536,11 @@ claims_compaction_log:
   ''there is no stopped status'' rule is kept - and the OOM/cpu-shares detail, retained as its own claim below).
   The topic-4 correction that a `-c` shell execs the LAST command in place is preserved verbatim, because it is
   the one claim on this list that contradicts what the un-rewritten topics still say.'
+- '2026-08-26, after topic 10 (position 11): 33 per-topic claims from topics 6-10 compacted to 5 domain-level claims
+  (volumes / networking / compose / registries / health+logging+shutdown), 1450+ -> tighter. Nothing mechanically
+  load-bearing dropped: the copy_up pre-existing-data condition, EROFS-not-EACCES, embedded DNS 127.0.0.11, Engine-28
+  raw-PREROUTING block, VXLAN 50-byte/1464 arithmetic, Raft (N/2)+1, depends_on ordering-not-readiness, tag-vs-digest,
+  index-digest RepoDigest, spec-SHOULD/client-enforced verification, --start-interval Engine 25.0, dual-logging
+  since 20.10, and docker-stop 10s grace all survive verbatim in substance. 137/143 exit codes are deliberately
+  NOT introduced (topic 11 owns them; the open cliffhanger withholds them). The 6 domain claims from the topic-5
+  compaction are untouched.'
