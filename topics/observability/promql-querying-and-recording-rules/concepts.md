@@ -505,24 +505,24 @@ window (useful to spot crash-looping). Never compute counter deltas by hand
 
 ## Common follow-up questions
 
-- **Why does `increase()` return a non-integer like 3.4?** Because `rate`/`increase`
+- Why does `increase()` return a non-integer like 3.4? Because `rate`/`increase`
   extrapolate to the exact window boundaries; the value estimates the true increase at the
   edges, it doesn't count raw deltas.
-- **`rate` vs `irate` — when each?** `rate` for alerts and slow dashboards (smooth, uses
+- `rate` vs `irate` — when each? `rate` for alerts and slow dashboards (smooth, uses
   the whole window). `irate` for high-resolution volatile graphs (uses only the last two
   samples, spiky). Alerting on `irate` is discouraged — it's too jumpy.
-- **How wide should the range window be?** At least 2×, ideally ≥ 4× the scrape interval,
+- How wide should the range window be? At least 2×, ideally ≥ 4× the scrape interval,
   so every window has enough samples. Wider = smoother but laggier.
-- **Why can't I just average percentiles across pods?** Percentiles aren't linearly
+- Why can't I just average percentiles across pods? Percentiles aren't linearly
   combinable. Sum the histogram *buckets* first, then `histogram_quantile`. This is also
   why histograms beat client-side summaries for aggregation.
-- **When do I need `group_left`?** When many series on one side map to one series on the
+- When do I need `group_left`? When many series on one side map to one series on the
   other (joining against an `info`/lookup metric). Prometheus forces you to make
   many-to-one explicit.
-- **Recording rule vs alerting rule?** A recording rule *stores a new series*; an alerting
+- Recording rule vs alerting rule? A recording rule *stores a new series*; an alerting
   rule *evaluates a condition* and fires to Alertmanager when it's true (for `for`
   duration). They live in the same rule files but do different jobs.
-- **What does the `@` modifier buy over `offset`?** `offset` is relative to eval time; `@`
+- What does the `@` modifier buy over `offset`? `offset` is relative to eval time; `@`
   pins to an absolute timestamp (or `start()`/`end()`), so you can compare against a fixed
   reference that doesn't move as the query window slides.
 

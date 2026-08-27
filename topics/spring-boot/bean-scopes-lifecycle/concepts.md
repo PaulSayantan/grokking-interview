@@ -469,17 +469,17 @@ Precise semantics that separate seniors from juniors:
 
 ## Common follow-up questions
 
-- **Is a Spring "singleton" the same as the GoF singleton pattern?** No — Spring's is one-per-container (per bean name); GoF is one-per-classloader/JVM. Two contexts → two instances.
-- **Why isn't `@PreDestroy` called on my prototype bean?** The container doesn't manage prototype destruction; you must clean up yourself (or use a custom BPP / `ConfigurableApplicationContext` hooks).
-- **I injected a prototype into a singleton but always get the same instance — why?** Injection resolves once at singleton creation. Use `@Lookup`, `ObjectProvider`, `Provider`, or a scoped proxy to get fresh instances.
-- **How do I inject a request-scoped bean into a singleton?** Use a scoped proxy (`@RequestScope` defaults to `proxyMode = TARGET_CLASS`).
-- **What's the difference between `application` scope and `singleton`?** `singleton` is per Spring container; `application` is per `ServletContext`. They usually coincide but diverge when multiple contexts share a servlet context.
-- **`@PostConstruct` vs `InitializingBean` vs `@Bean(initMethod)` order?** `@PostConstruct` → `afterPropertiesSet()` → `init-method`.
-- **Difference between `SmartLifecycle` and `@PostConstruct`?** `@PostConstruct` runs during bean init; `SmartLifecycle.start()` runs after the whole context is initialized and supports phased ordering and graceful stop.
-- **When are AOP proxies (e.g. `@Transactional`) created?** In `BeanPostProcessor.postProcessAfterInitialization`, i.e. after init callbacks.
-- **What broke when moving to Spring Boot 3?** `javax.annotation.PostConstruct`/`PreDestroy` moved to `jakarta.annotation.*`; update imports.
-- **Are singletons thread-safe automatically?** No. Only if stateless/immutable or explicitly synchronized.
-- **BFPP vs BDRPP?** BDRPP extends BFPP and can register new definitions (`postProcessBeanDefinitionRegistry` runs first); BFPP only modifies existing definitions.
+- Is a Spring "singleton" the same as the GoF singleton pattern? No — Spring's is one-per-container (per bean name); GoF is one-per-classloader/JVM. Two contexts → two instances.
+- Why isn't `@PreDestroy` called on my prototype bean? The container doesn't manage prototype destruction; you must clean up yourself (or use a custom BPP / `ConfigurableApplicationContext` hooks).
+- I injected a prototype into a singleton but always get the same instance — why? Injection resolves once at singleton creation. Use `@Lookup`, `ObjectProvider`, `Provider`, or a scoped proxy to get fresh instances.
+- How do I inject a request-scoped bean into a singleton? Use a scoped proxy (`@RequestScope` defaults to `proxyMode = TARGET_CLASS`).
+- What's the difference between `application` scope and `singleton`? `singleton` is per Spring container; `application` is per `ServletContext`. They usually coincide but diverge when multiple contexts share a servlet context.
+- `@PostConstruct` vs `InitializingBean` vs `@Bean(initMethod)` order? `@PostConstruct` → `afterPropertiesSet()` → `init-method`.
+- Difference between `SmartLifecycle` and `@PostConstruct`? `@PostConstruct` runs during bean init; `SmartLifecycle.start()` runs after the whole context is initialized and supports phased ordering and graceful stop.
+- When are AOP proxies (e.g. `@Transactional`) created? In `BeanPostProcessor.postProcessAfterInitialization`, i.e. after init callbacks.
+- What broke when moving to Spring Boot 3? `javax.annotation.PostConstruct`/`PreDestroy` moved to `jakarta.annotation.*`; update imports.
+- Are singletons thread-safe automatically? No. Only if stateless/immutable or explicitly synchronized.
+- BFPP vs BDRPP? BDRPP extends BFPP and can register new definitions (`postProcessBeanDefinitionRegistry` runs first); BFPP only modifies existing definitions.
 
 ## References
 

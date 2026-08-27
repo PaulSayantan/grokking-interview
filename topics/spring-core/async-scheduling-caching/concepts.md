@@ -495,15 +495,15 @@ The bean *is* wrapped in a proxy, and external callers hit the advice correctly.
 
 ## Common follow-up questions
 
-- **Why is my `@Async`/`@Cacheable` method running synchronously / not caching?** Almost always self-invocation (internal `this` call), a missing `@EnableAsync`/`@EnableCaching`, a non-public method, or the object not being a Spring bean.
-- **What's the difference between `fixedRate` and `fixedDelay`?** Rate measures from the *start* of the previous run (fixed frequency); delay measures from the *end* (fixed gap between runs).
-- **Does `@EnableCaching` give me a cache?** No — you must define a `CacheManager` bean in plain Spring. Spring Boot auto-configures one; the Spring Framework does not.
-- **How do I handle exceptions from a `void @Async` method?** They never reach the caller; register an `AsyncUncaughtExceptionHandler`. For `Future`-returning methods the exception surfaces on `get()`.
-- **Why does the default scheduler serialize my tasks?** The default `TaskScheduler` is single-threaded; supply a `ThreadPoolTaskScheduler` with a larger pool.
-- **`@Cacheable` vs `@CachePut`?** `@Cacheable` skips the method on a hit; `@CachePut` always runs the method and updates the cache. Don't combine them on one method.
-- **How do I avoid a cache stampede on a hot key?** Use `@Cacheable(sync = true)`.
-- **JDK dynamic proxy vs CGLIB — which does Spring use?** Interface present → JDK dynamic proxy; no interface (or `proxyTargetClass = true`) → CGLIB subclass proxy.
-- **Difference from Spring Boot?** Spring Boot adds auto-configuration (default executor, cache manager detection via `spring.cache.*`, starters). Core Spring Framework requires you to enable and configure everything explicitly.
+- Why is my `@Async`/`@Cacheable` method running synchronously / not caching? Almost always self-invocation (internal `this` call), a missing `@EnableAsync`/`@EnableCaching`, a non-public method, or the object not being a Spring bean.
+- What's the difference between `fixedRate` and `fixedDelay`? Rate measures from the *start* of the previous run (fixed frequency); delay measures from the *end* (fixed gap between runs).
+- Does `@EnableCaching` give me a cache? No — you must define a `CacheManager` bean in plain Spring. Spring Boot auto-configures one; the Spring Framework does not.
+- How do I handle exceptions from a `void @Async` method? They never reach the caller; register an `AsyncUncaughtExceptionHandler`. For `Future`-returning methods the exception surfaces on `get()`.
+- Why does the default scheduler serialize my tasks? The default `TaskScheduler` is single-threaded; supply a `ThreadPoolTaskScheduler` with a larger pool.
+- `@Cacheable` vs `@CachePut`? `@Cacheable` skips the method on a hit; `@CachePut` always runs the method and updates the cache. Don't combine them on one method.
+- How do I avoid a cache stampede on a hot key? Use `@Cacheable(sync = true)`.
+- JDK dynamic proxy vs CGLIB — which does Spring use? Interface present → JDK dynamic proxy; no interface (or `proxyTargetClass = true`) → CGLIB subclass proxy.
+- Difference from Spring Boot? Spring Boot adds auto-configuration (default executor, cache manager detection via `spring.cache.*`, starters). Core Spring Framework requires you to enable and configure everything explicitly.
 
 ## References
 

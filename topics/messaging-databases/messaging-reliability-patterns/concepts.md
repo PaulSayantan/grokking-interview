@@ -537,34 +537,34 @@ absolute value.
 
 ## Common follow-up questions
 
-- **"Can you get exactly-once delivery?"** No — the network forces at-most-once or
+- "Can you get exactly-once delivery?" No — the network forces at-most-once or
   at-least-once. You get *effectively-once* via at-least-once + idempotent processing.
   Kafka EOS is exactly-once *semantics* for Kafka-internal stream processing only.
-- **"Why is publishing an event after a DB commit unsafe?"** The dual-write problem — the
+- "Why is publishing an event after a DB commit unsafe?" The dual-write problem — the
   process can crash between the two independent writes, or the second can fail, leaving DB
   and broker inconsistent. Use the transactional outbox.
-- **"Outbox or 2PC?"** Outbox: one local transaction + at-least-once relay, loosely coupled,
+- "Outbox or 2PC?" Outbox: one local transaction + at-least-once relay, loosely coupled,
   broker outage tolerated. 2PC: distributed, blocking coordinator, tight coupling, and Kafka
   isn't XA-capable. Prefer outbox.
-- **"Does the outbox give exactly-once?"** No — the relay is at-least-once (it can
+- "Does the outbox give exactly-once?" No — the relay is at-least-once (it can
   republish after a crash). It guarantees *no lost events*; consumers still need idempotency.
-- **"How do you dedup?"** Idempotency key + a unique constraint in a dedup/inbox table,
+- "How do you dedup?" Idempotency key + a unique constraint in a dedup/inbox table,
   inserted in the *same transaction* as the effect (or make the effect naturally
   idempotent).
-- **"How does Kafka guarantee ordering?"** Only per partition, only for same-keyed records,
+- "How does Kafka guarantee ordering?" Only per partition, only for same-keyed records,
   and only if in-flight/retry settings (idempotent producer) don't reorder.
-- **"What breaks ordering that people forget?"** DLQ/retry-topic detours, concurrent
+- "What breaks ordering that people forget?" DLQ/retry-topic detours, concurrent
   consumers of one partition, adding partitions, and `max.in.flight > 1` without
   idempotence.
-- **"How do you handle a poison message?"** Bounded retries with backoff+jitter, then
+- "How do you handle a poison message?" Bounded retries with backoff+jitter, then
   dead-letter it with the failure reason; alert on DLQ depth; provide a redrive path.
-- **"Backoff formula?"** `min(cap, base·2^attempt)` with **full jitter**:
+- "Backoff formula?" `min(cap, base·2^attempt)` with **full jitter**:
   `sleep = rand(0, that)`. Jitter breaks the retry-storm/thundering-herd.
-- **"Choreography vs orchestration saga?"** Choreography = event-reaction, decentralized,
+- "Choreography vs orchestration saga?" Choreography = event-reaction, decentralized,
   good for simple flows; orchestration = central coordinator, visible/testable, good for
   complex flows. Both undo via compensating (semantic) transactions and give eventual
   consistency with no isolation.
-- **"What is consumer lag and how do you fix it?"** Unread offsets between producer and
+- "What is consumer lag and how do you fix it?" Unread offsets between producer and
   consumer; fix by scaling consumers to partition count, adding partitions, speeding
   processing, or shedding load. Backpressure matches intake to processing rate (pull =
   natural; push = prefetch/qos).

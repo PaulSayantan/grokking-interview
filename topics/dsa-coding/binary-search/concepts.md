@@ -446,24 +446,24 @@ arrays, then the high-value **binary-search-on-the-answer** family.
 
 ## Common follow-up questions
 
-- **Why `mid = lo + (hi - lo) // 2` and not `(lo + hi) // 2`?** To avoid signed-integer
+- Why `mid = lo + (hi - lo) // 2` and not `(lo + hi) // 2`? To avoid signed-integer
   overflow when `lo + hi` exceeds the max int (a bug that lived in the JDK for years).
-- **When does your loop use `lo <= hi` vs `lo < hi`?** `<=` with a closed interval and
+- When does your loop use `lo <= hi` vs `lo < hi`? `<=` with a closed interval and
   `mid ± 1` updates for exact match; `<` with a half-open interval and `hi = mid` for
   boundary/insertion-point searches. Consistency between condition and update is what
   prevents infinite loops.
-- **How do duplicates change rotated-array search?** They can make you unable to decide
+- How do duplicates change rotated-array search? They can make you unable to decide
   which half is sorted (`A[lo]==A[mid]==A[hi]`), forcing a one-step linear shrink and
   degrading the worst case to O(n).
-- **How do you find the *first* vs *last* occurrence?** lower_bound gives the first index
+- How do you find the *first* vs *last* occurrence? lower_bound gives the first index
   `>= t`; upper_bound gives the first index `> t`, so `upper_bound - 1` is the last
   occurrence and `upper_bound - lower_bound` is the count.
-- **How do you recognize binary-search-on-the-answer?** "Minimize the maximum / maximize
+- How do you recognize binary-search-on-the-answer? "Minimize the maximum / maximize
   the minimum" or "can we do it with at most K?" plus a monotonic `feasible(x)`.
-- **Can binary search run on a linked list?** Logically yes, but indexing the midpoint is
+- Can binary search run on a linked list? Logically yes, but indexing the midpoint is
   O(n), so total time is O(n) — no better than a linear scan. Binary search needs O(1)
   random access.
-- **How do you set the answer bounds?** `low` = smallest possibly-feasible value, `high` =
+- How do you set the answer bounds? `low` = smallest possibly-feasible value, `high` =
   a guaranteed-feasible value; for min-largest-sum problems that's `[max(nums), sum(nums)]`.
 
 ## References

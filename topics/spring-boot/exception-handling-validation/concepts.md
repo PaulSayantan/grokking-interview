@@ -584,18 +584,18 @@ Deeper group mechanics that experts are expected to know:
 
 ## Common follow-up questions
 
-- **What's the difference between `@Valid` and `@Validated`?** `@Valid` is the Jakarta spec annotation (no groups, but is the cascade marker); `@Validated` is Spring's, supports validation groups and enables method-level validation when placed on a class.
-- **Why is my `@Min` on a `@RequestParam` ignored?** The controller class lacks `@Validated`; param constraints need method-level validation.
-- **Why does a path-variable constraint violation return 500 instead of 400?** It throws `ConstraintViolationException`, which has no default 400 mapping (unlike `MethodArgumentNotValidException`); add a handler (or rely on Spring 6.1+ `HandlerMethodValidationException`).
-- **`MethodArgumentNotValidException` vs `ConstraintViolationException` — when each?** The former from `@Valid` on `@RequestBody`/`@ModelAttribute`; the latter from method-level validation on `@Validated` beans (params, service methods).
-- **Why did my `@ExceptionHandler` return 200 for an error?** No `@ResponseStatus` and you returned a plain body; set the status explicitly or return `ResponseEntity`.
-- **`@ControllerAdvice` vs `@RestControllerAdvice`?** The latter adds `@ResponseBody` so returns are serialized to the response body.
-- **How do you produce RFC 7807 responses?** Return/throw `ProblemDetail`/`ErrorResponseException`; enable `spring.mvc.problemdetails.enabled=true` for built-ins; content type is `application/problem+json`.
-- **Why did adding `BindingResult` stop my 400s?** Its presence suppresses the thrown exception — you must check `hasErrors()` yourself.
-- **How can a validator query the database (uniqueness)?** `ConstraintValidator`s are Spring beans; inject a repository via `@Autowired`.
-- **Upgrade trap: my `ResponseEntityExceptionHandler` overrides do nothing after Boot 3.** The signatures changed from `HttpStatus` to `HttpStatusCode`; and `javax.validation` annotations must move to `jakarta.validation`.
-- **Does `@ExceptionHandler` catch exceptions from filters?** No — filters run outside DispatcherServlet's handler invocation; use error-dispatch/`@ControllerAdvice` cannot see them.
-- **Self-invocation and validation:** calling a `@Validated` method from within the same bean bypasses the validation proxy (same reason as `@Transactional` self-invocation).
+- What's the difference between `@Valid` and `@Validated`? `@Valid` is the Jakarta spec annotation (no groups, but is the cascade marker); `@Validated` is Spring's, supports validation groups and enables method-level validation when placed on a class.
+- Why is my `@Min` on a `@RequestParam` ignored? The controller class lacks `@Validated`; param constraints need method-level validation.
+- Why does a path-variable constraint violation return 500 instead of 400? It throws `ConstraintViolationException`, which has no default 400 mapping (unlike `MethodArgumentNotValidException`); add a handler (or rely on Spring 6.1+ `HandlerMethodValidationException`).
+- `MethodArgumentNotValidException` vs `ConstraintViolationException` — when each? The former from `@Valid` on `@RequestBody`/`@ModelAttribute`; the latter from method-level validation on `@Validated` beans (params, service methods).
+- Why did my `@ExceptionHandler` return 200 for an error? No `@ResponseStatus` and you returned a plain body; set the status explicitly or return `ResponseEntity`.
+- `@ControllerAdvice` vs `@RestControllerAdvice`? The latter adds `@ResponseBody` so returns are serialized to the response body.
+- How do you produce RFC 7807 responses? Return/throw `ProblemDetail`/`ErrorResponseException`; enable `spring.mvc.problemdetails.enabled=true` for built-ins; content type is `application/problem+json`.
+- Why did adding `BindingResult` stop my 400s? Its presence suppresses the thrown exception — you must check `hasErrors()` yourself.
+- How can a validator query the database (uniqueness)? `ConstraintValidator`s are Spring beans; inject a repository via `@Autowired`.
+- Upgrade trap: my `ResponseEntityExceptionHandler` overrides do nothing after Boot 3. The signatures changed from `HttpStatus` to `HttpStatusCode`; and `javax.validation` annotations must move to `jakarta.validation`.
+- Does `@ExceptionHandler` catch exceptions from filters? No — filters run outside DispatcherServlet's handler invocation; use error-dispatch/`@ControllerAdvice` cannot see them.
+- Self-invocation and validation: calling a `@Validated` method from within the same bean bypasses the validation proxy (same reason as `@Transactional` self-invocation).
 
 ## References
 

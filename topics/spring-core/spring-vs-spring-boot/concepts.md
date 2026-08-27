@@ -361,15 +361,15 @@ These are additive: a Boot 3 app you never AOT-process behaves like any other Sp
 
 ## Common follow-up questions
 
-- **Does Spring Boot replace the Spring Framework?** No. Boot depends on and configures the Spring Framework; a Boot app is a normal Spring `ApplicationContext`.
-- **What three annotations does `@SpringBootApplication` combine?** `@SpringBootConfiguration`, `@EnableAutoConfiguration`, `@ComponentScan`.
-- **How does auto-configuration know what to configure?** Conditional annotations (`@ConditionalOnClass`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty`, …) evaluated against the classpath and existing beans; auto-config runs after user config and backs off when you've defined a bean yourself.
-- **What is a starter?** A curated transitive dependency bundle (e.g. `spring-boot-starter-web`) with versions managed by the Boot BOM.
-- **How does a Boot app run without an external server?** It embeds Tomcat/Jetty/Undertow (Netty for WebFlux) and packages an executable fat JAR run via `java -jar`.
-- **Can you override an auto-configured bean?** Yes — define your own bean and `@ConditionalOnMissingBean` makes Boot back off; you can also `exclude` auto-configuration classes.
-- **What does Actuator give you and does plain Spring have it?** Health, metrics, info, env, and other operational endpoints; it is a Boot-only feature.
-- **Java/Jakarta namespace?** Spring Framework 6 / Boot 3 need Java 17+ and use `jakarta.*`; Spring 5 / Boot 2 use `javax.*`.
-- **When would you NOT use Boot?** Legacy WAR-to-external-server deployments, tightly constrained dependency environments, or minimal use of a single Spring module.
+- Does Spring Boot replace the Spring Framework? No. Boot depends on and configures the Spring Framework; a Boot app is a normal Spring `ApplicationContext`.
+- What three annotations does `@SpringBootApplication` combine? `@SpringBootConfiguration`, `@EnableAutoConfiguration`, `@ComponentScan`.
+- How does auto-configuration know what to configure? Conditional annotations (`@ConditionalOnClass`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty`, …) evaluated against the classpath and existing beans; auto-config runs after user config and backs off when you've defined a bean yourself.
+- What is a starter? A curated transitive dependency bundle (e.g. `spring-boot-starter-web`) with versions managed by the Boot BOM.
+- How does a Boot app run without an external server? It embeds Tomcat/Jetty/Undertow (Netty for WebFlux) and packages an executable fat JAR run via `java -jar`.
+- Can you override an auto-configured bean? Yes — define your own bean and `@ConditionalOnMissingBean` makes Boot back off; you can also `exclude` auto-configuration classes.
+- What does Actuator give you and does plain Spring have it? Health, metrics, info, env, and other operational endpoints; it is a Boot-only feature.
+- Java/Jakarta namespace? Spring Framework 6 / Boot 3 need Java 17+ and use `jakarta.*`; Spring 5 / Boot 2 use `javax.*`.
+- When would you NOT use Boot? Legacy WAR-to-external-server deployments, tightly constrained dependency environments, or minimal use of a single Spring module.
 
 ## References
 

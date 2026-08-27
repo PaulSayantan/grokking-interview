@@ -412,22 +412,22 @@ Heap / priority-queue / top-k canon — the ones that show up again and again:
 
 ## Common follow-up questions
 
-- **Why is build-heap O(n) but heapsort O(n log n)?** Build-heap sums *heights* (converges
+- Why is build-heap O(n) but heapsort O(n log n)? Build-heap sums *heights* (converges
   to O(n)); heapsort then does n extractions each O(log n).
-- **For the k largest, do you use a min-heap or a max-heap? Why?** Min-heap of size k, so the
+- For the k largest, do you use a min-heap or a max-heap? Why? Min-heap of size k, so the
   root is the smallest of your current k and can be evicted in O(log n) when a bigger element
   arrives.
-- **When would you use quickselect over a heap?** One-shot k-th element of an in-memory array
+- When would you use quickselect over a heap? One-shot k-th element of an in-memory array
   where you don't need the elements ordered — O(n) average beats O(n log k). Heap wins for
   streaming / online top-k.
-- **How do you make a max-heap in Python?** Negate the keys (or push `(-key, item)`); `heapq`
+- How do you make a max-heap in Python? Negate the keys (or push `(-key, item)`); `heapq`
   is min-only.
-- **How does Dijkstra use a heap, and how do you handle decrease-key?** A min-heap keyed by
+- How does Dijkstra use a heap, and how do you handle decrease-key? A min-heap keyed by
   tentative distance; since binary heaps lack O(log n) decrease-key, use *lazy deletion* —
   push a new (dist, node) entry and skip stale entries when popped.
-- **Median of a stream — what structure?** Two heaps (max-heap low half, min-heap high half),
+- Median of a stream — what structure? Two heaps (max-heap low half, min-heap high half),
   rebalanced to differ in size by at most one.
-- **Is a heap sorted?** No — only the root is guaranteed extreme; siblings are unordered.
+- Is a heap sorted? No — only the root is guaranteed extreme; siblings are unordered.
 
 ---
 

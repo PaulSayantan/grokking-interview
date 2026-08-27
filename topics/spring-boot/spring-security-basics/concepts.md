@@ -977,25 +977,25 @@ the `hasRole`/`hasAuthority` distinction.
 
 ## Common follow-up questions
 
-- **Why do I get a generated password / everything is secured by default?**
+- Why do I get a generated password / everything is secured by default?
   Boot's `SecurityAutoConfiguration` locks all endpoints and creates a `user`
   with a random logged password until you define your own `SecurityFilterChain`
   or user details.
-- **How do I have both a stateless `/api/**` chain and a session UI chain?**
+- How do I have both a stateless `/api/` chain and a session UI chain?**
   Two `SecurityFilterChain` beans with `@Order` + `securityMatcher`.
-- **Why doesn't `@PreAuthorize` work on a method called from within the same
-  bean?** AOP proxy self-invocation bypass — the internal call skips the proxy.
-- **`hasRole('ADMIN')` fails even though my user has `ROLE_ADMIN` — why?** Usually
+- Why doesn't `@PreAuthorize` work on a method called from within the same
+  bean? AOP proxy self-invocation bypass — the internal call skips the proxy.
+- `hasRole('ADMIN')` fails even though my user has `ROLE_ADMIN` — why? Usually
   the reverse: you granted `ADMIN` without the `ROLE_` prefix, or used
   `hasAuthority('ADMIN')` vs `hasRole('ADMIN')` inconsistently.
-- **Is it safe to disable CSRF?** Only when you don't authenticate via cookies
+- Is it safe to disable CSRF? Only when you don't authenticate via cookies
   (i.e. bearer-token stateless APIs). Cookie-based auth still needs CSRF.
-- **Can I revoke a JWT?** Not natively; use short expiry + a denylist / refresh
+- Can I revoke a JWT? Not natively; use short expiry + a denylist / refresh
   rotation / token versioning.
-- **Where should a SPA store its JWT?** `HttpOnly` cookie (XSS-safe, but needs
+- Where should a SPA store its JWT? `HttpOnly` cookie (XSS-safe, but needs
   CSRF handling) vs memory/localStorage (XSS-exposed). Trade-off question.
-- **401 vs 403?** 401 = not authenticated; 403 = authenticated but not authorized.
-- **Difference between `authorizeHttpRequests` and `authorizeRequests`?** The
+- 401 vs 403? 401 = not authenticated; 403 = authenticated but not authorized.
+- Difference between `authorizeHttpRequests` and `authorizeRequests`? The
   former (new, `AuthorizationManager`/`AuthorizationFilter`) replaces the
   deprecated latter (`FilterSecurityInterceptor`).
 

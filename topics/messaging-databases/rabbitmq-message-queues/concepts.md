@@ -490,28 +490,28 @@ quorum queues at 3, 5, or 7.
 
 ## Common follow-up questions
 
-- **Why publish to an exchange instead of directly to a queue?** Decoupling: producers
+- Why publish to an exchange instead of directly to a queue? Decoupling: producers
   don't need to know which queues exist. Routing rules (bindings) live in the broker and
   can change without touching producers.
-- **What's the difference between a connection and a channel?** A connection is one TCP
+- What's the difference between a connection and a channel? A connection is one TCP
   socket; channels are lightweight multiplexed sessions over it. Open one connection per
   process and many channels (ideally one channel per thread) — don't open a TCP connection
   per operation.
-- **How do you guarantee a message is never lost end-to-end?** Durable queue + persistent
+- How do you guarantee a message is never lost end-to-end? Durable queue + persistent
   message + publisher confirms on the producer, manual ack on the consumer, and quorum
   queues for node-failure survival. Even then it's at-least-once, so make consumers
   idempotent.
-- **At-least-once vs exactly-once?** RabbitMQ gives at-least-once with manual ack.
+- At-least-once vs exactly-once? RabbitMQ gives at-least-once with manual ack.
   "Exactly-once" is achieved at the application layer via idempotency keys / dedup, not by
   the broker.
-- **What happens to an unroutable message?** Dropped silently unless you set `mandatory`
+- What happens to an unroutable message? Dropped silently unless you set `mandatory`
   (returned to publisher) or configure an alternate exchange.
-- **How do you implement delayed/retry-with-backoff?** TTL on a wait queue + DLX pointing
+- How do you implement delayed/retry-with-backoff? TTL on a wait queue + DLX pointing
   back to the work queue, or the delayed-message exchange plugin. Track a retry count and
   park to a dead queue after N attempts.
-- **Why is my one consumer overloaded while others idle?** Prefetch is too high (or
+- Why is my one consumer overloaded while others idle? Prefetch is too high (or
   unbounded); set a low `basic.qos` prefetch for fair dispatch.
-- **RabbitMQ or Kafka for this?** Replay/high-volume streaming/multiple independent
+- RabbitMQ or Kafka for this? Replay/high-volume streaming/multiple independent
   readers → Kafka. Complex routing/task queue/RPC/per-message retry → RabbitMQ.
 
 ## References

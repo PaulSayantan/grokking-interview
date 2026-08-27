@@ -208,25 +208,25 @@ that Uber's post doesn't publish them.
 
 ## Common follow-up questions
 
-- **"Why not just give consumers a SQL view over the tables?"** A view still binds
+- "Why not just give consumers a SQL view over the tables?" A view still binds
   you to specific tables in one database and can't span *heterogeneous* engines
   (OLAP + Docstore + Hive) or pick the best-matching table per request at runtime.
   The DAL resolves across engines and assembles results the way a single view can't.
-- **"How does the DAL decide which physical table to use?"** Three-phase table
+- "How does the DAL decide which physical table to use?" Three-phase table
   resolution: schema eligibility (must have every requested dimension and metric),
   dataset availability (freshness/retention must overlap the time range), then
   column continuity (prefer the candidate closest in cardinality to the request).
-- **"Why run the queries in parallel instead of sequentially?"** A single logical
+- "Why run the queries in parallel instead of sequentially?" A single logical
   request often fans out to several physical tables (the post shows one producing
   three queries). Sequential execution would sum their latencies; parallel execution
   is bounded by the slowest single query, which is what keeps the endpoint fast.
-- **"What happens when you add a new database technology?"** You implement the
+- "What happens when you add a new database technology?" You implement the
   **connector interface** for it; the metadata/query-engine core doesn't change. That
   pluggability is why the DAL could grow from ads into other domains.
-- **"How are domain-specific quirks handled without polluting the core?"** Through
+- "How are domain-specific quirks handled without polluting the core?" Through
   **decorator extension points** — controlled hooks that customize behavior for a
   domain, keeping the engine general-purpose and domain-agnostic.
-- **"What's the catch?"** Every request pays resolution, generation, and assembly
+- "What's the catch?" Every request pays resolution, generation, and assembly
   overhead, and the hidden dependency graphs can be deep. You accept that internal
   complexity in exchange for consumers that no longer break when schemas evolve and
   reports that ship in under two days instead of months.

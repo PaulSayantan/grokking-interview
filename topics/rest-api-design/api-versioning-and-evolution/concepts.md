@@ -777,27 +777,27 @@ the entire history of the topic*.
 
 ## Common follow-up questions
 
-- **"Is adding a field to a JSON response a breaking change?"** Not for tolerant readers; it can
+- "Is adding a field to a JSON response a breaking change?" Not for tolerant readers; it can
   break strict clients whose deserializer fails on unknown properties — which is why you publish
   tolerant-reader guidance up front. Adding an *enum value* to a response is breaking for clients
   that exhaustively switch on the known set.
-- **"URI vs header vs media-type versioning — which do you pick and why?"** Give the trade-off
+- "URI vs header vs media-type versioning — which do you pick and why?" Give the trade-off
   matrix; default to URI path for pragmatism/tooling, and note it is the least RESTful. Choose
   media-type/header when REST purity, per-resource evolution, or date-pinned snapshots matter.
-- **"What status code for an unsupported version?"** `400` for a bad/unknown version parameter;
+- "What status code for an unsupported version?" `400` for a bad/unknown version parameter;
   `406 Not Acceptable` when using media-type content negotiation and no representation matches.
   Never silently fall back to another version.
-- **"Difference between the Deprecation and Sunset headers?"** `Deprecation` (RFC 9745) is a
+- "Difference between the Deprecation and Sunset headers?" `Deprecation` (RFC 9745) is a
   structured-field Date marking *when* it became discouraged; `Sunset` (RFC 8594) is an HTTP-date
   marking *when it stops working*. Sunset must not precede Deprecation. Different date formats.
-- **"Backward vs forward compatibility?"** Backward = new server serves old clients (server's
+- "Backward vs forward compatibility?" Backward = new server serves old clients (server's
   job). Forward = old client survives new-server data (achieved via tolerant readers).
-- **"How would you rename a field without breaking anyone?"** Expand/contract: add the new field
+- "How would you rename a field without breaking anyone?" Expand/contract: add the new field
   alongside the old, migrate clients, remove the old after telemetry confirms no usage.
-- **"Should you version internal microservice APIs the same way as public ones?"** Internal APIs
+- "Should you version internal microservice APIs the same way as public ones?" Internal APIs
   can move faster (you control both ends and can coordinate deploys), but still benefit from
   additive/tolerant patterns; public APIs need longer deprecation windows and stronger guarantees.
-- **"When is a `/v2` justified?"** Only when a change is genuinely breaking *and* cannot be done
+- "When is a `/v2` justified?" Only when a change is genuinely breaking *and* cannot be done
   via expand/contract or a feature flag — e.g., a fundamental resource-model redesign.
 
 ## References

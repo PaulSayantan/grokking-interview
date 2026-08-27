@@ -417,26 +417,26 @@ mostly impractical for general workloads.
 
 ## Common follow-up questions
 
-- **"We already have TLS and encrypted disks — why encrypt fields too?"** Because those protect
+- "We already have TLS and encrypted disks — why encrypt fields too?" Because those protect
   the wire and stolen media only; a DB dump, rogue DBA, leaked backup, or SQLi returns
   plaintext. Field-level encryption keeps data confidential even from DB-level access.
-- **"How do you rotate keys without re-encrypting terabytes?"** Envelope encryption: rotate the
+- "How do you rotate keys without re-encrypting terabytes?" Envelope encryption: rotate the
   KEK and re-wrap the (small) DEKs; the bulk ciphertext is untouched. Tag ciphertext with a key
   ID so old data still decrypts and new writes use the new key.
-- **"How do you search on an encrypted column?"** For exact match, a keyed **HMAC blind index**
+- "How do you search on an encrypted column?" For exact match, a keyed **HMAC blind index**
   in an indexed column alongside randomized ciphertext. Deterministic encryption also enables
   equality but leaks value equality/frequency. Range/substring search on strong encryption is
   effectively unsupported (OPE/ORE leak; FHE is impractical).
-- **"How do you honor GDPR erasure when data is in immutable backups/event logs?"**
+- "How do you honor GDPR erasure when data is in immutable backups/event logs?"
   Crypto-shredding: per-user DEK, destroy the key (and its backups) to render all copies
   unreadable. Requires per-user key granularity and verified key destruction.
-- **"Tokenization vs encryption for card data?"** Tokenize (or use a PSP) to pull most systems
+- "Tokenization vs encryption for card data?" Tokenize (or use a PSP) to pull most systems
   out of PCI scope; the real PAN lives only in the isolated vault. Encryption leaves ciphertext
   plus keys in-scope.
-- **"Where should the DEK live and for how long?"** In app memory only as long as needed;
+- "Where should the DEK live and for how long?" In app memory only as long as needed;
   minimize/zero it; be deliberate about caching decrypted DEKs (latency/cost vs revocation and
   exposure window).
-- **"What breaks if you use deterministic encryption on a `status` column?"** Frequency
+- "What breaks if you use deterministic encryption on a `status` column?" Frequency
   analysis — few distinct values with skewed distribution let an observer infer plaintext from
   ciphertext frequencies.
 

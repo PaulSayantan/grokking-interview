@@ -573,37 +573,37 @@ buying down the cost of the bugs we'd otherwise find late.
 
 ## Common follow-up questions
 
-- **"Can testing prove your code is correct?"** No — testing shows the presence of bugs,
+- "Can testing prove your code is correct?" No — testing shows the presence of bugs,
   not their absence (Dijkstra). It builds *confidence* and catches *regressions*; it's
   risk management, not proof. Formal methods prove; tests sample.
-- **"What's the difference between a test level and a test type?"** Level = scope (unit /
+- "What's the difference between a test level and a test type?" Level = scope (unit /
   integration / system / acceptance); type = quality attribute checked (functional /
   performance / security / …). They're orthogonal: you can have a non-functional unit
   test and a functional E2E test.
-- **"What exact ratio should the pyramid be?"** It's a shape, not a formula — many fast
+- "What exact ratio should the pyramid be?" It's a shape, not a formula — many fast
   low-level tests, few slow high-level ones. The ratio falls out of your architecture;
   don't quote 70/20/10 as a rule.
-- **"Is 100% coverage a good goal?"** No — coverage measures whether code *ran*, not
+- "Is 100% coverage a good goal?" No — coverage measures whether code *ran*, not
   whether anything *checked* the result, so assertion-free tests can hit 100% while
   catching nothing. Treat coverage as a way to find *un*tested code (low numbers are a
   real signal), not as proof of quality; chasing the last few percent tends to produce
   brittle, low-value tests. To measure whether tests actually catch bugs, use **mutation
   testing** (inject faults; a surviving mutant is a real gap).
-- **"Pyramid vs testing trophy — which is right?"** Both optimize confidence-per-feedback-
+- "Pyramid vs testing trophy — which is right?" Both optimize confidence-per-feedback-
   second; the trophy just weights integration more (sensible when units are thin I/O
   wrappers). The debate is largely about how you define "unit."
-- **"My E2E suite is flaky and takes an hour. What do you do?"** Diagnose the ice-cream
+- "My E2E suite is flaky and takes an hour. What do you do?" Diagnose the ice-cream
   cone: push coverage down to unit/integration, reserve E2E for a few critical journeys,
   make each reproduced flake into a fast deterministic lower test, stabilize time/network
   dependencies.
-- **"Verification vs validation?"** Verification = building it right (vs the spec);
+- "Verification vs validation?" Verification = building it right (vs the spec);
   validation = building the right thing (vs user needs). You can pass all tests and still
   fail validation.
-- **"What makes a good unit test?"** FIRST — Fast, Isolated, Repeatable, Self-validating,
+- "What makes a good unit test?" FIRST — Fast, Isolated, Repeatable, Self-validating,
   Timely — plus readable and behavior-focused (not coupled to implementation).
-- **"Smoke vs sanity?"** Smoke = wide & shallow build-verification ("does it turn on?");
+- "Smoke vs sanity?" Smoke = wide & shallow build-verification ("does it turn on?");
   sanity = narrow & deep check of one change ("does this fix behave?").
-- **"Why write tests first (shift-left)?"** Because defect cost rises the later they're
+- "Why write tests first (shift-left)?" Because defect cost rises the later they're
   found; catching them at coding time is cheapest and improves design.
 
 ## References

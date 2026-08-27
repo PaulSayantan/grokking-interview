@@ -481,29 +481,29 @@ normalized/pretty-printed form so key order and whitespace don't cause spurious 
 
 ## Common follow-up questions
 
-- **"Why not just mock the HTTP client with Mockito instead of running WireMock?"** —
+- "Why not just mock the HTTP client with Mockito instead of running WireMock?" —
   Mocking the client object skips serialization, URL/header construction, timeout config,
   and interceptors/retry wiring. A mock server exercises the real client stack over a real
   socket, catching wire-level bugs a Mockito mock can't.
-- **"How do you test that your code retries and then trips a circuit breaker?"** — Use a
+- "How do you test that your code retries and then trips a circuit breaker?" — Use a
   WireMock **scenario** (stateful stub) to fail N times then succeed; `verify(exactly(N))`
   the request count to prove retry behaviour; for the breaker, drive persistent failures and
   verify calls stop hitting the server once it's OPEN; inject a `Clock` for HALF_OPEN.
-- **"Mock server vs contract test — what does a contract catch that a mock doesn't?"** —
+- "Mock server vs contract test — what does a contract catch that a mock doesn't?" —
   Downstream drift. A hand-written/recorded stub stays green when the real provider changes;
   a contract is verified against the real provider, so a breaking change fails a build.
-- **"How do you simulate a downstream timeout / connection reset?"** — WireMock
+- "How do you simulate a downstream timeout / connection reset?" — WireMock
   `withFixedDelay` (with the client's read timeout set lower) for timeouts;
   `withFault(Fault.CONNECTION_RESET_BY_PEER)` / `EMPTY_RESPONSE` for connection faults.
-- **"MockWebServer vs WireMock?"** — MockWebServer is a tiny FIFO-queue server, ideal for a
+- "MockWebServer vs WireMock?" — MockWebServer is a tiny FIFO-queue server, ideal for a
   focused client unit test; WireMock does rich request matching, verification, fault
   injection, recording, and standalone/container deployment.
-- **"When is REST Assured the wrong tool?"** — When you only want to test controller logic
+- "When is REST Assured the wrong tool?" — When you only want to test controller logic
   in isolation and speed matters — a `MockMvc`/`@WebMvcTest` slice avoids booting a server.
   REST Assured shines for full-stack API contract tests over a real port.
-- **"How do you keep snapshot tests from becoming rubber-stamps?"** — Mask non-deterministic
+- "How do you keep snapshot tests from becoming rubber-stamps?" — Mask non-deterministic
   fields, compare JSON semantically (JSONAssert), and review golden-file changes as code.
-- **"Where do these tests sit in the pyramid?"** — Mock-server and contract tests are the
+- "Where do these tests sit in the pyramid?" — Mock-server and contract tests are the
   integration layer (many); real end-to-end tests are few (happy path only).
 
 ## References

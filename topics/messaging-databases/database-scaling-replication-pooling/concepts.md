@@ -538,28 +538,28 @@ flowchart TB
 
 ## Common follow-up questions
 
-- **"Add a read replica and point all reads at it — what breaks?"** Any read-your-writes
+- "Add a read replica and point all reads at it — what breaks?" Any read-your-writes
   flow (submit then immediately read) breaks intermittently due to replication lag;
   route those reads to the leader or use LSN/GTID-aware routing.
-- **"Sync vs async replication trade-off in one line?"** Sync = no data loss on failover
+- "Sync vs async replication trade-off in one line?" Sync = no data loss on failover
   but commits block on the replica (latency + availability risk); async = fast commits
   but a crashed leader loses un-shipped writes.
-- **"How do you prevent split-brain?"** Quorum/consensus for promotion (majority
+- "How do you prevent split-brain?" Quorum/consensus for promotion (majority
   required) plus fencing/STONITH of the old leader; two nodes without a witness can't
   auto-failover safely.
-- **"Why is a pool of 20 faster than 500?"** The DB can only do `~cores` real work in
+- "Why is a pool of 20 faster than 500?" The DB can only do `~cores` real work in
   parallel; extra connections add context switching and memory pressure, so throughput
   drops. Queue in the pool, not the database.
-- **"PgBouncer transaction mode breaks my prepared statements — why?"** Consecutive
+- "PgBouncer transaction mode breaks my prepared statements — why?" Consecutive
   statements can land on different backend connections, so server-side session state
   (prepared statements, `SET`, temp tables, `LISTEN`) doesn't carry over. Use session
   mode or disable server-side prepared statements.
-- **"Statement vs row-based replication — which and why?"** Row-based (the modern
+- "Statement vs row-based replication — which and why?" Row-based (the modern
   default), because statement-based silently diverges on non-deterministic statements
   (`NOW()`, `RAND()`, ordering).
-- **"Range vs hash sharding?"** Range → good range scans but hot-spot risk; hash → even
+- "Range vs hash sharding?" Range → good range scans but hot-spot risk; hash → even
   load but scatters range queries. Directory adds flexibility at the cost of a lookup hop.
-- **"What's the default replication mode of managed read replicas?"** Asynchronous —
+- "What's the default replication mode of managed read replicas?" Asynchronous —
   expect lag and design reads accordingly.
 
 ## References

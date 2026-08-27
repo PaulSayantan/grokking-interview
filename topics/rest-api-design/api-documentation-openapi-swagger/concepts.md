@@ -956,53 +956,53 @@ responses:
 
 ## Common follow-up questions
 
-- **"Is OpenAPI the same as Swagger?"** No. OpenAPI is the specification; Swagger is
+- "Is OpenAPI the same as Swagger?" No. OpenAPI is the specification; Swagger is
   a toolset (UI, Editor, Codegen) and the legacy name of the spec (2.0). Say
   "OpenAPI 3.1 rendered with Swagger UI."
-- **"Design-first or code-first — which and why?"** Design-first for public/cross-team
+- "Design-first or code-first — which and why?" Design-first for public/cross-team
   APIs (parallel work, deliberate design, consumer review before build); code-first
   is acceptable for small single-team internal services. Either way, enforce
   sync with CI.
-- **"Biggest 3.0 → 3.1 change?"** Full JSON Schema 2020-12 alignment; `nullable`
+- "Biggest 3.0 → 3.1 change?" Full JSON Schema 2020-12 alignment; `nullable`
   replaced by `type: [..., "null"]`; `exclusiveMinimum/Maximum` become numbers;
   `webhooks` added.
-- **"How do you stop docs from drifting?"** Contract tests validating the live
+- "How do you stop docs from drifting?" Contract tests validating the live
   server against the committed spec, plus a generated-vs-committed diff check and
   spec linting in CI.
-- **"How do mocks help before the backend exists?"** A mock server serves
+- "How do mocks help before the backend exists?" A mock server serves
   schema/example-driven responses so consumers integrate in parallel; but mocks
   validate shape, not business logic.
-- **"What is `operationId` and why care?"** A unique operation identifier;
+- "What is `operationId` and why care?" A unique operation identifier;
   generators use it as the client method name, so it's part of the SDK contract.
-- **"AND vs OR in `security`?"** Outer array = OR (any entry suffices); object
+- "AND vs OR in `security`?" Outer array = OR (any entry suffices); object
   inside an entry = AND (all its schemes required). `security: []` = public.
-- **"Does declaring a security scheme secure the endpoint?"** No — the spec
+- "Does declaring a security scheme secure the endpoint?" No — the spec
   documents auth; the runtime must enforce it.
-- **"Can OpenAPI document your authorization rules?"** No. It documents
+- "Can OpenAPI document your authorization rules?" No. It documents
   *authentication scheme shapes* and OAuth **scopes** (which are documentation only —
   the server enforces them). Object- and function-level authorization (BOLA/BFLA,
   **OWASP API Security Top 10 2023** API1/API5) are runtime concerns not expressible
   in the spec. Note OAuth 2.1 removes the `implicit` and `password` flows.
-- **"Generated (code-first) spec has bad descriptions and leaks internal endpoints,
-  and you can't touch the generator — how do you ship clean public docs?"** Apply an
+- "Generated (code-first) spec has bad descriptions and leaks internal endpoints,
+  and you can't touch the generator — how do you ship clean public docs?" Apply an
   **Overlay** in CI: `remove` internal paths and `update` in better descriptions,
   producing a public variant without editing (and re-diverging from) the source.
-- **"How do you document a 5-call checkout flow with auth in between?"** OpenAPI
+- "How do you document a 5-call checkout flow with auth in between?" OpenAPI
   describes operations; use **Arazzo** to describe the ordered workflow (steps,
   `successCriteria`, `onSuccess`/`onFailure`, runtime expressions threading outputs).
-- **"You need to document Kafka events too — extend OpenAPI?"** No; use **AsyncAPI**
+- "You need to document Kafka events too — extend OpenAPI?" No; use **AsyncAPI**
   (channels/messages/operations/bindings) for pub-sub and streaming.
-- **"Difference between `webhooks`, `callbacks`, and AsyncAPI?"** `callbacks` =
+- "Difference between `webhooks`, `callbacks`, and AsyncAPI?" `callbacks` =
   out-of-band requests tied to a URL registered *in a specific operation*; `webhooks`
   (3.1 root) = out-of-band requests the API sends, not tied to any operation call;
   AsyncAPI = full async/streaming messaging.
-- **"How do you document `?filter[status]=OPEN&filter[region]=us`?"** A `query`
+- "How do you document `?filter[status]=OPEN&filter[region]=us`?" A `query`
   object parameter with `style: deepObject`, `explode: true` (RFC 6570 lineage).
-- **"How do you enforce one API style across 50 teams?"** Written style guide
+- "How do you enforce one API style across 50 teams?" Written style guide
   (Zalando/AIP/Microsoft-style MUST/SHOULD) + **Spectral/Zally** ruleset in CI + a
   review board + shared `components`.
-- **"Your spec is 8000 lines across 30 files but the target tool can't resolve remote
-  `$ref`s — what do you do?"** Author split, **bundle** in CI (Redocly CLI) into one
+- "Your spec is 8000 lines across 30 files but the target tool can't resolve remote
+  `$ref`s — what do you do?" Author split, **bundle** in CI (Redocly CLI) into one
   document with local refs preserved; publish that as the artifact.
 
 ## References

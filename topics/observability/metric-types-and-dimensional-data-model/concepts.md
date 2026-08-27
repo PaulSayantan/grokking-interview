@@ -563,27 +563,27 @@ flowchart TD
 
 ## Common follow-up questions
 
-- **"What uniquely identifies a Prometheus time series?"** The metric name (the `__name__`
+- "What uniquely identifies a Prometheus time series?" The metric name (the `__name__`
   label) plus the complete set of label key/value pairs. Any label difference = new series.
-- **"Counter vs gauge — how do you decide?"** If the value can decrease during normal
+- "Counter vs gauge — how do you decide?" If the value can decrease during normal
   operation, it's a gauge; if it only accumulates (resetting only on restart), it's a
   counter. You `rate()` counters, not gauges.
-- **"Why can't you average p99 latency across servers?"** A percentile describes a
+- "Why can't you average p99 latency across servers?" A percentile describes a
   distribution; the average of per-server p99s isn't the p99 of combined traffic. Aggregate
   histogram bucket counts first, then compute the quantile once.
-- **"Histogram vs summary?"** Histogram = server-side quantiles from aggregatable buckets;
+- "Histogram vs summary?" Histogram = server-side quantiles from aggregatable buckets;
   summary = client-side quantiles that can't be aggregated. Default to histograms.
-- **"What breaks `rate()`?"** Using it on a gauge; a window shorter than ~2 scrape intervals;
+- "What breaks `rate()`?" Using it on a gauge; a window shorter than ~2 scrape intervals;
   aggregating counters *before* `rate()` (hides per-series resets); expecting exact integers
   (it extrapolates).
-- **"How would you accidentally 100× your metrics bill?"** Add a high-cardinality label
+- "How would you accidentally 100× your metrics bill?" Add a high-cardinality label
   (user_id, request_id, full URL) — series count = product of label cardinalities.
-- **"Cumulative vs delta, and why does it matter for OTel→Prometheus?"** Prometheus is
+- "Cumulative vs delta, and why does it matter for OTel→Prometheus?" Prometheus is
   cumulative; delta metrics must be converted to cumulative (stateful, single-writer) before
   ingestion.
-- **"Why base units?"** Uniform seconds/bytes everywhere prevents unit-mixing bugs and lets
+- "Why base units?" Uniform seconds/bytes everywhere prevents unit-mixing bugs and lets
   every dashboard/alert agree; display formatting happens in Grafana.
-- **"What's a native/exponential histogram and why use it?"** A single series with
+- "What's a native/exponential histogram and why use it?" A single series with
   auto-scaling exponential buckets — high resolution, low cardinality, still aggregatable
   and quantile-queryable; avoids guessing bucket boundaries.
 

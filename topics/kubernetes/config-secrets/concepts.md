@@ -381,20 +381,20 @@ node/zone into an app for topology-aware behavior.
 
 ## Common follow-up questions
 
-- **"Is a Secret encrypted?"** No — base64-encoded and stored plaintext in etcd by default.
+- "Is a Secret encrypted?" No — base64-encoded and stored plaintext in etcd by default.
   Enable encryption-at-rest (ideally KMS-backed) and lock down RBAC.
-- **"ConfigMap vs Secret — what's the real difference?"** Intent and handling: Secrets are
+- "ConfigMap vs Secret — what's the real difference?" Intent and handling: Secrets are
   base64, can be encrypted at rest, are (optionally) not written to disk on the node beyond
   tmpfs, have typed variants, and get RBAC/audit attention. Mechanically they're near-twins.
-- **"I updated config, app didn't change — why?"** Env var (needs Pod restart) vs volume
+- "I updated config, app didn't change — why?" Env var (needs Pod restart) vs volume
   (live, ~1 min, not `subPath`, app must re-read).
-- **"How do you trigger a restart when a ConfigMap changes?"** `kubectl rollout restart`, or
+- "How do you trigger a restart when a ConfigMap changes?" `kubectl rollout restart`, or
   hash config into a Pod-template annotation so the template changes.
-- **"Why immutable ConfigMaps?"** Prevent accidental edits + reduce kubelet watch load at
+- "Why immutable ConfigMaps?" Prevent accidental edits + reduce kubelet watch load at
   scale; change = create a new versioned object.
-- **"How do secrets work with GitOps?"** Sealed Secrets / SOPS (commit encrypted), or ESO /
+- "How do secrets work with GitOps?" Sealed Secrets / SOPS (commit encrypted), or ESO /
   CSI driver pulling from an external manager — never commit plaintext.
-- **"How does a Pod know its own name/namespace?"** Downward API via `fieldRef` env or a
+- "How does a Pod know its own name/namespace?" Downward API via `fieldRef` env or a
   `downwardAPI` volume (labels/annotations only via volume).
 
 ## References

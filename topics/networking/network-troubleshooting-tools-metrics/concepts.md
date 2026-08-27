@@ -851,40 +851,40 @@ Extending the bufferbloat section with the current landscape:
 
 ## Common follow-up questions
 
-- **Why might `ping` fail but the website still load?** ICMP Echo is often filtered/dropped
+- Why might `ping` fail but the website still load? ICMP Echo is often filtered/dropped
   by policy while TCP 443 is open; ping only tests L3 + ICMP, not the app.
-- **You see `* * *` in traceroute — is the path broken?** Not necessarily; that hop just
+- You see `* * *` in traceroute — is the path broken? Not necessarily; that hop just
   isn't replying to ICMP (deprioritized/filtered). If later hops respond, traffic passes.
-- **Difference between TIME_WAIT and CLOSE_WAIT, and which side owns each?** TIME_WAIT is on
+- Difference between TIME_WAIT and CLOSE_WAIT, and which side owns each? TIME_WAIT is on
   the active closer (self-clears after 2×MSL, usually benign). CLOSE_WAIT is on the side
   that received a FIN but hasn't `close()`d — an app bug that leaks FDs.
-- **Bandwidth vs throughput vs goodput?** Capacity vs achieved rate vs application-useful
+- Bandwidth vs throughput vs goodput? Capacity vs achieved rate vs application-useful
   rate (payload only, minus headers/retransmits/ACKs).
-- **How does 1% packet loss affect a TCP flow?** Disproportionately — loss halves cwnd;
+- How does 1% packet loss affect a TCP flow? Disproportionately — loss halves cwnd;
   throughput ∝ 1/(RTT·√loss), so long-RTT flows collapse.
-- **Symptom: HTTPS/large transfers hang but small requests work.** PMTUD black hole — ICMP
+- Symptom: HTTPS/large transfers hang but small requests work. PMTUD black hole — ICMP
   "Packet Too Big"/"Fragmentation Needed" is filtered; clamp MSS.
-- **Downloads fast, video call choppy on the same link?** Bufferbloat; diagnose with
+- Downloads fast, video call choppy on the same link? Bufferbloat; diagnose with
   ping-under-load, fix with AQM (fq_codel/CAKE) or BBR.
-- **BDP and window scaling?** BDP = bandwidth × RTT = in-flight data needed to fill a pipe;
+- BDP and window scaling? BDP = bandwidth × RTT = in-flight data needed to fill a pipe;
   window must be ≥ BDP, hence RFC 7323 window scaling on long-fat networks.
-- **Capture vs display filters in tcpdump/Wireshark?** BPF capture filters (kernel, before
+- Capture vs display filters in tcpdump/Wireshark? BPF capture filters (kernel, before
   capture) vs Wireshark display filters (richer, after capture) — different syntax.
-- **How to bypass DNS to test a specific backend?** `curl --resolve host:port:IP` or
+- How to bypass DNS to test a specific backend? `curl --resolve host:port:IP` or
   `dig @resolver` / `nc -vz IP port`.
-- **Fixed ~40 ms latency on small requests?** Nagle × delayed-ACK deadlock; set
+- Fixed ~40 ms latency on small requests? Nagle × delayed-ACK deadlock; set
   `TCP_NODELAY` (or batch the write). Large writes don't trigger it.
-- **`ss -i` shows high `retrans` vs a growing `lastsnd`?** High retrans = network loss
+- `ss -i` shows high `retrans` vs a growing `lastsnd`? High retrans = network loss
   collapsing `cwnd`; growing `lastsnd` with zero retrans = the app isn't sending.
-- **Connections time out under load but the server CPU is idle?** SYN/accept-queue overflow —
+- Connections time out under load but the server CPU is idle? SYN/accept-queue overflow —
   check `ListenDrops`/`ListenOverflows`, `somaxconn`, and the `listen()` backlog.
-- **"Cannot assign requested address" from a busy client?** Ephemeral/SNAT source-port
+- "Cannot assign requested address" from a busy client? Ephemeral/SNAT source-port
   exhaustion (4-tuple), distinct from `TIME_WAIT`; also check `nf_conntrack` table fullness.
-- **Why does latency explode near 90–95% utilization?** Queueing knee: delay ∝ 1/(1−ρ)
+- Why does latency explode near 90–95% utilization? Queueing knee: delay ∝ 1/(1−ρ)
   (Little's Law / M/M/1) — run with headroom.
-- **Why can't classic TCP tools see HTTP/3?** QUIC is UDP/443 with an encrypted transport
+- Why can't classic TCP tools see HTTP/3? QUIC is UDP/443 with an encrypted transport
   header; capture `udp port 443` and decrypt via `SSLKEYLOGFILE`/qlog.
-- **Why might a load-test p99 look great but users complain?** Coordinated omission and
+- Why might a load-test p99 look great but users complain? Coordinated omission and
   fan-out tail amplification (tail at scale).
 
 ## References

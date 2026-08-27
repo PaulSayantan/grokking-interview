@@ -836,25 +836,25 @@ Two negotiation nuances reinforce the media-type and i18n sections.
 
 ## Common follow-up questions
 
-- **"Why not just return 200 with an error flag?"** It breaks caches, proxies,
+- "Why not just return 200 with an error flag?" It breaks caches, proxies,
   monitoring, and generic HTTP clients that key off the status line; the status
   code is the machine-readable outcome and must be honest.
-- **"What replaced RFC 7807?"** RFC 9457 (July 2023) obsoletes 7807. The object
+- "What replaced RFC 7807?" RFC 9457 (July 2023) obsoletes 7807. The object
   model (`type`/`title`/`status`/`detail`/`instance` + extensions) is unchanged;
   9457 clarifies guidance and registration. `application/problem+json` is the
   media type.
-- **"400 or 422 for validation?"** `400` for unparseable requests, `422` for
+- "400 or 422 for validation?" `400` for unparseable requests, `422` for
   well-formed-but-semantically-invalid. Pick one convention and be consistent.
-- **"401 or 403 when the token is missing?"** `401` (with `WWW-Authenticate`).
+- "401 or 403 when the token is missing?" `401` (with `WWW-Authenticate`).
   `403` is for an authenticated caller who lacks permission.
-- **"How do clients react differently to the same status?"** Via the stable
+- "How do clients react differently to the same status?" Via the stable
   machine `code`/`type`, not by parsing the human message.
-- **"How do you make POST retries safe after a timeout?"** Idempotency keys the
+- "How do you make POST retries safe after a timeout?" Idempotency keys the
   server deduplicates; advertise the mechanism and the retry semantics.
-- **"How do you debug a production error without leaking internals?"** Return a
+- "How do you debug a production error without leaking internals?" Return a
   generic body plus a correlation/trace ID; keep the full detail in server logs
   keyed by that ID.
-- **"How do you localize errors?"** Localize only the human strings via
+- "How do you localize errors?" Localize only the human strings via
   `Accept-Language`/`Content-Language`; keep stable codes + structured params so
   rich clients can localize themselves.
 

@@ -424,20 +424,20 @@ the hashing technique). Grouped by difficulty.
 
 ## Common follow-up questions
 
-- **Why is dynamic-array append amortized `O(1)`, and why must growth be geometric?**
+- Why is dynamic-array append amortized `O(1)`, and why must growth be geometric?
   Geometric growth makes total copy work a convergent geometric series (`< 2n`); additive
   growth makes it `O(n^2)`.
-- **Why are hash-map operations `O(1)` average but `O(n)` worst case?** Average assumes a
+- Why are hash-map operations `O(1)` average but `O(n)` worst case? Average assumes a
   good hash spreading keys evenly; collisions/adversarial keys pile into one bucket. (Deep
   dive in the Hash Tables topic.)
-- **When would you NOT use a hash map even though lookups are `O(1)`?** When you need
+- When would you NOT use a hash map even though lookups are `O(1)`? When you need
   ordering, range queries, or worst-case guarantees — use a balanced BST/`TreeMap`
   (`O(log n)`); or when `n` is tiny and constant factors/memory dominate.
-- **How do you solve Two Sum if the array is sorted?** Two pointers from both ends —
+- How do you solve Two Sum if the array is sorted? Two pointers from both ends —
   `O(n)` time, `O(1)` space, no hashing.
-- **Why is `s += x` in a loop `O(n^2)` and how do you fix it?** Immutable strings copy on
+- Why is `s += x` in a loop `O(n^2)` and how do you fix it? Immutable strings copy on
   every concat; use `StringBuilder` / `"".join`.
-- **How do you achieve `O(1)` extra space?** In-place two pointers, swapping, reversal
+- How do you achieve `O(1)` extra space? In-place two pointers, swapping, reversal
   tricks, or sign-bit / cyclic-sort encoding using the input array itself.
 
 ## References

@@ -570,25 +570,25 @@ volumes and query patterns your primary DB handles poorly.
 
 ## Common follow-up questions
 
-- **"Why is Elasticsearch called near-real-time?"** Buffered docs become searchable only after a
+- "Why is Elasticsearch called near-real-time?" Buffered docs become searchable only after a
   refresh (default ~1s), so there's a sub-second gap between indexing and visibility.
-- **"Refresh vs flush vs translog fsync?"** Refresh = new searchable segment in fs cache (cheap,
+- "Refresh vs flush vs translog fsync?" Refresh = new searchable segment in fs cache (cheap,
   ~1s); flush = fsync segments to disk + trim translog (expensive); translog fsync = persist the
   WAL for durability (per request by default). Refresh ≠ durability; the translog provides it.
-- **"Why both `text` and `.keyword` for the same field?"** `text` (analyzed) for full-text
+- "Why both `text` and `.keyword` for the same field?" `text` (analyzed) for full-text
   `match`; `keyword` (exact) for sorting, aggregations, and `term` filters.
-- **"Why does my `term` query return nothing on a text field?"** The field's indexed terms are
+- "Why does my `term` query return nothing on a text field?" The field's indexed terms are
   analyzed (lowercased/stemmed) but `term` doesn't analyze the query value — query the `keyword`
   sub-field instead.
-- **"How do you change an analyzer/mapping with zero downtime?"** Create a new index with the new
+- "How do you change an analyzer/mapping with zero downtime?" Create a new index with the new
   mapping, `_reindex`, catch up writes, then atomically swap an alias; drop the old index.
-- **"TF-IDF vs BM25 — what changed?"** BM25 adds saturating term frequency (`k1`) and explicit
+- "TF-IDF vs BM25 — what changed?" BM25 adds saturating term frequency (`k1`) and explicit
   length normalization (`b`); it's the default similarity in current Lucene/ES/OS.
-- **"How do you keep the index in sync with the DB?"** CDC (log-based, e.g. Debezium→Kafka) or a
+- "How do you keep the index in sync with the DB?" CDC (log-based, e.g. Debezium→Kafka) or a
   transactional outbox — not naive dual-write; keep the indexer idempotent and replayable.
-- **"Can you change the number of primary shards?"** Not in place — it's fixed at creation; use
+- "Can you change the number of primary shards?" Not in place — it's fixed at creation; use
   reindex, or the Split/Shrink APIs. Replica count is changeable at runtime.
-- **"What's the difference between query and filter context?"** Query context scores (`_score`)
+- "What's the difference between query and filter context?" Query context scores (`_score`)
   and isn't cached; filter context is a yes/no, unscored, and cacheable — put hard criteria there.
 
 ## References

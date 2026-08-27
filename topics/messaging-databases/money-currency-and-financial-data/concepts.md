@@ -431,28 +431,28 @@ independent rounding is exactly how systems leak or duplicate money.
 
 ## Common follow-up questions
 
-- **"Why is `0.1 + 0.2 != 0.3`?"** Binary floating point can't represent 0.1/0.2/0.3
+- "Why is `0.1 + 0.2 != 0.3`?" Binary floating point can't represent 0.1/0.2/0.3
   exactly; the stored values are the nearest `double`s and their sum isn't the nearest
   `double` to 0.3. Use decimal or integer minor units.
-- **"DECIMAL or integer cents — which do you pick?"** Either is exact. Integer minor units
+- "DECIMAL or integer cents — which do you pick?" Either is exact. Integer minor units
   for high-throughput payments and clean serialization; `DECIMAL(p,s)` for SQL analytics and
   variable sub-cent scales. Never `float`/`double`.
-- **"What scale should the DECIMAL column have?"** Match the currency's minor unit (2 for
+- "What scale should the DECIMAL column have?" Match the currency's minor unit (2 for
   USD, 0 for JPY, 3 for KWD), plus extra places (4–6) for intermediate values you round only
   at the end.
-- **"Half-up or half-even?"** Half-even (banker's) removes summation bias and is the IEEE
+- "Half-up or half-even?" Half-even (banker's) removes summation bias and is the IEEE
   default; but use whatever the jurisdiction/contract mandates, made explicit and consistent.
-- **"How do you total revenue across currencies?"** You don't sum them directly — convert to
+- "How do you total revenue across currencies?" You don't sum them directly — convert to
   one reporting currency at a recorded rate/time, or `GROUP BY currency`.
-- **"Mutable balance or ledger?"** Append-only double-entry ledger as source of truth
+- "Mutable balance or ledger?" Append-only double-entry ledger as source of truth
   (auditable, self-balancing, corrected by reversal); a cached balance is a derived
   optimization reconciled against the ledger.
-- **"How do you prevent a double-charge on retry?"** Idempotency key with a unique
+- "How do you prevent a double-charge on retry?" Idempotency key with a unique
   constraint; a repeat returns the original result. Ideally in the same transaction as the
   ledger postings.
-- **"How do you split $10 three ways without losing a cent?"** Integer minor units +
+- "How do you split $10 three ways without losing a cent?" Integer minor units +
   divmod + distribute the remainder so shares re-sum to the total.
-- **"Why send money as a string in JSON?"** JSON numbers decode to `double` in most parsers
+- "Why send money as a string in JSON?" JSON numbers decode to `double` in most parsers
   (all of JS); a string preserves the exact decimal.
 
 ## References

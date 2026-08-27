@@ -624,25 +624,25 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **"`git merge` vs `git rebase` — and when is rebase dangerous?"** Merge preserves history with
+- "`git merge` vs `git rebase` — and when is rebase dangerous?" Merge preserves history with
   a merge commit; rebase rewrites into linear history with new hashes. Never rebase commits
   others have pulled (Golden Rule).
-- **"I did `git reset --hard` and lost commits — recover them?"** `git reflog` to find the SHA,
+- "I did `git reset --hard` and lost commits — recover them?" `git reflog` to find the SHA,
   then `git reset --hard <sha>` or `git branch recover <sha>`.
-- **"Undo a bad commit already on `main`?"** `git revert` (adds inverse commit; safe on shared
+- "Undo a bad commit already on `main`?" `git revert` (adds inverse commit; safe on shared
   branch), not `reset`.
-- **"Why does DORA favor trunk-based development?"** Frequent integration → small batches, fewer
+- "Why does DORA favor trunk-based development?" Frequent integration → small batches, fewer
   conflicts, lower change-failure rate, faster lead time; correlated with elite delivery
   performance.
-- **"How do you merge unfinished work to main?"** Feature flags / branch by abstraction; deploy
+- "How do you merge unfinished work to main?" Feature flags / branch by abstraction; deploy
   dark, release by flipping the flag.
-- **"How do you keep `main` deployable?"** Branch protection: PR-only, required green checks
+- "How do you keep `main` deployable?" Branch protection: PR-only, required green checks
   (up-to-date with base), required reviews, plus a merge queue at scale.
-- **"When is Git Flow appropriate?"** Versioned/released software with multiple supported
+- "When is Git Flow appropriate?" Versioned/released software with multiple supported
   versions (mobile, desktop, on-prem, libraries) — not continuously deployed web services.
-- **"Squash vs merge commit vs rebase merge?"** Squash = one clean commit per PR (great with
+- "Squash vs merge commit vs rebase merge?" Squash = one clean commit per PR (great with
   TBD); merge commit = full history + revertable unit; rebase merge = linear, keeps commits.
-- **"Two PRs each pass CI but break together — fix?"** Merge queue / merge trains re-run CI on
+- "Two PRs each pass CI but break together — fix?" Merge queue / merge trains re-run CI on
   the combined result before landing.
 
 ## References

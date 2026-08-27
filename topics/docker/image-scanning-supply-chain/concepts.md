@@ -365,31 +365,31 @@ Both guarantees are now in hand and both have edges: scanning finds only what is
 
 ## Common follow-up questions
 
-- **Scanning vs signing — what does each guarantee?** Scanning = "no *known* vulnerable
+- Scanning vs signing — what does each guarantee? Scanning = "no *known* vulnerable
   components inside." Signing = "authentic, produced by whom I trust, untampered." They're
   orthogonal; you need both. A signed image can be vulnerable; a clean scan can be a forged
   artifact.
-- **Why does a smaller base image have fewer CVEs?** Fewer OS packages ⇒ fewer components
+- Why does a smaller base image have fewer CVEs? Fewer OS packages ⇒ fewer components
   that can have advisories. Distroless/`scratch` strip the shell and package manager
   entirely, shrinking both CVE count and attack surface.
-- **Why pin the base by digest, and what's the downside?** Reproducibility + tag-hijack
+- Why pin the base by digest, and what's the downside? Reproducibility + tag-hijack
   defense; downside is it never auto-updates, so you must automate digest bumps + rescan.
-- **My image passed the scan 3 months ago — still safe?** Not necessarily; new CVEs may
+- My image passed the scan 3 months ago — still safe? Not necessarily; new CVEs may
   have been disclosed against its frozen packages. Continuous registry scanning + rebuild
   cadence address this.
-- **Why is Trivy flagging a Red Hat package the vendor says is patched?** Backported fix:
+- Why is Trivy flagging a Red Hat package the vendor says is patched? Backported fix:
   the version string is unchanged but the fix is applied. Use a distro-advisory-aware
   scan; don't match against NVD alone.
-- **What's the difference between DCT/Notary and cosign?** DCT = Notary v1 / TUF, signs
+- What's the difference between DCT/Notary and cosign? DCT = Notary v1 / TUF, signs
   tags, needs a Notary server, tied to Docker Hub. Cosign = Sigstore, signs the digest,
   stores the signature as an OCI artifact in the same registry, supports keyless
   (Fulcio + Rekor). Cosign is the modern default.
-- **What does keyless signing actually remove?** Long-lived private keys (a top leak
+- What does keyless signing actually remove? Long-lived private keys (a top leak
   vector). Fulcio issues a short-lived cert bound to your OIDC identity; Rekor logs the
   event for audit.
-- **SBOM vs provenance?** SBOM = *what's inside* (components). Provenance = *how/where it
+- SBOM vs provenance? SBOM = *what's inside* (components). Provenance = *how/where it
   was built* (SLSA). BuildKit emits both as attestations.
-- **Where does the actual SLSA/framework detail live?** `devops-cicd/software-supply-chain-security`.
+- Where does the actual SLSA/framework detail live? `devops-cicd/software-supply-chain-security`.
 
 ## References
 

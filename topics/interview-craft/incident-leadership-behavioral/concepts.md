@@ -327,22 +327,22 @@ currently publishes **16 Leadership Principles**; the outage story maps especial
 
 Interviewers probe to test the depth and honesty of your story. Expect:
 
-- **"What was *your* specific role?"** — Guards against "we" stories. Be ready with first-person
+- "What was *your* specific role?" — Guards against "we" stories. Be ready with first-person
   actions and decisions you personally made.
-- **"What would you have done differently?"** — Tests reflection and blamelessness. Answer with a
+- "What would you have done differently?" — Tests reflection and blamelessness. Answer with a
   *systemic* insight, not "I'd have been more careful."
-- **"How did you decide to roll back vs. fix forward?"** — Tests real-time judgment under
+- "How did you decide to roll back vs. fix forward?" — Tests real-time judgment under
   uncertainty. Explain the risk trade-off you weighed.
-- **"Who did you communicate with, and how often?"** — Tests whether communication was a
+- "Who did you communicate with, and how often?" — Tests whether communication was a
   deliverable or an afterthought.
-- **"Was it your mistake? How did you feel / how did the team react?"** — Tests accountability and
+- "Was it your mistake? How did you feel / how did the team react?" — Tests accountability and
   whether the culture was blameless. The strong answer owns it and describes a systemic, not
   personal, resolution.
-- **"Did the fix actually prevent recurrence?"** — Tests follow-through. Have the evidence (it
+- "Did the fix actually prevent recurrence?" — Tests follow-through. Have the evidence (it
   hasn't recurred; the guardrail caught N regressions since).
-- **"How did you prevent this class of problem, not just this instance?"** — The staff-level probe:
+- "How did you prevent this class of problem, not just this instance?" — The staff-level probe:
   can you generalize from one incident to a category of risk?
-- **"What if you couldn't roll back?"** — Tests whether your mitigate-first instinct is a rule or
+- "What if you couldn't roll back?" — Tests whether your mitigate-first instinct is a rule or
   a judgment (see the mid-migration nuance above).
 
 ---

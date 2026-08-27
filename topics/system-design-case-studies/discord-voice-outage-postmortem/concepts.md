@@ -183,27 +183,27 @@ healthy. Total user-visible degradation: **12:13 to 15:30 PDT**.
 
 ## Common follow-up questions
 
-- **Why did the change drop ~17% of sessions rather than 50%?** The rollout was
+- Why did the change drop ~17% of sessions rather than 50%? The rollout was
   per-zone and only reached the *first* zone before being halted. Sessions are balanced
   across three zones (~1/3 each), so terminating 50% of the pods in one zone hit about
   half of one-third — ≈17% of all sessions. Had the same 50% cut rolled out to all
   three zones, it would have been ~50% of the fleet.
-- **Why did restarts recover the node and then fail again?** Cold-start thundering
+- Why did restarts recover the node and then fail again? Cold-start thundering
   herd: an empty, "healthy"-looking node attracts the entire reconnect backlog at once
   and immediately re-enters overload. Recovery only stuck once rate limits capped the
   inflow so a cold node could warm up under a survivable load.
-- **What actually made the supervisor slow — the mailbox size or the code?** Both,
+- What actually made the supervisor slow — the mailbox size or the code? Both,
   together. The code uses a *selective receive* that scans the whole mailbox, so cost
   grows with queue length; once the mailbox hit ~100k, each spawn took ~1ms extra, and
   at ~1M it could never catch up. Small mailbox, no problem; huge mailbox, death spiral.
-- **Why did instance 2-8 survive?** Placement is primary/secondary/tertiary, so any
+- Why did instance 2-8 survive? Placement is primary/secondary/tertiary, so any
   instance carries only a "3/15 share" of load. 2-8's share kept it just under the
   overload cliff that its peers crossed.
-- **How does a PartitionSupervisor fix this?** It replaces the single supervisor with
+- How does a PartitionSupervisor fix this? It replaces the single supervisor with
   many independent ones running concurrently, so work is spread across processes and no
   single mailbox becomes the chokepoint — turning a single-threaded cliff into
   parallel, bounded queues.
-- **Why manually provision VMs mid-incident instead of just autoscaling?** They needed
+- Why manually provision VMs mid-incident instead of just autoscaling? They needed
   supply *now* and control over placement; standing up 15 instances via Terraform/Salt
   and registering them in etcd halved per-instance load deterministically, rather than
   waiting on an autoscaler that might feed the thundering herd.

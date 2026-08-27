@@ -488,25 +488,25 @@ the conversation. That asymmetry is the crux of every senior BDD question.
 
 ## Common follow-up questions
 
-- **"Isn't BDD just TDD with Cucumber?"** No — mechanically the inner loop is TDD, but
+- "Isn't BDD just TDD with Cucumber?" No — mechanically the inner loop is TDD, but
   BDD adds collaborative requirements discovery (three amigos, example mapping),
   ubiquitous language, and a behaviour framing. Cucumber is optional; the conversation
   isn't.
-- **"Who should write the feature files?"** The whole team, collaboratively (three
+- "Who should write the feature files?" The whole team, collaboratively (three
   amigos). If developers write them alone after coding, you've lost the point.
-- **"Why not just automate everything through Gherkin?"** Because Gherkin adds an
+- "Why not just automate everything through Gherkin?" Because Gherkin adds an
   indirection layer only worth paying for business-facing behaviour that stakeholders
   read. Use plain JUnit/Mockito for technical/unit-level logic.
-- **"How do you keep a Cucumber suite from becoming slow and flaky?"** Write declarative
+- "How do you keep a Cucumber suite from becoming slow and flaky?" Write declarative
   domain-level steps (not UI-mechanics), keep a clean automation layer (page
   objects/DSL), push most coverage to fast unit tests (test pyramid), share state via DI
   not statics, and don't drive everything through the UI.
-- **"Scenario Outline vs Data Table — when do you use each?"** Outline parameterises a
+- "Scenario Outline vs Data Table — when do you use each?" Outline parameterises a
   *whole scenario* across many rows; a data table passes a *collection to one step*.
-- **"What's the difference between BDD and ATDD?"** They heavily overlap and are often
+- "What's the difference between BDD and ATDD?" They heavily overlap and are often
   used interchangeably; BDD stresses communication and ubiquitous language, ATDD stresses
   driving from agreed acceptance criteria. Both wrap TDD's inner loop and are outside-in.
-- **"How does BDD relate to the test pyramid?"** BDD acceptance scenarios sit near the
+- "How does BDD relate to the test pyramid?" BDD acceptance scenarios sit near the
   top (fewer, slower, high-value); they should *not* replace the broad base of fast unit
   tests. Over-using Gherkin end-to-end scenarios inverts the pyramid ("ice-cream cone").
 

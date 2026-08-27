@@ -516,28 +516,28 @@ You rarely migrate a large suite in one shot. Strategy:
 
 ## Common follow-up questions
 
-- **What are the three modules of JUnit 5 and why?** Platform (launcher + `TestEngine`
+- What are the three modules of JUnit 5 and why? Platform (launcher + `TestEngine`
   SPI), Jupiter (new programming/extension model + its engine), Vintage (runs JUnit 3/4).
   The SPI lets many engines run on one platform, ending JUnit 4's single-`@RunWith` limit.
-- **Why is `@BeforeAll` usually `static`?** Because the default per-method instance
+- Why is `@BeforeAll` usually `static`? Because the default per-method instance
   lifecycle has no single instance to bind it to; it must belong to the class. `@TestInstance
   (PER_CLASS)` creates one instance for the class and lets `@BeforeAll` be non-static.
-- **`assertTimeout` vs `assertTimeoutPreemptively`?** The former runs in the calling thread
+- `assertTimeout` vs `assertTimeoutPreemptively`? The former runs in the calling thread
   and waits then fails; the latter runs in a separate thread and aborts on timeout — which
   breaks `ThreadLocal`/transactional/security-context state.
-- **How do you assert on a thrown exception?** `assertThrows` returns the exception; assert
+- How do you assert on a thrown exception? `assertThrows` returns the exception; assert
   on its message/cause. Or AssertJ's `assertThatThrownBy(...).hasMessageContaining(...)`.
-- **Assertion vs assumption?** Failed assertion = test *fails* (bug). Failed assumption =
+- Assertion vs assumption? Failed assertion = test *fails* (bug). Failed assumption =
   test *aborted/skipped* (not applicable here). Don't hide missing coverage behind
   assumptions.
-- **How do you make several assertions all report together?** `assertAll(...)` — evaluates
+- How do you make several assertions all report together? `assertAll(...)` — evaluates
   every executable and throws a `MultipleFailuresError` with all failures.
-- **`@ExtendWith` vs `@RegisterExtension`?** Declarative (class you can't configure) vs
+- `@ExtendWith` vs `@RegisterExtension`? Declarative (class you can't configure) vs
   programmatic (field instance you *can* configure via builder/constructor).
-- **How would you migrate a JUnit 4 suite?** Add `junit-vintage-engine` to run both, migrate
+- How would you migrate a JUnit 4 suite? Add `junit-vintage-engine` to run both, migrate
   test-by-test, swap annotations, and watch the reordered assertion message and the loss of
   `@Test(expected/timeout)`.
-- **How do you split fast vs slow tests in CI?** `@Tag` them and include/exclude tags in
+- How do you split fast vs slow tests in CI? `@Tag` them and include/exclude tags in
   Surefire/Gradle; or use conditional annotations for environment gating.
 
 ## References

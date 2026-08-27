@@ -485,26 +485,26 @@ Practical implications for interviews:
 
 ## Common follow-up questions
 
-- **Is OpenTelemetry a monitoring backend?** No. It generates and ships telemetry;
+- Is OpenTelemetry a monitoring backend? No. It generates and ships telemetry;
   you still need a backend (Prometheus/Tempo/Loki, Jaeger, or a vendor) to store,
   query, and visualize.
-- **What replaced OpenTracing and OpenCensus?** OpenTelemetry — it's the merger of
+- What replaced OpenTracing and OpenCensus? OpenTelemetry — it's the merger of
   both, keeping OpenTracing's API/impl split and OpenCensus's implementation/agents.
-- **Why can't instrumentation libraries depend on the SDK?** So they stay a no-op
+- Why can't instrumentation libraries depend on the SDK? So they stay a no-op
   when no SDK is present and don't force implementation/version choices on the app
   owner; only the app owner wires the SDK.
-- **What's the difference between attributes and Resource attributes?** Attributes
+- What's the difference between attributes and Resource attributes? Attributes
   describe a single span/metric/log; Resource attributes describe the entity (service,
   host, pod) and attach to *all* signals from that SDK.
-- **Head vs tail sampling — where does it happen?** Head sampling is decided in the
+- Head vs tail sampling — where does it happen? Head sampling is decided in the
   SDK at span start (cheap, but can't be error-aware); tail sampling is decided after
   spans are buffered, usually in the Collector (can keep all error/slow traces).
   Detailed coverage lives in *Sampling, Cardinality & Telemetry Cost Management*.
-- **Why did I lose my trace across services?** Almost always a propagator mismatch or
+- Why did I lose my trace across services? Almost always a propagator mismatch or
   a framework not instrumented to inject/extract `traceparent`.
-- **BatchSpanProcessor vs SimpleSpanProcessor?** Batch = async, batched, production
+- BatchSpanProcessor vs SimpleSpanProcessor? Batch = async, batched, production
   default; Simple = synchronous export per span, for debugging only.
-- **What is baggage good for and what's the risk?** Propagating business context
+- What is baggage good for and what's the risk? Propagating business context
   (tenant, session) downstream; risk = leaking PII/secrets in plaintext headers and
   header bloat; baggage isn't auto-added to spans.
 

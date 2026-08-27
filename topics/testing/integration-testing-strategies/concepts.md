@@ -398,30 +398,30 @@ a *thin* set of broad end-to-end tests for the few critical user journeys.
 
 ## Common follow-up questions
 
-- **"When is a test an integration test vs a unit test?"** If a real
+- "When is a test an integration test vs a unit test?" If a real
   cross-boundary collaborator (DB, broker, network, filesystem) participates, it
   is an integration test; if all collaborators are doubles and you test logic in
   isolation, it is a unit test. (Fowler complicates this with "sociable" unit
   tests — flag the ambiguity.)
-- **"Why not just use H2 for speed?"** It's a different database; dialect and
+- "Why not just use H2 for speed?" It's a different database; dialect and
   behaviour gaps give false confidence. Testcontainers runs the real engine at
   acceptable cost for production-fidelity.
-- **"Your integration suite is slow and flaky — what do you do?"** Push
+- "Your integration suite is slow and flaky — what do you do?" Push
   assertions down the pyramid; make narrow tests; ensure per-test isolation
   (fresh/truncated data, unique keys); replace real-network deps with mock
   servers/contract tests; kill `Thread.sleep` in favour of Awaitility; inject a
   fixed `Clock`; reuse cached contexts/containers.
-- **"Rollback vs truncate for test data?"** Rollback is fastest but never
+- "Rollback vs truncate for test data?" Rollback is fastest but never
   commits, so it hides flush/trigger/commit-time behaviour and breaks when code
   manages its own transactions; truncate against a real DB is slower but
   faithful.
-- **"Top-down vs bottom-up — who needs stubs, who needs drivers?"** Top-down
+- "Top-down vs bottom-up — who needs stubs, who needs drivers?" Top-down
   needs stubs for the unbuilt modules below; bottom-up needs drivers to invoke
   the modules from above.
-- **"Contract test vs broad integration test — when each?"** Contract tests for
+- "Contract test vs broad integration test — when each?" Contract tests for
   most service-to-service API compatibility (fast, decoupled, per-team); a small
   number of broad end-to-end tests only for critical whole-system journeys.
-- **"How do you test async / event-driven flows without flakiness?"** Poll for a
+- "How do you test async / event-driven flows without flakiness?" Poll for a
   condition with a timeout (Awaitility), assert on eventual state, avoid fixed
   sleeps, and isolate broker state per test.
 

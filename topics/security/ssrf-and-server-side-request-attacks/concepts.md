@@ -727,26 +727,26 @@ Ground SSRF/XXE claims in named controls (interviewers value precise citations):
 
 ## Common follow-up questions
 
-- **"What is the highest-impact SSRF target and why?"** Cloud instance metadata
+- "What is the highest-impact SSRF target and why?" Cloud instance metadata
   (`169.254.169.254`) — it hands out temporary IAM credentials (IMDSv1 with one GET), leading
   to account compromise; this is the Capital One 2019 breach.
-- **"Why isn't a denylist enough?"** Alternate IP encodings (decimal/octal/hex/IPv6-mapped),
+- "Why isn't a denylist enough?" Alternate IP encodings (decimal/octal/hex/IPv6-mapped),
   wildcard DNS (`nip.io`), DNS rebinding, redirects, and parser confusion all evade string
   matching. Validate the *resolved numeric IP* and prefer allowlists.
-- **"You resolve the host and check it's public, then connect — safe?"** No — **DNS
+- "You resolve the host and check it's public, then connect — safe?" No — **DNS
   rebinding** (TOCTOU) changes the answer between check and connect. **Pin** the validated IP.
-- **"How does SSRF escalate to RCE?"** `gopher://` (arbitrary bytes) into an unauthenticated
+- "How does SSRF escalate to RCE?" `gopher://` (arbitrary bytes) into an unauthenticated
   internal Redis/FastCGI to write a cron job or webshell.
-- **"How does IMDSv2 stop SSRF?"** It requires a `PUT` + custom token header (most fetchers
+- "How does IMDSv2 stop SSRF?" It requires a `PUT` + custom token header (most fetchers
   can only GET), defaults to hop-limit 1, and rejects `PUT`s with `X-Forwarded-For`. It's
   defense in depth, not a fix for the SSRF itself.
-- **"Blind SSRF — is it exploitable?"** Yes: out-of-band DNS/HTTP callbacks confirm it,
+- "Blind SSRF — is it exploitable?" Yes: out-of-band DNS/HTTP callbacks confirm it,
   timing/status oracles enable port scanning, and it can still hit state-changing internal
   GET endpoints.
-- **"Difference between SSRF and CSRF?"** CSRF abuses the *victim's browser* to make requests
+- "Difference between SSRF and CSRF?" CSRF abuses the *victim's browser* to make requests
   with the victim's cookies; SSRF abuses the *server* to make requests from the server's
   network position. Different actor, different trust boundary.
-- **"How does XXE relate?"** XXE can force an XML parser to fetch a `SYSTEM` URL — an SSRF/
+- "How does XXE relate?" XXE can force an XML parser to fetch a `SYSTEM` URL — an SSRF/
   file-read delivery mechanism; disable DTDs and external entities.
 
 ## References

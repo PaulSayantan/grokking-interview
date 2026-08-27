@@ -241,25 +241,25 @@ those, this post does not supply them — don't fabricate them.
 
 ## Common follow-up questions
 
-- **"Why decouple *what* from *how* instead of just adding more presets?"** Because
+- "Why decouple *what* from *how* instead of just adding more presets?" Because
   the confusion was structural: one field controlled two independent behaviors, so
   no preset could express "aware everywhere, quiet on this device." Splitting the
   fields makes the previously-impossible combinations expressible and the model
   understandable.
-- **"Why translate at read time instead of migrating the database?"** Reversibility.
+- "Why translate at read time instead of migrating the database?" Reversibility.
   A destructive bulk rewrite of millions of rows is hard to undo and changes behavior
   mid-flight; read-time logic keeps the original data intact so a rollback is one
   code deploy. They reserved backfill for the purely additive new field.
-- **"How do you keep two devices consistent without a sync mechanism?"** Store
+- "How do you keep two devices consistent without a sync mechanism?" Store
   explicit per-surface values and a single unambiguous source of truth that every
   client reads and renders identically. The implicit "sync" parameter was itself the
   source of drift, so removing it *improved* consistency.
-- **"A malformed preference field reset users to Mentions — what's the systemic
-  fix?"** Treat the preference schema as a data-integrity surface: validate writes
+- "A malformed preference field reset users to Mentions — what's the systemic
+  fix?" Treat the preference schema as a data-integrity surface: validate writes
   strictly, version the schema, and make cache invalidation (flushing memcache) part
   of the incident fix, since caches can keep serving the corrupt value after the data
   is cleaned.
-- **"What's the general principle here for interviews?"** Separate policy (*what*)
+- "What's the general principle here for interviews?" Separate policy (*what*)
   from mechanism (*how*); prefer reversible, read-time migrations for risky
   behavioral changes; make safety-critical defaults fail closed; and choose explicit
   state over implicit cleverness when correctness across replicas/clients is on the

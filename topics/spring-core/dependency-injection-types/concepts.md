@@ -676,28 +676,28 @@ alternatives when you only need presence/absence, not repeated lookup.
 
 ## Common follow-up questions
 
-- **What is the difference between IoC and DI?** IoC is the broad principle of handing control
+- What is the difference between IoC and DI? IoC is the broad principle of handing control
   of object creation/wiring to a container; DI is the specific implementation that injects
   dependencies. DI is a form of IoC, but IoC also includes patterns like Service Locator.
-- **Why is constructor injection preferred over field injection?** Immutability (`final`),
+- Why is constructor injection preferred over field injection? Immutability (`final`),
   guaranteed non-null mandatory dependencies, no partially-constructed beans, easy unit testing
   without Spring, and an explicit dependency contract that surfaces SRP violations.
-- **Is `@Autowired` required on a constructor?** No, not since Spring 4.3 when the class has
+- Is `@Autowired` required on a constructor? No, not since Spring 4.3 when the class has
   exactly one constructor. With multiple constructors you must annotate the intended one.
-- **How do you inject an optional dependency?** Use setter injection with
+- How do you inject an optional dependency? Use setter injection with
   `@Autowired(required = false)`, or `@Nullable`, or `Optional<T>`, or `ObjectProvider<T>`.
-- **How does Spring resolve a singleton that needs a prototype every time?** Lookup method
+- How does Spring resolve a singleton that needs a prototype every time? Lookup method
   injection (`@Lookup`), or inject `ObjectProvider`/`Provider`/`ObjectFactory` and call it per
   use; avoid caching the prototype in the singleton.
-- **Can constructor injection cause circular dependency failures?** Yes — mutual constructor
+- Can constructor injection cause circular dependency failures? Yes — mutual constructor
   dependencies cannot be resolved and Spring throws at startup. Setter/field injection can
   sometimes resolve singleton cycles, but the cycle is still a design smell.
-- **How do you inject all beans of a type?** Declare a `List`/`Set`/array of that type; Spring
+- How do you inject all beans of a type? Declare a `List`/`Set`/array of that type; Spring
   injects all matching beans (order via `@Order`). A `Map<String, T>` gives them keyed by bean
   name.
-- **javax vs jakarta:** In Spring 6.x (Jakarta EE 9+), JSR-330 `@Inject` comes from
+- javax vs jakarta: In Spring 6.x (Jakarta EE 9+), JSR-330 `@Inject` comes from
   `jakarta.inject` and `@Resource` from `jakarta.annotation`; earlier Spring used `javax.*`.
-- **What is the difference between `@Autowired`, `@Inject`, and `@Resource`?** `@Autowired` is
+- What is the difference between `@Autowired`, `@Inject`, and `@Resource`? `@Autowired` is
   Spring's own (by type, then by qualifier/name); `@Inject` (JSR-330) is by type; `@Resource`
   (JSR-250) is primarily by name.
 

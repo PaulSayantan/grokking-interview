@@ -602,28 +602,28 @@ another classic gotcha.)
 
 ## Common follow-up questions
 
-- **"What's the difference between the control plane and worker nodes?"** — Control plane stores
+- "What's the difference between the control plane and worker nodes?" — Control plane stores
   state (etcd) and makes decisions (apiserver, scheduler, controllers); worker nodes run your
   containers via kubelet + runtime, directed through the API.
-- **"Why can only the apiserver talk to etcd?"** — To funnel every change through authn/authz/
+- "Why can only the apiserver talk to etcd?" — To funnel every change through authn/authz/
   admission/validation and the watch machinery; direct etcd access bypasses all safety and can
   corrupt state.
-- **"How many etcd members should you run and why?"** — Odd numbers, 3 or 5, for Raft quorum;
+- "How many etcd members should you run and why?" — Odd numbers, 3 or 5, for Raft quorum;
   even counts add cost without extra fault tolerance.
-- **"Edge-triggered vs level-triggered controllers?"** — Kubernetes is level-triggered: acts on
+- "Edge-triggered vs level-triggered controllers?" — Kubernetes is level-triggered: acts on
   current observed state, so it self-corrects after missed events or restarts; watches are just an
   optimization.
-- **"What decides where a Pod runs?"** — The scheduler: filter feasible nodes (on requests,
+- "What decides where a Pod runs?" — The scheduler: filter feasible nodes (on requests,
   affinity, taints), then score and bind. Requests, not usage, gate scheduling.
-- **"Is the control plane in the data path for pod traffic?"** — No. Once Pods run, traffic flows
+- "Is the control plane in the data path for pod traffic?" — No. Once Pods run, traffic flows
   via CNI + kube-proxy/eBPF in the kernel; the apiserver isn't involved per-packet.
-- **"If the control plane goes down, do my apps stop?"** — Existing Pods keep running (kubelets are
+- "If the control plane goes down, do my apps stop?" — Existing Pods keep running (kubelets are
   autonomous); you just can't make changes or reschedule until it recovers.
-- **"Did Kubernetes remove Docker? Do my images break?"** — Only the kubelet's dockershim was
+- "Did Kubernetes remove Docker? Do my images break?" — Only the kubelet's dockershim was
   removed (v1.24). OCI images built by Docker run fine on containerd/CRI-O.
-- **"spec vs status?"** — spec = desired (you write it), status = actual (the controller writes
+- "spec vs status?" — spec = desired (you write it), status = actual (the controller writes
   it); reconciliation drives status toward spec.
-- **"What is a static Pod?"** — A Pod the kubelet runs from local manifest files, used to
+- "What is a static Pod?" — A Pod the kubelet runs from local manifest files, used to
   bootstrap the control plane; managed via files on the node, not the API.
 
 ## References

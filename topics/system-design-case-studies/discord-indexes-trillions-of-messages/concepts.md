@@ -235,28 +235,28 @@ still serving live search — is a textbook zero-downtime migration:
 
 ## Common follow-up questions
 
-- **"Why did one node failure fail ~40% of batches in the old system?"** Because a
+- "Why did one node failure fail ~40% of batches in the old system?" Because a
   batch of 50 fanned out to up to 50 nodes, and *any* failed operation re-enqueued
   the whole batch. With 100 nodes, a single dead node touched ~40% of in-flight
   batches. The fix — group by destination so each bulk request hits one index/node —
   shrinks the batch's blast radius to one failure domain.
-- **"Why migrate from Redis to Pub/Sub?"** Redis was best-effort: under backlog it
+- "Why migrate from Redis to Pub/Sub?" Redis was best-effort: under backlog it
   maxed CPU and dropped messages, corrupting the index silently. Pub/Sub guarantees
   delivery, so backlogs cause delay, not data loss. You trade a little latency for
   durability.
-- **"Why many small clusters instead of a couple of big ones?"** The master node's
+- "Why many small clusters instead of a couple of big ones?" The master node's
   cluster state doesn't scale, so huge clusters OOM the master; bulk fan-out grows
   with node count; and more nodes means more failures and slower recovery. ~40 small
   clusters keep coordination cheap and blast radius contained.
-- **"Why shard DMs by user but guilds by guild?"** Query pattern. A guild search hits
+- "Why shard DMs by user but guilds by guild?" Query pattern. A guild search hits
   one guild → shard by `guild_id`. A DM cross-search spans all your conversations →
   shard by `user_id` and store each DM twice, so either participant's search is a
   single-shard read.
-- **"When do multiple primary shards actually help?"** Only when one shard can't hold
+- "When do multiple primary shards actually help?" Only when one shard can't hold
   or serve the data — i.e. a BFG near `MAX_DOC`, where parallel query across shards
   beats the coordination overhead. For a normal guild, a single primary shard is
   faster because there's no fan-out.
-- **"How do they grow a BFG's index without downtime?"** Dual-index new writes to old
+- "How do they grow a BFG's index without downtime?" Dual-index new writes to old
   and new indices, backfill history into the new (2x-shard) index while queries still
   read the old one, then flip query traffic once backfill completes, then clean up
   the old index.

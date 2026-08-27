@@ -1132,30 +1132,30 @@ is a real debugging scenario. (Extends the "serve intermediates" advice.)
 
 ## Common follow-up questions
 
-- **Is SSL the same as TLS?** No — SSL is the obsolete predecessor (SSL 2.0/3.0, all broken).
+- Is SSL the same as TLS? No — SSL is the obsolete predecessor (SSL 2.0/3.0, all broken).
   What people call "SSL" today is really TLS. Current: TLS 1.2 and TLS 1.3.
-- **Why is TLS 1.3 faster?** 1-RTT full handshake (vs 2-RTT in 1.2), 0-RTT on resumption, and
+- Why is TLS 1.3 faster? 1-RTT full handshake (vs 2-RTT in 1.2), 0-RTT on resumption, and
   fewer round trips because the client sends a key_share in the first message.
-- **What is forward secrecy and how does TLS 1.3 guarantee it?** Compromising the server's
+- What is forward secrecy and how does TLS 1.3 guarantee it? Compromising the server's
   long-term private key later can't decrypt past sessions, because keys come from *ephemeral*
   (EC)DHE. TLS 1.3 mandates it by removing static RSA key exchange.
-- **What does a cipher suite specify?** Key exchange, authentication, bulk cipher, and hash
+- What does a cipher suite specify? Key exchange, authentication, bulk cipher, and hash
   (in 1.2). TLS 1.3 suites specify only the AEAD cipher + hash; key exchange/auth are separate.
-- **Why not use asymmetric crypto for everything?** It's far too slow for bulk data; TLS uses
+- Why not use asymmetric crypto for everything? It's far too slow for bulk data; TLS uses
   it only to authenticate and agree on a symmetric key.
-- **Server sends a valid cert — is that enough?** No; it must also **sign the handshake**
+- Server sends a valid cert — is that enough? No; it must also **sign the handshake**
   (CertificateVerify) to prove it holds the matching private key, and the client must verify
   chain + hostname + validity + revocation.
-- **Why is the certificate encrypted in TLS 1.3 but not 1.2?** Privacy — the cert reveals the
+- Why is the certificate encrypted in TLS 1.3 but not 1.2? Privacy — the cert reveals the
   server identity, so 1.3 sends it under handshake keys.
-- **Why can't you just run TLS over UDP for HTTP/3?** TLS's record/handshake state machine
+- Why can't you just run TLS over UDP for HTTP/3? TLS's record/handshake state machine
   needs reliable, ordered delivery; QUIC provides that per-stream and integrates the TLS 1.3
   handshake directly.
-- **What leaks even over HTTPS?** Destination IP, port, traffic size/timing, DNS query
+- What leaks even over HTTPS? Destination IP, port, traffic size/timing, DNS query
   (unless DoH/DoT), and SNI (unless ECH).
-- **When is 0-RTT unsafe?** For non-idempotent requests — early data can be replayed, so
+- When is 0-RTT unsafe? For non-idempotent requests — early data can be replayed, so
   restrict 0-RTT to safe GETs.
-- **How do client and server agree on HTTP/2?** ALPN in the TLS handshake (`h2`).
+- How do client and server agree on HTTP/2? ALPN in the TLS handshake (`h2`).
 
 ---
 

@@ -842,48 +842,48 @@ is never a defense** — only preventing the injection is.
 
 ## Common follow-up questions
 
-- **"What is the single best defense against SQL injection?"** Parameterized queries /
+- "What is the single best defense against SQL injection?" Parameterized queries /
   prepared statements — they separate query structure from data so bound values can never
   be parsed as SQL. Escaping and WAFs are secondary.
-- **"Why isn't escaping enough?"** Numeric/unquoted contexts, charset/encoding bypasses,
+- "Why isn't escaping enough?" Numeric/unquoted contexts, charset/encoding bypasses,
   and the need to escape perfectly for every DB and context; one miss reopens the hole.
   Blocklists are additionally bypassable and break valid data.
-- **"Can you parameterize a table or column name?"** No — placeholders bind *values*, not
+- "Can you parameterize a table or column name?" No — placeholders bind *values*, not
   identifiers or SQL keywords. Use a strict allowlist mapping for dynamic identifiers.
-- **"What is second-order SQLi?"** A stored malicious value that is safely stored, then
+- "What is second-order SQLi?" A stored malicious value that is safely stored, then
   later concatenated into a query in a different code path where it fires. Fix: treat data
   from your own DB as untrusted and parameterize *every* query.
-- **"How do you detect SQLi when there's no error and no visible output?"** Boolean-based
+- "How do you detect SQLi when there's no error and no visible output?" Boolean-based
   (compare true/false page states) and time-based blind (conditional `SLEEP`/`pg_sleep`/
   `WAITFOR` and measure latency), or out-of-band via DNS/HTTP.
-- **"How is NoSQL injection different?"** You inject **operators/objects** (`$ne`, `$gt`,
+- "How is NoSQL injection different?" You inject **operators/objects** (`$ne`, `$gt`,
   `$where`) instead of breaking a quoted string. Fix by enforcing input types (reject
   objects where a string is expected) and not passing raw user objects as query documents.
-- **"How do you safely run an OS command with user input?"** Avoid the shell; use an
+- "How do you safely run an OS command with user input?" Avoid the shell; use an
   **argv array** so input is a single argument. Then also guard **argument injection**
   (values starting with `-`) via allowlisting and `--` end-of-options.
-- **"Are stored procedures safe?"** Only if they don't build dynamic SQL by concatenation
+- "Are stored procedures safe?" Only if they don't build dynamic SQL by concatenation
   from their parameters. Dynamic SQL inside a proc is still injectable.
-- **"Is a WAF a valid SQLi defense?"** No — it's a bypassable, context-blind blocklist;
+- "Is a WAF a valid SQLi defense?" No — it's a bypassable, context-blind blocklist;
   use it only as defense in depth / virtual patching, never as the primary control.
-- **"Why still use least-privilege DB accounts if you parameterize?"** Defense in depth —
+- "Why still use least-privilege DB accounts if you parameterize?" Defense in depth —
   it bounds the damage of any injection that slips through (no DDL, no OS commands, limited
   tables).
-- **"How do you safely pass an `IN` list of user-supplied IDs?"** Generate N `?` placeholders
+- "How do you safely pass an `IN` list of user-supplied IDs?" Generate N `?` placeholders
   from a validated count (`IN (?,?,?)`) and bind N values — never bind a CSV string to one
   placeholder, and never bind an array to one `?`.
-- **"We added a WAF and it caught our SQLi test — are we safe?"** No. Signature engines are
+- "We added a WAF and it caught our SQLi test — are we safe?" No. Signature engines are
   bypassable (JSON operators per Claroty Team82 2022, plus encoding/case/comment tricks) and
   cannot see second-order or non-HTTP injection. Fix the code.
-- **"What class of injection was Log4Shell, and what actually fixes it?"** JNDI/lookup
+- "What class of injection was Log4Shell, and what actually fixes it?" JNDI/lookup
   interpolation injection (CVE-2021-44228) — untrusted logged strings interpreted for
   `${jndi:...}` lookups. Fix: upgrade Log4j (2.17.1+); `formatMsgNoLookups` was only partial.
-- **"What was the Equifax injection?"** CVE-2017-5638 — Apache Struts 2 evaluated the
+- "What was the Equifax injection?" CVE-2017-5638 — Apache Struts 2 evaluated the
   `Content-Type` header as an OGNL expression, an expression-language injection (CWE-917)
   giving RCE.
-- **"Is `{{7*7}}` returning 49 XSS or SSTI?"** SSTI — it was evaluated **server-side**
+- "Is `{{7*7}}` returning 49 XSS or SSTI?" SSTI — it was evaluated **server-side**
   (RCE-capable). If the payload only executes in the browser, that's XSS.
-- **"How is `escapeshellcmd` different from `escapeshellarg`?"** `escapeshellcmd` still lets
+- "How is `escapeshellcmd` different from `escapeshellarg`?" `escapeshellcmd` still lets
   input add an extra argument (argument injection); `escapeshellarg` quotes to a single
   argument. Prefer an argv array with no shell.
 

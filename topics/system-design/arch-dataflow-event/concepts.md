@@ -874,32 +874,32 @@ CEP is often built *on* a stream processor.
 
 ## Common follow-up questions
 
-- **"Pipe-and-Filter vs. Chain of Responsibility?"** Different altitudes:
+- "Pipe-and-Filter vs. Chain of Responsibility?" Different altitudes:
   pipe-and-filter is a *system* data-flow style where every stage transforms and passes
   data along; CoR is an *object* pattern where one handler in a chain claims a request
   and stops. Don't conflate the two.
-- **"When would you choose Kappa over Lambda?"** When a single replayable log + one
+- "When would you choose Kappa over Lambda?" When a single replayable log + one
   stream engine can meet your correctness needs — Kappa removes Lambda's dual code paths.
   Stay with Lambda (or add a warehouse) when heavy ad-hoc historical/OLAP analytics
   dominate.
-- **"Broker vs. mediator EDA topology?"** Broker = no coordinator, maximal
+- "Broker vs. mediator EDA topology?" Broker = no coordinator, maximal
   scalability/extensibility, weak workflow control; mediator = central orchestrator,
   strong error handling/visibility, coupling/SPOF risk. Same axis as choreography vs.
   orchestration for sagas.
-- **"Does CQRS require Event Sourcing (or vice versa)?"** No — they're orthogonal and
+- "Does CQRS require Event Sourcing (or vice versa)?" No — they're orthogonal and
   merely compose well. CQRS separates read/write models; Event Sourcing changes how state
   is stored.
-- **"Event Sourcing vs. CDC?"** Event Sourcing makes events the primary source of truth
+- "Event Sourcing vs. CDC?" Event Sourcing makes events the primary source of truth
   by design; CDC derives an event stream from a database's existing transaction log after
   the fact. Deep dive: `event-driven-cqrs-saga-cdc`.
-- **"Reactive vs. Event-Driven — same thing?"** Overlapping but distinct: EDA is the
+- "Reactive vs. Event-Driven — same thing?" Overlapping but distinct: EDA is the
   event *topology*; Reactive is the *-ilities discipline* (responsive/resilient/elastic)
   delivered via non-blocking message-passing and backpressure.
-- **"Which -ility does this style optimize?"** Be ready to name it: pipe-and-filter →
+- "Which -ility does this style optimize?" Be ready to name it: pipe-and-filter →
   modularity/reusability; batch → throughput/cost; stream → latency/freshness; broker EDA
   → scalability/extensibility; mediator EDA → controllability/recoverability; CQRS →
   read/write scalability; Event Sourcing → auditability; Reactive → resilience/elasticity.
-- **"How is this group different from the `dp-*` Design Patterns group?"** Altitude:
+- "How is this group different from the `dp-*` Design Patterns group?" Altitude:
   `arch-*` styles structure a *whole application/deployment*; `dp-*` patterns structure
   *classes and objects* within a process.
 

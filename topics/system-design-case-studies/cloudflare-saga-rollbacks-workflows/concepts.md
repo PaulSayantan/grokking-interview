@@ -192,29 +192,29 @@ The concrete specifics the post does give are:
 
 ## Common follow-up questions
 
-- **"Why isn't durable execution alone enough — why do you need rollback?"** Durable
+- "Why isn't durable execution alone enough — why do you need rollback?" Durable
   execution resumes *unfinished* work by replaying from persisted state. It cannot undo
   *finished* work that had external side effects. Reversing a committed debit requires a
   new compensating credit — the saga pattern — which is what rollback adds.
-- **"Why not just use a `try/catch`?"** A catch block only sees in-memory state at its
+- "Why not just use a `try/catch`?" A catch block only sees in-memory state at its
   exact execution point. A Workflow can crash and resume, at which point that in-memory
   state is gone. Rollback handlers instead read the engine's persisted step history, so
   they know what actually completed regardless of restarts.
-- **"When exactly do rollbacks fire?"** Only when the Workflow is about to fail
+- "When exactly do rollbacks fire?" Only when the Workflow is about to fail
   terminally — not on every caught step error a retry might fix. The failing step is
   itself eligible if it registered a handler.
-- **"In what order do compensations run?"** Reverse step-*start* order, not completion
+- "In what order do compensations run?" Reverse step-*start* order, not completion
   order — because parallel steps finish unpredictably, and unwinding most-recently-
   started-first is the deterministic, stack-like behavior you want.
-- **"Why must rollback handlers be idempotent?"** Because a crash can cause a handler to
+- "Why must rollback handlers be idempotent?" Because a crash can cause a handler to
   run more than once. An idempotency key lets the downstream system dedupe so the
   reversing effect applies at most once.
-- **"How does rollback survive an engine crash?"** Handlers are held as callable stubs
+- "How does rollback survive an engine crash?" Handlers are held as callable stubs
   (`dup()`'d Workers RPC references). On restart those stubs are lost, so Workflows
   replays the code — reading persisted results instead of re-running completed forward
   steps — and each `step.do()` with a rollback re-registers its stub without repeating
   the side effect.
-- **"Why metadata on `step.do()` instead of a fluent or builder API?"** The fluent form
+- "Why metadata on `step.do()` instead of a fluent or builder API?" The fluent form
   made step timing ambiguous under promise pipelining; the builder form added ceremony
   and a forgettable `.run()`. Metadata is less magical but simpler, clearer, and lets
   existing `step.do()` calls keep working unchanged.

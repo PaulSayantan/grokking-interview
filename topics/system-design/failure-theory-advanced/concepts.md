@@ -624,35 +624,35 @@ without a timeout is a bug, not a style choice.
 
 ## Common interview follow-up questions
 
-- **"Your service is at 100% CPU and near-zero goodput; adding hosts didn't
-  help. What's happening and what do you do?"** — Suspect a metastable failure
+- "Your service is at 100% CPU and near-zero goodput; adding hosts didn't
+  help. What's happening and what do you do?" — Suspect a metastable failure
   (likely retry storm or GC spiral). Adding capacity feeds the amplifier. Shed
   load below the *sustaining* threshold, disable/curtail retries (open breakers,
   drain retry budget), flush backlog; then re-introduce traffic gradually.
-- **"Three services each retry 3×. What's the load on the datastore during a
-  partial failure?"** — Up to 3^3 = 27×. Fix: retry at one layer, use a
+- "Three services each retry 3×. What's the load on the datastore during a
+  partial failure?" — Up to 3^3 = 27×. Fix: retry at one layer, use a
   token-bucket retry budget, propagate deadlines so lower layers fail fast.
-- **"Why is a timeout at p99 usually wrong?"** — It fails ~1% of *healthy*
+- "Why is a timeout at p99 usually wrong?" — It fails ~1% of *healthy*
   requests (false positives) and triggers needless retries → self-inflicted load.
   Set from p99.9/p99.99 + margin, and use deadline propagation.
-- **"When is a circuit breaker the wrong tool?"** — When the dependency degrades
+- "When is a circuit breaker the wrong tool?" — When the dependency degrades
   *gracefully* under load rather than being binary up/down; an adaptive
   concurrency limiter keeps serving what it can, whereas a breaker's binary trip
   either over- or under-shoots.
-- **"FIFO vs LIFO for a request queue?"** — FIFO under normal load; LIFO (or
+- "FIFO vs LIFO for a request queue?" — FIFO under normal load; LIFO (or
   adaptive) *under overload*, because the front of a deep FIFO queue is stale/past
   deadline — serving it is wasted work. Also drop past-deadline items unprocessed.
-- **"Why can adding a fallback make things worse?"** — Untested path, correlated
+- "Why can adding a fallback make things worse?" — Untested path, correlated
   demand (all traffic shifts at once to an unsized alternate), bimodal behavior.
   Prefer fail-and-shed or safe fallbacks (stale cache) that add no dependency.
-- **"Full vs decorrelated jitter — when each?"** — Full jitter minimizes total
+- "Full vs decorrelated jitter — when each?" — Full jitter minimizes total
   competing calls; decorrelated jitter climbs faster without tracking an attempt
   counter and gives a good spread — pick decorrelated when you want increasing
   backoff without per-attempt state.
-- **"How do you detect a gray failure that health checks miss?"** — Client-side/
+- "How do you detect a gray failure that health checks miss?" — Client-side/
   outlier detection: eject on observed latency/error rate from the caller's
   perspective, not on the server's self-reported health.
-- **"Why does over-provisioning increase metastability risk?"** — More headroom
+- "Why does over-provisioning increase metastability risk?" — More headroom
   hides the cliff and, because amplification is multiplicative, a bigger normal
   load means a bigger absolute surge when the trigger hits.
 

@@ -212,31 +212,31 @@ guarantee gets stricter — a realistic, honest way to state correctness SLAs.
 
 ## Common follow-up questions
 
-- **"Why double-entry bookkeeping instead of just storing balances?"** Because
+- "Why double-entry bookkeeping instead of just storing balances?" Because
   double-entry gives a *mathematical* invariant: entries must balance, and clearing
   accounts must zero out at steady state. That turns "is this correct?" into a query
   ("are any clearing balances nonzero?") instead of a judgment call. A single stored
   balance can be silently wrong; an unbalanced ledger cannot hide.
-- **"Why make it immutable — isn't that just harder to operate?"** Immutability is
+- "Why make it immutable — isn't that just harder to operate?" Immutability is
   what makes it *auditable*: history can never be quietly rewritten, so the log is
   trustworthy evidence and past state is reconstructible by replay. Corrections
   become explicit compensating events (revert-and-reprocess), which is also an audit
   trail. The operational cost is real and accepted for that guarantee.
-- **"Clearing, timeliness, completeness — why three separate metrics?"** They catch
+- "Clearing, timeliness, completeness — why three separate metrics?" They catch
   three different failure modes. Clearing catches *wrong* data (won't balance),
   timeliness catches *late* data, completeness catches *missing* data. Late and
   absent data can both look fine in whatever did arrive, so a single correctness
   check would miss them.
-- **"How does completeness actually get checked?"** Two ways: a cross-system check
+- "How does completeness actually get checked?" Two ways: a cross-system check
   that every ID in a producer's database has a matching Ledger event, plus
   statistical anomaly detection on whether the expected *volume* of data arrived at
   the expected time — so both individual gaps and bulk shortfalls are caught.
-- **"What happens when a fund flow doesn't clear?"** The unmatched amount stays as a
+- "What happens when a fund flow doesn't clear?" The unmatched amount stays as a
   nonzero clearing balance (the "stuck water"), a simple query surfaces it, alerting
   routes it to an owner for root-cause attribution, and the fix flows through the
   two-phase repair pipeline. If the cause is a third party, ownership is reassigned
   and the alert excluded.
-- **"Where else does this pattern apply?"** Any system needing provable
+- "Where else does this pattern apply?" Any system needing provable
   correctness of critical distributed state: event-sourced systems generally,
   reconciliation between microservices, exactly-once accounting, and audit logs.
   The ledger-plus-invariants approach is the reusable core.

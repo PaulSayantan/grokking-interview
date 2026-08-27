@@ -543,31 +543,31 @@ correct answer. See also `webhooks-and-async-api-patterns` and
 
 ## Common follow-up questions
 
-- **"Why is base64-in-JSON a bad idea for file upload?"** ~33% size inflation,
+- "Why is base64-in-JSON a bad idea for file upload?" ~33% size inflation,
   forces in-memory buffering/decoding (blocks streaming, risks OOM), extra CPU.
   Fine only for tiny inline blobs.
-- **"How do you upload a 5 GB file reliably?"** Pre-signed direct-to-storage +
+- "How do you upload a 5 GB file reliably?" Pre-signed direct-to-storage +
   multipart/resumable (S3 multipart or tus): parallel parts, retry only failed
   parts, resume from offset, never touches the app tier.
-- **"How do you validate an uploaded file's type?"** Inspect magic bytes /
+- "How do you validate an uploaded file's type?" Inspect magic bytes /
   signature (libmagic, Tika), cross-check against extension and declared
   `Content-Type`, enforce an allowlist; return `415` on mismatch. Never trust the
   extension or client `Content-Type`.
-- **"How do you serve private media without proxying bytes through your app?"**
+- "How do you serve private media without proxying bytes through your app?"
   Authorize in the app, then issue a short-lived signed URL/cookie so the CDN or
   storage serves the bytes directly.
-- **"What status code for an upload that kicks off transcoding?"** `202 Accepted`
+- "What status code for an upload that kicks off transcoding?" `202 Accepted`
   with a status resource to poll (or a webhook).
-- **"What status for an oversized upload?"** `413 Content Too Large`.
-- **"How does video seeking work over HTTP?"** `Range` request → `206 Partial
+- "What status for an oversized upload?" `413 Content Too Large`.
+- "How does video seeking work over HTTP?" `Range` request → `206 Partial
   Content` with `Content-Range`; server advertises `Accept-Ranges: bytes`.
-- **"What's SSRF in an upload context and how do you prevent it?"** URL-fetch
+- "What's SSRF in an upload context and how do you prevent it?" URL-fetch
   uploads letting an attacker reach internal/metadata endpoints; defend with
   scheme/host allowlists, blocking private IP ranges (re-validated after DNS),
   and no redirects to internal targets.
-- **"Where do you store the file — DB or object storage?"** Blob in object
+- "Where do you store the file — DB or object storage?" Blob in object
   storage, metadata (incl. a status state machine) in the DB.
-- **"How do you cap decompression / prevent zip bombs?"** Limit decompressed
+- "How do you cap decompression / prevent zip bombs?" Limit decompressed
   size, compression ratio, and nesting depth; abort past thresholds.
 
 ## References

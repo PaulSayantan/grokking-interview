@@ -352,25 +352,25 @@ In Spring Boot 3 AOT / GraalVM native builds, CGLIB proxying and runtime classpa
 
 ## Common follow-up questions
 
-- **Are `@Service` and `@Component` different at runtime?** No behavioral difference today; `@Service` is a semantic marker meta-annotated with `@Component`. Only `@Repository` adds runtime behavior (exception translation).
-- **What does `@RestController` add over `@Controller`?** It's `@Controller` + `@ResponseBody`, so return values are serialized to the response body instead of being resolved as view names.
-- **Why is `@Configuration` proxied with CGLIB?** So inter-`@Bean`-method calls return the shared container singleton rather than creating new instances. `proxyBeanMethods = false` (lite mode) disables this for faster startup when not needed.
-- **`@Bean` vs `@Component`?** `@Bean` = method-level, explicit, ideal for third-party/config-heavy beans; `@Component` = class-level, scanned, for your own classes.
-- **How does component scanning read classes without loading them?** ASM-based metadata reading in `ClassPathScanningCandidateComponentProvider`.
-- **`@Primary` vs `@Qualifier` precedence?** `@Qualifier` at the injection point beats `@Primary`.
-- **`${}` vs `#{}`?** Property placeholder vs SpEL. Placeholders resolve first; SpEL is a full expression language.
-- **Why does `@Value("${x}")` fail at startup?** No such property and no default → unresolved placeholder → `IllegalArgumentException`.
-- **Field vs constructor injection?** Prefer constructor: immutability (`final`), testability, explicit dependencies, no reflection, fail-fast on missing deps.
-- **JDK proxy vs CGLIB for AOP?** JDK dynamic proxy when the bean implements an interface (proxies the interface); CGLIB subclass when there's no interface (or `proxyTargetClass=true`). `@Configuration` always uses CGLIB.
-- **Does exception translation work if I catch and rethrow inside the repository?** No — translation happens at the proxy boundary on exceptions propagating out; swallowing them bypasses it.
-- **Why must post-processor `@Bean` methods be `static`?** So Spring can create them very early without prematurely instantiating the (not-yet-fully-configured) `@Configuration` class; non-static risks skipped `@Autowired`/`@Value` and a warning.
-- **Can a `@Bean` method be `private` or `final` in full `@Configuration`?** No — the CGLIB subclass must override `@Bean` methods to intercept them; `private`/`final` methods lose interception silently.
-- **What happens with two `@Primary` beans of the same type?** `NoUniqueBeanDefinitionException` — Spring needs exactly one primary. `@Fallback` (6.2+) is the inverse marker.
-- **Difference between an `ImportSelector` and a `DeferredImportSelector`?** The deferred one runs after all other config classes are parsed (so it sees the full picture and user overrides) — the basis of auto-configuration ordering.
-- **Does `@Order` change bean creation order?** No — only collection-injection ordering and config/advisor ordering. Instantiation order follows the dependency graph and `@DependsOn`.
-- **Why can't `@Value`/`@Autowired` be used inside a `BeanFactoryPostProcessor`?** Those post-processors run before the annotation-processing `BeanPostProcessor`, so the fields aren't injected yet — read the `Environment` directly.
-- **Does `@Value` support relaxed binding like `@ConfigurationProperties`?** No — the placeholder key must match exactly.
-- **Are prototype beans' `@PreDestroy` callbacks invoked?** No — the container does not manage prototype destruction.
+- Are `@Service` and `@Component` different at runtime? No behavioral difference today; `@Service` is a semantic marker meta-annotated with `@Component`. Only `@Repository` adds runtime behavior (exception translation).
+- What does `@RestController` add over `@Controller`? It's `@Controller` + `@ResponseBody`, so return values are serialized to the response body instead of being resolved as view names.
+- Why is `@Configuration` proxied with CGLIB? So inter-`@Bean`-method calls return the shared container singleton rather than creating new instances. `proxyBeanMethods = false` (lite mode) disables this for faster startup when not needed.
+- `@Bean` vs `@Component`? `@Bean` = method-level, explicit, ideal for third-party/config-heavy beans; `@Component` = class-level, scanned, for your own classes.
+- How does component scanning read classes without loading them? ASM-based metadata reading in `ClassPathScanningCandidateComponentProvider`.
+- `@Primary` vs `@Qualifier` precedence? `@Qualifier` at the injection point beats `@Primary`.
+- `${}` vs `#{}`? Property placeholder vs SpEL. Placeholders resolve first; SpEL is a full expression language.
+- Why does `@Value("${x}")` fail at startup? No such property and no default → unresolved placeholder → `IllegalArgumentException`.
+- Field vs constructor injection? Prefer constructor: immutability (`final`), testability, explicit dependencies, no reflection, fail-fast on missing deps.
+- JDK proxy vs CGLIB for AOP? JDK dynamic proxy when the bean implements an interface (proxies the interface); CGLIB subclass when there's no interface (or `proxyTargetClass=true`). `@Configuration` always uses CGLIB.
+- Does exception translation work if I catch and rethrow inside the repository? No — translation happens at the proxy boundary on exceptions propagating out; swallowing them bypasses it.
+- Why must post-processor `@Bean` methods be `static`? So Spring can create them very early without prematurely instantiating the (not-yet-fully-configured) `@Configuration` class; non-static risks skipped `@Autowired`/`@Value` and a warning.
+- Can a `@Bean` method be `private` or `final` in full `@Configuration`? No — the CGLIB subclass must override `@Bean` methods to intercept them; `private`/`final` methods lose interception silently.
+- What happens with two `@Primary` beans of the same type? `NoUniqueBeanDefinitionException` — Spring needs exactly one primary. `@Fallback` (6.2+) is the inverse marker.
+- Difference between an `ImportSelector` and a `DeferredImportSelector`? The deferred one runs after all other config classes are parsed (so it sees the full picture and user overrides) — the basis of auto-configuration ordering.
+- Does `@Order` change bean creation order? No — only collection-injection ordering and config/advisor ordering. Instantiation order follows the dependency graph and `@DependsOn`.
+- Why can't `@Value`/`@Autowired` be used inside a `BeanFactoryPostProcessor`? Those post-processors run before the annotation-processing `BeanPostProcessor`, so the fields aren't injected yet — read the `Environment` directly.
+- Does `@Value` support relaxed binding like `@ConfigurationProperties`? No — the placeholder key must match exactly.
+- Are prototype beans' `@PreDestroy` callbacks invoked? No — the container does not manage prototype destruction.
 
 ## References
 

@@ -907,30 +907,30 @@ well-behaved source (WebClient call, R2DBC query) then aborts its work.
 
 ## Common follow-up questions
 
-- **Is WebFlux always faster than MVC?** No. For CPU-bound or low-concurrency
+- Is WebFlux always faster than MVC? No. For CPU-bound or low-concurrency
   work it can be equal or slower; it wins for I/O-bound, high-concurrency,
   streaming workloads with an end-to-end non-blocking stack.
-- **Can Spring MVC return `Mono`/`Flux`?** Yes — MVC supports reactive return
+- Can Spring MVC return `Mono`/`Flux`? Yes — MVC supports reactive return
   types via async servlet support, but it still uses a servlet thread per
   request, so the concurrency benefit is limited.
-- **What happens if I don't subscribe?** Nothing runs; the publisher is lazy.
-- **Difference between `subscribeOn` and `publishOn`?** `subscribeOn` sets the
+- What happens if I don't subscribe? Nothing runs; the publisher is lazy.
+- Difference between `subscribeOn` and `publishOn`? `subscribeOn` sets the
   thread for the subscription/source (affects upstream, position-agnostic);
   `publishOn` switches the thread for downstream operators from that point.
-- **`map` vs `flatMap`?** `map` is synchronous 1:1; `flatMap` is asynchronous
+- `map` vs `flatMap`? `map` is synchronous 1:1; `flatMap` is asynchronous
   1:N returning publishers, merged (unordered). `concatMap` keeps order.
-- **Why `boundedElastic`?** To safely run blocking/legacy calls off the event
+- Why `boundedElastic`? To safely run blocking/legacy calls off the event
   loop, with a capped, reusable, elastic thread pool.
-- **Is `RestTemplate` deprecated?** No — it is in maintenance mode; `WebClient`
+- Is `RestTemplate` deprecated? No — it is in maintenance mode; `WebClient`
   (reactive) and `RestClient` (blocking, Spring 6.1+) are the modern choices.
-- **How do you test reactive code?** `StepVerifier` (assert emissions/errors) and
+- How do you test reactive code? `StepVerifier` (assert emissions/errors) and
   `WebTestClient` (endpoint integration).
-- **How is backpressure achieved over HTTP?** Reactor Netty maps demand to TCP
+- How is backpressure achieved over HTTP? Reactor Netty maps demand to TCP
   flow control (read backpressure); for streaming responses the client's demand
   throttles the server.
-- **What replaces `ThreadLocal`?** Reactor `Context` / `contextWrite`, plus
+- What replaces `ThreadLocal`? Reactor `Context` / `contextWrite`, plus
   Micrometer context propagation for bridging existing `ThreadLocal`s.
-- **Can MVC and WebFlux run in one app?** Not as the primary web stack — one is
+- Can MVC and WebFlux run in one app? Not as the primary web stack — one is
   chosen at startup (`web-application-type`); but you can use `WebClient` in an
   MVC app and Reactor types in services.
 

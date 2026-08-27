@@ -897,46 +897,46 @@ bodyless `204`/`201` rather than echoing the resource.
 
 ## Common follow-up questions
 
-- **Why not just return the database entity as JSON?** Over-exposure of sensitive fields
+- Why not just return the database entity as JSON? Over-exposure of sensitive fields
   (OWASP API3:2023), mass-assignment on writes, and coupling the wire contract to schema
   migrations. Use request/response DTOs with explicit allowlists.
-- **`camelCase` or `snake_case`?** Either — but be consistent across the whole API;
+- `camelCase` or `snake_case`? Either — but be consistent across the whole API;
   switching later is a breaking change. `camelCase` is the common default for JS-facing
   JSON, `snake_case` for Python/Ruby-centric APIs.
-- **`null` vs omitting a field — does it matter?** On reads, document which you mean
+- `null` vs omitting a field — does it matter? On reads, document which you mean
   (present-but-empty vs no-information). On a JSON Merge Patch write it's critical: `null`
   deletes the field, absence leaves it unchanged.
-- **When do you return `415` vs `406`?** `415 Unsupported Media Type` when you can't parse
+- When do you return `415` vs `406`? `415 Unsupported Media Type` when you can't parse
   the request's `Content-Type`; `406 Not Acceptable` when you can't produce anything the
   client's `Accept` allows.
-- **What's the difference between `Content-Type` and `Accept`?** `Content-Type` describes
+- What's the difference between `Content-Type` and `Accept`? `Content-Type` describes
   the body being sent; `Accept` states what the client is willing to receive.
-- **What does `Accept-Encoding` negotiate?** Compression (`gzip`, `br`, `zstd`), not
+- What does `Accept-Encoding` negotiate? Compression (`gzip`, `br`, `zstd`), not
   character encoding. Charset for JSON is always UTF-8, and `Accept-Charset` is deprecated.
-- **How do you avoid over-fetching in REST without GraphQL?** Sparse fieldsets
+- How do you avoid over-fetching in REST without GraphQL? Sparse fieldsets
   (`?fields=...`) for projection and expansion (`?expand=...`) for related resources.
-- **How would you version via media types?** `Accept: application/vnd.example.v2+json`;
+- How would you version via media types? `Accept: application/vnd.example.v2+json`;
   weigh it against URL versioning (more discoverable, browser/curl-friendly).
-- **How do you send money and large IDs safely in JSON?** Money as integer minor units or
+- How do you send money and large IDs safely in JSON? Money as integer minor units or
   decimal string + currency code; large 64-bit IDs as strings to dodge the 2^53 float limit.
-- **Why must you send `Vary`?** So shared caches don't serve a representation negotiated
+- Why must you send `Vary`? So shared caches don't serve a representation negotiated
   for one client (e.g. French, gzip) to a client that asked for something else.
-- **How does a client say "don't send the body back" after a write?** `Prefer:
+- How does a client say "don't send the body back" after a write? `Prefer:
   return=minimal`; the server answers `204`/`201` with `Preference-Applied: return=minimal`
   (and `Vary: Prefer` if cached).
-- **How do you send a large search filter and keep it cacheable?** Not GET-with-body
+- How do you send a large search filter and keep it cacheable? Not GET-with-body
   (undefined semantics, RFC 9110 §9.3.1) and not plain POST (uncacheable) — use the HTTP
   **QUERY** method (safe, idempotent, request body in the cache key).
-- **What's the standard error body?** RFC 9457 Problem Details (`application/problem+json`):
+- What's the standard error body? RFC 9457 Problem Details (`application/problem+json`):
   `type`, `title`, `status`, `detail`, `instance`, plus extension members like `errors[]`.
-- **`Location` vs `Content-Location`?** `Location` = another resource (created/redirect/
+- `Location` vs `Content-Location`? `Location` = another resource (created/redirect/
   async monitor); `Content-Location` = canonical URI of the representation in *this* body
   (the specific negotiated variant).
-- **Partial response vs partial representation?** Range/`206` transfers part of the *bytes*;
+- Partial response vs partial representation? Range/`206` transfers part of the *bytes*;
   sparse fieldsets project part of the *fields*. Different axes.
-- **How do you stream a huge result set?** NDJSON (`application/x-ndjson`) or JSON sequences
+- How do you stream a huge result set? NDJSON (`application/x-ndjson`) or JSON sequences
   (`application/json-seq`) over chunked transfer — not one buffered JSON array; SSE for push.
-- **Is adding an enum value breaking?** Depends on the client's unknown-value handling;
+- Is adding an enum value breaking? Depends on the client's unknown-value handling;
   publish a must-ignore rule and reserve `UNSPECIFIED` (AIP-126).
 
 ## References

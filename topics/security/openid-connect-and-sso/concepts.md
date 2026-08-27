@@ -830,46 +830,46 @@ own `state`/`nonce`, so those checks pass on the attacker's side. Redirect-URI e
 
 ## Common follow-up questions
 
-- **What is the difference between authentication and authorization, and which does OIDC add to
-  OAuth?** OAuth = authorization (delegated API access); OIDC adds authentication (proving who
+- What is the difference between authentication and authorization, and which does OIDC add to
+  OAuth? OAuth = authorization (delegated API access); OIDC adds authentication (proving who
   the user is) via the ID Token.
-- **Why can't I just use the access token to log the user in?** It's a bearer credential for an
+- Why can't I just use the access token to log the user in? It's a bearer credential for an
   API, often opaque to the client, audience-bound to a resource server, and says nothing about
   the authentication event — leading to token-substitution bugs.
-- **`state` vs `nonce`?** `state` is reflected on the redirect (CSRF/callback binding); `nonce`
+- `state` vs `nonce`? `state` is reflected on the redirect (CSRF/callback binding); `nonce`
   is embedded in the ID Token (replay defense).
-- **How do you validate an ID Token?** Verify signature (correct `kid`, expected asymmetric
+- How do you validate an ID Token? Verify signature (correct `kid`, expected asymmetric
   `alg`, reject `none`), then `iss`, `aud`==client_id, `exp`/`iat`, and `nonce`.
-- **What's in the discovery document and JWKS, and how does key rotation work?** Endpoints +
+- What's in the discovery document and JWKS, and how does key rotation work? Endpoints +
   supported params; JWKS holds public signing keys keyed by `kid`; rotation = publish new key,
   clients match `kid` and refresh.
-- **SAML vs OIDC?** XML assertions + XML-DSig vs JWT on OAuth 2.0; SAML for enterprise web SSO,
+- SAML vs OIDC? XML assertions + XML-DSig vs JWT on OAuth 2.0; SAML for enterprise web SSO,
   OIDC for mobile/SPA/API.
-- **What is XML Signature Wrapping?** Injecting an unsigned forged assertion while keeping the
+- What is XML Signature Wrapping? Injecting an unsigned forged assertion while keeping the
   original signed one so the verifier passes but the app reads the forged element.
-- **Why is IdP-initiated SSO risky?** Unsolicited assertion, no `InResponseTo`/`state`/`nonce`,
+- Why is IdP-initiated SSO risky? Unsolicited assertion, no `InResponseTo`/`state`/`nonce`,
   enabling login CSRF and replay.
-- **Front-channel vs back-channel logout?** Iframe-based browser logout (fragile under 3P-cookie
+- Front-channel vs back-channel logout? Iframe-based browser logout (fragile under 3P-cookie
   blocking) vs server-to-server signed Logout Token (reliable).
-- **What is a mix-up attack and how do you prevent it?** Attacker steers a multi-OP client's
+- What is a mix-up attack and how do you prevent it? Attacker steers a multi-OP client's
   response to the wrong OP; pin expected `iss` per request, use the `iss` response param
   (RFC 9207).
-- **How are `c_hash`/`at_hash` computed and why?** Hash the ASCII value with the hash matching
+- How are `c_hash`/`at_hash` computed and why? Hash the ASCII value with the hash matching
   the ID Token's JWS `alg`, take the left-most half, base64url-encode. They bind a
   front-channel ID Token to the code/access token to stop hybrid-flow token substitution.
-- **Why is matching "Sign in with X" users by email dangerous?** Unverified-email / pre-hijack
+- Why is matching "Sign in with X" users by email dangerous? Unverified-email / pre-hijack
   ATO and merge attacks; key on `(iss, sub)`, require `email_verified`, never auto-link by email.
-- **Name a recent SSO CVE and its root cause.** Ruby-SAML CVE-2025-25291/292 — parser
+- Name a recent SSO CVE and its root cause. Ruby-SAML CVE-2025-25291/292 — parser
   differential (REXML vs Nokogiri) with signature and hash verification not linked → full auth
   bypass from one valid signed assertion.
-- **What can go wrong if your OP fetches `logo_uri`/`jwks_uri`/`sector_identifier_uri`?**
+- What can go wrong if your OP fetches `logo_uri`/`jwks_uri`/`sector_identifier_uri`?
   Second-order SSRF (and stored XSS for `logo_uri`); allowlist and validate server-fetched URLs
   (CVE-2021-26715).
-- **Public vs pairwise `sub`?** Public = same `sub` to all RPs; pairwise (PPID) = different
+- Public vs pairwise `sub`? Public = same `sub` to all RPs; pairwise (PPID) = different
   `sub` per RP/sector to prevent cross-RP correlation, grouped by `sector_identifier_uri`.
-- **Bearer vs holder-of-key assertion?** Bearer = possession is use (replayable); holder-of-key
+- Bearer vs holder-of-key assertion? Bearer = possession is use (replayable); holder-of-key
   binds the assertion to a key the subscriber proves — the FAL3 / sender-constrained analog.
-- **How do you prove MFA and enforce step-up via OIDC?** Request `acr_values`/`max_age`, then
+- How do you prove MFA and enforce step-up via OIDC? Request `acr_values`/`max_age`, then
   verify `acr`/`amr`/`auth_time` in the returned ID Token and re-prompt if insufficient.
 
 ## References

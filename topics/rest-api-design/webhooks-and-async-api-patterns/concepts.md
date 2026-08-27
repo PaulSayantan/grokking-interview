@@ -923,32 +923,32 @@ outbox / dedupe write so the record and effect commit together.
 
 ## Common follow-up questions
 
-- **"Webhooks are at-least-once — how do you prevent double-processing?"**
+- "Webhooks are at-least-once — how do you prevent double-processing?"
   Idempotent consumer: de-dup on the stable event id with a uniqueness
   constraint, return `2xx` for duplicates, and keep the side effect
   order-independent.
-- **"How do you verify a webhook really came from us?"** Shared-secret
+- "How do you verify a webhook really came from us?" Shared-secret
   HMAC-SHA256 over the raw body + timestamp, sent in a signature header; verify
   with a constant-time comparison. TLS alone is not enough — it protects
   transport, not sender identity.
-- **"Someone captured a valid signed request and re-sends it — what stops
-  them?"** Replay protection: a signed timestamp with a tolerance window (±5 min)
+- "Someone captured a valid signed request and re-sends it — what stops
+  them?" Replay protection: a signed timestamp with a tolerance window (±5 min)
   plus nonce/event-id de-duplication.
-- **"Which HTTP status should a long-running POST return?"** `202 Accepted` with
+- "Which HTTP status should a long-running POST return?" `202 Accepted` with
   a `Location`/status resource to poll; not `200` (implies done) or `201`
   (implies created synchronously).
-- **"When would you choose polling over webhooks?"** Consumer can't expose a
+- "When would you choose polling over webhooks?" Consumer can't expose a
   public URL, is behind a firewall/NAT, low event volume, or you want the
   simplest possible integration.
-- **"Webhook vs SSE vs WebSocket?"** Webhook = server→consumer-server push
+- "Webhook vs SSE vs WebSocket?" Webhook = server→consumer-server push
   (integrations); SSE = one-way server→client stream over HTTP with reconnect;
   WebSocket = bidirectional persistent connection (chat/collab).
-- **"What happens after retries are exhausted?"** Dead-letter the event, alert,
+- "What happens after retries are exhausted?" Dead-letter the event, alert,
   optionally auto-disable the endpoint, and offer redelivery once it is fixed.
-- **"Consumer takes 30 s to process — what's the anti-pattern?"** Doing the work
+- "Consumer takes 30 s to process — what's the anti-pattern?" Doing the work
   before responding; the producer times out and retries. Ack fast (enqueue +
   `2xx`), process async.
-- **"How do you roll a webhook signing secret without downtime?"** Dual secrets:
+- "How do you roll a webhook signing secret without downtime?" Dual secrets:
   emit two signatures (or accept two) during an overlap window, then retire the
   old one.
 

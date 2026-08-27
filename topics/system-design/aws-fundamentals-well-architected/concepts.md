@@ -716,59 +716,59 @@ graceful degradation?)? **Control-plane unavailable** (is your failover statical
 
 Each question below is followed by *what a strong answer hits* — use them to self-check.
 
-- **"You said multi-AZ — walk me through exactly what fails and how the system recovers if
-  `us-east-1a` goes dark. What's the RPO/RTO?"**
+- "You said multi-AZ — walk me through exactly what fails and how the system recovers if
+  `us-east-1a` goes dark. What's the RPO/RTO?"
   - ELB health checks fail the targets in `1a` and stop routing to them; the ASG detects the
     shortfall and launches replacements in a healthy AZ (`1b`/`1c`).
   - RDS Multi-AZ flips DNS to the synchronous standby in another AZ — failover typically
     **~60–120 s** (seconds on Aurora / Multi-AZ cluster).
-  - **RPO ≈ 0** (standby is synchronous, no committed data lost); **RTO** ≈ the failover window
+  - RPO ≈ 0 (standby is synchronous, no committed data lost); **RTO** ≈ the failover window
     above. Call out that pre-provisioned capacity across AZs is what makes this *statically
     stable* — no control-plane calls needed mid-incident.
-- **"When would you go multi-Region, and which of the four DR patterns for a 5-min RTO /
-  1-sec RPO budget?"**
+- "When would you go multi-Region, and which of the four DR patterns for a 5-min RTO /
+  1-sec RPO budget?"
   - Go multi-Region only after confirming multi-AZ can't meet the SLO (regulatory DR, Region
     blast-radius, global latency). 
   - 5-min RTO rules out Backup & Restore (hours) and Pilot Light (10s of min); 1-sec RPO needs
     continuous replication → **Warm Standby** (scaled-down live copy, scale up on failover).
     Active-active also qualifies but is overkill/expensive for a 5-min RTO.
-- **"Why DynamoDB over Aurora? What breaks first as you scale — the hot-partition story?"**
+- "Why DynamoDB over Aurora? What breaks first as you scale — the hot-partition story?"
   - DynamoDB for known access patterns, single-digit-ms at massive scale, serverless ops;
     Aurora when you need joins/ad-hoc queries/transactions.
   - What breaks first: a **hot partition** — skewed keys funnel >3,000 RCU/1,000 WCU into one
     partition and throttle while the table has spare capacity. Fix: high-cardinality/ write-
     sharded keys, DAX for hot reads.
-- **"SQS or Kinesis? What about replay or multiple independent consumers?"**
+- "SQS or Kinesis? What about replay or multiple independent consumers?"
   - SQS = work queue: a message is consumed and deleted, one logical consumer group, no replay.
   - Kinesis = ordered, **replayable** log with a retention window; **multiple** independent
     consumers each read at their own offset (per-shard ordering). Need replay/fan-out to
     independent readers → Kinesis (or SNS→SQS for durable fan-out without ordering).
-- **"Lambda everywhere — at what traffic does always-on Fargate/EC2 get cheaper?"**
+- "Lambda everywhere — at what traffic does always-on Fargate/EC2 get cheaper?"
   - Lambda bills per-request + GB-s: unbeatable for spiky/idle, but per-request cost dominates
     under sustained load. Break-even is **high, steady utilization** (see the Lambda vs Fargate
     worked example: ~$2,400/mo Lambda vs ~$1,000/mo Fargate at a flat 500 req/s). Flat & busy →
     Fargate/EC2 with Savings Plans; bursty → Lambda.
-- **"IAM policy evaluation — SCP denies `s3:*` but the role allows it. Can the role access S3?"**
-  - **No.** Explicit deny > allow > implicit deny; an SCP is a ceiling that only limits, and its
+- "IAM policy evaluation — SCP denies `s3:*` but the role allows it. Can the role access S3?"
+  - No. Explicit deny > allow > implicit deny; an SCP is a ceiling that only limits, and its
     explicit deny beats the identity Allow → net DENY (see the traced IAM example). Editing the
     role policy won't help; you must change the SCP.
-- **"Why separate AWS accounts instead of one? Blast radius, and how do you connect them?"**
+- "Why separate AWS accounts instead of one? Blast radius, and how do you connect them?"
   - The account is the strongest natural isolation/billing/quota boundary: it caps breach blast
     radius, gives clean cost attribution, and stops one app exhausting another's quotas.
   - Stitch them with Organizations + OUs/SCPs, Identity Center for humans, cross-account IAM
     roles for workloads, and Transit Gateway/VPC peering/RAM for networking.
-- **"Your design calls `CreateXxx` APIs during failover — why is that a static-stability
-  anti-pattern?"**
+- "Your design calls `CreateXxx` APIs during failover — why is that a static-stability
+  anti-pattern?"
   - The **control plane** (provisioning) is less reliable and often *correlated* with the very
     outage you're failing over from. Depending on it mid-incident means failover fails exactly
     when you need it. Fix: pre-provision standby capacity and shift traffic via data-plane
     mechanisms (Route 53 health checks), so recovery uses resources that already exist.
-- **"Shared-responsibility line for RDS vs EC2 vs Lambda — who patches the OS?"**
+- "Shared-responsibility line for RDS vs EC2 vs Lambda — who patches the OS?"
   - EC2: **you** patch the guest OS (or via SSM Patch Manager). RDS: **AWS** patches OS + DB
     engine; you own schema/queries/credentials. Lambda: **AWS** owns everything up to the
     runtime; you own code + IAM + data. In *all* models IAM, data classification, and access
     control stay yours.
-- **"How would cell-based architecture and shuffle sharding reduce blast radius here?"**
+- "How would cell-based architecture and shuffle sharding reduce blast radius here?"
   - Cells: partition users into independent full-stack copies so a bad deploy/poison-pill hits
     only one cell, not the fleet. Shuffle sharding: assign each customer a *random subset* of
     workers so few customers share the exact same set — one abusive/failing tenant degrades

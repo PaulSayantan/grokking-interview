@@ -731,27 +731,27 @@ bound; lower is fine).
 
 ## Common follow-up questions
 
-- **"Password + security question — is that MFA?"** No. Both are knowledge factors; true MFA
+- "Password + security question — is that MFA?" No. Both are knowledge factors; true MFA
   spans different categories (know / have / are).
-- **"Why is TOTP not phishing-resistant if it changes every 30 seconds?"** Because a
+- "Why is TOTP not phishing-resistant if it changes every 30 seconds?" Because a
   real-time proxy relays the code you just typed to the real site within the same window.
   Rotation stops *later* reuse, not *live* relay. Only origin binding (WebAuthn) stops relay.
-- **"How does WebAuthn stop phishing?"** The credential is bound to the origin/RP ID; the
+- "How does WebAuthn stop phishing?" The credential is bound to the origin/RP ID; the
   browser refuses to sign for a look-alike domain, and there's no shared secret to hand over.
-- **"What is number matching and what does it fix?"** The user types a number shown on the
+- "What is number matching and what does it fix?" The user types a number shown on the
   login screen into the push prompt; it defeats MFA-fatigue/blind-approval, but not a full
   AiTM relay.
-- **"You have WebAuthn but SMS recovery — what's the security level?"** SMS. Security equals
+- "You have WebAuthn but SMS recovery — what's the security level?" SMS. Security equals
   your weakest accepted path; recovery must match the primary factor's strength.
-- **"Where do you store the TOTP seed / the WebAuthn public key?"** TOTP seed = a *secret*
+- "Where do you store the TOTP seed / the WebAuthn public key?" TOTP seed = a *secret*
   (encrypt / HSM, breach-sensitive). WebAuthn public key = *not* secret (breach yields
   nothing usable).
-- **"MFA is enabled but the attacker got in with a stolen session cookie — how?"** MFA
+- "MFA is enabled but the attacker got in with a stolen session cookie — how?" MFA
   protects the *login event*, not the *session*. Defend sessions (short TTL, rotation, bound
   tokens); consider step-up re-auth for sensitive actions.
-- **"Difference between AAL2 and AAL3?"** AAL2 = MFA; AAL3 = MFA that is hardware-based and
+- "Difference between AAL2 and AAL3?" AAL2 = MFA; AAL3 = MFA that is hardware-based and
   phishing-resistant.
-- **"401 vs 403?"** 401 = not authenticated (send `WWW-Authenticate`); 403 = authenticated
+- "401 vs 403?" 401 = not authenticated (send `WWW-Authenticate`); 403 = authenticated
   but not authorized.
 
 ## References

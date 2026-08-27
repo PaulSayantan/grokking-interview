@@ -476,22 +476,22 @@ worth it for anything touching production.
 
 ## Common follow-up questions
 
-- **"A developer committed an AWS key to a public repo. Walk me through the response."** Rotate/revoke
+- "A developer committed an AWS key to a public repo. Walk me through the response." Rotate/revoke
   the key immediately (assume abuse), check CloudTrail for misuse, then scrub history and add push
   protection + pre-commit scanning to prevent recurrence. Rotation first, cleanup second.
-- **"How do you avoid storing cloud keys in GitHub Actions?"** OIDC federation: grant
+- "How do you avoid storing cloud keys in GitHub Actions?" OIDC federation: grant
   `id-token: write`, configure a cloud trust policy pinning the repo/branch/environment claims, and
   exchange the OIDC token for short-lived STS/temp credentials per run.
-- **"Kubernetes Secrets are secure, right?"** No — base64-encoded, not encrypted, by default; enable
+- "Kubernetes Secrets are secure, right?" No — base64-encoded, not encrypted, by default; enable
   etcd encryption-at-rest (KMS provider), lock down RBAC, and prefer mounted files over env vars.
-- **"How do secrets work with GitOps if git is the source of truth?"** Commit *encrypted* secrets
+- "How do secrets work with GitOps if git is the source of truth?" Commit *encrypted* secrets
   (SOPS/Sealed Secrets) or a *reference* (External Secrets Operator) — never plaintext.
-- **"What's the secret-zero problem and how do you solve it?"** The credential needed to auth to the
+- "What's the secret-zero problem and how do you solve it?" The credential needed to auth to the
   secret store; solve with platform-attested identity (instance identity, SA token, OIDC) so no
   static bootstrap secret ships.
-- **"Static vs dynamic secrets?"** Static = one stored value shared by all consumers; dynamic =
+- "Static vs dynamic secrets?" Static = one stored value shared by all consumers; dynamic =
   Vault generates a unique, short-TTL, auto-revoked credential per request.
-- **"Env var vs file injection — which is safer?"** Files (on tmpfs) leak less and rotate in place;
+- "Env var vs file injection — which is safer?" Files (on tmpfs) leak less and rotate in place;
   env vars are simpler but leak via `/proc`, child procs, and dumps, and can't rotate without restart.
 
 ## References

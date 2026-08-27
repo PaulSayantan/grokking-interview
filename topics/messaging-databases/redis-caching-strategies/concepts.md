@@ -608,28 +608,28 @@ event-sourcing-style consumption.
 
 ## Common follow-up questions
 
-- **"Redis is single-threaded — how does it use multiple cores?"** Command execution is
+- "Redis is single-threaded — how does it use multiple cores?" Command execution is
   one thread; run multiple Redis instances/shards (Cluster) per host to use more cores, and
   optionally enable `io-threads` for network I/O. CPU-bound Lua/`O(N)` commands still
   serialize on the one thread.
-- **"Difference between expiry and eviction?"** Expiry removes keys whose TTL elapsed
+- "Difference between expiry and eviction?" Expiry removes keys whose TTL elapsed
   (lazy + active sampling); eviction removes keys when `maxmemory` is hit, per
   `maxmemory-policy`. Default policy is `noeviction` (writes fail when full).
-- **"RDB or AOF for a database?"** Enable AOF (`everysec`) for a ≤1s loss window, often
+- "RDB or AOF for a database?" Enable AOF (`everysec`) for a ≤1s loss window, often
   alongside RDB for fast restarts/backups; on restart AOF wins as the more complete record.
-- **"Can Redis lose acknowledged writes?"** Yes — async replication means a primary can ack
+- "Can Redis lose acknowledged writes?" Yes — async replication means a primary can ack
   then crash before a replica receives the write; failover loses it. Use `WAIT` /
   `min-replicas-*` to reduce the window (not eliminate it).
-- **"How do you cache and keep it consistent on writes?"** Cache-aside with delete (not
+- "How do you cache and keep it consistent on writes?" Cache-aside with delete (not
   update) on write, TTLs as a safety net, and versioned keys or CDC-driven invalidation for
   tighter freshness.
-- **"Update or delete the cache on write?"** Delete/invalidate — updating in place races
+- "Update or delete the cache on write?" Delete/invalidate — updating in place races
   with concurrent readers/writers and can persist a stale value.
-- **"How to prevent hammering the DB when a hot key expires?"** Mutex/request coalescing,
+- "How to prevent hammering the DB when a hot key expires?" Mutex/request coalescing,
   logical (never-hard) expiry with async refresh, TTL jitter, and stale-while-revalidate.
-- **"Is a Redis lock safe for correctness?"** Only with fencing tokens; a bare TTL lock can
+- "Is a Redis lock safe for correctness?" Only with fencing tokens; a bare TTL lock can
   admit two holders under GC/network pauses — that's the Redlock critique.
-- **"Why 16384 slots in Cluster?"** A fixed, small slot count keeps the per-node slot
+- "Why 16384 slots in Cluster?" A fixed, small slot count keeps the per-node slot
   bitmap tiny to gossip and makes resharding a matter of moving slot ownership.
 
 ## References

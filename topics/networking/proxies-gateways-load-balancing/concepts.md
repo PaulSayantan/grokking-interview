@@ -797,25 +797,25 @@ Deepening the gateway-vs-mesh split:
 
 ## Common follow-up questions
 
-- **"Difference between a load balancer and a reverse proxy?"** Every load balancer that
+- "Difference between a load balancer and a reverse proxy?" Every load balancer that
   terminates connections is a reverse proxy; not every reverse proxy load-balances (a single
   reverse proxy can front one backend for TLS/caching). "Load balancer" emphasizes
   distribution across a pool; "reverse proxy" emphasizes the intermediary role.
-- **"Why can't an L4 LB do path-based routing?"** The path is in the HTTP request at L7 and
+- "Why can't an L4 LB do path-based routing?" The path is in the HTTP request at L7 and
   is encrypted under HTTPS; L4 only sees the 4-tuple. It can at most peek at TLS SNI.
-- **"How do you preserve the client IP through a proxy?"** L7: `X-Forwarded-For`/`Forwarded`
+- "How do you preserve the client IP through a proxy?" L7: `X-Forwarded-For`/`Forwarded`
   (only trusted from your own proxies). L4: NAT mode or DSR can keep the real source IP; or
   use the PROXY protocol to carry it out-of-band to the backend.
-- **"When would you terminate TLS at the LB vs pass it through?"** Terminate for L7 features
+- "When would you terminate TLS at the LB vs pass it through?" Terminate for L7 features
   and to offload backend CPU; pass through for end-to-end encryption/compliance; re-encrypt
   when you need both.
-- **"Round robin vs least connections?"** Round robin ignores load and can overload a node
+- "Round robin vs least connections?" Round robin ignores load and can overload a node
   when request durations vary; least connections adapts to that.
-- **"How do sticky sessions hurt you?"** Uneven load, painful draining/scaling, lost state on
+- "How do sticky sessions hurt you?" Uneven load, painful draining/scaling, lost state on
   failure — prefer stateless backends with shared session storage.
-- **"What breaks source-IP stickiness?"** Shared NAT/CGNAT (many clients, one IP → one
+- "What breaks source-IP stickiness?" Shared NAT/CGNAT (many clients, one IP → one
   backend) and clients whose IP changes (mobile roaming).
-- **"Why DSR?"** Asymmetric traffic (big responses) — keep the response off the LB so it
+- "Why DSR?" Asymmetric traffic (big responses) — keep the response off the LB so it
   isn't the bandwidth bottleneck; cost is losing L7 and reverse-path visibility.
 
 ## References

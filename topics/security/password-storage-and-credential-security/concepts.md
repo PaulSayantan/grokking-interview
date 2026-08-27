@@ -720,24 +720,24 @@ the password path hardened per everything above during the transition.
 
 ## Common follow-up questions
 
-- **"Walk me through storing a password from registration to login."** CSPRNG salt →
+- "Walk me through storing a password from registration to login." CSPRNG salt →
   Argon2id with tuned params → store the PHC string; on login, re-derive with the
   embedded salt/params, constant-time compare, and re-hash if params are outdated.
-- **"Why is a salt not secret but a pepper is?"** Salt's job is *uniqueness* to defeat
+- "Why is a salt not secret but a pepper is?" Salt's job is *uniqueness* to defeat
   precomputation; it's fine for the attacker to have it. The pepper's job is *secrecy*
   — kept out of the DB so a DB-only breach yields uncrackable hashes.
-- **"You have a legacy `sha256(password)` table and can't force everyone to reset. How
-  do you migrate?"** Wrap: store `argon2id(sha256(password))` now; unwrap on next login.
-- **"How do you pick Argon2id parameters?"** Benchmark on production hardware to a
+- "You have a legacy `sha256(password)` table and can't force everyone to reset. How
+  do you migrate?" Wrap: store `argon2id(sha256(password))` now; unwrap on next login.
+- "How do you pick Argon2id parameters?" Benchmark on production hardware to a
   target verify time (~250–500 ms) at the highest memory you can afford; start from
   OWASP's m=19 MiB, t=2, p=1 and tune up.
-- **"How does rate limiting stop credential stuffing if the attacker rotates IPs and
-  each account only sees one attempt?"** It doesn't, alone — that's why you add
+- "How does rate limiting stop credential stuffing if the attacker rotates IPs and
+  each account only sees one attempt?" It doesn't, alone — that's why you add
   breached-password screening, MFA, bot/device detection, and impossible-travel/risk
   scoring.
-- **"Is bcrypt still OK in 2026?"** Acceptable for existing systems at cost ≥ 10, but
+- "Is bcrypt still OK in 2026?" Acceptable for existing systems at cost ≥ 10, but
   it isn't memory-hard and truncates at 72 bytes; prefer Argon2id for new work.
-- **"Why not encrypt passwords so we can recover them?"** You never need to recover a
+- "Why not encrypt passwords so we can recover them?" You never need to recover a
   password, only verify it; encryption is reversible and the key is a single point of
   total compromise.
 

@@ -295,27 +295,27 @@ One confusion is worth killing off directly, because the two ideas sound identic
 
 ## Common follow-up questions
 
-- **Walk me through `docker run` end to end.** CLI → REST → `dockerd` → gRPC → `containerd` (ensure
+- Walk me through `docker run` end to end. CLI → REST → `dockerd` → gRPC → `containerd` (ensure
   image, unpack to snapshot, build OCI bundle) → `containerd-shim` → `runc create` then `runc start`
   → runc sets up namespaces/cgroups/caps and `exec`s your process → runc exits, shim reparents PID 1.
-- **What does the shim do and why can I restart Docker without killing containers?** The
+- What does the shim do and why can I restart Docker without killing containers? The
   `containerd-shim` is the container's persistent parent; it holds stdio and the exit code so
   containerd/dockerd can restart independently of running containers (live-restore).
-- **runc vs containerd — which is the "runtime"?** Both are, at different levels: containerd is the
+- runc vs containerd — which is the "runtime"? Both are, at different levels: containerd is the
   *high-level* runtime (images + lifecycle on a host); runc is the *low-level* OCI runtime (spawns
   one container from a bundle). containerd calls runc.
-- **What are the three OCI specs?** image-spec (image format/manifest/config/layers),
+- What are the three OCI specs? image-spec (image format/manifest/config/layers),
   runtime-spec (bundle + `config.json` + lifecycle), distribution-spec (registry `/v2/` HTTP API).
-- **Why didn't Kubernetes dropping Docker break my images?** Images are an OCI standard, independent
+- Why didn't Kubernetes dropping Docker break my images? Images are an OCI standard, independent
   of the Docker daemon. Only *dockershim* (the Docker-daemon CRI adapter) was removed in v1.24;
   nodes use containerd/CRI-O.
-- **Namespaces vs cgroups in one line?** Namespaces = what a container *sees* (isolation); cgroups =
+- Namespaces vs cgroups in one line? Namespaces = what a container *sees* (isolation); cgroups =
   what it *can use* (limits). Capabilities = what it's *allowed to do* (privilege).
-- **Why did my container exit 137?** SIGKILL (128+9) — usually the memory cgroup limit was exceeded
+- Why did my container exit 137? SIGKILL (128+9) — usually the memory cgroup limit was exceeded
   and the kernel OOM-killed it (`OOMKilled=true`), or a `docker stop` hit its timeout.
-- **How do I isolate untrusted workloads more strongly than runc?** gVisor (`runsc`, user-space
+- How do I isolate untrusted workloads more strongly than runc? gVisor (`runsc`, user-space
   kernel) or Kata/Firecracker (microVM with its own kernel) — both are drop-in OCI runtimes.
-- **Rootless vs `USER` non-root?** Rootless = the *daemon/runtime* is unprivileged; `USER` = the
+- Rootless vs `USER` non-root? Rootless = the *daemon/runtime* is unprivileged; `USER` = the
   *app process* is non-root inside the container. Different layers; use both.
 
 ## References

@@ -787,56 +787,56 @@ Deepening credential-abuse defense with current standards:
 
 ## Common follow-up questions
 
-- **"Token bucket vs leaky bucket — which allows bursts?"** Token bucket: it accumulates up to
+- "Token bucket vs leaky bucket — which allows bursts?" Token bucket: it accumulates up to
   B tokens during idle periods, so a burst up to B passes, then the sustained rate is the refill
   rate R. A leaky-bucket queue smooths output to a constant rate and adds queuing delay.
-- **"What's the boundary-burst problem with fixed windows and how do you fix it?"** A client can
+- "What's the boundary-burst problem with fixed windows and how do you fix it?" A client can
   send a full limit at the end of one window and another full limit at the start of the next,
   yielding ~2× the limit around the boundary. Fix with a **sliding-window counter** (weight the
   previous window) or a **sliding-window log** (exact but memory-heavy).
-- **"How do you rate-limit across many servers?"** Shared atomic counter (Redis `INCR`/Lua) so
+- "How do you rate-limit across many servers?" Shared atomic counter (Redis `INCR`/Lua) so
   the check-and-increment is atomic; decide fail-open vs fail-closed if the store is down.
-- **"Why do amplification attacks use UDP with a spoofed source IP?"** UDP is connectionless
+- "Why do amplification attacks use UDP with a spoofed source IP?" UDP is connectionless
   (no handshake to verify the source), so the reflector believes the spoofed victim asked, and
   sends a much larger response to the victim. TCP's handshake makes this impractical.
-- **"How do SYN cookies work?"** The server encodes connection state into the SYN-ACK sequence
+- "How do SYN cookies work?" The server encodes connection state into the SYN-ACK sequence
   number and stores no half-open entry, reconstructing state from the client's final ACK — so a
   SYN flood consumes no backlog.
-- **"What status code and header signal a client to slow down?"** `429 Too Many Requests`
+- "What status code and header signal a client to slow down?" `429 Too Many Requests`
   (RFC 6585) with `Retry-After`; use `503` for whole-service overload.
-- **"Why add jitter to client retries?"** Without jitter, all throttled clients retry
+- "Why add jitter to client retries?" Without jitter, all throttled clients retry
   simultaneously → thundering-herd/retry-storm re-DoSing the service. Jitter spreads retries.
-- **"How is slowloris different from an HTTP flood?"** Slowloris uses *few, slow, incomplete*
+- "How is slowloris different from an HTTP flood?" Slowloris uses *few, slow, incomplete*
   connections to tie up worker slots (low bandwidth); an HTTP flood sends *many fast* complete
   requests (high rate). Slowloris is fixed with read timeouts; floods with rate limiting/WAF.
-- **"What is ReDoS and how do you prevent it?"** Catastrophic backtracking from nested
+- "What is ReDoS and how do you prevent it?" Catastrophic backtracking from nested
   quantifiers turns regex matching exponential; fix with linear-time engines (RE2), input-length
   caps, match timeouts, and never accepting user-supplied patterns.
-- **"How do you defend a login endpoint from brute force without enabling account-lockout DoS?"**
+- "How do you defend a login endpoint from brute force without enabling account-lockout DoS?"
   Per-IP + per-account throttling, progressive delays, CAPTCHA on risk, MFA, and breached-password
   checks — avoid hard lockout keyed only on username (an attacker could lock out victims).
-- **"Rate limiting didn't stop the attack — why?"** It was volumetric (packets saturated the
+- "Rate limiting didn't stop the attack — why?" It was volumetric (packets saturated the
   uplink before reaching the app) or algorithmic (tiny payload, huge work) — wrong layer/control.
-- **"HTTP/2 Rapid Reset — why does a concurrency cap fail and what stops it?"** The client
+- "HTTP/2 Rapid Reset — why does a concurrency cap fail and what stops it?" The client
   cancels streams with `RST_STREAM` before they occupy a concurrent slot, so the cap is never
   reached; monitor the client reset rate and `GOAWAY`+close the connection above a threshold.
-- **"A CONTINUATION flood pins CPU with no access logs — what's the fix?"** The request never
+- "A CONTINUATION flood pins CPU with no access logs — what's the fix?" The request never
   completes (no `END_HEADERS`), so it isn't logged; cap header list size, field count, and
   frames per stream, and log at the connection layer.
-- **"What is HashDoS and how is it fixed?"** Crafted colliding keys turn hash-table ops into
+- "What is HashDoS and how is it fixed?" Crafted colliding keys turn hash-table ops into
   O(n²); fix with a randomized/keyed hash (SipHash) and a cap on parameter/key count.
-- **"How does GCRA relate to token bucket?"** GCRA tracks one Theoretical Arrival Time and is
+- "How does GCRA relate to token bucket?" GCRA tracks one Theoretical Arrival Time and is
   provably equivalent to a token bucket (τ ≈ bucket depth, T ≈ refill interval); its single
   timestamp makes atomic distributed use easy (redis-cell `CL.THROTTLE`).
-- **"The flood is all valid traffic — how do you stay up?"** Load shedding: admission control /
+- "The flood is all valid traffic — how do you stay up?" Load shedding: admission control /
   concurrency limits (Little's Law), adaptive concurrency (AIMD), CoDel/LIFO queues, and
   prioritized graceful degradation — reject cheaply and early.
-- **"Our own retries caused a cascading outage — prevent it."** Retry storm; add retry budgets,
+- "Our own retries caused a cascading outage — prevent it." Retry storm; add retry budgets,
   backoff with jitter, circuit breakers, bulkheads, and deadline propagation.
-- **"CDN in front but origin still floods — two independent reasons."** Origin-IP discovery
+- "CDN in front but origin still floods — two independent reasons." Origin-IP discovery
   bypass (lock origin to edge ranges/mTLS) and cache-busting query strings (normalize the cache
   key + rate-limit cache misses).
-- **"Design a distributed limiter for many PoPs with a sub-ms budget."** Two-tier local+global
+- "Design a distributed limiter for many PoPs with a sub-ms budget." Two-tier local+global
   allowance, GCRA/token-bucket via atomic Lua, accept bounded overcount, handle clock skew via
   the store's clock, fail-open for public traffic.
 

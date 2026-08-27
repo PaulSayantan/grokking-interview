@@ -276,31 +276,31 @@ these cases — the frontier where "replace the instance" needs a gentler answer
 
 ## Common follow-up questions
 
-- **"What exactly is 'immutable infrastructure' and why does Slack want it?"** Once an
+- "What exactly is 'immutable infrastructure' and why does Slack want it?" Once an
   instance is running you never change it in place; to change anything you build a new
   image and replace the instance. It eliminates configuration drift, makes deploys
   reversible (swap images), and shrinks the attack surface with short-lived hosts.
-- **"Why split bake and provision?"** Bake does the slow, cacheable work (package
+- "Why split bake and provision?" Bake does the slow, cacheable work (package
   install, common config) once into the AMI so every instance is identical; provision
   does only the light per-instance work (secrets, regional config) at launch. That's
   why instances come up in seconds rather than minutes.
-- **"If instances are immutable, how do secrets get rotated?"** They're the deliberate
+- "If instances are immutable, how do secrets get rotated?" They're the deliberate
   exception: each instance runs Consul Template to pull fresh secrets from Vault
   in-place, so the OS and app layers stay immutable but runtime secrets can refresh
   without cycling the fleet.
-- **"How does a deploy actually roll out safely?"** Gondola ships a deployable unit
+- "How does a deploy actually roll out safely?" Gondola ships a deployable unit
   (AMI + versioned Chef artifact tied to a git commit) and drives progressive rollouts
   — canary ASGs per AZ, metric-based checks, auto-halt or auto-rollback to a known-good
   version if metrics regress.
-- **"Why layer images instead of one big AMI per service?"** A shared golden base
+- "Why layer images instead of one big AMI per service?" A shared golden base
   (slack-zero) centralizes OS hardening, agents, and service discovery so security
   fixes land in one place; teams bake their app on top. It's a shared-responsibility
   split of platform stability plus team flexibility.
-- **"What stops a 'temporary' instance from living forever and drifting?"** The Reaper:
+- "What stops a 'temporary' instance from living forever and drifting?" The Reaper:
   it replaces instances that are tainted (e.g., after a human logs in or an emergency
   SSM change) or that exceed their allowed lifespan, with rate limits and a global
   pause button so it never over-reaps.
-- **"What doesn't this model handle well?"** Long-lived instances — data nodes,
+- "What doesn't this model handle well?" Long-lived instances — data nodes,
   singletons like GitHub Enterprise, third-party apps like JIRA — that can't be cycled
   quickly. New Gondola executors are being built for them.
 

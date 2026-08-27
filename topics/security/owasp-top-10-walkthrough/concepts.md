@@ -836,46 +836,46 @@ Expanding A06:2021 → A03:2025, know the standards and the distinctions:
 
 ## Common follow-up questions
 
-- **"Is the OWASP Top 10 a standard you can certify against?"** No — it's an *awareness*
+- "Is the OWASP Top 10 a standard you can certify against?" No — it's an *awareness*
   document. For verifiable requirements use **ASVS**; for testing use the **WSTG**.
-- **"Why did Broken Access Control move to #1?"** 94% of tested apps were *tested for* it
+- "Why did Broken Access Control move to #1?" 94% of tested apps were *tested for* it
   (avg incidence ~3.81%) and it had the most CWE occurrences (34 mapped CWEs) — not that
   94% *had* it; authorization is app-specific and hard to test automatically.
-- **"What's the difference between A04 Insecure Design and A05 Misconfiguration?"** A04 =
+- "What's the difference between A04 Insecure Design and A05 Misconfiguration?" A04 =
   a needed control was never designed in (can't be patched, must redesign); A05 = a
   control exists but is deployed with insecure/default settings.
-- **"Where did XSS, XXE, and Insecure Deserialization go in 2021?"** XSS → A03 Injection;
+- "Where did XSS, XXE, and Insecure Deserialization go in 2021?" XSS → A03 Injection;
   XXE → A05 Misconfiguration; Insecure Deserialization → A08 Integrity Failures.
-- **"How are the two survey-selected categories chosen and why?"** By community vote, to
+- "How are the two survey-selected categories chosen and why?" By community vote, to
   surface risks that are hard to detect with automated tooling (2021: A04 and A10).
-- **"What actually stops SQL injection?"** Parameterized queries/prepared statements
+- "What actually stops SQL injection?" Parameterized queries/prepared statements
   (separate code and data channels); escaping/validation is defense in depth.
-- **"How does SSRF lead to cloud account takeover?"** By reaching the metadata endpoint
+- "How does SSRF lead to cloud account takeover?" By reaching the metadata endpoint
   (`169.254.169.254`) to steal temporary IAM credentials — mitigated by IMDSv2 + egress
   controls + destination allowlisting.
-- **"Why is SHA-256(password) a cryptographic failure?"** It's a *fast* hash — attackers
+- "Why is SHA-256(password) a cryptographic failure?" It's a *fast* hash — attackers
   compute billions/sec. Passwords need a slow, salted KDF (Argon2id/bcrypt/scrypt/PBKDF2).
-- **"What defends A06 that pen-testing your own code won't?"** SBOM + Software Composition
+- "What defends A06 that pen-testing your own code won't?" SBOM + Software Composition
   Analysis against CVE feeds; you inherit vulns from transitive dependencies.
-- **"How does A08 relate to SolarWinds?"** A compromised CI/CD build pipeline shipped a
+- "How does A08 relate to SolarWinds?" A compromised CI/CD build pipeline shipped a
   signed-but-backdoored update — an integrity failure; defense is pipeline hardening,
   artifact signing, and dependency verification.
-- **"The 2025 Top 10 just dropped — what changed and why?"** Supply Chain → A03 (survey #1),
+- "The 2025 Top 10 just dropped — what changed and why?" Supply Chain → A03 (survey #1),
   SSRF merged into A01, new A10 Mishandling of Exceptional Conditions, Misconfiguration up to
   A02; driven by cloud/CI-CD reality and major supply-chain incidents.
-- **"Where is SSRF in 2025?"** Not standalone anymore — merged up into **A01 Broken Access
+- "Where is SSRF in 2025?" Not standalone anymore — merged up into **A01 Broken Access
   Control**. Memorizing "SSRF = A10" is now the wrong answer.
-- **"CWE vs CVE vs CVSS vs KEV vs EPSS?"** CWE = weakness *class*; CVE = specific *instance*;
+- "CWE vs CVE vs CVSS vs KEV vs EPSS?" CWE = weakness *class*; CVE = specific *instance*;
   CVSS = severity *score*; KEV = *being exploited in the wild*; EPSS = *probability* of
   exploitation soon. Prioritize with KEV + EPSS + CVSS + your own reachability/exposure.
-- **"Auth service times out — fail open or fail closed?"** **Fail closed (deny).** Failing
+- "Auth service times out — fail open or fail closed?" **Fail closed (deny).** Failing
   open (CWE-636) is the core A10:2025 Mishandling of Exceptional Conditions failure.
-- **"`Access-Control-Allow-Origin: *` with `credentials: true` — what happens?"** The Fetch
+- "`Access-Control-Allow-Origin: *` with `credentials: true` — what happens?" The Fetch
   spec forbids it; the browser blocks the response. Credentialed CORS needs an explicit
   echoed origin.
-- **"Is SHA-256 + salt OK for passwords?"** No — still a *fast* hash. Use Argon2id
+- "Is SHA-256 + salt OK for passwords?" No — still a *fast* hash. Use Argon2id
   (m≈19MiB, t=2, p=1), bcrypt (cost ≥10–12), scrypt, or PBKDF2 (~600k iterations).
-- **"How do ASVS L1/L2/L3 differ?"** L1 opportunistic/mostly-automated baseline; L2 standard
+- "How do ASVS L1/L2/L3 differ?" L1 opportunistic/mostly-automated baseline; L2 standard
   for most sensitive-data apps (recommended target); L3 for high-value/critical systems.
 
 ## References

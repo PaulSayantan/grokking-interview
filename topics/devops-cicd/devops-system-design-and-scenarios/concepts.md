@@ -530,22 +530,22 @@ them. A pocket list:
 
 ## Common follow-up questions
 
-- **"Your deploy just failed in prod at 2am — what do you do?"** Mitigate first
+- "Your deploy just failed in prod at 2am — what do you do?" Mitigate first
   (rollback/flag/failover), communicate, then diagnose with deploy markers and
   observability; blameless postmortem after.
-- **"How do you deploy a breaking DB change with zero downtime?"** Expand/contract:
+- "How do you deploy a breaking DB change with zero downtime?" Expand/contract:
   additive change → dual-write/backfill → deploy new code → drop old in a later release.
-- **"CI is slow and expensive — where do you start?"** Measure queue vs build vs test;
+- "CI is slow and expensive — where do you start?" Measure queue vs build vs test;
   then caching, affected-target builds, parallel/sharded tests, autoscaled ephemeral
   runners.
-- **"Monorepo or polyrepo for 40 services?"** Depends on tooling maturity; monorepo
+- "Monorepo or polyrepo for 40 services?" Depends on tooling maturity; monorepo
   needs affected-graph builds + remote cache or CI melts; polyrepo needs strong contract
   testing and versioning.
-- **"How do you keep prod credentials out of CI?"** OIDC federation for short-lived
+- "How do you keep prod credentials out of CI?" OIDC federation for short-lived
   cloud creds; secrets manager + injection at deploy; no static long-lived keys.
-- **"How do you know your DevOps changes are working?"** DORA four keys — improved
+- "How do you know your DevOps changes are working?" DORA four keys — improved
   deploy frequency and lead time *without* raising change-failure rate or MTTR.
-- **"How do you enforce standards across many teams without becoming a bottleneck?"**
+- "How do you enforce standards across many teams without becoming a bottleneck?"
   Golden-path templates + policy-as-code guardrails (self-service platform), not manual
   review gates.
 

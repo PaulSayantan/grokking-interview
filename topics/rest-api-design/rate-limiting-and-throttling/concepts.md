@@ -767,26 +767,26 @@ Modified` returns no body and costs the server far less, so **some APIs charge
 
 ## Common follow-up questions
 
-- **"Why is 429 a 4xx if it's retryable?"** Because the fault is on the client
+- "Why is 429 a 4xx if it's retryable?" Because the fault is on the client
   side (it sent too many requests); it's a client error, but unlike most 4xx it
   becomes valid again after waiting, which is why `Retry-After` accompanies it.
-- **"429 or 503 for a throttle?"** 429 for *per-client* limiting, 503 for
+- "429 or 503 for a throttle?" 429 for *per-client* limiting, 503 for
   *server-wide* overload/maintenance. Both may carry `Retry-After`.
-- **"Timestamp or seconds for reset/Retry-After?"** Prefer seconds
+- "Timestamp or seconds for reset/Retry-After?" Prefer seconds
   (delta-seconds) — no clock sync needed and it's what the modern RateLimit
   draft uses. HTTP-date is fine for fixed calendar resets (daily quota).
-- **"Are the RateLimit headers a standard?"** They're a Standards-Track IETF
+- "Are the RateLimit headers a standard?" They're a Standards-Track IETF
   *draft* (`draft-ietf-httpapi-ratelimit-headers`), not yet an RFC; the modern
   version uses two Structured Fields (`RateLimit`, `RateLimit-Policy`). Many APIs
   still use the informal `X-RateLimit-*` triplet.
-- **"How should a client handle a 429 with no Retry-After?"** Exponential
+- "How should a client handle a 429 with no Retry-After?" Exponential
   backoff with jitter, capped attempts, only auto-retrying idempotent requests.
-- **"How do you stop a retry storm?"** Server: send `Retry-After` and RateLimit
+- "How do you stop a retry storm?" Server: send `Retry-After` and RateLimit
   headers. Client: honor them, add jitter, cap retries.
-- **"Should a cache store a 429?"** No — RFC 6585 says 429 responses must not be
+- "Should a cache store a 429?" No — RFC 6585 says 429 responses must not be
   stored by a cache by default.
-- **"How do you keep one customer from bypassing an account limit with many
-  keys?"** Layer a per-account limit above the per-key limit.
+- "How do you keep one customer from bypassing an account limit with many
+  keys?" Layer a per-account limit above the per-key limit.
 
 ## References
 

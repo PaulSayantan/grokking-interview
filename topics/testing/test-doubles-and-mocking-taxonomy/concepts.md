@@ -350,23 +350,23 @@ Gotchas interviewers like:
 
 ## Common follow-up questions
 
-- **"What's the difference between a mock and a stub?"** Stub = canned answers, verify state;
+- "What's the difference between a mock and a stub?" Stub = canned answers, verify state;
   mock = pre-set expectations, verify interactions. (Fowler: *Mocks Aren't Stubs*.)
-- **"When would you use a fake instead of a mock?"** When many tests need real round-trip
+- "When would you use a fake instead of a mock?" When many tests need real round-trip
   behavior (save/retrieve), or when mocking every call would be brittle — e.g. an in-memory
   repository. Consider Testcontainers when fidelity matters.
-- **"Why shouldn't you mock types you don't own?"** You encode assumptions about a library's
+- "Why shouldn't you mock types you don't own?" You encode assumptions about a library's
   contract; upgrades or misunderstandings give false passes. Wrap them behind an owned
   adapter and integration-test the adapter.
-- **"Classical vs London/mockist TDD — which do you use?"** Explain the state-vs-interaction
+- "Classical vs London/mockist TDD — which do you use?" Explain the state-vs-interaction
   trade-off and refactor resilience; most engineers blend them.
-- **"How do you make time-dependent code testable?"** Inject a `Clock` (a seam) and use
+- "How do you make time-dependent code testable?" Inject a `Clock` (a seam) and use
   `Clock.fixed(...)`; don't call `Instant.now()` inline.
-- **"Your team's tests break on every refactor — why?"** Likely over-mocking / behavior
+- "Your team's tests break on every refactor — why?" Likely over-mocking / behavior
   verification of internals; move toward state verification and mock only at boundaries.
-- **"Why does `when(spy.get(0))...` blow up?"** It calls the real method during stubbing; use
+- "Why does `when(spy.get(0))...` blow up?" It calls the real method during stubbing; use
   `doReturn(...).when(spy).get(0)`.
-- **"What is test-induced design damage?"** Distorting production design (needless interfaces,
+- "What is test-induced design damage?" Distorting production design (needless interfaces,
   indirection) solely to enable mocking.
 
 ## References

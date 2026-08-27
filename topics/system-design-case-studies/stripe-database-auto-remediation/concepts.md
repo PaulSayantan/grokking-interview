@@ -220,30 +220,30 @@ Stripe gives unusually specific figures — quote these directly:
 
 ## Common follow-up questions
 
-- **"Why is this a graph problem and not just a smarter priority list?"** A priority
+- "Why is this a graph problem and not just a smarter priority list?" A priority
   list is greedy: it picks the single most important fix, ignoring that fix A may
   require fix B first. Ordering across multiple simultaneous faults is exactly what
   graph pathfinding solves — it finds a *whole valid sequence*, and prunes any route
   that would pass through an unsafe state. The old ranked-plugin approach kept hitting
   circular dependencies precisely because it had no notion of a path.
-- **"Why switch from BFS to Dijkstra?"** BFS minimizes step count but returns nothing
+- "Why switch from BFS to Dijkstra?" BFS minimizes step count but returns nothing
   when no complete path exists, and it treats a 101-cost rebuild the same as a 3-cost
   config change. Dijkstra weights edges by `misconfiguration × estimatedTime` so it
   prefers genuinely cheaper repairs, and it can return the path to the *least
   misconfigured reachable* state (partial remediation) instead of giving up.
-- **"How does this survive a crash mid-repair?"** Real execution runs on Temporal,
+- "How does this survive a crash mid-repair?" Real execution runs on Temporal,
   which resumes an interrupted workflow where it left off. And because the planner can
   recompute a path from *any* current state, a shard left in an intermediate state
   just gets a fresh plan from there — no orphaned "stranded shards."
-- **"Why does onboarding a new layout need zero code changes now?"** Remediation
+- "Why does onboarding a new layout need zero code changes now?" Remediation
   depends only on states, operations, invariants, and scoring rules — none of which
   hard-code a cluster's shape. The old plugins baked in layout assumptions, so each new
   layout meant auditing them all (~1 week each).
-- **"What's the risk in the cost model?"** The `estimatedTime` constants are fixed
+- "What's the risk in the cost model?" The `estimatedTime` constants are fixed
   guesses. If, say, rebuilds get much faster or oplog resizes much slower in reality,
   Dijkstra's "cheapest path" may stop matching true cost until the constants are
   retuned. It's a pragmatic approximation, not a live measurement.
-- **"Where else does this pattern apply?"** Any domain where you must reach a goal
+- "Where else does this pattern apply?" Any domain where you must reach a goal
   configuration through safe intermediate steps: Kubernetes reconciliation loops,
   infrastructure-as-code planners, robot motion planning, even build-dependency
   resolution. The shared shape is "states + legal transitions + invariants + search."

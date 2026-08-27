@@ -526,28 +526,28 @@ annotations:
 
 ## Common follow-up questions
 
-- **"Where does the `for:` duration live — Prometheus or Alertmanager?"** Prometheus. It
+- "Where does the `for:` duration live — Prometheus or Alertmanager?" Prometheus. It
   governs the `pending → firing` transition during rule evaluation. Alertmanager has no
   hysteresis/debounce of its own; its timing knobs are `group_wait`/`group_interval`/
   `repeat_interval`.
-- **"What's the difference between `group_wait` and `group_interval`?"** `group_wait` (30s)
+- "What's the difference between `group_wait` and `group_interval`?" `group_wait` (30s)
   delays the *first* notification of a *new* group so siblings can accumulate; `group_interval`
   (5m) is the minimum gap before sending an *updated* notification for an *existing* group.
-- **"Silence vs inhibition?"** Silence = manual, time-boxed, human-created mute. Inhibition =
+- "Silence vs inhibition?" Silence = manual, time-boxed, human-created mute. Inhibition =
   automatic suppression of target alerts while a matching *source* alert fires (with `equal`
   scoping). 
-- **"How do you avoid double-paging with two Prometheis?"** Alertmanager dedups on the alert
+- "How do you avoid double-paging with two Prometheis?" Alertmanager dedups on the alert
   label fingerprint; run Alertmanager as a gossip cluster; keep alert labels identical across
   replicas.
-- **"Why alert on symptoms not causes?"** Symptoms map to user pain and catch unforeseen
+- "Why alert on symptoms not causes?" Symptoms map to user pain and catch unforeseen
   failure modes with far fewer, higher-signal alerts; causes (CPU/disk) are numerous, often
   benign, and unenumerable.
-- **"Why two windows in burn-rate alerting?"** The long window avoids false positives and the
+- "Why two windows in burn-rate alerting?" The long window avoids false positives and the
   short window confirms the burn is ongoing so the alert resets quickly after recovery.
-- **"An alert is stuck in `pending` and never fires — why?"** The expression isn't staying
+- "An alert is stuck in `pending` and never fires — why?" The expression isn't staying
   *continuously* true for the whole `for` window (noisy signal, missing samples reset the
   timer). Smooth it with `rate(...[5m])` or shorten `for`.
-- **"Alert fires but no notification arrives — where do you look?"** Check Alertmanager: an
+- "Alert fires but no notification arrives — where do you look?" Check Alertmanager: an
   active **silence**, an **inhibition** rule muting it, a route matching a receiver that's
   misconfigured, or `repeat_interval` not yet elapsed. `amtool` and the Alertmanager UI show
   the alert's state.

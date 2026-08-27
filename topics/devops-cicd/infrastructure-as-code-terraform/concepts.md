@@ -717,23 +717,23 @@ is what makes "infrastructure as code" actually behave like code.
 
 ## Common follow-up questions
 
-- **"Why does Terraform need a state file — can't it just read the cloud?"** Mapping
+- "Why does Terraform need a state file — can't it just read the cloud?" Mapping
   config→real IDs, performance, dependency metadata, and detecting deletions. It *can*
   refresh from the cloud, but state is the authoritative binding.
-- **"What happens if two engineers run `apply` at once?"** Without locking, corrupted or
+- "What happens if two engineers run `apply` at once?" Without locking, corrupted or
   conflicting state; with a locking backend the second run waits/fails to acquire the lock.
-- **"Is a value marked `sensitive` encrypted in state?"** No — only hidden from output;
+- "Is a value marked `sensitive` encrypted in state?" No — only hidden from output;
   state is plaintext. Encrypt the backend and control access.
-- **"Workspaces or separate directories for prod?"** Directories/repos per env for strong
+- "Workspaces or separate directories for prod?" Directories/repos per env for strong
   isolation; workspaces for ephemeral parallel copies. HashiCorp advises against workspaces
   for prod isolation.
-- **"How do you adopt Terraform for existing hand-built infra?"** `import` (block or
+- "How do you adopt Terraform for existing hand-built infra?" `import` (block or
   command) resources into state and write matching HCL; verify with a clean `plan`.
-- **"Terraform vs CloudFormation?"** Multi-cloud + own state vs AWS-only + AWS-managed
+- "Terraform vs CloudFormation?" Multi-cloud + own state vs AWS-only + AWS-managed
   state; CDK synthesizes to CFN.
-- **"How do you handle secrets Terraform generates?"** Encrypt/lock state, restrict access,
+- "How do you handle secrets Terraform generates?" Encrypt/lock state, restrict access,
   and prefer external secret managers over materializing secrets into state.
-- **"How do you detect and fix drift?"** `plan -detailed-exitcode` (scheduled in CI);
+- "How do you detect and fix drift?" `plan -detailed-exitcode` (scheduled in CI);
   remediate by re-apply, updating config, or `-refresh-only`.
 
 ## References

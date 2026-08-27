@@ -846,25 +846,25 @@ of the two applied to a smaller piece. Anything you cannot account for, put unde
 ---
 ## Common follow-up questions
 
-- **"Does deleting a file in a later `RUN` shrink the image?"** No. Layers are immutable once
+- "Does deleting a file in a later `RUN` shrink the image?" No. Layers are immutable once
   committed, so the delete writes a whiteout marker in a new layer and the bytes stay in the
   old one. Add and delete inside one instruction, or never build the file into that image at
   all.
-- **"Alpine vs distroless vs slim — which and why?"** Alpine is the smallest with a shell, at
+- "Alpine vs distroless vs slim — which and why?" Alpine is the smallest with a shell, at
   the cost of musl instead of glibc. `-slim` keeps glibc and `apt` and is the safe middle.
   Distroless is smaller and has the least to attack, at the cost of no shell for `RUN` or for
   debugging.
-- **"Why won't `docker exec sh` work on my distroless image?"** There is no `/bin/sh` for
+- "Why won't `docker exec sh` work on my distroless image?" There is no `/bin/sh` for
   `exec` to start. Use the `:debug` tag of the same image, attach a debug container from
   outside, or build `--target builder` and reproduce it there.
-- **"My scratch image can't make HTTPS calls, or says 'no such file or directory' on start."**
+- "My scratch image can't make HTTPS calls, or says 'no such file or directory' on start."
   The first is the missing CA bundle: copy `ca-certificates.crt` in. The second is a
   dynamically linked binary whose loader is absent, not a missing `ENTRYPOINT` path: rebuild
   static with `CGO_ENABLED=0`.
-- **"How do I keep the build fast but not ship the package cache?"** A BuildKit cache mount,
+- "How do I keep the build fast but not ship the package cache?" A BuildKit cache mount,
   `RUN --mount=type=cache,...`, which persists between builds and is never committed into a
   layer.
-- **"Why is my image still huge after adding a multi-stage build?"** Four usual causes: the
+- "Why is my image still huge after adding a multi-stage build?" Four usual causes: the
   final stage copies more than the artifact, its base is still a full distro, there is no
   `.dockerignore` behind a `COPY . .`, or the builder's `node_modules` with `devDependencies`
   came across whole.

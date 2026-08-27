@@ -693,24 +693,24 @@ state through one API server without locks.
 
 ## Common follow-up questions
 
-- **"What's the difference between spec and status, and who writes each?"** You write `spec`
+- "What's the difference between spec and status, and who writes each?" You write `spec`
   (desired state); the controller writes `status` (observed state) and drives spec→status.
-- **"kind vs resource?"** `kind` is the PascalCase type in YAML (`Pod`); `resource` is the
+- "kind vs resource?" `kind` is the PascalCase type in YAML (`Pod`); `resource` is the
   lowercase plural REST/RBAC name (`pods`).
-- **"When would you use `create` vs `apply`?"** `apply` for anything you'll manage over time
+- "When would you use `create` vs `apply`?" `apply` for anything you'll manage over time
   (idempotent, GitOps); `create`/`run` for one-off or scaffolding.
-- **"How does apply know what to delete?"** Client-side: three-way merge via the last-applied
+- "How does apply know what to delete?" Client-side: three-way merge via the last-applied
   annotation. Server-side: field ownership in `managedFields`.
-- **"Client dry-run vs server dry-run?"** Client is local-only (no validation/admission);
+- "Client dry-run vs server dry-run?" Client is local-only (no validation/admission);
   server runs the full pipeline including webhooks but doesn't persist.
-- **"Why is my namespace/object stuck Terminating?"** A finalizer whose controller never
+- "Why is my namespace/object stuck Terminating?" A finalizer whose controller never
   cleared it; inspect `metadata.finalizers`.
-- **"I deleted the parent but children remain — why?"** Orphan cascade policy / broken owner
+- "I deleted the parent but children remain — why?" Orphan cascade policy / broken owner
   references.
-- **"Labels vs annotations?"** Labels are selectable identity; annotations are non-selectable
+- "Labels vs annotations?" Labels are selectable identity; annotations are non-selectable
   metadata.
-- **"How do I target a different cluster?"** Switch kubeconfig **context** (`use-context`).
-- **"What are alpha/beta/stable API versions?"** Maturity/compat guarantees; alpha may be
+- "How do I target a different cluster?" Switch kubeconfig **context** (`use-context`).
+- "What are alpha/beta/stable API versions?" Maturity/compat guarantees; alpha may be
   removed, beta is enabled-but-may-change, v1 is stable.
 
 ## References

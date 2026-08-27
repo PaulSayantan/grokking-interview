@@ -210,30 +210,30 @@ guardrails:
 
 ## Common follow-up questions
 
-- **"Why not just delete blobs in place instead of compacting?"** Because Magic
+- "Why not just delete blobs in place instead of compacting?" Because Magic
   Pocket volumes are immutable and never reopened — you physically can't punch a
   hole in a sealed volume. The only way to reclaim space is to copy the live blobs
   into a new volume and discard the old one. That constraint buys simplicity and
   reliability but forces a background compaction process.
-- **"Why three strategies instead of one good one?"** Volumes span a huge range of
+- "Why three strategies instead of one good one?" Volumes span a huge range of
   fill levels. L1 assumes volumes are mostly full and just tops off a host; it
   reads tens of GiB to reclaim under one volume when fragmentation is bad. L2 packs
   many under-filled volumes into one via DP; L3 stream-re-encodes the sparsest
   through the Live Coder. Each is efficient only in its own band.
-- **"What was the actual bottleneck?"** Metadata capacity, not disk packing.
+- "What was the actual bottleneck?" Metadata capacity, not disk packing.
   Rewriting a blob means a new location entry; L3 rewrites *most* blobs, so it
   generates the heaviest metadata load — which is why it's rate-limited and treated
   as one of the biggest constraints.
-- **"How much did the new system help?"** L2 reduced compaction overhead 2–3×
+- "How much did the new system help?" L2 reduced compaction overhead 2–3×
   faster than L1, drove overhead 30–50% lower than L1-only cells, and returned
   overhead to sustainable levels within days (over about a week). The worst
   under-filled volumes had held live data in under 5% of their capacity.
-- **"Why a dynamic control loop instead of a tuned threshold?"** Because the fill
+- "Why a dynamic control loop instead of a tuned threshold?" Because the fill
   distribution keeps shifting. Too-high a threshold starves hosts and overhead
   climbs; too-low wastes compute and I/O compacting volumes that don't need it. A
   static number is always stale, so the eligibility threshold is adjusted
   automatically.
-- **"Where else does this pattern show up?"** Any append-only / immutable store:
+- "Where else does this pattern show up?" Any append-only / immutable store:
   LSM-tree compaction (RocksDB, Cassandra), log-structured file systems, Kafka log
   segment cleanup, and copy-on-write systems all face the same "reclaim space by
   rewriting live data, and mind the write amplification" trade-off.

@@ -617,27 +617,27 @@ Note on `FactoryBean`: placing `<aop:scoped-proxy/>` on a `FactoryBean` definiti
 
 ## Common follow-up questions
 
-- **Is a Spring singleton the same as the GoF singleton pattern?** No. GoF = one per
+- Is a Spring singleton the same as the GoF singleton pattern? No. GoF = one per
   classloader/JVM; Spring = one per bean definition per container. Two contexts → two
   instances.
-- **Are initialization and destruction callbacks called for prototypes?** Init callbacks:
+- Are initialization and destruction callbacks called for prototypes? Init callbacks:
   yes. Destruction callbacks: **no** — the client must clean up.
-- **What's the default scope?** `singleton`.
-- **How do you get a fresh prototype each time inside a singleton?** `ObjectProvider`/
+- What's the default scope? `singleton`.
+- How do you get a fresh prototype each time inside a singleton? `ObjectProvider`/
   `ObjectFactory`, a scoped proxy (`proxyMode`), or `@Lookup` method injection — not plain
   `@Autowired`.
-- **Why does injecting a prototype into a singleton "not work"?** Injection runs once at
+- Why does injecting a prototype into a singleton "not work"? Injection runs once at
   wiring time, so the singleton keeps a single prototype forever.
-- **Are singletons thread-safe?** Spring doesn't make them thread-safe; keep them stateless
+- Are singletons thread-safe? Spring doesn't make them thread-safe; keep them stateless
   or synchronize yourself.
-- **When are singletons created?** Eagerly at startup by default; use `@Lazy` to defer.
-- **What's the difference between `application` scope and `singleton`?** `application` is one
+- When are singletons created? Eagerly at startup by default; use `@Lazy` to defer.
+- What's the difference between `application` scope and `singleton`? `application` is one
   per `ServletContext` and exposed as a servlet context attribute; `singleton` is one per
   `ApplicationContext`.
-- **Which scopes need a web-aware context?** `request`, `session`, `application`, `websocket`.
-- **CGLIB vs JDK proxy for scoped proxies?** `TARGET_CLASS` → CGLIB (no interface needed, no
+- Which scopes need a web-aware context? `request`, `session`, `application`, `websocket`.
+- CGLIB vs JDK proxy for scoped proxies? `TARGET_CLASS` → CGLIB (no interface needed, no
   private/final method interception); `INTERFACES` → JDK proxy (needs an interface).
-- **javax vs jakarta?** Spring 6/7 use `jakarta.servlet.*`; Spring 5 used `javax.servlet.*`.
+- javax vs jakarta? Spring 6/7 use `jakarta.servlet.*`; Spring 5 used `javax.servlet.*`.
 
 ## References
 

@@ -429,25 +429,25 @@ prevent.
 
 ## Common follow-up questions
 
-- **Why does columnar storage compress better than row storage?** Because a column
+- Why does columnar storage compress better than row storage? Because a column
   contains values of a single type and domain, so neighbors are similar → RLE,
   dictionary, delta, and general compressors all do far better than on a mixed-type row.
-- **What is vectorized execution and why does columnar enable it?** Processing batches
+- What is vectorized execution and why does columnar enable it? Processing batches
   of like-typed column values through CPU-friendly (often SIMD) operators instead of
   tuple-at-a-time; columns are already dense arrays, so it's a natural fit.
-- **How does predicate pushdown work in Parquet?** Per-row-group min/max statistics let
+- How does predicate pushdown work in Parquet? Per-row-group min/max statistics let
   the reader skip row groups that can't satisfy the `WHERE` clause without reading them.
-- **Snowflake vs BigQuery vs Redshift in one line each?** Snowflake: virtual warehouses
+- Snowflake vs BigQuery vs Redshift in one line each? Snowflake: virtual warehouses
   over shared storage; BigQuery: serverless slots, fully managed; Redshift: cluster
   (with RA3/Serverless separating storage/compute).
-- **Why is single-row UPDATE slow in a column store?** The row's fields are scattered
+- Why is single-row UPDATE slow in a column store? The row's fields are scattered
   across N separate, compressed column files; touching one row disturbs many blocks.
-- **What causes a Prometheus OOM?** High series cardinality — usually an unbounded value
+- What causes a Prometheus OOM? High series cardinality — usually an unbounded value
   placed in a label.
-- **Continuous aggregate vs recording rule vs materialized view?** All precompute
+- Continuous aggregate vs recording rule vs materialized view? All precompute
   aggregates; continuous aggregates (Timescale) refresh incrementally, recording rules
   (Prometheus) evaluate on a schedule into new series, MVs may be full or incremental.
-- **What is a lakehouse?** A transactional table layer (Iceberg/Delta/Hudi) over
+- What is a lakehouse? A transactional table layer (Iceberg/Delta/Hudi) over
   columnar files in object storage, adding ACID, schema evolution, and time travel.
 
 ## References

@@ -506,35 +506,35 @@ industry consensus is: **strangle, don't rewrite.**
 
 ## Common follow-up questions
 
-- **"Where does the Strangler Fig name come from and what's the core idea?"** A vine that
+- "Where does the Strangler Fig name come from and what's the core idea?" A vine that
   grows around a host tree until it can stand on its own and the host is gone — grow the
   new system around the monolith, route slices to it, delete the monolith at the end. No
   big-bang cutover.
-- **"Why not just rewrite from scratch?"** Frozen value delivery, undocumented behavior
+- "Why not just rewrite from scratch?" Frozen value delivery, undocumented behavior
   encoded in the old code, a moving target, and an all-or-nothing risky cutover. Rewrites
   usually fail on large systems.
-- **"How do you decide what to extract first?"** Low-risk / high-value edges: loosely
+- "How do you decide what to extract first?" Low-risk / high-value edges: loosely
   coupled, high-churn or high-value, clear ownership. Leave the deeply entangled
   transactional core for last.
-- **"Dual write vs outbox vs CDC — which and why?"** Never dual-write (no cross-system
+- "Dual write vs outbox vs CDC — which and why?" Never dual-write (no cross-system
   atomicity → permanent divergence). Use the transactional outbox (one atomic local write
   + relay) or CDC (tail the log; no app change to the legacy DB), both at-least-once so
   consumers must be idempotent.
-- **"Difference between parallel run, dark launch, and canary?"** Parallel run computes
+- "Difference between parallel run, dark launch, and canary?" Parallel run computes
   and compares both outputs but serves the old one; dark launch exercises the new path in
   prod invisibly (e.g. shadow traffic); canary shifts a small % of real traffic and
   watches metrics.
-- **"What is branch by abstraction and when do you use it?"** An in-code technique:
+- "What is branch by abstraction and when do you use it?" An in-code technique:
   introduce an abstraction, migrate clients to it, build the new impl behind it, switch
   (often via flag), delete the old — all on the mainline. Use it to extract an internal
   component or a service behind the facade.
-- **"How do you roll back a slice safely?"** Route/flag flip (instant, no redeploy), keep
+- "How do you roll back a slice safely?" Route/flag flip (instant, no redeploy), keep
   the legacy path warm, use expand/contract for schema, and keep data sync running so the
   new writes can be reconciled back.
-- **"Is a shared database during migration OK?"** As a *temporary transitional* state,
+- "Is a shared database during migration OK?" As a *temporary transitional* state,
   yes; as a permanent design, no — it couples deployments and hides ownership, giving you
   a distributed monolith. Split the schema before/with the service.
-- **"When would you NOT migrate?"** Healthy monolith, small team, unclear boundaries, or
+- "When would you NOT migrate?" Healthy monolith, small team, unclear boundaries, or
   when the real problem is testing/CI/process. Consider a modular monolith instead.
 
 ## References

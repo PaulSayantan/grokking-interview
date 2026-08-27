@@ -368,22 +368,22 @@ feature doesn't actually work."
 
 ## Common follow-up questions
 
-- **"What does 'red' actually prove?"** That the test is capable of failing and fails for
+- "What does 'red' actually prove?" That the test is capable of failing and fails for
   the *expected* reason — so a future green genuinely means the behaviour works and the
   test isn't a false positive.
-- **"Why write the simplest/faked code to pass?"** To reach green fast and let subsequent
+- "Why write the simplest/faked code to pass?" To reach green fast and let subsequent
   tests (triangulation) *drive* the real implementation, avoiding speculative
   generality (YAGNI).
-- **"When would you NOT do TDD?"** Spikes/exploration, throwaway code, or where the risk is
+- "When would you NOT do TDD?" Spikes/exploration, throwaway code, or where the risk is
   integration/UI/perf rather than unit logic — cover those with integration/E2E/perf tests.
-- **"Classicist or mockist — which do you use?"** Prefer real collaborators; mock at owned
+- "Classicist or mockist — which do you use?" Prefer real collaborators; mock at owned
   architectural seams and external systems. Avoid interaction tests that just mirror the
   implementation.
-- **"How do you TDD legacy code?"** Add characterization tests at seams to pin current
+- "How do you TDD legacy code?" Add characterization tests at seams to pin current
   behaviour, then refactor to testability, then TDD changes.
-- **"Isn't TDD dead (DHH)?"** No — his critique targets over-isolation/mock-heavy dogma;
+- "Isn't TDD dead (DHH)?" No — his critique targets over-isolation/mock-heavy dogma;
   the fix is a balanced test pyramid, not abandoning test-first.
-- **"Does TDD guarantee good design or fewer bugs?"** It exerts design pressure and gives a
+- "Does TDD guarantee good design or fewer bugs?" It exerts design pressure and gives a
   regression net; evidence is a modest quality gain, roughly neutral productivity. Tests
   can share the code's misunderstandings, so it's not a silver bullet.
 

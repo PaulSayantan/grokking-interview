@@ -570,29 +570,29 @@ because each change is small and easy to reason about and roll back. A fifth mea
 
 ## Common follow-up questions
 
-- **What's the difference between continuous delivery and continuous deployment?** Delivery
+- What's the difference between continuous delivery and continuous deployment? Delivery
   automates everything up to a *deployable* state and keeps a manual release gate; deployment
   removes that gate and auto-ships every green change to prod.
-- **Why build once and deploy many?** So the exact bits tested in staging are the bits that
+- Why build once and deploy many? So the exact bits tested in staging are the bits that
   run in prod; rebuilding per environment breaks that guarantee. Config, not the artifact,
   varies per environment (12-Factor).
-- **How do you speed up a slow pipeline?** Parallelize independent jobs, shard slow test
+- How do you speed up a slow pipeline? Parallelize independent jobs, shard slow test
   suites (fan-out/fan-in), cache dependencies keyed on the lockfile, run the fast commit
   stage first with fail-fast, and move slow acceptance/E2E tests to later stages.
-- **Reproducible vs idempotent — what's the difference?** Reproducible = same inputs yield a
+- Reproducible vs idempotent — what's the difference? Reproducible = same inputs yield a
   bit-identical artifact; idempotent = re-running a step is safe and converges. First is
   about the build output; second is about retry safety.
-- **Where do security scans go?** As gate stages, shifted left (early). SAST/SCA/IaC scan in
+- Where do security scans go? As gate stages, shifted left (early). SAST/SCA/IaC scan in
   the commit/build stage; DAST against a running staging deploy. Details in
   `devsecops-and-pipeline-security`.
-- **Why ephemeral runners?** Clean state, security isolation, elastic scale — at the cost of
+- Why ephemeral runners? Clean state, security isolation, elastic scale — at the cost of
   cold-start speed, mitigated by caching.
-- **Your build is red 20% of the time from flaky tests — what do you do?** Measure a flake
+- Your build is red 20% of the time from flaky tests — what do you do? Measure a flake
   rate, quarantine known-flaky tests into a non-blocking suite (ticketed, not deleted),
   add *bounded, logged* retries to keep flow, and deflake root causes (kill `sleep`-based
   waits, isolate shared state, pin clocks/seeds). Don't blanket-retry the whole suite —
   that masks real intermittent bugs and destroys trust in the green build.
-- **How do you know your pipeline is good?** DORA four keys: deployment frequency, lead time,
+- How do you know your pipeline is good? DORA four keys: deployment frequency, lead time,
   change failure rate, failed-deployment recovery time — throughput and stability together.
 
 ## References

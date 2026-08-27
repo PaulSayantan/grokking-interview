@@ -632,16 +632,16 @@ Config file conventions: `logback-spring.xml` (Logback) or `log4j2-spring.xml` (
 
 ## Common follow-up questions
 
-- **Why does `/actuator/metrics` not return Prometheus text?** `/metrics` is Micrometer's own JSON navigation endpoint. Prometheus scrapes the separate `/actuator/prometheus` endpoint, which only exists when `micrometer-registry-prometheus` is on the classpath.
-- **What's the difference between enabling and exposing an endpoint?** Enabling controls whether the endpoint bean/feature exists; exposing controls whether an enabled endpoint is reachable over HTTP/JMX. `shutdown` is disabled by default and must be both enabled and exposed.
-- **Liveness vs readiness — which should check the database?** Readiness may check external deps (so traffic stops when they're down); liveness should NOT, or a transient DB outage will trigger pod restarts across the fleet.
-- **Sleuth vs Micrometer Tracing?** Sleuth was removed in Boot 3; use Micrometer Tracing with a Brave or OTel bridge. Auto-config lives under `management.tracing.*` and `management.zipkin.*`.
-- **Default sampling rate for traces?** 0.1 (10%). Set `management.tracing.sampling.probability=1.0` to capture all.
-- **How do I change a log level without redeploying?** `POST /actuator/loggers/{name}` with `{"configuredLevel":"DEBUG"}`.
-- **Which server does WebFlux use by default?** Netty (Reactor Netty), not Tomcat.
-- **How does graceful shutdown avoid 500s during deploys?** New connections are refused, in-flight requests finish within `spring.lifecycle.timeout-per-shutdown-phase`, and readiness flips to REFUSING_TRAFFIC so the LB drains the pod.
-- **Why is my gauge reporting NaN?** Micrometer holds a weak reference to the gauged object; if it's GC'd (no strong reference), the gauge reports NaN.
-- **What's a dangerous metric-tag mistake?** High-cardinality tags (user IDs, raw URLs) create unbounded time series and can OOM the registry/backend.
+- Why does `/actuator/metrics` not return Prometheus text? `/metrics` is Micrometer's own JSON navigation endpoint. Prometheus scrapes the separate `/actuator/prometheus` endpoint, which only exists when `micrometer-registry-prometheus` is on the classpath.
+- What's the difference between enabling and exposing an endpoint? Enabling controls whether the endpoint bean/feature exists; exposing controls whether an enabled endpoint is reachable over HTTP/JMX. `shutdown` is disabled by default and must be both enabled and exposed.
+- Liveness vs readiness — which should check the database? Readiness may check external deps (so traffic stops when they're down); liveness should NOT, or a transient DB outage will trigger pod restarts across the fleet.
+- Sleuth vs Micrometer Tracing? Sleuth was removed in Boot 3; use Micrometer Tracing with a Brave or OTel bridge. Auto-config lives under `management.tracing.*` and `management.zipkin.*`.
+- Default sampling rate for traces? 0.1 (10%). Set `management.tracing.sampling.probability=1.0` to capture all.
+- How do I change a log level without redeploying? `POST /actuator/loggers/{name}` with `{"configuredLevel":"DEBUG"}`.
+- Which server does WebFlux use by default? Netty (Reactor Netty), not Tomcat.
+- How does graceful shutdown avoid 500s during deploys? New connections are refused, in-flight requests finish within `spring.lifecycle.timeout-per-shutdown-phase`, and readiness flips to REFUSING_TRAFFIC so the LB drains the pod.
+- Why is my gauge reporting NaN? Micrometer holds a weak reference to the gauged object; if it's GC'd (no strong reference), the gauge reports NaN.
+- What's a dangerous metric-tag mistake? High-cardinality tags (user IDs, raw URLs) create unbounded time series and can OOM the registry/backend.
 
 ## References
 

@@ -234,31 +234,31 @@ message id 32848, UDP payload size 1232 bytes.
 
 ## Common follow-up questions
 
-- **"Why does a TLD DNSSEC mistake break child domains that don't even use
-  DNSSEC?"** Because validation walks the chain of trust downward. If the resolver
+- "Why does a TLD DNSSEC mistake break child domains that don't even use
+  DNSSEC?" Because validation walks the chain of trust downward. If the resolver
   can't validate `.al` itself (DS vs. DNSKEY mismatch), it can't establish trust
   for anything beneath `.al`, so it fails closed for the whole subtree regardless
   of each child's own configuration.
-- **"What exactly went wrong in the rollover?"** The operator published a new
+- "What exactly went wrong in the rollover?" The operator published a new
   DNSKEY and stopped serving the old one while the root DS still pointed at the old
   key `id=26319`. The served key's fingerprint no longer matched the parent's DS,
   so signatures couldn't be validated. Later they removed all DNSKEYs (worse), then
   finally removed the DS to make the zone cleanly unsigned.
-- **"Why is an NTA safe to apply here but risky in general?"** Applying it drops
+- "Why is an NTA safe to apply here but risky in general?" Applying it drops
   spoofing protection for the zone. Cloudflare deemed it acceptable because the
   break was public and already failing for every validating resolver — an attacker
   gained nothing. In a *targeted* attack, blindly applying an NTA could help the
   attacker, so the bar is "public, confirmed, everyone-equally-affected."
-- **"What does EDE 33 add over just returning an answer?"** Transparency. Without
+- "What does EDE 33 add over just returning an answer?" Transparency. Without
   it, a client can't tell that the resolver stopped validating that zone. EDE 33
   says "served under a Negative Trust Anchor, unvalidated" on every response while
   the NTA is active — closing the silent-NTA gap from the `.de` incident.
-- **"How did Cloudflare even notice, given no one from Albania reported it?"**
+- "How did Cloudflare even notice, given no one from Albania reported it?"
   Their own SERVFAIL metrics rose as cached records expired and resolvers
   re-validated against the broken chain. They tried contacting the operator and
   posting to the DNS-OARC Mattermost, got no reply, and applied the NTA at 17:15
   UTC.
-- **"What's the durable fix beyond this one incident?"** Standardizing EDE 33 (via
+- "What's the durable fix beyond this one incident?" Standardizing EDE 33 (via
   the IETF DNSOP draft) and getting tools like `kdig` and Unbound to recognize it,
   so NTA usage is observable in-band across the ecosystem — not just on a status
   page someone has to remember to check.

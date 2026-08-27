@@ -683,22 +683,22 @@ territory is the layer *below and beside* the cluster, not app config inside it.
 
 ## Common follow-up questions
 
-- **"Terraform or Ansible — which do I use?"** Both: Terraform provisions the infra,
+- "Terraform or Ansible — which do I use?" Both: Terraform provisions the infra,
   Ansible configures the hosts. Terraform has state and plans a diff; Ansible is stateless
   and converges per task.
-- **"How does Ansible achieve idempotency if it's just running commands?"** It doesn't just
+- "How does Ansible achieve idempotency if it's just running commands?" It doesn't just
   run commands — each *module* checks current state and only acts on a diff. `command`/`shell`
   are the exception and must be guarded (`creates`, `changed_when`).
-- **"Why agentless? What's the catch?"** No agent to install/patch/secure; only needs SSH +
+- "Why agentless? What's the catch?" No agent to install/patch/secure; only needs SSH +
   Python. Catch: push doesn't self-heal between runs and fans out SSH at very large scale.
-- **"What's the difference between `copy` and `template`?"** `copy` ships a file verbatim;
+- "What's the difference between `copy` and `template`?" `copy` ships a file verbatim;
   `template` renders Jinja2 (vars/facts) first. Both are idempotent.
-- **"When would you NOT use Ansible?"** For app config *inside* Kubernetes (use ConfigMaps +
+- "When would you NOT use Ansible?" For app config *inside* Kubernetes (use ConfigMaps +
   GitOps), for full infra lifecycle (use Terraform), or when you've gone fully immutable and
   only bake images.
-- **"How do handlers help idempotency?"** They restart a service *only if* its config task
+- "How do handlers help idempotency?" They restart a service *only if* its config task
   reported `changed`, so a converged run doesn't bounce healthy services.
-- **"Ansible Vault vs HashiCorp Vault?"** Ansible Vault is static file encryption committed
+- "Ansible Vault vs HashiCorp Vault?" Ansible Vault is static file encryption committed
   to git; HashiCorp Vault is a dynamic secrets platform (leases, rotation, audit). For
   deploy-time secrets prefer the latter — see `secrets-management`.
 

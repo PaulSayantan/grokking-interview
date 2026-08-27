@@ -208,26 +208,26 @@ peering locations to steer traffic toward a preferred entry point.
 
 ## Common follow-up questions
 
-- **"Why is ORIGIN a tempting attribute to manipulate rather than Local Preference
-  or AS_PATH?"** Local Preference never leaves your own network (it's not sent to
+- "Why is ORIGIN a tempting attribute to manipulate rather than Local Preference
+  or AS_PATH?" Local Preference never leaves your own network (it's not sent to
   peers), so you can't use it to influence *other* networks. Prepending AS_PATH
   makes *your own* path look worse, not better. ORIGIN is one of the few transitive
   signals a middle network can quietly lower to make its route win downstream ties.
-- **"If ORIGIN is only the third tie-breaker, does it really matter?"** Yes — Local
+- "If ORIGIN is only the third tie-breaker, does it really matter?" Yes — Local
   Preference and AS_PATH length are frequently tied across competing paths on the
   real Internet, so rung 3 decides a large share of routes. Cloudflare measured
   concrete gains: +18% best-paths on IPv4 and +40% on IPv6 for rewriters.
-- **"How do you attribute a rewrite to a specific network when a path has many
-  hops?"** Two-hop paths are trivial (only one other AS could have done it). For
+- "How do you attribute a rewrite to a specific network when a path has many
+  hops?" Two-hop paths are trivial (only one other AS could have done it). For
   longer paths, seed a trusted set with known-honest ASes and iteratively remove
   classified ASes until exactly one unknown remains, then attribute the change to
   it — accepting that visibility gaps leave some uncertainty.
-- **"Why not just cryptographically sign ORIGIN so rewrites are detectable?"** BGP
+- "Why not just cryptographically sign ORIGIN so rewrites are detectable?" BGP
   attributes weren't designed with per-attribute authentication, and adding it to a
   mandatory field across ~70k networks and every router vendor is a massive
   deployment problem. Cloudflare's pragmatic path is to *neuter* the attribute
   (force IGP), not secure it.
-- **"What's the general lesson for system design?"** Any decision that relies on a
+- "What's the general lesson for system design?" Any decision that relies on a
   value editable by untrusted parties in the path will be gamed once there's
   incentive. Either authenticate the value, remove it from the decision, or make it
   uniform so it can't be a differentiator — asking participants to "please behave"

@@ -207,32 +207,32 @@ The post is generous with figures — quote these in an interview:
 
 ## Common follow-up questions
 
-- **"Why not just give each client a shallow or partial clone instead of building a
-  service?"** Shallow/partial/single-branch clones cut transfer size but the server
+- "Why not just give each client a shallow or partial clone instead of building a
+  service?" Shallow/partial/single-branch clones cut transfer size but the server
   still enumerates objects and streams a packfile per request, and they break
   operations like `merge-base` and `bisect` that need full history. They optimize the
   copy; GitFarm eliminates the per-client copy entirely.
-- **"How does GitFarm get a checkout ready in under half a second when materializing
-  one takes up to 3 minutes?"** Pooling. It pre-warms fixed-size pools of containers
+- "How does GitFarm get a checkout ready in under half a second when materializing
+  one takes up to 3 minutes?" Pooling. It pre-warms fixed-size pools of containers
   and checkouts, so a request grabs a ready one in under a second instead of building
   it on demand. The 3-minute cost is paid ahead of time, in the background.
-- **"Is GitFarm a Git server?"** No — it's a centralized Git *client*. It stores no
+- "Is GitFarm a Git server?" No — it's a centralized Git *client*. It stores no
   repositories and relies on upstream Git servers for actual storage; it just runs
   commands against warm local clones on the caller's behalf.
-- **"How fresh is the data GitFarm serves?"** Eventually consistent: each backend
+- "How fresh is the data GitFarm serves?" Eventually consistent: each backend
   refreshes its bare clone on push events and via a `git fetch` every 5 minutes.
   Clients needing the latest state run an explicit `git fetch` in-session, paying
   extra latency for guaranteed freshness.
-- **"How does the Gateway decide where to send a request, and what happens under
-  overload?"** It tracks backend health/load via heartbeats in Redis, routes to the
+- "How does the Gateway decide where to send a request, and what happens under
+  overload?" It tracks backend health/load via heartbeats in Redis, routes to the
   right cluster by placement policy, and picks the backend with the most available
   checkouts for that repo. If none have capacity, it rejects the request — throttling
   so the system degrades gracefully rather than falling over.
-- **"Why multiple clusters instead of one big pool?"** To avoid the noisy-neighbor
+- "Why multiple clusters instead of one big pool?" To avoid the noisy-neighbor
   problem — a heavy workload on a specialized cluster can't starve unrelated
   workloads. There's a generic shared cluster plus specialized ones, with onboarding
   review and sizing per use case.
-- **"What's the headline win?"** For the read-heavy CODEOWNERS service: CPU dropped
+- "What's the headline win?" For the read-heavy CODEOWNERS service: CPU dropped
   77% (70+ cores to 16), memory dropped 90%+ (400–600 GB to 32 GB), and startup fell
   from 15–20 minutes to under a minute — while checkouts became available in under
   500 ms and client-side resource use fell over 80% overall.

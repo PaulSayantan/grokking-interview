@@ -477,35 +477,35 @@ not "exactly-once," when an interviewer probes durability.
 
 ## Common follow-up questions
 
-- **Q: Why not export directly from the SDK to the backend?** You can, but you lose central policy
+- Q: Why not export directly from the SDK to the backend? You can, but you lose central policy
   (sampling, redaction, routing), tie instrumentation to backend lifecycle, put batching/retry in
   the request path, and expose backend credentials in every service. Direct export is fine for
   small/demo setups; the Collector is the production default.
-- **Q: What's the difference between a processor and a connector?** A processor stays within one
+- Q: What's the difference between a processor and a connector? A processor stays within one
   pipeline and one signal. A connector links two pipelines — it's the exporter of one and the
   receiver of another — and can even change signal type (traces → metrics via `spanmetrics`).
-- **Q: Where should `memory_limiter` and `batch` go?** `memory_limiter` first (so backpressure hits
+- Q: Where should `memory_limiter` and `batch` go? `memory_limiter` first (so backpressure hits
   receivers before memory is committed), `batch` last (batch the final, post-sampling shape).
-- **Q: Why can't I just add `tail_sampling` to my autoscaled gateway?** Because each replica sees
+- Q: Why can't I just add `tail_sampling` to my autoscaled gateway? Because each replica sees
   only a fragment of each trace. You need a load-balancing tier routing by `traceID` so all spans of
   a trace reach one tail-sampling instance.
-- **Q: Head vs tail sampling trade-off?** Head is cheap and stateless but blind to outcome (may drop
+- Q: Head vs tail sampling trade-off? Head is cheap and stateless but blind to outcome (may drop
   the error). Tail is outcome-aware (keep errors/slow) but needs to buffer whole traces → memory,
   latency, and the load-balancing requirement.
-- **Q: What happens to the tail-sampling tier when it scales up or down?** The `loadbalancing`
+- Q: What happens to the tail-sampling tier when it scales up or down? The `loadbalancing`
   exporter's consistent-hash ring reshards on membership change, so a fraction of in-flight traces
   briefly split across the old and new owner and produce partial decisions — the same failure the
   tier prevents at steady state. Scale slowly/stably, use a stable resolver, and accept a small
   transient error rather than autoscaling aggressively.
-- **Q: How do I send telemetry to two backends?** List both exporters in one pipeline (fan-out
+- Q: How do I send telemetry to two backends? List both exporters in one pipeline (fan-out
   copies to each). For *different* subsets per backend, use separate pipelines or a routing
   connector.
-- **Q: Agent or gateway?** Both. Agent for local enrichment/offload (k8s metadata, host metrics);
+- Q: Agent or gateway? Both. Agent for local enrichment/offload (k8s metadata, host metrics);
   gateway for aggregation, central policy, and tail sampling. Agents forward OTLP to the gateway.
-- **Q: How do I avoid data loss when the backend is down?** Enable `retry_on_failure` and a
+- Q: How do I avoid data loss when the backend is down? Enable `retry_on_failure` and a
   `sending_queue`; back the queue with the `file_storage` extension for persistence across
   restarts. Ultimately `memory_limiter` refuses and data drops if the outage outlasts the queue.
-- **Q: Which port is OTLP on?** gRPC 4317, HTTP 4318.
+- Q: Which port is OTLP on? gRPC 4317, HTTP 4318.
 
 ## References
 

@@ -345,23 +345,23 @@ add-and-search / word-search variants, then the bit-trie.
 
 ## Common follow-up questions
 
-- **Trie vs hash set for a dictionary — when does each win?** Hash set: less memory,
+- Trie vs hash set for a dictionary — when does each win? Hash set: less memory,
   simpler, O(L) exact lookup. Trie: prefix queries (`startsWith`, autocomplete,
   longest/shortest matching prefix), enumerating words by prefix, and sharing work across
   many keys during a search.
-- **How do you make `search` differ from `startsWith`?** `search` returns `node.isEnd`
+- How do you make `search` differ from `startsWith`? `search` returns `node.isEnd`
   after the walk; `startsWith` returns `node != null`. Same traversal, different final
   check.
-- **How do you cut a trie's memory?** Use a compressed/radix trie to collapse single-child
+- How do you cut a trie's memory? Use a compressed/radix trie to collapse single-child
   chains, a hash-map (or TST) children representation for sparse alphabets, and share
   prefixes (which the trie does automatically).
-- **How do you delete a word without breaking others?** Clear `isEnd`; on the way up,
+- How do you delete a word without breaking others? Clear `isEnd`; on the way up,
   prune a node only if it has no children and isn't another word's end.
-- **How does a bit-trie maximize XOR?** Insert numbers MSB-first as bits; per query, greedily
+- How does a bit-trie maximize XOR? Insert numbers MSB-first as bits; per query, greedily
   descend to the opposite bit when possible so the high-value XOR bits become 1.
-- **Why is a trie used in IP routing?** Longest-prefix match on address bits is exactly a
+- Why is a trie used in IP routing? Longest-prefix match on address bits is exactly a
   (radix) trie walk; routers use PATRICIA/radix tries for this.
-- **What's the complexity of enumerating all words under a prefix?** O(length of prefix +
+- What's the complexity of enumerating all words under a prefix? O(length of prefix +
   total characters across all matching words) — you pay only for what you output.
 
 ## References

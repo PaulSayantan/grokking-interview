@@ -463,26 +463,26 @@ class OrderServiceTest {
 
 ## Common follow-up questions
 
-- **"Is a unit test the same as testing a single class?"** No — a unit is a unit of *behavior*.
+- "Is a unit test the same as testing a single class?" No — a unit is a unit of *behavior*.
   Sociable tests deliberately use real collaborators; you double only awkward boundaries.
-- **"Should I mock everything?"** No. Default to state-based/sociable testing; mock at
+- "Should I mock everything?" No. Default to state-based/sociable testing; mock at
   architectural boundaries (I/O, time, randomness, third parties). Over-mocking couples tests to
   implementation and lets tests pass while the system is broken.
-- **"One assertion per test — literally?"** No: one *behavior* per test. Multiple assertions on
+- "One assertion per test — literally?" No: one *behavior* per test. Multiple assertions on
   one outcome are fine; use `assertAll`/soft assertions to report them together.
-- **"How do I test code that uses the current time / random UUIDs?"** Inject a `Clock` and a
+- "How do I test code that uses the current time / random UUIDs?" Inject a `Clock` and a
   random/ID generator; substitute fixed/seeded values in tests. Never call `now()`/`randomUUID()`
   directly in testable domain logic.
-- **"Why is my test green locally but flaky in CI?"** Usually hidden shared state, run-order
+- "Why is my test green locally but flaky in CI?" Usually hidden shared state, run-order
   dependence, reliance on `HashMap` iteration order, timing/`sleep`, or default locale/timezone —
   all FIRST "Isolated/Repeatable" violations.
-- **"AAA vs Given-When-Then — which?"** Same structure; GWT is the BDD phrasing. Keep the three
+- "AAA vs Given-When-Then — which?" Same structure; GWT is the BDD phrasing. Keep the three
   phases visually separated and have exactly one *Act*.
-- **"DRY or DAMP for tests?"** DAMP: keep essential inputs/expectations visible per test; extract
+- "DRY or DAMP for tests?" DAMP: keep essential inputs/expectations visible per test; extract
   only incidental boilerplate (via builders/`@BeforeEach`).
-- **`assertThrows` vs `assertThrowsExactly`?** The former accepts subclasses; the latter requires
+- `assertThrows` vs `assertThrowsExactly`? The former accepts subclasses; the latter requires
   the exact type. Scope the lambda to only the throwing call.
-- **Why must `@BeforeAll` be static?** Because the default `PER_METHOD` lifecycle creates a new
+- Why must `@BeforeAll` be static? Because the default `PER_METHOD` lifecycle creates a new
   instance per test, so no instance exists for a once-per-class hook — unless you switch to
   `PER_CLASS`.
 

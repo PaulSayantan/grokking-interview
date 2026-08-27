@@ -392,29 +392,29 @@ is a shared identifier in the log line:
 
 ## Common follow-up questions
 
-- **"Walk me through what happens to a log line from `stdout` to a Kibana search."** Ship
+- "Walk me through what happens to a log line from `stdout` to a Kibana search." Ship
   (Filebeat tails container stdout) → parse/enrich (Logstash grok or JSON decode, add k8s
   metadata) → buffer (Kafka/disk) → index (Elasticsearch analyzes fields, builds inverted
   index, writes to hot shard) → store (ILM ages to warm/cold) → query (Kibana Discover hits
   the inverted index).
-- **"Why is Loki cheaper than Elasticsearch?"** No full-text inverted index to build (low ingest
+- "Why is Loki cheaper than Elasticsearch?" No full-text inverted index to build (low ingest
   CPU/RAM) and raw lines live compressed in object storage instead of SSD-backed shards (low
   storage cost). The trade is slower broad text search.
-- **"A Loki query is timing out / ingesters are OOMing — what do you check?"** Label
+- "A Loki query is timing out / ingesters are OOMing — what do you check?" Label
   cardinality. Look for high-cardinality labels (request_id, user_id, path) causing stream
   explosion; move them into the log line and query with `| json`. Also check the selector is
   narrow enough that the text filter scans few chunks.
-- **"grok vs JSON logging?"** JSON at the source removes fragile, CPU-heavy regex and gives
+- "grok vs JSON logging?" JSON at the source removes fragile, CPU-heavy regex and gives
   exact, typed fields; grok only for logs you don't control.
-- **"How do you keep 1 year of audit logs without going bankrupt?"** Tier: short hot retention,
+- "How do you keep 1 year of audit logs without going bankrupt?" Tier: short hot retention,
   age to warm, then cold/frozen searchable snapshots in object storage; roll indices by day so
   deletion is a cheap index drop.
-- **"Push or pull for logs?"** Push — events are continuous and can't be re-derived by a scrape,
+- "Push or pull for logs?" Push — events are continuous and can't be re-derived by a scrape,
   unlike Prometheus metrics.
-- **"How do you avoid losing logs when the backend is down?"** Agent disk buffering +
+- "How do you avoid losing logs when the backend is down?" Agent disk buffering +
   backpressure and/or a Kafka broker in front of the store; accept at-least-once (dedupe on a
   key if needed).
-- **"Structured vs unstructured — impact on aggregation?"** Structured (JSON) fields aggregate
+- "Structured vs unstructured — impact on aggregation?" Structured (JSON) fields aggregate
   exactly and cheaply and correlate by `trace_id`; unstructured needs parsing first and is
   brittle.
 

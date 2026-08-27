@@ -372,24 +372,24 @@ Grouped by the technique they drill. All are canonical, frequently-asked problem
 
 ## Common follow-up questions
 
-- **Why `ArrayDeque` over `Stack`/`LinkedList` in Java?** `java.util.Stack` is a legacy
+- Why `ArrayDeque` over `Stack`/`LinkedList` in Java? `java.util.Stack` is a legacy
   synchronized `Vector` subclass that leaks the List API; `LinkedList` allocates a node per
   element with poor cache locality. `ArrayDeque` is an unsynchronized growable circular
   array — faster and the recommended stack/queue implementation.
-- **How is `enqueue`/`dequeue` O(1) if the array is fixed size?** Circular indexing: `head`
+- How is `enqueue`/`dequeue` O(1) if the array is fixed size? Circular indexing: `head`
   and `tail` wrap modulo capacity, so no element is shifted. When full, the buffer doubles
   (amortized O(1)).
-- **Prove the two-stack queue is amortized O(1).** Aggregate/accounting method: each element
+- Prove the two-stack queue is amortized O(1). Aggregate/accounting method: each element
   is pushed to `in` once and transferred to `out` at most once, so n dequeues do O(n) total
   work regardless of interleaving.
-- **When monotonic stack vs monotonic deque?** Stack for next-greater/smaller *per element*
+- When monotonic stack vs monotonic deque? Stack for next-greater/smaller *per element*
   (unbounded reach); deque when there's a **window** constraint (max/min over a moving
   window of size k), because you must also evict from the front as the window slides.
-- **Monotonic deque vs heap for sliding-window max?** Deque is O(n) and never stores stale
+- Monotonic deque vs heap for sliding-window max? Deque is O(n) and never stores stale
   values; a heap is O(n log k) and needs lazy deletion to skip out-of-window entries.
-- **Why store indices, not values, on the stack?** Indices let you recover distances (Daily
+- Why store indices, not values, on the stack? Indices let you recover distances (Daily
   Temperatures) and widths (histogram) and handle duplicates/circular arrays cleanly.
-- **What causes `StackOverflowError` and how do you avoid it?** Recursion deeper than the
+- What causes `StackOverflowError` and how do you avoid it? Recursion deeper than the
   call-stack limit; convert to an explicit stack (iterative DFS) or use tail-recursion/
   iteration.
 

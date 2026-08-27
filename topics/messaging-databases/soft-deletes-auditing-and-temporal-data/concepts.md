@@ -459,34 +459,34 @@ Implementation patterns:
 
 ## Common follow-up questions
 
-- **Why prefer `deleted_at TIMESTAMP` over an `is_deleted` boolean?** The timestamp
+- Why prefer `deleted_at TIMESTAMP` over an `is_deleted` boolean? The timestamp
   encodes both *whether* and *when* deleted in one column, gives you a free audit fact,
   and lets you drive retention/purge windows. A boolean throws away the "when."
-- **A user soft-deleted their account and can't re-register with the same email — why,
-  and how do you fix it?** A plain `UNIQUE(email)` counts the deleted row. Fix with a
+- A user soft-deleted their account and can't re-register with the same email — why,
+  and how do you fix it? A plain `UNIQUE(email)` counts the deleted row. Fix with a
   **partial/filtered unique index** `WHERE deleted_at IS NULL` (or a MySQL generated-column
   workaround, since InnoDB lacks partial indexes).
-- **Triggers vs application-level vs CDC auditing — which and why?** Triggers =
+- Triggers vs application-level vs CDC auditing — which and why? Triggers =
   completeness (can't be bypassed) but no user context; app-level = rich context but
   bypassed by out-of-band writes; CDC = zero write-path cost and captures everything but
   is async and lacks actor context. Often combined.
-- **Valid time vs transaction time?** Valid = when the fact is true in reality (settable,
+- Valid time vs transaction time? Valid = when the fact is true in reality (settable,
   future-datable, correctable); transaction = when the DB stored it (append-only, the
   audit axis). Bitemporal tracks both.
-- **Does PostgreSQL support SQL:2011 temporal tables?** Not natively (through PG 16) —
+- Does PostgreSQL support SQL:2011 temporal tables? Not natively (through PG 16) —
   emulate with triggers/history tables or an extension. MariaDB, SQL Server, and Db2 do.
-- **How do you reconcile an immutable audit log / event store with GDPR right-to-erasure?**
+- How do you reconcile an immutable audit log / event store with GDPR right-to-erasure?
   Anonymize the PII, or **crypto-shred** (destroy the per-subject encryption key so
   ciphertext in immutable logs becomes unreadable); rely on legal-basis exemptions where
   retention is legally required.
-- **Is soft delete enough for GDPR erasure?** No — the personal data is still present.
+- Is soft delete enough for GDPR erasure? No — the personal data is still present.
   You must anonymize or hard-delete, including copies in backups, replicas, and search
   indexes.
-- **How do you keep a huge audit table from crippling the DB?** Time-partition and
+- How do you keep a huge audit table from crippling the DB? Time-partition and
   `DROP PARTITION` old data; consider append-only permissions and tiered/archival storage.
-- **What's the strongest form of audit?** Event sourcing — an immutable event log is a
+- What's the strongest form of audit? Event sourcing — an immutable event log is a
   complete audit trail — at the cost of a CQRS/eventual-consistency architecture.
-- **SCD Type 2 vs system-versioning?** Both keep row history; SCD Type 2 is the warehouse
+- SCD Type 2 vs system-versioning? Both keep row history; SCD Type 2 is the warehouse
   (valid-time, surrogate-key) idiom for dimensions, system-versioning is the OLTP engine
   feature for transaction-time. They solve the same problem in different layers.
 

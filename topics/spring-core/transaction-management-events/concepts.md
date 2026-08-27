@@ -518,15 +518,15 @@ Spring's transaction abstraction is fundamentally **thread-bound** (for the impe
 
 ## Common follow-up questions
 
-- **Why doesn't my `@Transactional` roll back on a checked exception?** By default only unchecked exceptions (`RuntimeException`/`Error`) trigger rollback; add `rollbackFor` for checked exceptions.
-- **Why is my `@Transactional` method not being wrapped in a transaction at all?** Likely self-invocation (called via `this`), a non-public method, missing `@EnableTransactionManagement`, or the bean not being a Spring-managed proxy.
-- **Difference between `REQUIRES_NEW` and `NESTED`?** `REQUIRES_NEW` = a separate, independent physical transaction (suspends the outer); `NESTED` = a savepoint within the same physical transaction (partial rollback, only the outer commits).
-- **What's the difference between `@EventListener` and `@TransactionalEventListener`?** The former runs immediately/synchronously; the latter defers to a transaction phase (default after commit) and is skipped if no transaction is active.
-- **Is `readOnly=true` enforced?** No — it is a hint/optimization (notably disables Hibernate dirty-checking/flush); it does not guarantee the DB rejects writes.
-- **Are Spring application events synchronous or asynchronous?** Synchronous by default (publisher's thread, same transaction); use `@Async` + `@EnableAsync` (or a custom multicaster with a `TaskExecutor`) for async.
-- **Which transaction manager do I use for JPA vs plain JDBC?** `JpaTransactionManager` for JPA; `DataSourceTransactionManager` for plain JDBC; `JtaTransactionManager` for distributed/XA.
-- **What causes `UnexpectedRollbackException`?** A `REQUIRED` inner transaction was marked rollback-only (e.g., its exception was swallowed), then the outer tried to commit.
-- **How do you turn on annotation-driven transactions in plain Spring?** `@EnableTransactionManagement` on a `@Configuration` class (or `<tx:annotation-driven/>` in XML), plus a `PlatformTransactionManager` bean.
+- Why doesn't my `@Transactional` roll back on a checked exception? By default only unchecked exceptions (`RuntimeException`/`Error`) trigger rollback; add `rollbackFor` for checked exceptions.
+- Why is my `@Transactional` method not being wrapped in a transaction at all? Likely self-invocation (called via `this`), a non-public method, missing `@EnableTransactionManagement`, or the bean not being a Spring-managed proxy.
+- Difference between `REQUIRES_NEW` and `NESTED`? `REQUIRES_NEW` = a separate, independent physical transaction (suspends the outer); `NESTED` = a savepoint within the same physical transaction (partial rollback, only the outer commits).
+- What's the difference between `@EventListener` and `@TransactionalEventListener`? The former runs immediately/synchronously; the latter defers to a transaction phase (default after commit) and is skipped if no transaction is active.
+- Is `readOnly=true` enforced? No — it is a hint/optimization (notably disables Hibernate dirty-checking/flush); it does not guarantee the DB rejects writes.
+- Are Spring application events synchronous or asynchronous? Synchronous by default (publisher's thread, same transaction); use `@Async` + `@EnableAsync` (or a custom multicaster with a `TaskExecutor`) for async.
+- Which transaction manager do I use for JPA vs plain JDBC? `JpaTransactionManager` for JPA; `DataSourceTransactionManager` for plain JDBC; `JtaTransactionManager` for distributed/XA.
+- What causes `UnexpectedRollbackException`? A `REQUIRED` inner transaction was marked rollback-only (e.g., its exception was swallowed), then the outer tried to commit.
+- How do you turn on annotation-driven transactions in plain Spring? `@EnableTransactionManagement` on a `@Configuration` class (or `<tx:annotation-driven/>` in XML), plus a `PlatformTransactionManager` bean.
 
 ## References
 

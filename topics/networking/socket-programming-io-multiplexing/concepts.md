@@ -650,27 +650,27 @@ changes), `EVFILT_PROC` (process events) — one unified mechanism where Linux n
 
 ## Common follow-up questions
 
-- **What's the difference between `send` returning 0 bytes and `recv` returning 0?**
+- What's the difference between `send` returning 0 bytes and `recv` returning 0?
   `recv` returning `0` = orderly peer shutdown (FIN), end of stream. `send`/`recv`
   returning `-1` with `EAGAIN` = would block on a non-blocking socket. `send` returning a
   short count = kernel buffer nearly full; loop to send the rest.
-- **Why does my server get "Address already in use" on restart?** The previous connection
+- Why does my server get "Address already in use" on restart? The previous connection
   is in `TIME_WAIT` (~2×MSL) holding the 4-tuple. Set `SO_REUSEADDR` before `bind()`.
-- **When should I disable Nagle (`TCP_NODELAY`)?** For latency-sensitive
+- When should I disable Nagle (`TCP_NODELAY`)? For latency-sensitive
   request/response/interactive traffic where small writes must go out immediately;
   Nagle + delayed ACK can add ~40 ms stalls. Keep Nagle for bulk throughput.
-- **Why prefer edge-triggered epoll?** Fewer wakeups/syscalls under load; but you must
+- Why prefer edge-triggered epoll? Fewer wakeups/syscalls under load; but you must
   fully drain each fd to `EAGAIN` and use non-blocking sockets.
-- **Is one socket per port a limit on concurrent connections?** No — connections are keyed
+- Is one socket per port a limit on concurrent connections? No — connections are keyed
   by the full 4-tuple, so a single listening port serves many clients. The practical
   limits are file-descriptor limits (`ulimit -n`), memory, and — for a *client* connecting
   to one server — the pool of ephemeral source ports per (src IP, dst IP:port). That pool
   size is OS-configured: IANA *reserves* 49152–65535 (~16K), but Linux's default
   `ip_local_port_range` is 32768–60999, giving the commonly cited **~28K** ports.
-- **How do goroutines/virtual threads handle 100K connections without 100K OS threads?**
+- How do goroutines/virtual threads handle 100K connections without 100K OS threads?
   The runtime parks a blocked "thread" and uses an epoll/kqueue-backed netpoller to resume
   it when the fd is ready, multiplexing many logical threads onto few OS threads.
-- **Why can't `epoll` efficiently watch regular files?** Regular files are always reported
+- Why can't `epoll` efficiently watch regular files? Regular files are always reported
   ready (they never "block" in the readiness sense), so `epoll` is useless for disk I/O;
   that's a motivation for `io_uring`.
 

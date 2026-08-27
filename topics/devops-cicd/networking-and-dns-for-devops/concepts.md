@@ -551,26 +551,26 @@ analysis lives in the networking domain — this is the practical layered checkl
 
 ## Common follow-up questions
 
-- **"Why can't you CNAME the zone apex, and what do you use instead?"** RFC 1034 forbids CNAME
+- "Why can't you CNAME the zone apex, and what do you use instead?" RFC 1034 forbids CNAME
   coexisting with the apex's mandatory SOA/NS records; use provider **ALIAS/ANAME** (Route 53
   alias, Cloudflare CNAME flattening) that resolves to the target's A/AAAA at query time.
-- **"How long until a DNS change takes effect?"** Bounded by the **old** record's TTL (plus
+- "How long until a DNS change takes effect?" Bounded by the **old** record's TTL (plus
   resolvers that over-cache). Lower TTL *ahead of time* for a planned cutover; there's no push.
-- **"L4 vs L7 — when do you pick each?"** L4 for raw TCP/UDP throughput, non-HTTP, source-IP
+- "L4 vs L7 — when do you pick each?" L4 for raw TCP/UDP throughput, non-HTTP, source-IP
   preservation, or backend TLS termination; L7 when you need path/host/header routing, TLS
   offload, or a WAF.
-- **"Security group vs NACL?"** SG = stateful, allow-only, on the instance/ENI; NACL =
+- "Security group vs NACL?" SG = stateful, allow-only, on the instance/ENI; NACL =
   stateless, allow+deny, ordered, on the subnet. SG is your primary control; NACL is a coarse
   second layer (remember ephemeral-port return rules).
-- **"How do private instances reach the internet?"** Route outbound through a **NAT gateway**
+- "How do private instances reach the internet?" Route outbound through a **NAT gateway**
   in a public subnet; NAT is outbound-only, so nothing inbound is exposed.
-- **"HTTP-01 vs DNS-01 ACME challenge?"** HTTP-01 needs port 80 and can't do wildcards; DNS-01
+- "HTTP-01 vs DNS-01 ACME challenge?" HTTP-01 needs port 80 and can't do wildcards; DNS-01
   publishes a TXT record, works behind firewalls, and is **required for wildcard** certs.
-- **"How do you avoid expired certs?"** Automate renewal (certbot/cert-manager/ACM), reload the
+- "How do you avoid expired certs?" Automate renewal (certbot/cert-manager/ACM), reload the
   proxy on renew, and *also* alert on days-to-expiry as a backstop.
-- **"How do you debug 'the service is unreachable'?"** Layer up: `dig` → `ping`/`traceroute` →
+- "How do you debug 'the service is unreachable'?" Layer up: `dig` → `ping`/`traceroute` →
   `nc -zv` port → `openssl s_client` TLS → `curl -v` app; name the exact failing rung.
-- **"Why not use sticky sessions everywhere?"** They unbalance load and break clean scale-in;
+- "Why not use sticky sessions everywhere?" They unbalance load and break clean scale-in;
   prefer stateless backends with externalized session state.
 
 ## References

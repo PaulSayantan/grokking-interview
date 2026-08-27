@@ -544,35 +544,35 @@ Senior "is this routable?" trivia from the IANA special-purpose registries:
 
 ## Common follow-up questions
 
-- **How many usable hosts in a /26? A /29? A /30?** 62, 6, and 2 (2^host_bits − 2).
-- **What subnet does 172.16.5.66/26 belong to?** Block size 64 → network `172.16.5.64`,
+- How many usable hosts in a /26? A /29? A /30? 62, 6, and 2 (2^host_bits − 2).
+- What subnet does 172.16.5.66/26 belong to? Block size 64 → network `172.16.5.64`,
   broadcast `172.16.5.127`.
-- **Why does a /31 have 2 usable hosts?** RFC 3021 removes the network/broadcast reservation
+- Why does a /31 have 2 usable hosts? RFC 3021 removes the network/broadcast reservation
   for point-to-point links; both addresses are assignable.
-- **Can you summarize 192.168.1.0/24 and 192.168.2.0/24 into a /23?** No — they don't align
+- Can you summarize 192.168.1.0/24 and 192.168.2.0/24 into a /23? No — they don't align
   on a /23 boundary; .0/23 covers .0–.1 and .2/23 covers .2–.3.
-- **Is 172.20.0.0 public or private?** Private — inside `172.16.0.0/12` (172.16–172.31).
-- **What does a 169.254.x.x address indicate?** APIPA/link-local: the host got no DHCP lease.
-- **What's the normal IPv6 subnet size and why?** /64, because the lower 64 bits are the
+- Is 172.20.0.0 public or private? Private — inside `172.16.0.0/12` (172.16–172.31).
+- What does a 169.254.x.x address indicate? APIPA/link-local: the host got no DHCP lease.
+- What's the normal IPv6 subnet size and why? /64, because the lower 64 bits are the
   interface identifier used by SLAAC.
-- **Why can `::` appear only once in an IPv6 address?** Two `::` would make the number of
+- Why can `::` appear only once in an IPv6 address? Two `::` would make the number of
   zero groups each represents ambiguous.
-- **Is NAT a security control?** No — it's an address-conservation mechanism; obscurity is a
+- Is NAT a security control? No — it's an address-conservation mechanism; obscurity is a
   side effect, not a policy.
-- **Derive the SLAAC IID for MAC 00:1A:2B:3C:4D:5E.** Flip the U/L bit of `00`→`02`, insert
+- Derive the SLAAC IID for MAC 00:1A:2B:3C:4D:5E. Flip the U/L bit of `00`→`02`, insert
   `FFFE`: IID `021A:2BFF:FE3C:4D5E`. (But modern hosts default to RFC 7217/8981, not EUI-64.)
-- **SLAAC vs DHCPv6 — where does that decision live?** In the RA flags: A enables SLAAC, M =
+- SLAAC vs DHCPv6 — where does that decision live? In the RA flags: A enables SLAAC, M =
   stateful DHCPv6, O = stateless DHCPv6; the default gateway always comes from the RA.
-- **Why /127 (not /64) on a router-to-router link?** RFC 6164 — avoids neighbor-cache
+- Why /127 (not /64) on a router-to-router link? RFC 6164 — avoids neighbor-cache
   exhaustion DoS and ping-pong loops; the IPv6 analogue of the IPv4 /31.
-- **How many /64s in a delegated /48?** 65,536 (16 subnet bits); a /56 yields 256.
-- **How does an IPv6-only client reach an IPv4-only server?** NAT64/DNS64 via `64:ff9b::/96`,
+- How many /64s in a delegated /48? 65,536 (16 subnet bits); a /56 yields 256.
+- How does an IPv6-only client reach an IPv4-only server? NAT64/DNS64 via `64:ff9b::/96`,
   or 464XLAT; dual-stack clients use Happy Eyeballs (RFC 8305).
-- **Is 100.64.5.1 routable on the Internet?** No — CGNAT shared space (RFC 6598); not RFC 1918
+- Is 100.64.5.1 routable on the Internet? No — CGNAT shared space (RFC 6598); not RFC 1918
   but not public either.
-- **A host has only an fe80:: address, no global — what failed?** No RA received / router down
+- A host has only an fe80:: address, no global — what failed? No RA received / router down
   / DHCPv6 not answering — SLAAC/DHCPv6 never provided a global prefix.
-- **Two merged companies both use 10.0.0.0/8 — how do you interconnect?** Overlapping/twice-NAT,
+- Two merged companies both use 10.0.0.0/8 — how do you interconnect? Overlapping/twice-NAT,
   renumber one side, or migrate to non-overlapping IPv6/ULA space.
 
 ## References

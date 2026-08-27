@@ -466,28 +466,28 @@ management matters even more. It's a direct proxy for day-to-day collaboration a
 
 ## Common follow-up questions
 
-- **"You have a 4-hour take-home but the prompt clearly needs 20 hours of work. What do you
-  do?"** — Scope to the time-box: build the core loop end-to-end with tests, then document the
+- "You have a 4-hour take-home but the prompt clearly needs 20 hours of work. What do you
+  do?" — Scope to the time-box: build the core loop end-to-end with tests, then document the
   cuts and next steps in the README. Explain that finishing a coherent slice and naming what you
   deferred is the signal, not maximizing features.
-- **"In a take-home, is it better to build every requested feature partially, or a subset
-  fully?"** — A subset fully. Depth, tests, and a clear README beat breadth of half-built stubs.
-- **"What goes in a take-home README?"** — Run instructions, assumptions, design rationale,
+- "In a take-home, is it better to build every requested feature partially, or a subset
+  fully?" — A subset fully. Depth, tests, and a clear README beat breadth of half-built stubs.
+- "What goes in a take-home README?" — Run instructions, assumptions, design rationale,
   trade-offs, and an explicit "what I'd do with more time / left out" section.
-- **"During pairing you're completely stuck on the optimal solution. What now?"** — Say so,
+- "During pairing you're completely stuck on the optimal solution. What now?" — Say so,
   implement the brute-force version to have something working, and optimize from there —
   narrating throughout. A working slow solution beats an elegant non-solution.
-- **"The interviewer drops a hint you disagree with. How do you respond?"** — Engage with it,
+- "The interviewer drops a hint you disagree with. How do you respond?" — Engage with it,
   discuss the trade-off briefly and openly, then adapt. Never argue to win; how you take input
   is itself graded.
-- **"You're reviewing a PR with a subtle race condition and several formatting issues. Where do
-  you start?"** — Correctness and concurrency first (the race condition), then security, tests,
+- "You're reviewing a PR with a subtle race condition and several formatting issues. Where do
+  you start?" — Correctness and concurrency first (the race condition), then security, tests,
   readability, and style nits last. Verbalize the triage order.
-- **"How do you phrase a critical review comment without demoralizing the author?"** — Point to
+- "How do you phrase a critical review comment without demoralizing the author?" — Point to
   the specific line, explain the concrete risk, critique the code not the person, offer a
   suggestion, and label whether it's a blocker or a nit.
-- **"Your take-home used an unusual library the reviewer questions. How do you handle the
-  pushback?"** — Explain the reasoning behind the trade-off, acknowledge the downside, and stay
+- "Your take-home used an unusual library the reviewer questions. How do you handle the
+  pushback?" — Explain the reasoning behind the trade-off, acknowledge the downside, and stay
   open to changing it — disagree with data, not ego.
 
 ## References

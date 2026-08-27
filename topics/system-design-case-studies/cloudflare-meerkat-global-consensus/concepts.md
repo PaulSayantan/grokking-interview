@@ -213,29 +213,29 @@ consensus tuning:
 
 ## Common follow-up questions
 
-- **"Why is a leader a liability, not just a bottleneck?"** Because leader failure
+- "Why is a leader a liability, not just a bottleneck?" Because leader failure
   forces an *election*, and the election is a window where **no writes happen**. On a
   jittery global network the timeouts that detect a dead leader are impossible to
   tune, so you get either false elections or slow reaction. Leaderless consensus
   removes that failure mode: a replica dying just means the cluster uses a slower
   path, not a stall.
-- **"If there's no required leader, why does QuePaxa still allow one?"** Purely as an
+- "If there's no required leader, why does QuePaxa still allow one?" Purely as an
   optimization. A leader decides in one round trip vs. three-or-more for a non-leader.
   The key difference from Raft is that the leader is *optional* — losing it degrades
   latency instead of causing an outage.
-- **"How does a leaderless system still give linearizability?"** By making **reads**
+- "How does a leaderless system still give linearizability?" By making **reads**
   create log events too. A read that lands on an already-decided slot is forced to
   adopt that decided value and re-propose at the next slot, which orders it strictly
   after the write. Consensus on the log ordering is what buys the strong guarantee.
-- **"Why is this only for control-plane data and not a general database?"** Because
+- "Why is this only for control-plane data and not a general database?" Because
   every operation (even reads) pays for consensus, and decision latency is bounded by
   the round-trip time to a majority of globally-spread replicas. That's fine for
   small, infrequently-written, must-be-consistent facts (placement, leadership); it's
   too expensive for high-throughput application data.
-- **"What failures does it NOT handle?"** Byzantine (malicious/lying) nodes — it
+- "What failures does it NOT handle?" Byzantine (malicious/lying) nodes — it
   assumes crash-stop failures, like Raft. And it can't beat physics: if a majority of
   replicas are far apart, decisions are slow no matter what.
-- **"How would you make a globally-distributed QuePaxa cluster faster?"** Place
+- "How would you make a globally-distributed QuePaxa cluster faster?" Place
   replicas closer together, batch many writes into one consensus round, bundle
   operations via compare-and-swap or transactions, and serve stale-but-consistent
   reads locally where the application can tolerate lag.

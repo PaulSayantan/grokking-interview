@@ -552,27 +552,27 @@ accept") makes old code survive schema/data it wasn't built for:
 
 ## Common follow-up questions
 
-- **"Rename a column with zero downtime — walk me through it."** Add new nullable
+- "Rename a column with zero downtime — walk me through it." Add new nullable
   column → dual-write + backfill → switch reads → drop old, each a separate deploy.
-- **"Your instant `ALTER` still caused an outage. Why?"** It queued behind a long
+- "Your instant `ALTER` still caused an outage. Why?" It queued behind a long
   transaction holding a conflicting lock, and all new queries queued behind the
   `ALTER`. Fix with a short `lock_timeout` and retry.
-- **"Add a `NOT NULL` column to a 1 B-row table in Postgres."** Nullable column is
+- "Add a `NOT NULL` column to a 1 B-row table in Postgres." Nullable column is
   metadata-only; with a non-volatile default (v11+) even `NOT NULL DEFAULT const` is
   instant. To make an *existing* column `NOT NULL`, use `CHECK ... NOT VALID` →
   `VALIDATE` → `SET NOT NULL`.
-- **"pt-osc vs gh-ost?"** Triggers (synchronous, on write path) vs binlog (async, off
+- "pt-osc vs gh-ost?" Triggers (synchronous, on write path) vs binlog (async, off
   write path); gh-ost decouples migration load from production writes and throttles on
   lag.
-- **"Why batch a backfill?"** Short transactions release locks, bound WAL/undo, avoid
+- "Why batch a backfill?" Short transactions release locks, bound WAL/undo, avoid
   lock escalation and replica lag, and enable pause/resume; make each batch idempotent
   and checkpoint progress.
-- **"MySQL `ALGORITHM=INSTANT` limits?"** Metadata-only ops; 64-row-version cap per
+- "MySQL `ALGORITHM=INSTANT` limits?" Metadata-only ops; 64-row-version cap per
   table before you must rebuild.
-- **"Why not just do it in a maintenance window?"** Sometimes valid for small systems,
+- "Why not just do it in a maintenance window?" Sometimes valid for small systems,
   but large tables can exceed any acceptable window, and 24/7 services can't take one;
   expand/contract avoids the window entirely.
-- **"How do you make a migration rollback-safe?"** Keep destructive steps last and in
+- "How do you make a migration rollback-safe?" Keep destructive steps last and in
   their own release; ensure the previous code version runs against the new schema.
 
 ---

@@ -428,26 +428,26 @@ Canonical LeetCode problems that drill recursion & backtracking. Grouped by sub-
 
 ## Common follow-up questions
 
-- **"What's the time and space complexity?"** State the two axes separately: time from the
+- "What's the time and space complexity?" State the two axes separately: time from the
   number of decision-tree nodes × work per node (usually exponential — `2^n`, `n!`, `C(n,k)`),
   space from recursion depth `O(n)` *plus* output storage. Note that emitting `2^n` results is
   itself `O(2^n)` — you can't beat the output size.
-- **"Why do you undo the choice (`path.removeLast()`)?"** Because the `path` (and any occupancy
+- "Why do you undo the choice (`path.removeLast()`)?" Because the `path` (and any occupancy
   sets) is shared mutable state; without restoring it, sibling branches inherit a corrupted
   partial candidate. Alternatively pass immutable copies down and skip the undo.
-- **"How would you avoid stack overflow for very deep recursion?"** Convert to iteration with an
+- "How would you avoid stack overflow for very deep recursion?" Convert to iteration with an
   explicit heap-allocated stack (Java/Python don't do tail-call optimization, so tail-form
   rewriting alone won't help).
-- **"How do you handle duplicate inputs without emitting duplicate results?"** Sort, then skip a
+- "How do you handle duplicate inputs without emitting duplicate results?" Sort, then skip a
   candidate equal to its sibling at the same tree level. For the start-index template
   (subsets/combinations) that's `i > start && nums[i]==nums[i-1]`; for permutations (used[]
   loop, no `start`) it's `i > 0 && nums[i]==nums[i-1] && !used[i-1]`.
-- **"Where does pruning help most?"** Reject invalid partial candidates *before* recursing — a
+- "Where does pruning help most?" Reject invalid partial candidates *before* recursing — a
   cut at a shallow node eliminates an entire exponential subtree.
-- **"Backtracking vs DP — how do I choose?"** If you must enumerate *all* configurations →
+- "Backtracking vs DP — how do I choose?" If you must enumerate *all* configurations →
   backtracking. If you need a *count* or an *optimum* over overlapping subproblems → memoize
   (top-down DP) or tabulate; the recursion tree has repeated states you can cache.
-- **"Recursion vs BFS for search?"** DFS/backtracking uses `O(depth)` memory and finds *a*
+- "Recursion vs BFS for search?" DFS/backtracking uses `O(depth)` memory and finds *a*
   solution fast; BFS uses `O(width)` memory but finds the *shortest*-depth solution.
 
 ## References

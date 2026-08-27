@@ -570,27 +570,27 @@ sequenceDiagram
 
 ## Common follow-up questions
 
-- **"Walk me through securing the supply chain of a service end-to-end."** Pin & verify
+- "Walk me through securing the supply chain of a service end-to-end." Pin & verify
   deps (lockfile + hashes, proxy through a private registry), scan (SCA) — build hermetically
   on a hardened runner that emits **signed SLSA provenance** — generate and attach an **SBOM**
   — **sign** the image keyless with cosign and attach in-toto attestations — pin base images
   and CI actions **by digest/SHA** — **verify signatures + provenance at admission** before
   anything runs.
-- **"Which of your controls would have stopped SolarWinds?"** SLSA **L3** hardened/isolated
+- "Which of your controls would have stopped SolarWinds?" SLSA **L3** hardened/isolated
   builds + **reproducible builds** (independent rebuild would mismatch the tampered binary).
   Signing alone (L2) wouldn't — the malicious build would have signed the bad artifact.
-- **"SLSA L2 vs L3?"** L2 = signed provenance from a hosted platform (prevents tampering
+- "SLSA L2 vs L3?" L2 = signed provenance from a hosted platform (prevents tampering
   *after* build). L3 = hardened, isolated platform with unreachable signing keys (prevents
   tampering *during* build).
-- **"Why digest instead of tag?"** Tags (and even Git tags) are mutable and can be
+- "Why digest instead of tag?" Tags (and even Git tags) are mutable and can be
   repointed; only a content digest / full commit SHA is immutable, so it's the only thing a
   signature or pin can meaningfully bind to.
-- **"SBOM vs SCA?"** SBOM = inventory of components. SCA = analysis that matches components
+- "SBOM vs SCA?" SBOM = inventory of components. SCA = analysis that matches components
   against known-vuln databases. SBOM feeds SCA/VEX; it's not itself a vulnerability report.
-- **"Is Log4Shell a supply-chain attack?"** No — it's a *vulnerability* in a dependency.
+- "Is Log4Shell a supply-chain attack?" No — it's a *vulnerability* in a dependency.
   It's a supply-chain *management* problem: without an SBOM you can't quickly find where
   you're exposed.
-- **"How does keyless signing avoid key management?"** Ephemeral keys + short-lived Fulcio
+- "How does keyless signing avoid key management?" Ephemeral keys + short-lived Fulcio
   certs bound to an OIDC identity + a Rekor transparency-log record — nothing long-lived to
   leak or rotate.
 

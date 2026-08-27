@@ -520,17 +520,17 @@ pattern builds the recognition reflex this topic is about.
 
 ## Common follow-up questions
 
-- **"How did you know to use this pattern?"** — Name the signal you recognized (sorted →
+- "How did you know to use this pattern?" — Name the signal you recognized (sorted →
   binary search, contiguous → sliding window). Interviewers want the *reasoning*, not luck.
-- **"What's the brute force, and why is your solution better?"** — Always have the naive
+- "What's the brute force, and why is your solution better?" — Always have the naive
   complexity ready and articulate the specific bottleneck the pattern removes.
-- **"Can you do it in O(1) space?"** — Often a nudge toward two-pointers, cyclic sort,
+- "Can you do it in O(1) space?" — Often a nudge toward two-pointers, cyclic sort,
   in-place reversal, or bit tricks instead of a hashmap.
-- **"What if the input doesn't fit in memory / is a stream?"** — Steers toward heaps
+- "What if the input doesn't fit in memory / is a stream?" — Steers toward heaps
   (streaming top-k / median), reservoir sampling, or external merge.
-- **"Prove your greedy choice is optimal."** — Give an exchange argument, or fall back to
+- "Prove your greedy choice is optimal." — Give an exchange argument, or fall back to
   DP if you can't.
-- **"How do the constraints change your approach?"** — Tie n's magnitude to a target
+- "How do the constraints change your approach?" — Tie n's magnitude to a target
   complexity and thus a pattern (n ≤ 20 backtracking; n ≤ 10⁵ → O(n log n)).
 
 ## References

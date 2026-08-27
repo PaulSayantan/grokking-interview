@@ -538,20 +538,20 @@ the `secrets-management` topic.
 
 ## Common follow-up questions
 
-- **"Difference between a composite action and a reusable workflow?"** Composite = reuse a
+- "Difference between a composite action and a reusable workflow?" Composite = reuse a
   sequence of steps inside a job; reusable workflow = reuse whole jobs/a pipeline via
   `workflow_call`.
-- **"Why avoid self-hosted runners on public repos?"** Forked PRs can execute arbitrary code
+- "Why avoid self-hosted runners on public repos?" Forked PRs can execute arbitrary code
   on your infrastructure and, without ephemerality, poison later jobs.
-- **"How do jobs share data in GitHub Actions?"** Artifacts or job outputs — not the
+- "How do jobs share data in GitHub Actions?" Artifacts or job outputs — not the
   filesystem, because each job runs on its own runner.
-- **"Declarative vs scripted Jenkins pipelines?"** Declarative is structured/validated and
+- "Declarative vs scripted Jenkins pipelines?" Declarative is structured/validated and
   preferred; scripted is full Groovy for cases declarative can't express.
-- **"How do you avoid storing cloud keys in CI?"** OIDC federation: the pipeline mints a
+- "How do you avoid storing cloud keys in CI?" OIDC federation: the pipeline mints a
   short-lived token exchanged for temporary cloud credentials via a scoped trust policy.
-- **"What makes a runner 'ephemeral' and why care?"** One job then destroyed → clean
+- "What makes a runner 'ephemeral' and why care?" One job then destroyed → clean
   isolation, no secret/state residue between builds.
-- **"When would you still pick Jenkins in 2025?"** Air-gapped/on-prem, deep existing plugin
+- "When would you still pick Jenkins in 2025?" Air-gapped/on-prem, deep existing plugin
   investment, or highly customized flows needing full control of the server.
 
 ## References

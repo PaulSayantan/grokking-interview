@@ -212,32 +212,32 @@ operation.
 
 ## Common follow-up questions
 
-- **"Why build a framework instead of just cleaning up the scripts?"** Because the
+- "Why build a framework instead of just cleaning up the scripts?" Because the
   scripts' problems were structural, not cosmetic: no preconditions (unsafe), no
   progress tracking (unrecoverable), and copy-paste growth (unextensible). SCP's three
   layers directly answer those — mandatory `preconditions()`, SQLite job state, and
   composable tasks/workflows — which no amount of tidying a bash pile gives you.
-- **"Why is idempotency the linchpin?"** Retries and resumability both re-run tasks. If
+- "Why is idempotency the linchpin?" Retries and resumability both re-run tasks. If
   a task weren't idempotent, a retry after a partial failure could double-apply an
   operation and corrupt cluster state. Idempotency is what makes "just retry it" and
   "resume from where we left off" safe rather than reckless.
-- **"How does SCP survive a crash halfway through a 36-hour job?"** Job state lives in
+- "How does SCP survive a crash halfway through a 36-hour job?" Job state lives in
   a SQLite database recording which tasks finished on which nodes. On restart the job
   resumes from the last completed step instead of starting over — killing the old
   "any failure between steps 7 to 12 meant starting over" problem.
-- **"Why put workflows in YAML but tasks in Rust?"** Tasks are safety-critical
+- "Why put workflows in YAML but tasks in Rust?" Tasks are safety-critical
   primitives that benefit from Rust's type checking and compilation. Workflows are
   policy — ordering, retries, concurrency — that operators need to tune quickly; YAML
   lets them change behavior without recompiling and redeploying a binary.
-- **"What stops SCP from taking down a whole region?"** The `concurrency_unit` and
+- "What stops SCP from taking down a whole region?" The `concurrency_unit` and
   `concurrency_limit` controls. Grouping by `zone` prevents simultaneous operations
   across availability zones (which could break quorum), and the limit caps how many
   nodes act at once. Node joins run one at a time by design.
-- **"Why fire a webhook instead of just retrying harder?"** Because some failures are
+- "Why fire a webhook instead of just retrying harder?" Because some failures are
   unrecoverable, and blindly retrying against a genuinely broken cluster can cause real
   harm. SCP halts on unrecoverable errors and pings a human, trading a bit of manual
   intervention for safety — while still auto-retrying the transient stuff.
-- **"Where else does this pattern apply?"** Any long, risky, multi-step operational
+- "Where else does this pattern apply?" Any long, risky, multi-step operational
   procedure: rolling upgrades, data migrations, fleet-wide config rollouts,
   Kubernetes-style reconciliation. The reusable shape is *idempotent primitives +
   declarative composition + durable state + safe concurrency limits + alert-on-halt.*

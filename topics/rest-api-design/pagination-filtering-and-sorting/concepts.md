@@ -695,29 +695,29 @@ can be silently skipped. Either forbid NULLs in cursor columns, or add explicit
 
 ## Common follow-up questions
 
-- **"Offset vs cursor — when would you pick each?"** Offset for small/static sets
+- "Offset vs cursor — when would you pick each?" Offset for small/static sets
   and jump-to-page-N UIs; cursor for large, high-write, forward-only feeds where
   deep-paging cost and write-stability matter.
-- **"Why is deep offset slow?"** `OFFSET N` still reads/sorts and discards the
+- "Why is deep offset slow?" `OFFSET N` still reads/sorts and discards the
   first N rows; cost is O(N). Keyset seeks via an indexed `WHERE` predicate, cost
   O(page size).
-- **"How do you page a table exactly once while it's being written to?"** Keyset
+- "How do you page a table exactly once while it's being written to?" Keyset
   on an immutable unique key; offset can duplicate/skip rows under concurrent
   inserts/deletes.
-- **"Why append `id` to the sort?"** To make the order total; ties on a non-unique
+- "Why append `id` to the sort?" To make the order total; ties on a non-unique
   sort column make paging non-deterministic (skip/duplicate at boundaries) and
   break keyset predicates.
-- **"Why is returning `total_count` expensive?"** It needs a separate
+- "Why is returning `total_count` expensive?" It needs a separate
   `COUNT(*)` over the filtered set, which can scan the whole match set; prefer
   `has_more` (fetch `limit+1`) or an approximate count.
-- **"How should the client find the next page?"** Follow the `Link` header
+- "How should the client find the next page?" Follow the `Link` header
   (RFC 8288 `rel="next"`) or a `next`/`next_cursor` field in the body — don't make
   clients hand-build page URLs.
-- **"How do you filter safely?"** Allowlist filterable/sortable fields; never map
+- "How do you filter safely?" Allowlist filterable/sortable fields; never map
   raw client input to column names (injection + OWASP API3 property-level authz).
-- **"What status code for `limit=1000000`?"** Either clamp to the max (document
+- "What status code for `limit=1000000`?" Either clamp to the max (document
   it) or return `400` with a Problem Details body — don't return the whole table.
-- **"Is there an RFC for pagination?"** No standard mandates a *style*; RFC 8288
+- "Is there an RFC for pagination?" No standard mandates a *style*; RFC 8288
   standardizes the `Link` header + `next/prev/first/last` relations, and RFC 9457
   standardizes the error body. The page/cursor mechanics themselves are
   convention.

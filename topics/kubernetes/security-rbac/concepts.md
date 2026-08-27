@@ -639,26 +639,26 @@ Gotchas:
 
 ## Common follow-up questions
 
-- **"401 vs 403?"** 401 = authentication failed (unknown identity); 403 = authenticated but
+- "401 vs 403?" 401 = authentication failed (unknown identity); 403 = authenticated but
   RBAC denied the action.
-- **"Are users Kubernetes objects?"** No — only ServiceAccounts are. Users come from certs /
+- "Are users Kubernetes objects?" No — only ServiceAccounts are. Users come from certs /
   OIDC / IAM; RBAC just references the username/group strings they produce.
-- **"Why doesn't my new ServiceAccount have a token Secret?"** Since v1.24 tokens aren't
+- "Why doesn't my new ServiceAccount have a token Secret?" Since v1.24 tokens aren't
   auto-generated; use `kubectl create token` or create a `kubernetes.io/service-account-token`
   Secret explicitly for a long-lived one.
-- **"Difference between the bound projected token and the old Secret token?"** Bound tokens
+- "Difference between the bound projected token and the old Secret token?" Bound tokens
   are short-lived, audience- and object-scoped, auto-rotated; legacy Secret tokens never
   expire.
-- **"Can RBAC deny an action?"** No deny rules — it's additive/deny-by-default. Remove or
+- "Can RBAC deny an action?" No deny rules — it's additive/deny-by-default. Remove or
   narrow the grant instead.
-- **"RoleBinding to a ClusterRole — what scope?"** Only the RoleBinding's namespace.
-- **"Why can't a RoleBinding grant node access?"** Nodes are cluster-scoped; need a
+- "RoleBinding to a ClusterRole — what scope?" Only the RoleBinding's namespace.
+- "Why can't a RoleBinding grant node access?" Nodes are cluster-scoped; need a
   ClusterRoleBinding.
-- **"How do you check a Pod's effective permissions?"**
+- "How do you check a Pod's effective permissions?"
   `kubectl auth can-i --list --as=system:serviceaccount:<ns>:<sa> -n <ns>`.
-- **"How does a Pod authenticate to AWS/GCP without static keys?"** OIDC workload identity
+- "How does a Pod authenticate to AWS/GCP without static keys?" OIDC workload identity
   (IRSA / GKE/AKS Workload Identity) federating the projected SA token.
-- **"What is system:masters?"** The bootstrap super-user group, hard-bound to cluster-admin.
+- "What is system:masters?" The bootstrap super-user group, hard-bound to cluster-admin.
 
 ## References
 

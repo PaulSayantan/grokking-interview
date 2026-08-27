@@ -703,29 +703,29 @@ Trade-offs & alternatives:
 
 ## Common follow-up questions
 
-- **Why does my checked exception commit instead of rolling back?** Default
+- Why does my checked exception commit instead of rolling back? Default
   rollback is unchecked + Error only; add `rollbackFor = Exception.class`.
-- **Why is `@Transactional` on my `private` method ignored?** Proxy-based tx only
+- Why is `@Transactional` on my `private` method ignored? Proxy-based tx only
   advises public methods; make it public and call it through the proxy, or use
   AspectJ.
-- **I call a `@Transactional` method from another method in the same class and it
-  doesn't start a transaction — why?** Self-invocation bypasses the proxy.
-- **REQUIRED vs REQUIRES_NEW — when to use which?** REQUIRES_NEW for work that
+- I call a `@Transactional` method from another method in the same class and it
+  doesn't start a transaction — why? Self-invocation bypasses the proxy.
+- REQUIRED vs REQUIRES_NEW — when to use which? REQUIRES_NEW for work that
   must commit independently (audit logs, sending a notification record) even if
   the outer tx rolls back; REQUIRED for normal "all-or-nothing" flows.
-- **Difference between NESTED and REQUIRES_NEW?** NESTED = savepoint in the same
+- Difference between NESTED and REQUIRES_NEW? NESTED = savepoint in the same
   physical tx (rolls back to savepoint, dies with the outer); REQUIRES_NEW =
   separate physical tx/connection, commits independently.
-- **What is `UnexpectedRollbackException`?** The outer tx tried to commit but was
+- What is `UnexpectedRollbackException`? The outer tx tried to commit but was
   marked rollback-only by a failed inner participating tx.
-- **Does `@Transactional` work across threads (`@Async`, new Thread)?** No — the
+- Does `@Transactional` work across threads (`@Async`, new Thread)? No — the
   tx context is thread-bound via ThreadLocal; the new thread has no transaction.
-- **JDK proxy vs CGLIB for transactions?** JDK when interfaces exist (interface
+- JDK proxy vs CGLIB for transactions? JDK when interfaces exist (interface
   proxy), CGLIB otherwise (subclass); Spring Boot defaults to CGLIB.
-- **What does `readOnly = true` actually do?** Hibernate skips dirty checking /
+- What does `readOnly = true` actually do? Hibernate skips dirty checking /
   flush; sets JDBC connection read-only hint — a performance optimization, not a
   write guard.
-- **Which package for `@Transactional` in Spring Boot 3?** Use
+- Which package for `@Transactional` in Spring Boot 3? Use
   `org.springframework.transaction.annotation.Transactional` (Spring's), or the
   Jakarta `jakarta.transaction.Transactional` (note: `javax.*` → `jakarta.*` in
   Boot 3 / Spring 6). Spring's variant supports more attributes (isolation,

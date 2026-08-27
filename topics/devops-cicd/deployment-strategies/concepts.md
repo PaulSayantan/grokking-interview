@@ -522,26 +522,26 @@ rolling).
 
 ## Common follow-up questions
 
-- **"What's the difference between canary and blue-green?"** Blue-green flips 100% of
+- "What's the difference between canary and blue-green?" Blue-green flips 100% of
   traffic at once between two full environments (instant rollback, 2x infra); canary
   shifts a small percentage first and progressively increases while analyzing metrics
   (smallest blast radius, needs traffic control + metrics).
-- **"How do canary and A/B testing differ?"** Canary = release *safety* (random %,
+- "How do canary and A/B testing differ?" Canary = release *safety* (random %,
   technical metrics); A/B = business *experiment* (route by attribute, business
   metrics, run for statistical significance).
-- **"How do you do a zero-downtime deploy with a schema change?"** Expand/contract:
+- "How do you do a zero-downtime deploy with a schema change?" Expand/contract:
   additive-first change, dual-write/backfill, then drop the old element in a later
   deploy — never a breaking change in one step.
-- **"When would you roll forward instead of rolling back?"** When a rollback is unsafe
+- "When would you roll forward instead of rolling back?" When a rollback is unsafe
   — an irreversible migration already ran, or old code can't handle the new
   schema/data.
-- **"Deploy vs release?"** Deploy = ship bits to servers; release = expose behavior to
+- "Deploy vs release?" Deploy = ship bits to servers; release = expose behavior to
   users. Feature flags decouple them so you can deploy dark and release with a toggle.
-- **"How does a rolling update avoid downtime?"** `maxUnavailable: 0` + `maxSurge` (add
+- "How does a rolling update avoid downtime?" `maxUnavailable: 0` + `maxSurge` (add
   new pods before removing old) plus readiness probes so only healthy pods get traffic.
-- **"What breaks blue-green rollback?"** A destructive/non-backward-compatible
+- "What breaks blue-green rollback?" A destructive/non-backward-compatible
   migration on the shared DB — flipping back to blue then hits an incompatible schema.
-- **"What's dangerous about shadow deployments?"** Un-suppressed side effects
+- "What's dangerous about shadow deployments?" Un-suppressed side effects
   (duplicate writes/charges/emails) from mirroring non-idempotent requests.
 
 ## References

@@ -527,22 +527,22 @@ attack move use the identical primitives; the difference between them is only in
 
 ## Common follow-up questions
 
-- **"How do you debug a container that exits before you can `docker exec` into it?"** Override
+- "How do you debug a container that exits before you can `docker exec` into it?" Override
   the entrypoint: `docker run --rm -it --entrypoint sh <image>`, then run the real command by
   hand. `exec` can't help — the container is already gone.
-- **"`docker logs` shows nothing but the app is clearly running — why?"** Either the app logs
+- "`docker logs` shows nothing but the app is clearly running — why?" Either the app logs
   to a file instead of stdout/stderr, output is buffered (set `PYTHONUNBUFFERED=1`), or a
   remote logging driver is configured so `docker logs` can't read local logs.
-- **"Exit 137 vs 143 — what's the difference?"** `137` = SIGKILL (OOM or forced kill after a
+- "Exit 137 vs 143 — what's the difference?" `137` = SIGKILL (OOM or forced kill after a
   stop timeout); `143` = SIGTERM (a graceful stop the app honoured). Check `.State.OOMKilled` to
   tell OOM from a kill-timeout.
-- **"How do you get a shell into a distroless image with no `sh`?"** `docker debug`, or run a
+- "How do you get a shell into a distroless image with no `sh`?" `docker debug`, or run a
   toolbox image (`nicolaka/netshoot`) joined to the target's PID/network namespaces, or ship a
   separate `debug` build stage.
-- **"How do you tell whether the kernel OOM-killed the container or the app just crashed?"**
+- "How do you tell whether the kernel OOM-killed the container or the app just crashed?"
   `docker inspect --format '{{.State.OOMKilled}}'` → `true` means OOM; also watch for an `oom`
   event in `docker events`.
-- **"What's the difference between `docker exec` and `docker attach`?"** `exec` starts a new
+- "What's the difference between `docker exec` and `docker attach`?" `exec` starts a new
   process (safe for a debug shell); `attach` connects to `PID 1`'s stdio and can accidentally
   kill the container on exit.
 

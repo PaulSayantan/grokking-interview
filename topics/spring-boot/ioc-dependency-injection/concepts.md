@@ -690,31 +690,31 @@ the coupling DI was meant to remove).
 
 ## Common follow-up questions
 
-- **"What's the difference between IoC and DI?"** IoC is the principle (control of
+- "What's the difference between IoC and DI?" IoC is the principle (control of
   creation/wiring is inverted to the container); DI is one implementation of it.
-- **"Which injection type do you prefer and why?"** Constructor injection: immutability
+- "Which injection type do you prefer and why?" Constructor injection: immutability
   (`final`), guaranteed non-null fully-initialized objects, easy POJO testing, and it
   makes too-many-dependencies visible.
-- **"Can constructor injection cause a circular dependency failure?"** Yes —
+- "Can constructor injection cause a circular dependency failure?" Yes —
   `BeanCurrentlyInCreationException`. Field/setter can be resolved via early references;
   fix by redesign or `@Lazy`.
-- **"Why three levels in the singleton cache?"** The third level holds *factories* so
+- "Why three levels in the singleton cache?" The third level holds *factories* so
   Spring can lazily produce a single consistent early reference — importantly the correct
   AOP proxy — for beans in a cycle.
-- **"How does `@Autowired` resolve when there are two candidates?"** `@Primary` →
+- "How does `@Autowired` resolve when there are two candidates?" `@Primary` →
   `@Qualifier` → bean-name fallback → else `NoUniqueBeanDefinitionException`.
-- **"`@Resource` vs `@Autowired`?"** `@Resource` matches by name first; `@Autowired`
+- "`@Resource` vs `@Autowired`?" `@Resource` matches by name first; `@Autowired`
   by type first (name only as fallback).
-- **"What changed in Spring Boot 3 regarding these annotations?"** `javax.*` →
+- "What changed in Spring Boot 3 regarding these annotations?" `javax.*` →
   `jakarta.*` namespaces (`jakarta.annotation.Resource`, `jakarta.inject.Inject`).
-- **"Are singletons lazy or eager?"** Eager by default in `ApplicationContext`; use
+- "Are singletons lazy or eager?" Eager by default in `ApplicationContext`; use
   `@Lazy` or `spring.main.lazy-initialization` to defer.
-- **"BeanFactory vs ApplicationContext — when would you use BeanFactory?"** Rarely; only
+- "BeanFactory vs ApplicationContext — when would you use BeanFactory?" Rarely; only
   for extreme memory/lazy constraints. `ApplicationContext` adds events, i18n, AOP,
   annotation config, and eager singletons.
-- **"How do you inject all implementations of an interface?"** Inject `List<T>` or
+- "How do you inject all implementations of an interface?" Inject `List<T>` or
   `Map<String,T>`; order with `@Order`.
-- **"What happens if a required bean is missing?"** Startup fails with
+- "What happens if a required bean is missing?" Startup fails with
   `NoSuchBeanDefinitionException` unless the dependency is optional
   (`required=false`/`Optional`/`ObjectProvider`).
 

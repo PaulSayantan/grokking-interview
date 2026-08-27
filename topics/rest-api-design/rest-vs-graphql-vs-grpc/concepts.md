@@ -391,23 +391,23 @@ and the contract needs, then maps them.
 
 ## Common follow-up questions
 
-- **"Does GraphQL replace REST?"** No. It solves over/under-fetching and client-driven
+- "Does GraphQL replace REST?" No. It solves over/under-fetching and client-driven
   shapes, but gives up easy HTTP caching and adds query-cost/N+1 complexity. Many teams
   run both.
-- **"Why can't the browser call gRPC directly?"** Browser HTTP APIs don't expose the
+- "Why can't the browser call gRPC directly?" Browser HTTP APIs don't expose the
   HTTP/2 framing/trailers gRPC needs; you need gRPC-Web plus a proxy, and even then no
   client/bidi streaming.
-- **"What HTTP status does a failing GraphQL query return?"** Usually 200, with errors in
+- "What HTTP status does a failing GraphQL query return?" Usually 200, with errors in
   the `errors` array; transport 4xx/5xx is reserved for malformed/failed requests.
-- **"How do you stop an expensive GraphQL query?"** Depth limiting, query cost/complexity
+- "How do you stop an expensive GraphQL query?" Depth limiting, query cost/complexity
   analysis, persisted-query allowlists, timeouts, and cost-based rate limiting.
-- **"How do you version each?"** REST: URL/media-type versions + additive change. GraphQL:
+- "How do you version each?" REST: URL/media-type versions + additive change. GraphQL:
   don't version — add fields and `@deprecated`. gRPC: never reuse field numbers, add new
   tags, `reserve` removed ones.
-- **"Which is fastest?"** For raw service-to-service latency/throughput, gRPC (binary +
+- "Which is fastest?" For raw service-to-service latency/throughput, gRPC (binary +
   HTTP/2 multiplexing) usually wins; but "fastest" depends on caching — a CDN-cached REST
   `GET` beats everything by not hitting the origin at all.
-- **"Why does gRPC use HTTP/2?"** Multiplexed streams over one connection, header
+- "Why does gRPC use HTTP/2?" Multiplexed streams over one connection, header
   compression, and binary framing enable low-latency calls and native streaming.
 
 ## GraphQL-over-HTTP status codes

@@ -1544,28 +1544,28 @@ Deep dive: correct boundaries — see `microservices-ddd-and-boundaries`.
 
 ## Common follow-up questions
 
-- **"What's the difference between an architectural style and a design pattern?"** Altitude: a
+- "What's the difference between an architectural style and a design pattern?" Altitude: a
   style shapes the *whole system*; a GoF pattern arranges *a few objects*. A characteristic
   (`-ility`) is neither — it's the quality requirement the style is chosen to optimize.
-- **"There's no shared database in microservices — why?"** Independent deployability and data
+- "There's no shared database in microservices — why?" Independent deployability and data
   ownership; a shared DB re-couples services (schema changes ripple), producing a Distributed
   Monolith.
-- **"Layers vs tiers?"** Layers are *logical* groupings that can share one process; tiers are
+- "Layers vs tiers?" Layers are *logical* groupings that can share one process; tiers are
   *physical* deployment boundaries across processes/hosts.
-- **"Hexagonal vs Onion vs Clean?"** Same core idea — dependencies point inward to the domain,
+- "Hexagonal vs Onion vs Clean?" Same core idea — dependencies point inward to the domain,
   infra is swappable, core is testable — expressed with different vocabulary. Clean generalizes
   the other two with Entities/Use Cases and the Dependency Rule.
-- **"When would you NOT use microservices?"** Small team/early product, unclear domain
+- "When would you NOT use microservices?" Small team/early product, unclear domain
   boundaries, strong-consistency needs, limited ops maturity — start with a modular monolith.
-- **"How do you keep architecture from eroding?"** Fitness functions in CI (dependency-direction
+- "How do you keep architecture from eroding?" Fitness functions in CI (dependency-direction
   checks, coupling/latency gates) plus ADRs to preserve rationale.
-- **"Which style for extreme, spiky concurrency where the DB is the bottleneck?"** Space-Based
+- "Which style for extreme, spiky concurrency where the DB is the bottleneck?" Space-Based
   (in-memory grid + async persistence); if the goal is blast-radius isolation instead, Cell-Based.
-- **"SOA vs microservices?"** SOA = coarse services + central ESB (smart pipes, reuse-first);
+- "SOA vs microservices?" SOA = coarse services + central ESB (smart pipes, reuse-first);
   microservices = fine-grained, DB-per-service, smart endpoints + dumb pipes.
-- **"How does Conway's Law affect a microservices rollout?"** The system will mirror team
+- "How does Conway's Law affect a microservices rollout?" The system will mirror team
   communication; use the Inverse Conway Maneuver to shape teams to the target boundaries.
-- **"What is an architecture quantum?"** An independently deployable unit with high functional
+- "What is an architecture quantum?" An independently deployable unit with high functional
   cohesion and its own data — the unit that distinguishes monolithic (one quantum) from
   distributed (many) styles.
 

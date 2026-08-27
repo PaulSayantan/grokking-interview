@@ -191,29 +191,29 @@ authentication"* versus the default *"global payments integration."*
 
 ## Common follow-up questions
 
-- **"Why not just keep extending the Charges API?"** Because cards' two assumptions
+- "Why not just keep extending the Charges API?" Because cards' two assumptions
   — instant finalization and no customer action — are false for most global methods.
   Each exception forced a workaround (`pending` state, `BitcoinReceiver`, two state
   machines) until the abstraction was carrying more exceptions than rule. Redesign
   beats infinite bolting-on — "a spaceship, not a car with extra parts."
-- **"What exactly does an idempotency key protect against?"** The timeout ambiguity:
+- "What exactly does an idempotency key protect against?" The timeout ambiguity:
   a request that may or may not have succeeded because the response was lost. The key
   lets the client retry safely; the server replays the first result instead of
   re-charging, guaranteeing at-most-once execution for that logical operation.
-- **"Why does PaymentIntents have no `failed` state?"** So a failed attempt returns
+- "Why does PaymentIntents have no `failed` state?" So a failed attempt returns
   to `requires_payment_method` and the customer can retry with another method in the
   same object — failure is a retry loop, not a terminal dead end that discards the
   intent.
-- **"Why keep creating `Charge` objects after the redesign?"** Backward
+- "Why keep creating `Charge` objects after the redesign?" Backward
   compatibility: thousands of existing analytics/reporting integrations read
   `Charge`. Layering PaymentIntents *over* Charges (one Charge per attempt, plus a
   polymorphic `payment_method_details` hash) let the new model ship without breaking
   the old ecosystem.
-- **"How can Stripe change the API without breaking old integrations?"** Date-based
+- "How can Stripe change the API without breaking old integrations?" Date-based
   versioning: accounts are pinned to the version they integrated against, and Stripe
   translates between that frozen shape and the current internal model — so breaking
   changes never reach un-rewritten code.
-- **"What's the one design principle to take away?"** *"A great API product stays
+- "What's the one design principle to take away?" *"A great API product stays
   out of the developer's way for as long as possible"* — reveal power gradually,
   keep the simple case simple, and don't let your first use case permanently define
   your abstraction.

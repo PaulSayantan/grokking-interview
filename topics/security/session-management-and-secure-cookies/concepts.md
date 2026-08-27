@@ -792,29 +792,29 @@ The correct forms:
 
 ## Common follow-up questions
 
-- **"How much entropy does a session ID need and where does it come from?"** ≥64 bits
+- "How much entropy does a session ID need and where does it come from?" ≥64 bits
   (128-bit is typical/recommended) from a CSPRNG — never `Math.random()` or a
   time/counter-seeded PRNG.
-- **"Difference between session fixation and session hijacking?"** Fixation = attacker
+- "Difference between session fixation and session hijacking?" Fixation = attacker
   plants a known ID before login and the app fails to regenerate it; hijacking = attacker
   steals a valid active ID. Fix fixation by regenerating the ID at auth; fix hijacking by
   protecting the ID (HttpOnly, Secure, HTTPS, no URLs, short timeouts).
-- **"What does each cookie attribute defend against?"** `HttpOnly` → XSS token theft;
+- "What does each cookie attribute defend against?" `HttpOnly` → XSS token theft;
   `Secure` → network sniffing/downgrade; `SameSite` → CSRF; `__Host-` prefix →
   cookie-tossing/overwrite from subdomains + enforces host-locking.
-- **"Is `SameSite` enough to stop CSRF?"** No — `Lax` still allows top-level cross-site
+- "Is `SameSite` enough to stop CSRF?" No — `Lax` still allows top-level cross-site
   GETs, legacy browsers may not enforce it, and it doesn't cover same-site attacks. Keep
   anti-CSRF tokens for state-changing requests.
-- **"How do you log someone out of a stateless JWT session?"** You can't with the token
+- "How do you log someone out of a stateless JWT session?" You can't with the token
   alone — add short expiry + refresh-token rotation with reuse detection, or a server-side
   denylist checked per request. Support global logout by invalidating all of a user's
   sessions server-side.
-- **"Why not store the token in localStorage?"** It's readable by any JavaScript, so a
+- "Why not store the token in localStorage?" It's readable by any JavaScript, so a
   single XSS exfiltrates it; an `HttpOnly` cookie is unreadable by script.
-- **"Idle vs absolute timeout?"** Idle expires after inactivity (sliding, ~2–5 min high
+- "Idle vs absolute timeout?" Idle expires after inactivity (sliding, ~2–5 min high
   value / 15–30 min low risk); absolute expires a fixed time after creation (~4–8 h),
   forcing re-auth and capping a hijacked session's life. Enforce both server-side.
-- **"Server-side session or stateless token — which and why?"** Server-side when you need
+- "Server-side session or stateless token — which and why?" Server-side when you need
   easy revocation, forced logout, and concurrent-session control; stateless when you must
   scale without a shared store and can accept short lifetimes + a revocation mechanism.
 

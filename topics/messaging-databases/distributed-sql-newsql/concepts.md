@@ -583,25 +583,25 @@ Key mechanistic differences:
 
 ## Common follow-up questions
 
-- **"Why do these clusters use 3 or 5 replicas and not 4?"** Fault tolerance depends on
+- "Why do these clusters use 3 or 5 replicas and not 4?" Fault tolerance depends on
   keeping a *majority*; 4 replicas need a 3-node quorum, tolerating only 1 failure — same
   as 3 replicas but with more write cost. Odd counts maximize tolerance per replica.
-- **"How does Spanner give external consistency without a global clock?"** It uses
+- "How does Spanner give external consistency without a global clock?" It uses
   TrueTime's bounded uncertainty and **commit-wait** to ensure a transaction's timestamp
   is provably in the past before its writes are visible.
-- **"CockroachDB has no atomic clocks — how does it stay correct?"** HLC + a `max-offset`
+- "CockroachDB has no atomic clocks — how does it stay correct?" HLC + a `max-offset`
   assumption + **uncertainty restarts** on reads; nodes that exceed the offset self-
   terminate.
-- **"Isn't 2PC bad?"** Textbook 2PC with a non-replicated coordinator is blocking;
+- "Isn't 2PC bad?" Textbook 2PC with a non-replicated coordinator is blocking;
   distributed SQL replicates the coordinator and participants with consensus, removing
   that failure mode.
-- **"How do I avoid a write hotspot?"** Don't use a monotonic primary key with range
+- "How do I avoid a write hotspot?" Don't use a monotonic primary key with range
   sharding; use a UUID, hash-sharded index, or scattered key prefix.
-- **"How do I make multi-region reads fast?"** Follower/stale reads and geo-partitioning
+- "How do I make multi-region reads fast?" Follower/stale reads and geo-partitioning
   (pin replicas/leaseholders near access).
-- **"Serializable vs linearizable vs strict serializable?"** Isolation order vs single-
+- "Serializable vs linearizable vs strict serializable?" Isolation order vs single-
   object real-time recency vs both combined.
-- **"What's the catch with distributed SQL?"** Write latency across regions is floored by
+- "What's the catch with distributed SQL?" Write latency across regions is floored by
   consensus round-trips (physics); you engineer locality, you don't remove it.
 
 ## References

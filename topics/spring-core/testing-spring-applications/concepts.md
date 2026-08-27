@@ -722,22 +722,22 @@ auto-config and explicit configuration.
 
 ## Common follow-up questions
 
-- **Why is my test suite slow even though contexts are cached?** Usually too many *distinct* context
+- Why is my test suite slow even though contexts are cached? Usually too many *distinct* context
   configurations (varying `@ActiveProfiles`, `@TestPropertySource`, `@MockBean` sets) or overuse of
   `@DirtiesContext`, each of which forces a new/rebuilt context.
-- **When does the cached context get closed?** On JVM shutdown, on LRU eviction beyond `maxSize` (32),
+- When does the cached context get closed? On JVM shutdown, on LRU eviction beyond `maxSize` (32),
   or when `@DirtiesContext` marks it dirty.
-- **My `@Transactional` test passes but data isn't really saved — why?** The transaction rolls back and
+- My `@Transactional` test passes but data isn't really saved — why? The transaction rolls back and
   may never flush; force `flush()` or use `@Commit` to verify real persistence.
-- **`@MockBean` vs `@MockitoBean` vs `@Mock`?** `@Mock` = bare Mockito (no context); `@MockBean` = Boot,
+- `@MockBean` vs `@MockitoBean` vs `@Mock`? `@Mock` = bare Mockito (no context); `@MockBean` = Boot,
   replaces a context bean; `@MockitoBean` = the Spring Framework 6.2 core equivalent of `@MockBean`.
-- **Do I need `@ExtendWith(SpringExtension.class)` if I use `@SpringJUnitConfig`?** No — it is already
+- Do I need `@ExtendWith(SpringExtension.class)` if I use `@SpringJUnitConfig`? No — it is already
   composed in. You'd need it explicitly only with a bare `@ContextConfiguration`.
-- **How do I test a WebFlux endpoint?** Use `WebTestClient` (bindToController / bindToApplicationContext),
+- How do I test a WebFlux endpoint? Use `WebTestClient` (bindToController / bindToApplicationContext),
   not `MockMvc`.
-- **Can I run tests without any Spring annotations?** Yes — that's a unit test; construct the class and
+- Can I run tests without any Spring annotations? Yes — that's a unit test; construct the class and
   its mocks yourself.
-- **JUnit 4 vs 5 integration?** JUnit 4: `@RunWith(SpringRunner.class)`; JUnit 5:
+- JUnit 4 vs 5 integration? JUnit 4: `@RunWith(SpringRunner.class)`; JUnit 5:
   `@ExtendWith(SpringExtension.class)` (or the composed `@SpringJUnitConfig`).
 
 ## References

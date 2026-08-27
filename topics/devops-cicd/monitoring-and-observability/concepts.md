@@ -428,24 +428,24 @@ readout. (The SLI/SLO/error-budget definitions and burn math are owned by the
 
 ## Common follow-up questions
 
-- **"How do you know a deploy caused a regression?"** Deployment markers/annotations
+- "How do you know a deploy caused a regression?" Deployment markers/annotations
   correlate the metric change to a version; compare golden signals new-vs-baseline.
-- **"What metrics gate a deploy?"** The four golden signals (latency, traffic, errors,
+- "What metrics gate a deploy?" The four golden signals (latency, traffic, errors,
   saturation) queried by a canary analysis; plus a post-deploy smoke test on the
   critical path.
-- **"Liveness vs readiness — what breaks if you confuse them?"** Readiness gates traffic
+- "Liveness vs readiness — what breaks if you confuse them?" Readiness gates traffic
   (zero-downtime rolling deploys); a liveness probe that depends on a downstream can
   cause a restart storm and turn degradation into an outage.
-- **"Smoke test vs synthetic monitoring?"** Smoke = one-shot in-pipeline release gate;
+- "Smoke test vs synthetic monitoring?" Smoke = one-shot in-pipeline release gate;
   synthetic = continuous scripted prod transactions catching issues any time.
-- **"Define the DORA four keys and their clusters."** DF, lead time, CFR, recovery time;
+- "Define the DORA four keys and their clusters." DF, lead time, CFR, recovery time;
   throughput vs stability; CFR is a rate; elite = deploy on demand, <1h lead time & recovery.
-- **"How does automated rollback work?"** Canary analysis (Argo Rollouts/Flagger metric
+- "How does automated rollback work?" Canary analysis (Argo Rollouts/Flagger metric
   query) or alarm/SLO breach within a bake window reverts to last known-good; requires
   backward-compatible changes.
-- **"How do you measure pipeline health?"** Build duration, queue time, first-attempt
+- "How do you measure pipeline health?" Build duration, queue time, first-attempt
   pass rate, flaky rate, cost; these feed lead time.
-- **"When do you stop shipping features?"** When the error budget is exhausted per the
+- "When do you stop shipping features?" When the error budget is exhausted per the
   SLO policy.
 
 ## References

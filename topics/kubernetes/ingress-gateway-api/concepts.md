@@ -661,26 +661,26 @@ A practical checklist when "the URL doesn't work," from edge inward:
 
 ## Common follow-up questions
 
-- **"Why doesn't my Ingress do anything?"** No controller installed, or `ingressClassName`
+- "Why doesn't my Ingress do anything?" No controller installed, or `ingressClassName`
   doesn't match any installed `IngressClass` (and there's no default). The resource is inert
   without a controller.
-- **"Ingress vs Gateway API — one difference that matters most?"** Gateway API moves
+- "Ingress vs Gateway API — one difference that matters most?" Gateway API moves
   common features (traffic splitting, header routing, redirects, cross-namespace, TLS on the
   operator's Gateway) out of controller-specific annotations into a **typed, portable,
   role-oriented spec**; Ingress is frozen.
-- **"How do you do canary/blue-green at the edge?"** Native `backendRefs` weights in an
+- "How do you do canary/blue-green at the edge?" Native `backendRefs` weights in an
   HTTPRoute; with Ingress you'd need controller-specific canary annotations.
-- **"How does cross-namespace routing stay safe?"** Default-deny; an explicit
+- "How does cross-namespace routing stay safe?" Default-deny; an explicit
   `ReferenceGrant` in the target namespace (plus the Gateway's `allowedRoutes`) is required.
-- **"Where does TLS terminate?"** At the controller/Gateway edge by default; backend hops are
+- "Where does TLS terminate?" At the controller/Gateway edge by default; backend hops are
   plaintext unless you configure backend/re-encryption TLS or a mesh.
-- **"Ingress vs `type=LoadBalancer`?"** LoadBalancer is L4, one LB per Service; Ingress/
+- "Ingress vs `type=LoadBalancer`?" LoadBalancer is L4, one LB per Service; Ingress/
   Gateway is L7, one LB fanning out to many backends by host/path.
-- **"What automates certs and DNS?"** cert-manager (ACME/Let's Encrypt, auto-renew) and
+- "What automates certs and DNS?" cert-manager (ACME/Let's Encrypt, auto-renew) and
   ExternalDNS (DNS records from Ingress/Gateway/Service hostnames).
-- **"Is the Gateway API production-ready?"** Yes — GatewayClass/Gateway/HTTPRoute are GA
+- "Is the Gateway API production-ready?" Yes — GatewayClass/Gateway/HTTPRoute are GA
   (`v1`) since v1.0 (Oct 2023); GRPCRoute GA since v1.1; TCPRoute/UDPRoute GA in v1.6.
-- **"North-south vs east-west?"** Ingress/Gateway = north-south (client→cluster); mesh =
+- "North-south vs east-west?" Ingress/Gateway = north-south (client→cluster); mesh =
   east-west (service→service). Point to `service-mesh-traffic-management`.
 
 ## References

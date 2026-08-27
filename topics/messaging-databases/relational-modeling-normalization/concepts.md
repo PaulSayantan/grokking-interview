@@ -496,28 +496,28 @@ rows), and **conformed dimensions** shared across fact tables.
 
 ## Common follow-up questions
 
-- **"Why is 3NF usually the practical target rather than BCNF?"** 3NF is always
+- "Why is 3NF usually the practical target rather than BCNF?" 3NF is always
   achievable with a lossless *and* dependency-preserving decomposition; BCNF is lossless
   but may sacrifice dependency preservation, meaning some FDs can no longer be enforced by
   a single-table constraint. 3NF removes essentially all redundancy that matters in
   practice.
-- **"Surrogate or natural primary key?"** Surrogate for stable, narrow identity (great for
+- "Surrogate or natural primary key?" Surrogate for stable, narrow identity (great for
   FKs/indexes/clustered storage); add a `UNIQUE` constraint on the natural key to keep the
   business uniqueness guarantee. Natural keys are risky because real-world values change
   and aren't always truly unique.
-- **"Is a UUID a good primary key?"** Functionally yes, but random UUIDv4 hurts insert
+- "Is a UUID a good primary key?" Functionally yes, but random UUIDv4 hurts insert
   locality (especially InnoDB's clustered index) — prefer time-ordered UUIDv7/ULID.
-- **"How do you model many-to-many?"** A junction table whose PK is the composite of the
+- "How do you model many-to-many?" A junction table whose PK is the composite of the
   two FKs; relationship attributes live on the junction row.
-- **"When would you denormalize?"** Read-heavy/reporting hot paths, backed by
+- "When would you denormalize?" Read-heavy/reporting hot paths, backed by
   measurement, with an explicit mechanism (trigger, materialized view, CDC) to keep the
   redundant copy consistent.
-- **"1NF violation examples?"** Comma-separated lists in a column, repeating groups like
+- "1NF violation examples?" Comma-separated lists in a column, repeating groups like
   `phone1/phone2/phone3`, or arrays used to dodge a child table.
-- **"What's the difference between a candidate key and a superkey?"** A superkey uniquely
+- "What's the difference between a candidate key and a superkey?" A superkey uniquely
   identifies rows but may include redundant attributes; a candidate key is a *minimal*
   superkey.
-- **"Star vs snowflake — which and why?"** Star by default (fewer joins, faster scans,
+- "Star vs snowflake — which and why?" Star by default (fewer joins, faster scans,
   BI-tool friendly); snowflake when dimensions are very large or change enough that
   dimension-side integrity/storage matters.
 

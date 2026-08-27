@@ -739,48 +739,48 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **Why does the WebSocket handshake return 101 and not 200?** Because it is switching the
+- Why does the WebSocket handshake return 101 and not 200? Because it is switching the
   connection off the HTTP protocol onto the WebSocket protocol; `101 Switching Protocols`
   is exactly the HTTP mechanism for that (`Upgrade`/`Connection` headers).
-- **What is the magic GUID for?** `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` is concatenated to
+- What is the magic GUID for? `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` is concatenated to
   the client's `Sec-WebSocket-Key`, SHA-1'd and base64'd into `Sec-WebSocket-Accept` to
   prove the server understands WebSocket — a handshake integrity check, not security.
-- **Why must client frames be masked?** To prevent cache-poisoning attacks on intermediaries
+- Why must client frames be masked? To prevent cache-poisoning attacks on intermediaries
   that might misinterpret attacker-controlled payload bytes as an HTTP request. It provides
   no confidentiality; use TLS (`wss://`).
-- **Does SSE support binary?** No — `text/event-stream` is UTF-8 text only; base64-encode
+- Does SSE support binary? No — `text/event-stream` is UTF-8 text only; base64-encode
   binary (with size overhead) or use WebSocket.
-- **How does SSE recover lost events?** Server assigns `id:` values; on reconnect the browser
+- How does SSE recover lost events? Server assigns `id:` values; on reconnect the browser
   sends `Last-Event-ID`, and the server replays events after that id.
-- **WebSocket has no reconnect — how do you handle drops?** Detect via ping/pong timeout or
+- WebSocket has no reconnect — how do you handle drops? Detect via ping/pong timeout or
   close code 1006, then reconnect with jittered exponential backoff and replay missed state.
-- **WebSocket over HTTP/2?** Not the classic `Upgrade`; RFC 8441 defines an "extended
+- WebSocket over HTTP/2? Not the classic `Upgrade`; RFC 8441 defines an "extended
   CONNECT" bootstrap over HTTP/2 (and RFC 9220 for HTTP/3).
-- **Long polling vs SSE — both hold a connection, why prefer SSE?** SSE keeps one connection
+- Long polling vs SSE — both hold a connection, why prefer SSE? SSE keeps one connection
   open for *many* events with tiny framing and built-in reconnect/resume; long polling pays
   a full request/response cycle per event.
-- **An attacker's page opens a `wss://` to your app as a logged-in user — how, and how do you
-  stop it?** Cross-Site WebSocket Hijacking (CWE-1385): handshakes aren't bound by SOP/CORS and
+- An attacker's page opens a `wss://` to your app as a logged-in user — how, and how do you
+  stop it? Cross-Site WebSocket Hijacking (CWE-1385): handshakes aren't bound by SOP/CORS and
   cookies ride cross-site. Stop it with server-side `Origin` allowlist validation + a CSRF
   token, or auth via a token inside the WS layer instead of the ambient cookie.
-- **Why can't you send an `Authorization` header on a browser WebSocket or `EventSource`?** The
+- Why can't you send an `Authorization` header on a browser WebSocket or `EventSource`? The
   constructors don't expose custom request headers. Use cookie (+CSWSH mitigation), a token in
   `Sec-WebSocket-Protocol`, a query-string token (log-leak risk), post-connect auth, or (for
   SSE) fetch-based streaming which *can* set headers.
-- **You enabled `permessage-deflate` and memory ballooned / a scanner flagged you — why?**
+- You enabled `permessage-deflate` and memory ballooned / a scanner flagged you — why?
   Context takeover holds an LZ77 window per connection (memory), and history-based compression
   enables CRIME-style size-oracle leaks and decompression-bomb DoS. Use `*_no_context_takeover`
   and bound the window / max message size.
-- **WebSocket works locally but drops after ~60s behind a corporate LB/cloud ALB — why?** Idle
+- WebSocket works locally but drops after ~60s behind a corporate LB/cloud ALB — why? Idle
   timeout reaping. Fix with app-level heartbeats or protocol pings *within* the timeout;
   browsers can't send protocol pings, so use app-level heartbeat messages.
-- **SSE works in `curl` but the browser gets all events at once at the end.** Response buffering
+- SSE works in `curl` but the browser gets all events at once at the end. Response buffering
   in the chain: `proxy_buffering off` / `X-Accel-Buffering: no`, disable gzip on the endpoint,
   and flush after each event.
-- **Does WebSocket over HTTP/2 fix head-of-line blocking?** No. RFC 8441 extended CONNECT
+- Does WebSocket over HTTP/2 fix head-of-line blocking? No. RFC 8441 extended CONNECT
   multiplexes the socket onto one H2 stream but all streams share one TCP connection, so
   TCP-level HOL blocking remains. HTTP/3/QUIC (RFC 9220, WebTransport) is the real fix.
-- **How do you detect a half-open connection where the peer vanished?** TCP won't tell you;
+- How do you detect a half-open connection where the peer vanished? TCP won't tell you;
   only an application ping/pong (or heartbeat) timeout reveals it — OS TCP keepalive defaults to
   ~2 hours, far too coarse.
 

@@ -314,16 +314,16 @@ public OrderService(@Qualifier("stripe") PaymentGateway gateway) { ... }
 
 ## Common follow-up questions
 
-- **What is the resolution order of `@Autowired`?** By type → `@Qualifier` → `@Primary` → bean name / field-or-parameter name → error (unique or none).
-- **`@Primary` vs `@Qualifier` — who wins?** `@Qualifier` at the injection point overrides `@Primary` because it is more specific.
-- **What exception on two matching beans and no tiebreaker?** `NoUniqueBeanDefinitionException`. On zero beans with `required=true`: `NoSuchBeanDefinitionException`.
-- **Does `@Autowired` inject by name or type?** By type first; name is only a fallback tiebreaker. `@Resource` is the name-first one.
-- **How do I make a dependency optional?** `@Autowired(required=false)`, `Optional<T>`, `@Nullable`, or `ObjectProvider<T>`.
-- **Difference between `@Resource`, `@Inject`, `@Autowired`?** `@Resource` = JSR-250, by name; `@Inject` = JSR-330, by type (no `required`); `@Autowired` = Spring, by type with rich options.
-- **How do I inject all beans of a type?** Declare `List<T>`, `T[]`, or `Map<String,T>`; ordering via `@Order`/`@Priority`/`Ordered`.
-- **When can I omit `@Autowired` on a constructor?** When the class has exactly one constructor (Spring 4.3+).
-- **Can `@Resource` do constructor injection?** No — field and setter only.
-- **javax vs jakarta?** Spring 5 uses `javax.annotation`/`javax.inject`; Spring 6 uses `jakarta.*`.
+- What is the resolution order of `@Autowired`? By type → `@Qualifier` → `@Primary` → bean name / field-or-parameter name → error (unique or none).
+- `@Primary` vs `@Qualifier` — who wins? `@Qualifier` at the injection point overrides `@Primary` because it is more specific.
+- What exception on two matching beans and no tiebreaker? `NoUniqueBeanDefinitionException`. On zero beans with `required=true`: `NoSuchBeanDefinitionException`.
+- Does `@Autowired` inject by name or type? By type first; name is only a fallback tiebreaker. `@Resource` is the name-first one.
+- How do I make a dependency optional? `@Autowired(required=false)`, `Optional<T>`, `@Nullable`, or `ObjectProvider<T>`.
+- Difference between `@Resource`, `@Inject`, `@Autowired`? `@Resource` = JSR-250, by name; `@Inject` = JSR-330, by type (no `required`); `@Autowired` = Spring, by type with rich options.
+- How do I inject all beans of a type? Declare `List<T>`, `T[]`, or `Map<String,T>`; ordering via `@Order`/`@Priority`/`Ordered`.
+- When can I omit `@Autowired` on a constructor? When the class has exactly one constructor (Spring 4.3+).
+- Can `@Resource` do constructor injection? No — field and setter only.
+- javax vs jakarta? Spring 5 uses `javax.annotation`/`javax.inject`; Spring 6 uses `jakarta.*`.
 
 ## References
 

@@ -778,46 +778,46 @@ Concrete cases interviewers use in scenario/behavioral rounds:
 
 ## Common follow-up questions
 
-- **"A developer committed a live API key to a public repo an hour ago. Walk me through
-  the response."** Rotate/revoke first (assume compromised), audit usage for abuse, remove
+- "A developer committed a live API key to a public repo an hour ago. Walk me through
+  the response." Rotate/revoke first (assume compromised), audit usage for abuse, remove
   from code and move to a secret manager, purge history, add scanning + push protection.
   Scrubbing history alone is not remediation.
-- **"How do you rotate an encryption key for petabytes of data without re-encrypting it?"**
+- "How do you rotate an encryption key for petabytes of data without re-encrypting it?"
   Envelope encryption: data is encrypted with per-object DEKs; the KEK only wraps DEKs.
   Rotate the KEK by re-wrapping the DEKs (or let KMS version internally) — bulk ciphertext is
   untouched.
-- **"What's the difference between a secret manager and a KMS?"** Secret manager stores/returns
+- "What's the difference between a secret manager and a KMS?" Secret manager stores/returns
   secret *values*; KMS guards *key material* and performs crypto without exposing the key.
   They compose (Secrets Manager uses a KMS key to encrypt stored secrets).
-- **"How does an app authenticate to the secret manager without a stored secret?"** Secret-zero
+- "How does an app authenticate to the secret manager without a stored secret?" Secret-zero
   problem — solve with platform/workload identity (IAM role/IMDSv2, Kubernetes SA token,
   SPIFFE) or single-use short-TTL bootstrap tokens (Vault response wrapping / AppRole), not a
   baked-in static token.
-- **"Why are env-var secrets risky if they're not in the repo?"** They leak via crash/error
+- "Why are env-var secrets risky if they're not in the repo?" They leak via crash/error
   dumps, `/proc/<pid>/environ`, child processes, APM agents, and startup logging, and don't
   rotate without a restart.
-- **"What are the states in a key's lifecycle?"** Pre-activation, active, suspended,
+- "What are the states in a key's lifecycle?" Pre-activation, active, suspended,
   deactivated, compromised, destroyed (NIST SP 800-57 Part 1) — and deactivated/compromised
   keys may still be needed to decrypt/verify old data.
-- **"Why is deleting a secret from Git not enough?"** History retains every past version; any
+- "Why is deleting a secret from Git not enough?" History retains every past version; any
   clone recovers it. Assume compromised and rotate. Rewriting history (BFG/`git filter-repo`)
   also **changes commit SHAs**, and forks/mirrors/caches keep the old blob — so rewriting is
   cosmetic; **rotation is the only real fix**.
-- **"Delete one tenant's data from immutable backups — how?"** Crypto-shredding: per-tenant
+- "Delete one tenant's data from immutable backups — how?" Crypto-shredding: per-tenant
   DEK, destroy the DEK; state the caveat that any surviving key copy defeats it.
-- **"Prove the cloud provider can never read our data."** External Key Store / XKS (or HYOK):
+- "Prove the cloud provider can never read our data." External Key Store / XKS (or HYOK):
   KEK stays in your on-prem HSM, every decrypt calls out through a proxy, block it = kill
   switch. BYOK does **not** qualify — the imported key lives in the cloud KMS.
-- **"Zero-downtime DB password rotation?"** Alternating two-user strategy with
+- "Zero-downtime DB password rotation?" Alternating two-user strategy with
   `AWSPENDING`/`AWSCURRENT` staging; rotate the idle credential, test, then flip.
-- **"Your CI leaked env secrets to a forked PR — root cause and fix?"**
+- "Your CI leaked env secrets to a forked PR — root cause and fix?"
   `pull_request_target` running untrusted checkout with `secrets.*` in scope; fix is OIDC
   federation (`AssumeRoleWithWebIdentity`) so no static keys exist.
-- **"What FIPS 140 level zeroizes keys on tamper?"** Level 3 (tamper *response*); Level 2 is
+- "What FIPS 140 level zeroizes keys on tamper?" Level 3 (tamper *response*); Level 2 is
   tamper *evidence* only.
-- **"Why does one DEK per object matter cryptographically?"** AES-GCM nonce reuse / key
+- "Why does one DEK per object matter cryptographically?" AES-GCM nonce reuse / key
   exhaustion (~2^32 messages), not just blast radius.
-- **"Attacker got your KEK vs a DEK — what's exposed?"** KEK unwraps all DEKs → everything; a
+- "Attacker got your KEK vs a DEK — what's exposed?" KEK unwraps all DEKs → everything; a
   single DEK → only its one object/tenant slice.
 
 ## References

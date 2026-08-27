@@ -460,26 +460,26 @@ Thanos/Mimir in front (which dedupes by an external `replica` label).
 
 ## Common follow-up questions
 
-- **Why pull instead of push, and when do you push?** Pull gives free liveness (`up`), no
+- Why pull instead of push, and when do you push? Pull gives free liveness (`up`), no
   client needs the server address, and central rate/cardinality control. Push (Pushgateway)
   only for short-lived batch jobs that can't be scraped in time.
-- **What's the difference between `relabel_configs` and `metric_relabel_configs`?** The
+- What's the difference between `relabel_configs` and `metric_relabel_configs`? The
   first runs before the scrape on the *target's* labels and can drop the whole target; the
   second runs after the scrape on each *sample's* labels and only filters what's stored.
-- **Walk me through the write path.** Scrape → append to head (in memory) + WAL (disk) →
+- Walk me through the write path. Scrape → append to head (in memory) + WAL (disk) →
   every ~2h cut an immutable block → compaction merges blocks → retention deletes old
   blocks; optionally remote_write streams every sample out.
-- **Why did a series go stale / disappear?** Target left SD (stale marker inserted), scrape
+- Why did a series go stale / disappear? Target left SD (stale marker inserted), scrape
   failed, or no sample within the 5m lookback delta, or a relabel/sample_limit dropped it.
-- **What labels does Prometheus add at scrape time, and can I change them?** `job` and
+- What labels does Prometheus add at scrape time, and can I change them? `job` and
   `instance` (plus `up`, `scrape_*`). You can override/derive them via `relabel_configs`.
-- **How do you store years of metrics?** Not in Prometheus — `remote_write` to
+- How do you store years of metrics? Not in Prometheus — `remote_write` to
   Thanos/Cortex/Mimir backed by object storage; keep local retention short.
-- **How is Prometheus made highly available?** Two identical instances scraping the same
+- How is Prometheus made highly available? Two identical instances scraping the same
   targets; Alertmanager dedupes alerts; Thanos/Mimir for a deduped global query view.
-- **Why is the Pushgateway discouraged?** SPOF, breaks per-instance `up`, and pushed
+- Why is the Pushgateway discouraged? SPOF, breaks per-instance `up`, and pushed
   metrics persist (go stale) until explicitly deleted.
-- **Classic vs native histograms?** Classic = many cumulative `_bucket` series with fixed
+- Classic vs native histograms? Classic = many cumulative `_bucket` series with fixed
   `le` boundaries; native (exponential) = one series with dynamic exponential buckets, far
   cheaper and no bucket pre-selection.
 

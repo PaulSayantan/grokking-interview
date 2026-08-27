@@ -373,19 +373,19 @@ trade-offs, and amortized structures explicitly.
 
 ## Common follow-up questions
 
-- **"What's the space complexity?"** — Almost always the immediate follow-up to a time
+- "What's the space complexity?" — Almost always the immediate follow-up to a time
   answer. Separate auxiliary space, output space, and recursion-stack space.
-- **"Can you do it in `O(1)` space / in place?"** — Tests whether you can trade the
+- "Can you do it in `O(1)` space / in place?" — Tests whether you can trade the
   hashmap for two pointers, or mutate the input. Remember recursion stack still counts.
-- **"Is that truly `O(1)`, or amortized?"** — For dynamic arrays / hashmaps, name it as
+- "Is that truly `O(1)`, or amortized?" — For dynamic arrays / hashmaps, name it as
   amortized and explain the doubling.
-- **"What's the worst case vs the average?"** — Especially for quicksort and hashmaps;
+- "What's the worst case vs the average?" — Especially for quicksort and hashmaps;
   explain the input that triggers the worst case and how randomization/good hashing avoids
   it.
-- **"Why is comparison sorting `Ω(n log n)`?"** — Decision-tree argument: `n!` possible
+- "Why is comparison sorting `Ω(n log n)`?" — Decision-tree argument: `n!` possible
   orderings, a binary decision tree of height `h` distinguishes `2ʰ` leaves, so
   `2ʰ ≥ n!` → `h ≥ log₂(n!) = Ω(n log n)`.
-- **"The constant factor is huge — does Big-O still apply?"** — Yes asymptotically, but
+- "The constant factor is huge — does Big-O still apply?" — Yes asymptotically, but
   acknowledge that for the given `n` a higher-order algorithm with a small constant may
   win in practice.
 

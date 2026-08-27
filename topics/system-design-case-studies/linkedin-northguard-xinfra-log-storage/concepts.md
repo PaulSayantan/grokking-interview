@@ -253,32 +253,32 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **"What was actually broken about Kafka at LinkedIn scale?"** Not the storage — the
+- "What was actually broken about Kafka at LinkedIn scale?" Not the storage — the
   **metadata plane** (one controller per cluster is a scaling ceiling) and the
   **replication unit** (the partition is heavyweight to move and recover). Adding
   clusters just multiplied single-controller ceilings and the ops burden of 100+
   clusters.
-- **"Why segments and ranges instead of partitions?"** A segment is a small, immutable
+- "Why segments and ranges instead of partitions?" A segment is a small, immutable
   unit of replication, so re-replication and balancing move small lumps and happen
   automatically as brokers join (log striping). A range can be split/merged locally
   (buddy-allocator style), so scaling a hot key range doesn't stop the world like
   repartitioning a Kafka topic does.
-- **"How does Northguard scale metadata past one controller?"** DS-RSM: many **vnodes**
+- "How does Northguard scale metadata past one controller?" DS-RSM: many **vnodes**
   (Raft replicated state machines), each owning a metadata shard, placed on a
   consistent-hash ring. The vnode leader is the **coordinator**. Kafka's 1 controller
   becomes **128+ coordinators**.
-- **"What is an epoch in Xinfra and why does it matter?"** An epoch is one entry in a
+- "What is an epoch in Xinfra and why does it matter?" An epoch is one entry in a
   Xinfra topic's change history. One virtual topic can hold a Kafka epoch and a
   Northguard epoch simultaneously, so clients see a stable virtual name while the
   physical backing migrates underneath — transparently.
-- **"How do they migrate a topic with zero downtime?"** Create the new epoch in the
+- "How do they migrate a topic with zero downtime?" Create the new epoch in the
   target, **dual-write**, cut over **producers first then consumers**. Dual writes
   preserve ordering and allow rollback. Result: 90%+ of apps on Xinfra clients,
   thousands of topics moved.
-- **"How much better is durability, concretely?"** Kafka lazily flushes every 10 s /
+- "How much better is durability, concretely?" Kafka lazily flushes every 10 s /
   20k records (ack can precede disk); Northguard **fsyncs before ack** at 10 ms / 20k
   records / 10 MB — an acked write is truly on disk, while still meeting Kafka's SLOs.
-- **"How do they gain confidence in a system this critical?"** Deterministic simulation
+- "How do they gain confidence in a system this critical?" Deterministic simulation
   testing that injects network partitions, disk corruption, and packet loss — you
   replay the exact fault sequence to reproduce and fix bugs.
 

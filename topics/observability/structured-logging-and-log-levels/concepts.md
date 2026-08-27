@@ -366,27 +366,27 @@ instead of scanning logs.
 
 ## Common follow-up questions
 
-- **Why structured logging over grep-able text?** Field-level query/aggregation without
+- Why structured logging over grep-able text? Field-level query/aggregation without
   brittle regex; stable schema; easy correlation and dashboards. Text is fine for a laptop,
   not for a fleet.
-- **When is WARN vs ERROR correct?** WARN = unexpected but handled/recovered (request still
+- When is WARN vs ERROR correct? WARN = unexpected but handled/recovered (request still
   OK). ERROR = an operation actually failed and needs attention. Expected 4xx from clients
   are usually INFO/WARN for your service.
-- **How do you correlate logs across microservices?** Propagate W3C `traceparent`; put
+- How do you correlate logs across microservices? Propagate W3C `traceparent`; put
   `trace_id`/`span_id` on every line via MDC set at the request boundary; enable logs↔traces
   linking in the backend.
-- **Why must you clear MDC?** It's thread-local and threads are pooled/reused — stale context
+- Why must you clear MDC? It's thread-local and threads are pooled/reused — stale context
   leaks into the next request. Async/reactive flows need explicit context propagation.
-- **How do you keep secrets/PII out of logs?** Primary: don't log them (log IDs, not values).
+- How do you keep secrets/PII out of logs? Primary: don't log them (log IDs, not values).
   Defense in depth: serializer masking + pipeline redaction + hashing. Treat leaked secrets
   as compromised → rotate.
-- **What's a canonical log line and why is it useful?** One wide structured event per request;
+- What's a canonical log line and why is it useful? One wide structured event per request;
   slice by any dimension after the fact; the log form of high-cardinality wide events.
-- **How do you make logging fast?** Parameterized/guarded logging, async appenders (Log4j2
+- How do you make logging fast? Parameterized/guarded logging, async appenders (Log4j2
   Disruptor), no logging in hot loops, watch the async queue's drop/block behavior.
-- **When would you sample logs and what do you never sample?** Sample high-volume happy-path/
+- When would you sample logs and what do you never sample? Sample high-volume happy-path/
   DEBUG/INFO; keep 100% of errors; prefer trace-consistent sampling.
-- **Log vs metric for an alert?** Metric — cheaper, lower-latency, avoids scanning logs; keep
+- Log vs metric for an alert? Metric — cheaper, lower-latency, avoids scanning logs; keep
   high-cardinality IDs out of metric labels.
 
 ## References

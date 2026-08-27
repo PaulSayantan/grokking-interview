@@ -861,36 +861,36 @@ again with `If-Match: "v5"`.
 
 ## Common follow-up questions
 
-- **Walk me through what happens from the moment a request hits Tomcat until the
-  JSON response is written.** (Filters → DispatcherServlet → HandlerMapping →
+- Walk me through what happens from the moment a request hits Tomcat until the
+  JSON response is written. (Filters → DispatcherServlet → HandlerMapping →
   interceptors → HandlerAdapter → argument resolvers → controller → message
   converter → interceptors → filters.)
-- **Why is `@RestController` enough — where did `@ResponseBody` go?** (It's a
+- Why is `@RestController` enough — where did `@ResponseBody` go? (It's a
   meta-annotation combining `@Controller` + `@ResponseBody`.)
-- **Is DELETE idempotent even though the second call returns 404?** (Yes —
+- Is DELETE idempotent even though the second call returns 404? (Yes —
   idempotency is about resulting server state, not the response.)
-- **PUT vs PATCH for updating one field?** (PATCH; PUT would replace the whole
+- PUT vs PATCH for updating one field? (PATCH; PUT would replace the whole
   resource and blank unspecified fields.)
-- **How do you make a POST /payments safe to retry?** (Idempotency-Key header + server-side dedup.)
-- **Filter vs interceptor — where does Spring Security sit?** (Filter layer, before
+- How do you make a POST /payments safe to retry? (Idempotency-Key header + server-side dedup.)
+- Filter vs interceptor — where does Spring Security sit? (Filter layer, before
   interceptors.)
-- **Why not return JPA entities directly?** (Coupling, mass-assignment,
+- Why not return JPA entities directly? (Coupling, mass-assignment,
   LazyInitializationException/N+1, over-exposure — use DTOs.)
-- **Why does `allowCredentials(true)` + `allowedOrigins("*")` fail?** (Spec/Spring
+- Why does `allowCredentials(true)` + `allowedOrigins("*")` fail? (Spec/Spring
   forbids it; use `allowedOriginPatterns`.)
-- **Difference between 401 and 403? 400 vs 422? 302 vs 307 vs 308?**
-- **How does content negotiation pick XML vs JSON, and what returns 406 vs 415?**
-- **Why does a `@Min` on a `@RequestParam` return 500 in one app and 400 in another?**
+- Difference between 401 and 403? 400 vs 422? 302 vs 307 vs 308?
+- How does content negotiation pick XML vs JSON, and what returns 406 vs 415?
+- Why does a `@Min` on a `@RequestParam` return 500 in one app and 400 in another?
   (Pre-6.1 AOP `@Validated` path throws `ConstraintViolationException` → 500 if
   unhandled; Spring 6.1 built-in method validation throws
   `HandlerMethodValidationException` → 400.)
-- **Under async (`Callable`/`DeferredResult`), which thread runs the controller vs
-  produces the result, and why does my `ThreadLocal` timing interceptor break?**
-- **A counter field on a `@RestController` gives wrong totals — why?** (Singleton
+- Under async (`Callable`/`DeferredResult`), which thread runs the controller vs
+  produces the result, and why does my `ThreadLocal` timing interceptor break?
+- A counter field on a `@RestController` gives wrong totals — why? (Singleton
   bean invoked concurrently; controllers must be stateless.)
-- **Why doesn't my `@ControllerAdvice` catch the exception Spring Security throws?**
+- Why doesn't my `@ControllerAdvice` catch the exception Spring Security throws?
   (It's thrown in the filter chain, before the DispatcherServlet selects a handler.)
-- **`/users/` returns 404 after upgrading to Spring Boot 3 — what changed?**
+- `/users/` returns 404 after upgrading to Spring Boot 3 — what changed?
   (Trailing-slash matching is off by default in Spring 6.)
 
 ## References

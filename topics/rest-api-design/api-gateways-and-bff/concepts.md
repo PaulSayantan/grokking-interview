@@ -1020,25 +1020,25 @@ the edge) is the same, just measured in tokens.
 
 ## Common follow-up questions
 
-- **"Where do you put authentication vs authorization?"** AuthN and coarse authZ
+- "Where do you put authentication vs authorization?" AuthN and coarse authZ
   (scope/route gating) at the gateway; fine-grained, resource-level authZ (BOLA,
   ownership checks) in the service that owns the data.
-- **"Gateway or BFF for aggregating a mobile home screen?"** Prefer a BFF owned
+- "Gateway or BFF for aggregating a mobile home screen?" Prefer a BFF owned
   by the mobile team — it encodes product decisions about partial failure and
   payload shape. A shared gateway shouldn't hold client-specific logic.
-- **"How do you avoid the gateway being a SPOF?"** Run it redundantly behind an
+- "How do you avoid the gateway being a SPOF?" Run it redundantly behind an
   LB, keep the data plane simple/stateless, externalize state (rate-limit
   counters), and roll config out gradually with fast rollback.
-- **"Isn't a service mesh a replacement for a gateway?"** No — mesh is east-west
+- "Isn't a service mesh a replacement for a gateway?" No — mesh is east-west
   (internal service-to-service); gateway is north-south (external ingress). Many
   systems run both.
-- **"Why not just let clients call services directly?"** Clients would couple to
+- "Why not just let clients call services directly?" Clients would couple to
   internal topology, and every service would re-implement TLS/authN/rate
   limiting/CORS. The gateway centralizes those and gives one stable contract.
-- **"What status code when a client exceeds its quota vs the server is
-  overloaded?"** `429 Too Many Requests` for the specific client; `503 Service
+- "What status code when a client exceeds its quota vs the server is
+  overloaded?" `429 Too Many Requests` for the specific client; `503 Service
   Unavailable` for server-side overload — both with `Retry-After` when known.
-- **"How does a backend get the client's real IP after TLS termination?"** Via
+- "How does a backend get the client's real IP after TLS termination?" Via
   `X-Forwarded-For` / `Forwarded` (RFC 7239) injected by the trusted gateway;
   the backend must only trust these from the gateway.
 

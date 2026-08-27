@@ -457,26 +457,26 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **"You have 90% line coverage — are you well tested?"** No — line coverage measures execution, not
+- "You have 90% line coverage — are you well tested?" No — line coverage measures execution, not
   assertion quality; check branch coverage and, more importantly, mutation score. Assertion-free tests
   can produce 90% and catch nothing.
-- **"Line vs branch coverage — give an example where they differ."** A ternary/`if` on one line: one
+- "Line vs branch coverage — give an example where they differ." A ternary/`if` on one line: one
   test gives 100% line but 50% branch because only one side of the decision runs.
-- **"What is MC/DC and where is it required?"** Modified Condition/Decision Coverage — each condition
+- "What is MC/DC and where is it required?" Modified Condition/Decision Coverage — each condition
   independently shown to affect the outcome; required for safety-critical software (DO-178C, avionics).
-- **"What does JaCoCo instrument — source or bytecode?"** Bytecode, via a Java agent (on-the-fly).
+- "What does JaCoCo instrument — source or bytecode?" Bytecode, via a Java agent (on-the-fly).
   Line coverage needs debug info; exceptions aren't counted as branches.
-- **"What is a mutant? Killed vs survived?"** A one-change bug injected into the code. Killed = a test
+- "What is a mutant? Killed vs survived?" A one-change bug injected into the code. Killed = a test
   failed (good); survived = all tests passed (a real gap).
-- **"What is a mutation score and why can't it be 100%?"** Killed ÷ non-equivalent mutants; equivalent
+- "What is a mutation score and why can't it be 100%?" Killed ÷ non-equivalent mutants; equivalent
   mutants are behaviorally identical and unkillable, and detecting them is undecidable.
-- **"Coverage says 100%, mutation score says 55% — what's happening?"** Tests execute the code but
+- "Coverage says 100%, mutation score says 55% — what's happening?" Tests execute the code but
   don't assert enough; strengthen assertions to kill the surviving mutants.
-- **"Isn't mutation testing too slow for CI?"** Run it diff-scoped (changed classes) in PRs with
+- "Isn't mutation testing too slow for CI?" Run it diff-scoped (changed classes) in PRs with
   incremental/history analysis; full runs nightly.
-- **"How do you stop coverage targets being gamed (Goodhart)?"** Gate on diff/patch coverage of
+- "How do you stop coverage targets being gamed (Goodhart)?" Gate on diff/patch coverage of
   changed code, combine with mutation score, and review assertion quality — not a single vanity %.
-- **"What should you exclude from coverage?"** Generated code, trivial DTOs, config glue — never
+- "What should you exclude from coverage?" Generated code, trivial DTOs, config glue — never
   branchy logic just because it's hard.
 
 ## References

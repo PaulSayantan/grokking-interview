@@ -209,30 +209,30 @@ expose tools to AI agents.
 
 ## Common follow-up questions
 
-- **"Why one shared platform instead of a service per file format?"** Because the
+- "Why one shared platform instead of a service per file format?" Because the
   underlying steps (PDF rendering, page imaging, text extraction) are shared across
   formats. Per-format services duplicate that logic, and then configurations drift
   and package versions skew, so the copies diverge and each needs separate
   operation. One platform means one place to fix the PDF step and one place to
   scale it.
-- **"What does the central coordinator actually do?"** It collects requests,
+- "What does the central coordinator actually do?" It collects requests,
   composes the needed chain of transformations, validates them, caches responses,
   and dispatches to single-purpose workers. Caching and validation exist to shield
   workers from duplicate or invalid work.
-- **"How are new formats added without destabilizing the system?"** As plugins
+- "How are new formats added without destabilizing the system?" As plugins
   against the shared transformation library, plus single-purpose workers — not by
   editing the coordinator. Core coordination stays stable while capability count
   grows past 100.
-- **"Why did serving AI turn out to be cheap for Riviera?"** Because AI's needs —
+- "Why did serving AI turn out to be cheap for Riviera?" Because AI's needs —
   OCR, text extraction, metadata, normalization — are content-transformation
   problems Riviera had already solved for previews and search. Improving one path
   (e.g., text extraction) improved AI *and* search at once, and new file types only
   had to be added once.
-- **"Where's the risk in this design?"** The coordinator becomes a shared
+- "Where's the risk in this design?" The coordinator becomes a shared
   dependency on every product's critical path, so its availability and correctness
   are everyone's. And a shared platform needs firm boundaries, or it accretes
   unrelated responsibilities and loses focus.
-- **"Where else does this pattern show up?"** Any org with expensive, repeated
+- "Where else does this pattern show up?" Any org with expensive, repeated
   work behind many products: a shared media-transcoding pipeline, a company-wide
   feature store for ML, a document-ingestion service feeding both search and RAG.
   Same move — decompose into reusable steps, coordinate centrally, extend by

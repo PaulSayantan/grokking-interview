@@ -507,25 +507,25 @@ Prevention / mitigation:
 
 ## Common follow-up questions
 
-- **"What's PostgreSQL's default isolation level vs MySQL's?"** READ COMMITTED vs
+- "What's PostgreSQL's default isolation level vs MySQL's?" READ COMMITTED vs
   REPEATABLE READ. Be ready to explain why the difference bites (per-statement vs
   per-transaction snapshots).
-- **"Is REPEATABLE READ enough to stop phantoms?"** Per ANSI, no. In PostgreSQL RR
+- "Is REPEATABLE READ enough to stop phantoms?" Per ANSI, no. In PostgreSQL RR
   (snapshot isolation) and InnoDB RR (gap locks), effectively yes — but only SSI/true
   SERIALIZABLE stops write skew.
-- **"Why isn't snapshot isolation serializable?"** It only catches write-write
+- "Why isn't snapshot isolation serializable?" It only catches write-write
   conflicts on the same item; write skew is a read-write conflict across different
   items. Give the doctors-on-call example.
-- **"How do I prevent a lost update?"** Atomic `SET x = x + 1`, `SELECT ... FOR
+- "How do I prevent a lost update?" Atomic `SET x = x + 1`, `SELECT ... FOR
   UPDATE`, a version/CAS column, or SERIALIZABLE. Explain the read-modify-write race.
-- **"What does the WAL guarantee and what does fsync have to do with it?"** WAL rule:
+- "What does the WAL guarantee and what does fsync have to do with it?" WAL rule:
   log before data page and before commit ack; `fsync` forces the log to durable
   storage so a committed transaction survives a crash.
-- **"How do you handle serialization/deadlock failures?"** Retry loop on SQLSTATE
+- "How do you handle serialization/deadlock failures?" Retry loop on SQLSTATE
   40001; keep transactions idempotent and short; order locks consistently.
-- **"MVCC — where do old row versions live?"** PostgreSQL: in the heap (cleaned by
+- "MVCC — where do old row versions live?" PostgreSQL: in the heap (cleaned by
   VACUUM). InnoDB: in the undo log (cleaned by purge).
-- **"Difference between optimistic and pessimistic locking, and when to use each?"**
+- "Difference between optimistic and pessimistic locking, and when to use each?"
   Contention-driven; optimistic = validate-at-commit + retry; pessimistic = lock up
   front.
 

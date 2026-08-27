@@ -420,24 +420,24 @@ platform/IDP depth lives in `platform-engineering-and-idp`.
 
 ## Common follow-up questions
 
-- **"Is DevOps a role or a culture?"** — Primarily a culture/practice. The "DevOps engineer"
+- "Is DevOps a role or a culture?" — Primarily a culture/practice. The "DevOps engineer"
   title exists, but centralising DevOps in one gatekeeping person re-creates the wall of
   confusion; the goal is distributed capability + self-service platforms.
-- **"How do you measure DevOps success?"** — DORA four keys (DF, LT, CFR, recovery time),
+- "How do you measure DevOps success?" — DORA four keys (DF, LT, CFR, recovery time),
   balancing throughput and stability, plus the newer reliability measure. Explicitly *not*
   vanity metrics (lines of code, commits) or per-developer scores.
-- **"Continuous Delivery vs Continuous Deployment?"** — Both automate up to prod-ready;
+- "Continuous Delivery vs Continuous Deployment?" — Both automate up to prod-ready;
   Delivery keeps a *manual* production release decision, Deployment is *fully automatic*.
-- **"What's the difference between DevOps and Agile?"** — Agile optimises *building* software
+- "What's the difference between DevOps and Agile?" — Agile optimises *building* software
   iteratively; DevOps extends the flow through *delivery and operations* to running software.
-- **"Explain Conway's Law and why it matters."** — Systems mirror org communication
+- "Explain Conway's Law and why it matters." — Systems mirror org communication
   structure; shape teams to get the architecture you want (Inverse Conway Manoeuvre).
-- **"What does 'blameless' actually mean — is nobody responsible?"** — No punishment of
+- "What does 'blameless' actually mean — is nobody responsible?" — No punishment of
   individuals so truth surfaces; accountability shifts to fixing the system via action items.
-- **"How is SRE different from DevOps?"** — SRE is a concrete, prescriptive *implementation*
+- "How is SRE different from DevOps?" — SRE is a concrete, prescriptive *implementation*
   of DevOps principles centred on SLOs and error budgets.
-- **"What are the Three Ways?"** — Flow, Feedback, Continual Learning/Experimentation.
-- **"What does the L in CALMS stand for?"** — **Lean** (small batches, reduce WIP/waste),
+- "What are the Three Ways?" — Flow, Feedback, Continual Learning/Experimentation.
+- "What does the L in CALMS stand for?" — **Lean** (small batches, reduce WIP/waste),
   the most commonly-missed letter.
 
 ## References

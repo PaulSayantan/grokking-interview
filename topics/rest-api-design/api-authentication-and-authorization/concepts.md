@@ -1203,29 +1203,29 @@ migration (sign with the new, accept both), then retire the old.
 
 ## Common follow-up questions
 
-- **"401 vs 403 — which is which?"** `401` = not authenticated (unknown/invalid
+- "401 vs 403 — which is which?" `401` = not authenticated (unknown/invalid
   credentials, must send `WWW-Authenticate`); `403` = authenticated but not
   permitted. Re-auth fixes a `401`, never a `403`.
-- **"Where do you put an API key and why not the query string?"** A header
+- "Where do you put an API key and why not the query string?" A header
   (`Authorization` or `X-API-Key`); not the URL because URLs get logged, cached,
   and put in `Referer`/history.
-- **"Which OAuth flow for a backend service calling another API?"** Client
+- "Which OAuth flow for a backend service calling another API?" Client
   credentials (no user, no refresh token). For acting on behalf of a user, auth
   code + PKCE.
-- **"Why is PKCE needed if I already send `state`?"** They defend different
+- "Why is PKCE needed if I already send `state`?" They defend different
   attacks: `state` = CSRF on the redirect; PKCE = authorization-code
   interception/injection. OAuth 2.1 requires PKCE for all clients.
-- **"Access token vs refresh token?"** Access token is short-lived, sent to the
+- "Access token vs refresh token?" Access token is short-lived, sent to the
   API every call; refresh token is long-lived, sent only to the authz server to
   mint new access tokens; rotate refresh tokens.
-- **"Is a JWT encrypted?"** No — a signed JWT (JWS) is only Base64URL-encoded and
+- "Is a JWT encrypted?" No — a signed JWT (JWS) is only Base64URL-encoded and
   readable by anyone. Use JWE for confidentiality; never store secrets in claims.
-- **"How do you revoke a JWT immediately?"** You can't cleanly — use short TTLs +
+- "How do you revoke a JWT immediately?" You can't cleanly — use short TTLs +
   refresh rotation or a `jti` denylist (which adds state). Trade-off, not free.
-- **"When mTLS over bearer tokens?"** Service-to-service/zero-trust meshes and
+- "When mTLS over bearer tokens?" Service-to-service/zero-trust meshes and
   high-assurance partners: proof of possession, secret never on the wire; cost is
   PKI/cert lifecycle. Often combined as certificate-bound tokens (RFC 8705).
-- **"What's the #1 API vulnerability?"** BOLA (OWASP API1:2023) — missing
+- "What's the #1 API vulnerability?" BOLA (OWASP API1:2023) — missing
   per-object authorization even when authentication is correct.
 
 ## References

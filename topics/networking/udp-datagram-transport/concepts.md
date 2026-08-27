@@ -619,41 +619,41 @@ Deepening one-to-many delivery:
 
 ## Common follow-up questions
 
-- **How big is the UDP header and what are its fields?** 8 bytes: source port, dest port,
+- How big is the UDP header and what are its fields? 8 bytes: source port, dest port,
   length, checksum — all 16-bit.
-- **What does the Length field count?** Header + data, minimum 8.
-- **Is the UDP checksum mandatory?** Optional in IPv4 (0 = disabled), mandatory in IPv6.
+- What does the Length field count? Header + data, minimum 8.
+- Is the UDP checksum mandatory? Optional in IPv4 (0 = disabled), mandatory in IPv6.
   If the computed checksum is 0 it's transmitted as 0xFFFF.
-- **What's the max UDP payload?** 65,507 bytes over IPv4 (65,535 − 8 − 20), but you
+- What's the max UDP payload? 65,507 bytes over IPv4 (65,535 − 8 − 20), but you
   should stay within the path MTU to avoid fragmentation.
-- **Does UDP preserve message boundaries?** Yes — one send = one datagram = one receive.
+- Does UDP preserve message boundaries? Yes — one send = one datagram = one receive.
   TCP does not (it's a byte stream).
-- **Why does VoIP prefer UDP?** Latency; a retransmitted late audio packet is useless,
+- Why does VoIP prefer UDP? Latency; a retransmitted late audio packet is useless,
   and TCP's in-order retransmission causes stalls (head-of-line blocking).
-- **How would you make UDP reliable?** Add sequence numbers, ACKs, retransmission with
+- How would you make UDP reliable? Add sequence numbers, ACKs, retransmission with
   timeouts, congestion control, and optionally FEC — i.e. build what QUIC does.
-- **Why was QUIC built on UDP?** To avoid TCP/kernel/middlebox ossification, deploy in
+- Why was QUIC built on UDP? To avoid TCP/kernel/middlebox ossification, deploy in
   user space, pass through firewalls, and get per-stream (no HoL) reliability with
   0/1-RTT encrypted setup and connection migration.
-- **Can UDP do broadcast/multicast?** Yes (TCP can't). IPv4 broadcast `255.255.255.255`
+- Can UDP do broadcast/multicast? Yes (TCP can't). IPv4 broadcast `255.255.255.255`
   or subnet-directed; multicast `224.0.0.0/4` (IGMP). IPv6 has no broadcast — multicast
   `ff00::/8` only.
-- **What's UDP's IP protocol number?** 17 (TCP is 6).
-- **What happens if a UDP receive buffer overflows?** Datagrams are dropped silently;
+- What's UDP's IP protocol number? 17 (TCP is 6).
+- What happens if a UDP receive buffer overflows? Datagrams are dropped silently;
   no backpressure to the sender.
-- **What spec mandates congestion control for UDP apps?** RFC 8085 — congestion control is
+- What spec mandates congestion control for UDP apps? RFC 8085 — congestion control is
   required; ≤1 datagram/3 s with no feedback; initial RTO 1 s with Karn's algorithm.
-- **How do you pick a datagram size safely?** PLPMTUD (RFC 8899) probing, or fall back to
+- How do you pick a datagram size safely? PLPMTUD (RFC 8899) probing, or fall back to
   the EMTU_S floor (IPv4 576, IPv6 1280) minus IP+8; QUIC uses a 1200-byte floor.
-- **Why is UDP amplification possible and how is it stopped?** No handshake → spoofed source
+- Why is UDP amplification possible and how is it stopped? No handshake → spoofed source
   + reply ≫ request (memcached ~10,000×+, NTP monlist ~556×). Fix: BCP 38 ingress filtering.
-- **How does QUIC avoid being a reflector?** RFC 9000 §8.1: server sends ≤3× received bytes
+- How does QUIC avoid being a reflector? RFC 9000 §8.1: server sends ≤3× received bytes
   before validating the client address (Retry token).
-- **Why does the OS randomize the UDP source port?** RFC 6056/5452 — entropy against off-path
+- Why does the OS randomize the UDP source port? RFC 6056/5452 — entropy against off-path
   DNS spoofing (Kaminsky); the port is also ECMP flow-hash entropy.
-- **Why can't TLS run directly on UDP?** TLS needs a reliable ordered stream; DTLS (RFC 9147/
+- Why can't TLS run directly on UDP? TLS needs a reliable ordered stream; DTLS (RFC 9147/
   6347) adds epoch/sequence + replay window + its own handshake retransmission.
-- **What breaks UDP hole punching?** Symmetric NAT (new external port per destination) →
+- What breaks UDP hole punching? Symmetric NAT (new external port per destination) →
   fall back to a TURN relay.
 
 ## References

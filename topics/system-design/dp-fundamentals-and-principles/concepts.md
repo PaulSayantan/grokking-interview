@@ -1552,26 +1552,26 @@ completeness only. **Deep-dive treatments already exist — cross-reference, do 
 
 ## Common follow-up questions
 
-- **"What's the difference between a design pattern and an algorithm?"** — A pattern is a
+- "What's the difference between a design pattern and an algorithm?" — A pattern is a
   high-level, adaptable *blueprint* for structuring collaborating objects; an algorithm is a fixed
   step-by-step recipe. See *What is a design pattern*.
-- **"Name the three GoF categories and one pattern in each."** — Creational (Factory Method),
+- "Name the three GoF categories and one pattern in each." — Creational (Factory Method),
   Structural (Adapter), Behavioral (Strategy). See *The GoF catalog & 3 categories*.
-- **"State vs Strategy — same diagram, what's different?"** — Intent: State knows and triggers
+- "State vs Strategy — same diagram, what's different?" — Intent: State knows and triggers
   transitions; Strategy is interchangeable, independent algorithms chosen by the client.
-- **"DIP vs Dependency Injection vs IoC?"** — Principle vs technique vs the broad
+- "DIP vs Dependency Injection vs IoC?" — Principle vs technique vs the broad
   framework-calls-you idea (with a DI container as tooling). See *DIP*.
-- **"When would you NOT use a design pattern?"** — When the variation it targets isn't real
+- "When would you NOT use a design pattern?" — When the variation it targets isn't real
   (YAGNI); every pattern costs indirection. See *Pattern overuse* and *How to choose a pattern*.
-- **"Is a Square a Rectangle?"** — Not as a behavioral subtype — it violates LSP. Model by
+- "Is a Square a Rectangle?" — Not as a behavioral subtype — it violates LSP. Model by
   substitutable behavior, not dictionary "is-a".
-- **"How do you decide where a responsibility should live?"** — GRASP (Information Expert, Creator,
+- "How do you decide where a responsibility should live?" — GRASP (Information Expert, Creator,
   Controller…). See *GRASP principles*.
-- **"Adapter vs Decorator vs Proxy vs Facade?"** — convert / add behavior / control access /
+- "Adapter vs Decorator vs Proxy vs Facade?" — convert / add behavior / control access /
   simplify. See *Structural patterns map*.
-- **"Isn't DRY always good?"** — No; a wrong abstraction is worse than duplication. Beware
+- "Isn't DRY always good?" — No; a wrong abstraction is worse than duplication. Beware
   accidental duplication; prefer the rule of three.
-- **"SRP vs SoC vs cohesion?"** — SRP is class-level SoC; both aim at high cohesion; SoC operates at
+- "SRP vs SoC vs cohesion?" — SRP is class-level SoC; both aim at high cohesion; SoC operates at
   module/layer level.
 
 ## References

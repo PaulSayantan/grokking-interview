@@ -470,37 +470,37 @@ prove.
 
 ## Common follow-up questions
 
-- **"Why not just run integration tests across services?"** They need a shared
+- "Why not just run integration tests across services?" They need a shared
   environment and scale combinatorially with the number of services/versions;
   they are slow and flaky. Contract tests give per-boundary confidence with each
   side tested independently.
-- **"Walk me through the consumer-driven handshake."** Consumer test runs against
+- "Walk me through the consumer-driven handshake." Consumer test runs against
   a mock provider and generates a pact → pact published to broker → provider
   fetches it, sets up provider states, replays requests against the real impl,
   publishes results → `can-i-deploy` gates the deploy on the matrix.
-- **"What is a provider state and why is it needed?"** A named precondition the
+- "What is a provider state and why is it needed?" A named precondition the
   provider seeds before an interaction is replayed, because interactions are
   tested in isolation (no chaining). The string must match consumer `given` and
   provider `@State`.
-- **"How does `can-i-deploy` work?"** It queries the broker's matrix for the
+- "How does `can-i-deploy` work?" It queries the broker's matrix for the
   specific pacticipant version and target environment and returns whether every
   counterpart is verified compatible — a hard gate in CI.
-- **"How do you version contracts?"** Pacticipant version = git SHA; tag/branch to
+- "How do you version contracts?" Pacticipant version = git SHA; tag/branch to
   associate with environments; use pending/WIP pacts so new expectations don't
   break provider builds; deploy provider-first for additive change.
-- **"Pact vs Spring Cloud Contract?"** Pact = consumer-driven, polyglot, broker +
+- "Pact vs Spring Cloud Contract?" Pact = consumer-driven, polyglot, broker +
   `can-i-deploy`. SCC = usually producer-driven, JVM/Spring, Groovy/YAML DSL that
   generates provider tests and WireMock stubs.
-- **"Unidirectional vs bi-directional?"** Classic replays consumer expectations
+- "Unidirectional vs bi-directional?" Classic replays consumer expectations
   against the real provider (more confidence, more coupling); BDCT statically
   compares the consumer contract against the provider's OpenAPI spec (less
   coupling, confidence bounded by spec accuracy).
-- **"Contract vs OpenAPI/schema testing?"** Schema = whole surface, structural,
+- "Contract vs OpenAPI/schema testing?" Schema = whole surface, structural,
   spec-as-truth. Contract = consumer-specific, behavioural, and (for classic CDC)
   runs the real provider. Complementary.
-- **"Does contract testing replace e2e?"** It replaces most of it; keep a thin
+- "Does contract testing replace e2e?" It replaces most of it; keep a thin
   layer of e2e for critical whole-system journeys it cannot express.
-- **"How do you avoid brittle contracts?"** Use matchers (type/regex/"like") to
+- "How do you avoid brittle contracts?" Use matchers (type/regex/"like") to
   assert structure not exact values; capture only interactions the consumer
   actually uses; don't over-specify headers/fields.
 

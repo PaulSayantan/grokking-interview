@@ -510,30 +510,30 @@ to "how do you write a good test / mock a dependency."
 
 ## Common follow-up questions
 
-- **"Your PR pipeline takes 45 minutes. Walk me through how you'd cut it."**
+- "Your PR pipeline takes 45 minutes. Walk me through how you'd cut it."
   Measure first (which stages dominate); right-size the pyramid; parallelize/shard with
   timing-balanced splits; cache deps/build; add test impact analysis on PRs with full
   suite on main; quarantine flakes; split a fast required lane from a full post-merge lane.
 
-- **"A test passes locally and in CI 90% of the time. What do you do?"**
+- "A test passes locally and in CI 90% of the time. What do you do?"
   It's flaky — quarantine it (non-blocking lane, tracking ticket) to protect the gate,
   add bounded per-test retry with a flake report, then fix the root cause (timing, shared
   state, order dependence). Don't blanket-retry the whole job.
 
-- **"How do you deploy a provider service without breaking its consumers?"**
+- "How do you deploy a provider service without breaking its consumers?"
   Consumer-driven contract tests (Pact) + a `can-i-deploy` gate against the broker that
   checks compatibility with the versions currently in production; block the deploy if any
   contract is unsatisfied.
 
-- **"CI is green but the deploy still broke prod. Why, and how do you catch it?"**
+- "CI is green but the deploy still broke prod. Why, and how do you catch it?"
   CI tests artifacts, not the deployed environment (config/secrets/DNS/infra differ). Add
   post-deploy smoke tests and synthetic monitoring; use canary analysis to auto-rollback.
 
-- **"Coverage is 85% but bugs still ship. Is the number wrong?"**
+- "Coverage is 85% but bugs still ship. Is the number wrong?"
   Coverage measures execution, not assertion quality. Gate on *diff* coverage, and use
   mutation testing to measure whether tests actually catch injected faults.
 
-- **"When would you set `fail-fast: false`?"**
+- "When would you set `fail-fast: false`?"
   On a nightly/cross-version matrix where you want the *full* list of what's broken, not
   just the first failure. On PR runs, keep fail-fast on for quick feedback.
 

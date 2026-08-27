@@ -627,26 +627,26 @@ one table.
 
 ## Common follow-up questions
 
-- **`@ParameterizedTest` vs `@RepeatedTest`?** `@RepeatedTest(n)` runs the *same*
+- `@ParameterizedTest` vs `@RepeatedTest`? `@RepeatedTest(n)` runs the *same*
   test with *no* varying input (retries/timing/flakiness probing); parameterized
   runs with *different* inputs per invocation.
-- **Why did my `@MethodSource` method fail to resolve?** It's not `static` (and the
+- Why did my `@MethodSource` method fail to resolve? It's not `static` (and the
   class isn't `PER_CLASS`), the name is wrong, or it's in another class without the
   `FQCN#method` form.
-- **Do `@BeforeEach` hooks run for each dynamic test?** No — only once around the
+- Do `@BeforeEach` hooks run for each dynamic test? No — only once around the
   `@TestFactory` method. Static `@ParameterizedTest` invocations *do* get per-invocation
   lifecycle callbacks.
-- **How is `null` passed via `@CsvSource`?** An unquoted empty cell → `null`; an
+- How is `null` passed via `@CsvSource`? An unquoted empty cell → `null`; an
   empty quoted string `''` → `""`; or map a token with `nullValues`.
-- **When would you choose PBT over a big `@CsvSource`?** When you can state an
+- When would you choose PBT over a big `@CsvSource`? When you can state an
   invariant that must hold for *all* inputs (round-trip, ordering, idempotence) —
   let the generator find edge cases instead of enumerating rows by hand.
-- **How do you make a random PBT failure reproducible?** Re-run with the reported
+- How do you make a random PBT failure reproducible? Re-run with the reported
   **seed**; then pin the shrunk counterexample as a concrete example test.
-- **Is pairwise testing always enough?** It catches ~2-way interaction bugs, which
+- Is pairwise testing always enough? It catches ~2-way interaction bugs, which
   dominate empirically, but not bugs needing a specific 3+-way combination — raise
   `t` for critical components.
-- **How do you avoid a zero-invocation error?** Ensure the source is non-empty, or
+- How do you avoid a zero-invocation error? Ensure the source is non-empty, or
   (newer Jupiter) set `allowZeroInvocations = true` when empty is legitimate.
 
 ## References

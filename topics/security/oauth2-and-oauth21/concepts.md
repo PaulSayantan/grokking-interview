@@ -997,39 +997,39 @@ desktop clients:
 
 ## Common follow-up questions
 
-- **"Is OAuth authentication?"** No — it's delegated authorization. For authentication
+- "Is OAuth authentication?" No — it's delegated authorization. For authentication
   use OpenID Connect's ID token, which carries verified identity claims (`aud`, `sub`,
   `nonce`) meant for the client.
-- **"Why PKCE if the client already has a secret?"** PKCE defends against code
+- "Why PKCE if the client already has a secret?" PKCE defends against code
   interception/injection independently of client auth, which is why 2.1 mandates it for
   confidential clients too, not just public ones.
-- **"Why not just use the implicit flow for my SPA?"** Implicit is removed in 2.1;
+- "Why not just use the implicit flow for my SPA?" Implicit is removed in 2.1;
   tokens in the URL fragment leak via history/Referer and are instantly replayable. Use
   auth-code + PKCE.
-- **"What stops someone replaying a stolen access token?"** By default, nothing until it
+- "What stops someone replaying a stolen access token?" By default, nothing until it
   expires (bearer). Keep lifetimes short and use sender-constraining (DPoP/mTLS).
-- **"What's the difference between `state` and `nonce`?"** `state` = CSRF protection on
+- "What's the difference between `state` and `nonce`?" `state` = CSRF protection on
   the OAuth callback; `nonce` = replay protection on the OIDC ID token.
-- **"Refresh token rotation vs sliding session?"** Rotation issues a new refresh token
+- "Refresh token rotation vs sliding session?" Rotation issues a new refresh token
   each use and revokes the family on reuse — it's a theft *tripwire*, not just lifetime
   extension.
-- **"Client credentials for a mobile app?"** No — mobile is a public client and can't
+- "Client credentials for a mobile app?" No — mobile is a public client and can't
   hold the secret; client credentials is for confidential machine-to-machine only.
-- **"How does the resource server validate a token?"** JWT: verify signature via JWKS +
+- "How does the resource server validate a token?" JWT: verify signature via JWKS +
   check `iss`/`aud`/`exp`/`scope`. Opaque: call the AS introspection endpoint (RFC 7662).
-- **"Can you revoke a JWT access token before it expires?"** Not with local validation —
+- "Can you revoke a JWT access token before it expires?" Not with local validation —
   it's valid until `exp`. Mitigate with short lifetimes, a `jti` denylist, or introspection.
-- **"307 or 303 after the consent form POST, and why?"** 303 See Other — 307 would re-send
+- "307 or 303 after the consent form POST, and why?" 303 See Other — 307 would re-send
   the credential POST body to the client's redirect_uri (RFC 9700 §4.12).
-- **"SPA under XSS but I use DPoP and rotating refresh tokens — safe?"** No — the attacker
+- "SPA under XSS but I use DPoP and rotating refresh tokens — safe?" No — the attacker
   in your origin can silently mint new tokens (iframe) or proxy requests; only a BFF that
   keeps tokens off the browser mitigates it.
-- **"What changed in OAuth 2.1?"** PKCE mandatory for all clients; implicit + ROPC removed;
+- "What changed in OAuth 2.1?" PKCE mandatory for all clients; implicit + ROPC removed;
   exact redirect_uri match; no bearer tokens in query string; public-client refresh tokens
   sender-constrained or rotated; `iss` in the response.
-- **"Which client authentication is best?"** `private_key_jwt` or mTLS — the AS holds no
+- "Which client authentication is best?" `private_key_jwt` or mTLS — the AS holds no
   shared secret and both support proof-of-possession; FAPI 2.0 requires them.
-- **"Why not an embedded WebView for a mobile OAuth flow?"** The app controls the WebView
+- "Why not an embedded WebView for a mobile OAuth flow?" The app controls the WebView
   and can read the typed credentials; use the system browser / in-app tab (RFC 8252).
 
 ## References

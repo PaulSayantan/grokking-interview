@@ -617,27 +617,27 @@ attaches **SILVER**.
 
 ## Common follow-up questions
 
-- **"Difference between a watermark and allowed lateness?"** The watermark declares
+- "Difference between a watermark and allowed lateness?" The watermark declares
   "I think I've seen everything up to time T" and fires windows; allowed lateness keeps a
   fired window's state around *past* the watermark so genuinely late events can still
   update the result before the state is finally dropped.
-- **"Is exactly-once really possible?"** Effectively-once, yes — via replay from
+- "Is exactly-once really possible?" Effectively-once, yes — via replay from
   checkpoints/offsets plus idempotent or transactional sinks. Physical once-only delivery
   over an unreliable network is impossible (two-generals); we make duplicates harmless
   instead.
-- **"Why is log-based CDC preferred over triggers?"** No write-path overhead, captures
+- "Why is log-based CDC preferred over triggers?" No write-path overhead, captures
   DELETEs and full history in commit order, low latency, and reuses a log the DB already
   maintains; triggers add per-write cost and are DB-specific and hard to maintain.
-- **"What breaks if a Debezium/Postgres replication slot's consumer dies?"** The slot
+- "What breaks if a Debezium/Postgres replication slot's consumer dies?" The slot
   stops advancing, so Postgres cannot recycle WAL segments; WAL accumulates and can fill
   the disk, taking the primary down. Monitor slot lag and `restart_lsn`.
-- **"Kafka Streams vs Flink in one line?"** Kafka Streams is a Kafka-only library you
+- "Kafka Streams vs Flink in one line?" Kafka Streams is a Kafka-only library you
   embed in an app (no cluster); Flink is a full distributed engine with the richest
   event-time/state/CEP support and lowest latency.
-- **"How does CDC enable the Outbox pattern?"** Write the business change and an outbox
+- "How does CDC enable the Outbox pattern?" Write the business change and an outbox
   row in one local transaction; CDC tails the committed outbox and publishes events, so
   the event fires iff the transaction committed — atomic without distributed transactions.
-- **"Event time vs processing time — which for windows?"** Event time, for
+- "Event time vs processing time — which for windows?" Event time, for
   reproducible/correct results independent of machine speed and arrival delays; processing
   time only when you genuinely care about wall-clock observation, not when events occurred.
 

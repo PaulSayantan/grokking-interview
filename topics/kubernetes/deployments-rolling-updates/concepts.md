@@ -557,17 +557,17 @@ the same way — nothing here is cloud-specific.
 
 ## Common follow-up questions
 
-- **What actually happens when I run `kubectl set image`?** It patches `.spec.template`, the hash
+- What actually happens when I run `kubectl set image`? It patches `.spec.template`, the hash
   changes, a new ReplicaSet is minted, and the rolling update begins.
-- **Does scaling create a new revision?** No — only Pod-template changes do.
-- **How do I make a zero-capacity-loss rollout?** `maxUnavailable: 0` with `maxSurge > 0` (needs
+- Does scaling create a new revision? No — only Pod-template changes do.
+- How do I make a zero-capacity-loss rollout? `maxUnavailable: 0` with `maxSurge > 0` (needs
   headroom for surge Pods).
-- **How do I do a no-extra-capacity rollout under a tight quota?** `maxSurge: 0` with
+- How do I do a no-extra-capacity rollout under a tight quota? `maxSurge: 0` with
   `maxUnavailable > 0` (serves at reduced capacity during the roll).
-- **Why didn't my rollout roll back automatically after failing?** Deployments don't; only tooling
+- Why didn't my rollout roll back automatically after failing? Deployments don't; only tooling
   like Argo Rollouts/Flagger does. Watch `kubectl rollout status` in CI and call `undo`.
-- **Can I roll back to any revision?** Only those still retained within `revisionHistoryLimit`.
-- **How is a Deployment different from a StatefulSet/DaemonSet?** Deployments are for
+- Can I roll back to any revision? Only those still retained within `revisionHistoryLimit`.
+- How is a Deployment different from a StatefulSet/DaemonSet? Deployments are for
   interchangeable stateless replicas; StatefulSets give stable identity/ordering, DaemonSets run
   one Pod per node. (See `pods-workload-controllers`.)
 

@@ -454,22 +454,22 @@ surprise on the bill. Keep traffic in-AZ where possible and front heavy egress w
 
 ## Common follow-up questions
 
-- **"Explain IaaS vs PaaS vs SaaS to a non-technical stakeholder."** Pizza-as-a-service
+- "Explain IaaS vs PaaS vs SaaS to a non-technical stakeholder." Pizza-as-a-service
   analogy or the "who patches the OS?" question. The boundary is *who operates which layer*.
-- **"What does the customer always own in the shared responsibility model?"** Data, IAM/
+- "What does the customer always own in the shared responsibility model?" Data, IAM/
   access control, and configuration — regardless of service model.
-- **"When would you NOT use serverless?"** High steady throughput (reserved fleet cheaper),
+- "When would you NOT use serverless?" High steady throughput (reserved fleet cheaper),
   long-running jobs (execution limits), latency-critical paths sensitive to cold starts,
   or workloads needing specific OS/kernel control.
-- **"Managed database vs self-hosted — decide."** Default managed; self-host only for
+- "Managed database vs self-hosted — decide." Default managed; self-host only for
   unsupported version/feature, extreme-scale cost, or compliance — and only with ops capacity.
-- **"Is running three servers highly available?"** Only if they're across **AZs**. Same-AZ
+- "Is running three servers highly available?" Only if they're across **AZs**. Same-AZ
   is not HA.
-- **"Justify (or reject) multi-cloud."** Concrete driver (compliance, leverage, unique
+- "Justify (or reject) multi-cloud." Concrete driver (compliance, leverage, unique
   service) yes; vague "reliability" no — it usually adds failure modes and egress cost.
-- **"How do you cut a cloud bill?"** Tag → attribute → rightsize → commit steady load →
+- "How do you cut a cloud bill?" Tag → attribute → rightsize → commit steady load →
   spot for interruptible → watch egress → budgets/policy.
-- **"Reserved vs Spot vs On-demand — match to workloads."** Steady=reserved/committed,
+- "Reserved vs Spot vs On-demand — match to workloads." Steady=reserved/committed,
   interruptible/batch=spot, spiky/unknown=on-demand.
 
 ## References

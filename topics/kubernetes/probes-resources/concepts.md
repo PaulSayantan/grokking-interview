@@ -593,25 +593,25 @@ request elsewhere.
 
 ## Common follow-up questions
 
-- **"Pod is `Running` but returns 503s — why?"** No readiness probe (or it's misconfigured), so the
+- "Pod is `Running` but returns 503s — why?" No readiness probe (or it's misconfigured), so the
   Pod joined Service endpoints before the app could serve. Add a readiness probe on a real
   readiness endpoint.
-- **"Every replica restarted at once when the DB went down."** Liveness probe checks a downstream
+- "Every replica restarted at once when the DB went down." Liveness probe checks a downstream
   dependency; a dependency blip failed liveness cluster-wide → mass restarts. Move dependency checks
   to readiness; keep liveness local.
-- **"Container keeps `CrashLoopBackOff` right after deploy."** Liveness `initialDelaySeconds` too short
+- "Container keeps `CrashLoopBackOff` right after deploy." Liveness `initialDelaySeconds` too short
   for a slow boot → killed before it starts. Use a **startup probe** with a generous budget.
-- **"What's the difference between `OOMKilled` and an eviction?"** `OOMKilled` = container exceeded its
+- "What's the difference between `OOMKilled` and an eviction?" `OOMKilled` = container exceeded its
   **memory limit**, kernel kills just that container (restarted in place, exit 137). Eviction = kubelet
   reclaims a **node** under pressure, terminating whole Pods by QoS order.
-- **"Why is my Pod `Pending`?"** No node's **allocatable** capacity fits the Pod's **requests** (or
+- "Why is my Pod `Pending`?" No node's **allocatable** capacity fits the Pod's **requests** (or
   taints/affinity). Scheduling uses requests, not actual usage.
-- **"How do I make a Pod Guaranteed?"** Set CPU and memory **requests == limits** on every container.
-- **"CPU limit vs no CPU limit?"** With a limit, over-usage is **throttled** (latency, no crash);
+- "How do I make a Pod Guaranteed?" Set CPU and memory **requests == limits** on every container.
+- "CPU limit vs no CPU limit?" With a limit, over-usage is **throttled** (latency, no crash);
   many teams omit CPU limits to allow bursting while still setting CPU requests for fair scheduling.
-- **"ResourceQuota is set but my Pod won't create."** The quota requires requests/limits; add a
+- "ResourceQuota is set but my Pod won't create." The quota requires requests/limits; add a
   `LimitRange` with defaults or specify them explicitly.
-- **"Do probes go through the Service?"** No — the kubelet probes the **Pod IP directly** from the
+- "Do probes go through the Service?" No — the kubelet probes the **Pod IP directly** from the
   node, bypassing Services/Ingress.
 
 ---

@@ -657,46 +657,46 @@ most ~3× the bytes it has received from an unvalidated address), which bounds h
 
 ## Common follow-up questions
 
-- **"Why is opening a new connection per request slow?"** TCP handshake (~1 RTT) + TLS
+- "Why is opening a new connection per request slow?" TCP handshake (~1 RTT) + TLS
   handshake (1–2 RTTs) + slow-start ramp before full throughput. Reuse skips all of it.
-- **"What does `Connection: keep-alive` do in HTTP/1.1?"** Essentially nothing —
+- "What does `Connection: keep-alive` do in HTTP/1.1?" Essentially nothing —
   persistence is already the default. It mattered only in HTTP/1.0. `Connection: close`
   is the meaningful one in HTTP/1.1.
-- **"Why did HTTP/1.1 pipelining fail?"** Response FIFO ordering causes head-of-line
+- "Why did HTTP/1.1 pipelining fail?" Response FIFO ordering causes head-of-line
   blocking, buggy intermediaries broke it, and retrying non-idempotent pipelined requests is
   unsafe. Browsers disable it.
-- **"How does HTTP/2 multiplexing differ from pipelining?"** True independent streams with
+- "How does HTTP/2 multiplexing differ from pipelining?" True independent streams with
   interleaved binary frames and any-order responses — no application-layer HOL blocking.
-- **"Does HTTP/2 fully eliminate head-of-line blocking?"** No — it removes app-layer HOL but
+- "Does HTTP/2 fully eliminate head-of-line blocking?" No — it removes app-layer HOL but
   a lost TCP segment still stalls all streams (TCP-layer HOL). HTTP/3/QUIC fixes that.
-- **"Nagle vs delayed ACK — what's the classic bug?"** They interact to add ~200 ms latency
+- "Nagle vs delayed ACK — what's the classic bug?" They interact to add ~200 ms latency
   on small write/reply patterns; disable Nagle with `TCP_NODELAY`.
-- **"Is TCP keepalive the same as HTTP keep-alive?"** No. TCP keepalive (`SO_KEEPALIVE`) is a
+- "Is TCP keepalive the same as HTTP keep-alive?" No. TCP keepalive (`SO_KEEPALIVE`) is a
   transport liveness probe (default ~2h idle); HTTP keep-alive is app-layer connection reuse.
-- **"How do you size a connection pool?"** Little's Law: `connections ≈ arrival_rate ×
+- "How do you size a connection pool?" Little's Law: `connections ≈ arrival_rate ×
   service_time`, plus headroom for tail latency/bursts.
-- **"Why do keep-alive connections sometimes fail on reuse?"** A server/LB/NAT idle timeout
+- "Why do keep-alive connections sometimes fail on reuse?" A server/LB/NAT idle timeout
   closed the connection out from under the client. Keep client timeout < server timeout and
   retry idempotent requests.
-- **"What's the benefit of TLS session resumption?"** Skip the full handshake on new
+- "What's the benefit of TLS session resumption?" Skip the full handshake on new
   connections: TLS 1.2 → 1 RTT; TLS 1.3 → 0-RTT (with replay-safety caveats).
-- **"Why does high connection churn cause `EADDRINUSE`?"** The active closer holds each socket
+- "Why does high connection churn cause `EADDRINUSE`?" The active closer holds each socket
   in `TIME_WAIT` for ~2×MSL (~60 s), exhausting the ~28k ephemeral ports to one destination.
   Pool/keep-alive to stop closing; or widen the 4-tuple with more dst IPs/ports.
-- **"`TIME_WAIT` vs `CLOSE_WAIT`?"** `TIME_WAIT` is normal, on the active closer, timer-based
+- "`TIME_WAIT` vs `CLOSE_WAIT`?" `TIME_WAIT` is normal, on the active closer, timer-based
   (~2×MSL). `CLOSE_WAIT` sits until the app calls `close()` — a pile-up is a connection leak bug.
-- **"How many concurrent requests on one HTTP/2 connection?"** Bounded by the peer's
+- "How many concurrent requests on one HTTP/2 connection?" Bounded by the peer's
   `SETTINGS_MAX_CONCURRENT_STREAMS` (recommended ≥100); exceeding it yields `REFUSED_STREAM`.
-- **"When is it safe to auto-retry a POST?"** Only when the server guarantees non-processing:
+- "When is it safe to auto-retry a POST?" Only when the server guarantees non-processing:
   `REFUSED_STREAM`, or a stream above a `GOAWAY` Last-Stream-ID — or with an idempotency key.
-- **"How do you deploy an H2/gRPC server without dropping in-flight RPCs?"** Double-`GOAWAY`
+- "How do you deploy an H2/gRPC server without dropping in-flight RPCs?" Double-`GOAWAY`
   drain (first with max Last-Stream-ID to stop new streams, second after draining), plus
   gRPC `MAX_CONNECTION_AGE`/`_GRACE`.
-- **"Why does gRPC traffic pile onto one pod?"** An L4 LB pins the long-lived multiplexed
+- "Why does gRPC traffic pile onto one pod?" An L4 LB pins the long-lived multiplexed
   connection to one backend; use L7/per-request balancing or churn with `MAX_CONNECTION_AGE`.
-- **"What can HTTP/3 do that HTTP/2 fundamentally can't?"** Survive a 4-tuple change (NAT
+- "What can HTTP/3 do that HTTP/2 fundamentally can't?" Survive a 4-tuple change (NAT
   rebind, Wi-Fi→cellular) via QUIC connection migration keyed on Connection ID — TCP dies.
-- **"Why do IPv6 users see connect stalls but IPv4 users don't?"** Broken IPv6 path with no
+- "Why do IPv6 users see connect stalls but IPv4 users don't?" Broken IPv6 path with no
   Happy Eyeballs (RFC 8305) racing; add the 50 ms resolution delay + 250 ms attempt staggering.
 
 ## References

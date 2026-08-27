@@ -224,23 +224,23 @@ against a compound failure needs the extra managers plus dynamic voting.
 
 ## Common follow-up questions
 
-- **"Why isolation groups instead of just using the physical zones?"** Because
+- "Why isolation groups instead of just using the physical zones?" Because
   physical zones are unequal and there are usually more than three; awareness needs
   a balanced, fixed set of failure domains. IGs are an equal-sized logical layer
   that gives placement something clean to reason about, independent of hardware.
-- **"Why is 'yellow' acceptable during a zone outage?"** Yellow means primaries are
+- "Why is 'yellow' acceptable during a zone outage?" Yellow means primaries are
   up and the cluster is fully readable and writable — you've only lost *redundancy*,
   not *service*. Trading temporary redundancy for stability is the deliberate
   choice; forcing re-replication instead risks trading it for an *outage*.
-- **"Why 3 isolation groups specifically?"** Three is the minimum that keeps a
+- "Why 3 isolation groups specifically?" Three is the minimum that keeps a
   majority alive when one is lost (2 of 3) and caps a single-zone blast radius at
   ~33% of capacity. Fewer can't form a majority; more adds coordination cost for
   little resilience gain at this tier.
-- **"How does forced awareness differ from plain awareness?"** Plain awareness
+- "How does forced awareness differ from plain awareness?" Plain awareness
   spreads copies across whatever attribute values are *present*. Forced awareness
   pre-declares *all expected* values, so when some go missing it refuses to
   over-pack the survivors — the copies stay unassigned instead.
-- **"Where else does this pattern apply?"** Any replicated store choosing replica
+- "Where else does this pattern apply?" Any replicated store choosing replica
   placement across failure domains — Kafka rack-awareness, Cassandra's
   `NetworkTopologyStrategy`, Kubernetes pod topology-spread constraints. Same
   problem, same "spread across domains + don't stampede on failure" answer.

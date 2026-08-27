@@ -448,33 +448,33 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **"Where do E2E tests sit in the pyramid and why so few?"** Top of the
+- "Where do E2E tests sit in the pyramid and why so few?" Top of the
   pyramid; slow, flaky, expensive, and poor at localizing failures — so reserve
   them for critical journeys and push logic checks to unit/integration.
-- **"Selenium vs Playwright/Cypress — why migrate?"** Auto-waiting eliminates the
+- "Selenium vs Playwright/Cypress — why migrate?" Auto-waiting eliminates the
   biggest flakiness source; plus speed, tracing/time-travel debugging, network
   interception, built-in parallelism. Trade-off: Selenium's broader
   language/browser/Grid ecosystem and W3C standard.
-- **"How do you fix a flaky E2E test?"** Diagnose the cause: replace fixed sleeps
+- "How do you fix a flaky E2E test?" Diagnose the cause: replace fixed sleeps
   with explicit/auto waits, remove test-data coupling and shared state, use
   robust locators (role/`data-testid`), stub time/RNG/external services, and
   isolate data per test. Retries hide flakiness, they don't fix it.
-- **"Implicit vs explicit waits?"** Implicit = coarse session-wide poll for
+- "Implicit vs explicit waits?" Implicit = coarse session-wide poll for
   presence (default 0). Explicit = poll for a specific condition. Prefer
   explicit; never mix the two.
-- **"What is the ice-cream-cone anti-pattern?"** Inverted pyramid: too many
+- "What is the ice-cream-cone anti-pattern?" Inverted pyramid: too many
   manual/E2E tests, too few unit tests → slow, flaky, expensive, still leaky.
   Fix by re-balancing down the pyramid.
-- **"What does Page Object Model buy you?"** Encapsulates locators/interactions
+- "What does Page Object Model buy you?" Encapsulates locators/interactions
   per page so UI changes touch one class; makes tests readable and reusable.
   Keep assertions in the test, not the page object.
-- **"How do you handle E2E test data?"** Each test owns its data, seeded fast via
+- "How do you handle E2E test data?" Each test owns its data, seeded fast via
   API/DB with unique keys, in an isolated/ephemeral environment; stub external
   services and freeze time for determinism.
-- **"What is visual regression testing and why is it flaky?"** Screenshot vs
+- "What is visual regression testing and why is it flaky?" Screenshot vs
   baseline diffing; flaky due to font/anti-aliasing/dynamic content differences —
   mitigate with thresholds, masking, and a pinned rendering environment.
-- **"Headless vs headed?"** Headless (no UI) for CI/speed; headed for local
+- "Headless vs headed?" Headless (no UI) for CI/speed; headed for local
   debugging; capture traces/screenshots so headless failures are diagnosable.
 
 ## References

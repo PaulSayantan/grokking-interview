@@ -932,31 +932,31 @@ happy path.
 
 ## Common interview follow-up questions
 
-- **"You chose Postgres; how do you scale it to 10× writes?"** — Cache, read
+- "You chose Postgres; how do you scale it to 10× writes?" — Cache, read
   replicas for reads; for writes: vertical scale, then partition/shard by a good
   key (e.g., tenant/user id), then consider Citus/Vitess or CockroachDB. Explain
   why you defer sharding.
-- **"How do you pick a shard key?"** — High cardinality, even access, aligns with
+- "How do you pick a shard key?" — High cardinality, even access, aligns with
   the dominant query so most reads hit one shard; avoid monotonic keys and
   low-cardinality keys (hotspots); plan resharding (pre-split / consistent
   hashing).
-- **"A user updates their profile then sees old data — why and how to fix?"** —
+- "A user updates their profile then sees old data — why and how to fix?" —
   Replication lag on an async read replica; fix with read-your-writes (route to
   primary briefly, or version/LSN-aware routing) or a cache write-through.
-- **"Why is LSM better for a metrics/time-series workload?"** — Sequential append
+- "Why is LSM better for a metrics/time-series workload?" — Sequential append
   writes, high write throughput, good compression; reads use bloom filters; you
   accept compaction and multi-file reads.
-- **"When would you avoid 2PC?"** — Across services/regions where blocking and
+- "When would you avoid 2PC?" — Across services/regions where blocking and
   coordinator failure hurt availability; prefer sagas or single-shard design, or a
   consensus-backed transactional store.
-- **"How do you keep a search index in sync with the DB?"** — CDC (Debezium →
+- "How do you keep a search index in sync with the DB?" — CDC (Debezium →
   Kafka → indexer) or the transactional outbox pattern; avoid dual-writes.
-- **"Strong consistency at global scale — how?"** — Consensus-replicated
+- "Strong consistency at global scale — how?" — Consensus-replicated
   distributed SQL (Spanner/TrueTime, CockroachDB/Raft); explain the latency cost.
-- **"How does DynamoDB avoid hot partitions?"** — Adaptive capacity + write
+- "How does DynamoDB avoid hot partitions?" — Adaptive capacity + write
   sharding (add a suffix to spread a hot key); choose a high-cardinality partition
   key.
-- **"Normalize or denormalize your feed?"** — Denormalize the read path (precomputed
+- "Normalize or denormalize your feed?" — Denormalize the read path (precomputed
   feed) because reads ≫ writes, keep a normalized source of truth, sync via CDC.
 
 ## References

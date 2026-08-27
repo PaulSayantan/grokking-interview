@@ -548,24 +548,24 @@ peak performance for their specific model.
 
 ## Common follow-up questions
 
-- **"When would you pick DynamoDB over MongoDB (or vice versa)?"** DynamoDB for managed,
+- "When would you pick DynamoDB over MongoDB (or vice versa)?" DynamoDB for managed,
   predictable single-digit-ms KV/document access with known access patterns and
   AWS-native ops; MongoDB for richer ad-hoc querying, secondary indexes on many fields,
   and a more flexible document/aggregation model.
-- **"Explain R + W > N with N=3."** With W=2 and R=2, the two-node read set and two-node
+- "Explain R + W > N with N=3." With W=2 and R=2, the two-node read set and two-node
   write set must share at least one node (2+2 > 3), so the read sees the latest write;
   the system still tolerates one node being down.
-- **"How do you fix a hot partition?"** Higher-cardinality partition key, time/entity
+- "How do you fix a hot partition?" Higher-cardinality partition key, time/entity
   bucketing, and write-sharding/salting; explain the read scatter-gather cost of salting.
-- **"Why does Cassandra want `ALLOW FILTERING` for my query, and why is that bad?"** The
+- "Why does Cassandra want `ALLOW FILTERING` for my query, and why is that bad?" The
   query doesn't restrict the partition key, forcing a cluster-wide scan that worsens as
   the cluster grows — remodel with a query-specific table.
-- **"Embed or reference the comments on a post?"** Reference — comments are unbounded and
+- "Embed or reference the comments on a post?" Reference — comments are unbounded and
   would eventually exceed the 16 MB document limit; embed only bounded one-to-few data.
-- **"Is NoSQL faster than SQL?"** Not inherently. It's faster *for the access pattern it's
+- "Is NoSQL faster than SQL?" Not inherently. It's faster *for the access pattern it's
   modeled for*, by avoiding joins and scaling out; for ad-hoc queries and joins a relational
   engine is usually faster and simpler.
-- **"Difference between LSI and GSI?"** LSI shares the partition key with a different sort
+- "Difference between LSI and GSI?" LSI shares the partition key with a different sort
   key, must be created with the table, max 5, can be strongly consistent; GSI has its own
   partition+sort key and capacity, added anytime, max 20, eventually consistent.
 

@@ -761,33 +761,33 @@ trade-off each; do not deep-dive them.
 
 ## Common follow-up questions
 
-- **"What's the difference between Decorator and Proxy?"** Same UML; Decorator *adds behavior*
+- "What's the difference between Decorator and Proxy?" Same UML; Decorator *adds behavior*
   and the client composes it, Proxy *controls access* and usually creates/manages its own
   subject while keeping behavior identical.
-- **"Adapter or Bridge?"** Adapter is a retrofit to reconcile existing incompatible
+- "Adapter or Bridge?" Adapter is a retrofit to reconcile existing incompatible
   interfaces; Bridge is designed up front so an abstraction and its implementation vary on two
   independent axes.
-- **"When would you use Facade vs. Adapter?"** Facade invents a new *simpler* interface over
+- "When would you use Facade vs. Adapter?" Facade invents a new *simpler* interface over
   *many* subsystem classes; Adapter converts *one* existing interface into a *specific
   required* one.
-- **"Give the canonical Decorator in the standard library."** `java.io` streams —
+- "Give the canonical Decorator in the standard library." `java.io` streams —
   `BufferedInputStream`/`GZIPInputStream` wrapping a `FileInputStream`.
-- **"Explain intrinsic vs. extrinsic state."** Flyweight: intrinsic = shared, immutable,
+- "Explain intrinsic vs. extrinsic state." Flyweight: intrinsic = shared, immutable,
   stored inside the flyweight; extrinsic = context-specific, passed in by the client per call.
-- **"How do the two Adapter forms differ?"** Object Adapter uses composition (can adapt
+- "How do the two Adapter forms differ?" Object Adapter uses composition (can adapt
   subclasses, preferred); Class Adapter uses (multiple) inheritance (can override the adaptee
   but only adapts one class).
-- **"Why favor composition (object-based) over inheritance (class-based) for these patterns?"**
+- "Why favor composition (object-based) over inheritance (class-based) for these patterns?"
   Runtime flexibility, avoids single-inheritance limits, and lets you reconfigure structure
   dynamically.
-- **"Transparency vs. safety in Composite?"** Putting child-management on the shared interface
+- "Transparency vs. safety in Composite?" Putting child-management on the shared interface
   gives uniform treatment (transparency) but forces meaningless methods on leaves; restricting
   them to Composite is type-safe but breaks uniformity.
-- **"Name a Proxy variant for each of: lazy loading, network, security, caching."** Virtual,
+- "Name a Proxy variant for each of: lazy loading, network, security, caching." Virtual,
   Remote, Protection, Caching.
-- **"Which structural pattern helps with a combinatorial class explosion?"** Bridge (M+N vs.
+- "Which structural pattern helps with a combinatorial class explosion?" Bridge (M+N vs.
   M×N); Decorator also fights combinatorial *subclassing* of optional features.
-- **"Is a marker interface a structural pattern, and what replaced it?"** Yes (metadata via
+- "Is a marker interface a structural pattern, and what replaced it?" Yes (metadata via
   type); annotations often replace it, trading `instanceof` checks for richer metadata.
 
 ---

@@ -584,26 +584,26 @@ lifecycle and infrastructure availability.
 
 ## Common follow-up questions
 
-- **What is the difference between `${...}` and `#{...}`?** `${}` is a property-placeholder
+- What is the difference between `${...}` and `#{...}`? `${}` is a property-placeholder
   lookup resolved by `PropertySourcesPlaceholderConfigurer`; `#{}` is a SpEL expression
   evaluated by `StandardBeanExpressionResolver`. Placeholders are resolved before SpEL, so
   you can nest `${...}` inside `#{...}`.
-- **How do you give a default when a property is missing?** Use the placeholder default
+- How do you give a default when a property is missing? Use the placeholder default
   syntax `${key:default}`. This is separate from the SpEL Elvis operator `?:`.
-- **Can `@Value` inject into a static field?** No — Spring does not inject into statics.
-- **How do you call a static method in SpEL?** With the `T()` operator, e.g.
+- Can `@Value` inject into a static field? No — Spring does not inject into statics.
+- How do you call a static method in SpEL? With the `T()` operator, e.g.
   `T(java.lang.Math).max(a, b)`; `java.lang` classes may use the simple name.
-- **How do you reference another bean in a SpEL expression?** Use `@beanName` (or
+- How do you reference another bean in a SpEL expression? Use `@beanName` (or
   `@beanName.method()`); `&beanName` returns the FactoryBean itself.
-- **What is the difference between selection and projection?** Selection `.?[...]` filters a
+- What is the difference between selection and projection? Selection `.?[...]` filters a
   collection; projection `.![...]` maps/transforms each element. `.^[]`/`.$[]` return the
   first/last match.
-- **When is `@Value` SpEL evaluated?** During dependency injection at bean creation; it is a
+- When is `@Value` SpEL evaluated? During dependency injection at bean creation; it is a
   one-time evaluation, not a live binding.
-- **How do you enable `${...}` in plain Spring?** Register a
+- How do you enable `${...}` in plain Spring? Register a
   `PropertySourcesPlaceholderConfigurer` (as a `static @Bean`) or use
   `<context:property-placeholder>`; Spring Boot does this automatically.
-- **Is SpEL safe with untrusted input?** Use `SimpleEvaluationContext` to disable `T()`,
+- Is SpEL safe with untrusted input? Use `SimpleEvaluationContext` to disable `T()`,
   constructors, and bean references; `StandardEvaluationContext` exposes the full language.
 
 ## References

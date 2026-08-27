@@ -806,48 +806,48 @@ supporting vs generic).
 
 ## Common follow-up questions
 
-- **"What's the difference between a bounded context and a subdomain?"** A
+- "What's the difference between a bounded context and a subdomain?" A
   subdomain is a *problem-space* partition of the business (core/supporting/
   generic); a bounded context is a *solution-space* model boundary you build.
   Ideally each subdomain maps to one context, but legacy reality often violates
   that (a monolith cramming several subdomains into one context).
 
-- **"Conformist vs Anti-Corruption Layer — when each?"** Conformist when the
+- "Conformist vs Anti-Corruption Layer — when each?" Conformist when the
   upstream model is acceptable and you'd rather not pay for translation (accept
   the coupling). ACL when the upstream model would corrupt yours (legacy,
   external, messy) and model purity is worth the translation cost.
 
-- **"Open Host Service vs Published Language?"** OHS is the *access mechanism*
+- "Open Host Service vs Published Language?" OHS is the *access mechanism*
   (the stable protocol/API an upstream offers many consumers); Published
   Language is the *shared schema/vocabulary* that interface speaks. OHS usually
   exposes a Published Language.
 
-- **"Is a bounded context always a microservice?"** No. It's a strong default
+- "Is a bounded context always a microservice?" No. It's a strong default
   candidate for a service boundary, but a context is logical and a service is a
   deployment unit. Never span two contexts with one service; splitting one
   context across services needs real justification.
 
-- **"How do you decide which subdomain gets your best engineers?"** Identify the
+- "How do you decide which subdomain gets your best engineers?" Identify the
   **core domain** (the differentiator for *this* business), invest
   disproportionately there, buy/adopt **generic** subdomains, and keep
   **supporting** ones simple. That's strategic distillation.
 
-- **"How do you integrate with a legacy system you can't change?"** Treat it as
+- "How do you integrate with a legacy system you can't change?" Treat it as
   upstream (often a Big Ball of Mud), wrap it in an **Anti-Corruption Layer** so
   its model doesn't leak into yours, and migrate capabilities out over time with
   the Strangler Fig pattern.
 
-- **"How do you actually find the contexts?"** Collaborative discovery with
+- "How do you actually find the contexts?" Collaborative discovery with
   domain experts — **Event Storming** or **Domain Storytelling** — looking for
   linguistic seams where terms change meaning or work is handed off.
 
-- **"What if two teams keep needing each other's changes?"** That's a
+- "What if two teams keep needing each other's changes?" That's a
   Partnership (coordinate closely) or, if power is one-sided, Customer/Supplier
   with explicit contracts and shared acceptance tests. If coordination cost is
   too high and overlap is small, Separate Ways.
 
-- **"How big should a bounded context be — how do you know the boundary is
-  wrong?"** There's no size in lines of code; you read the symptoms.
+- "How big should a bounded context be — how do you know the boundary is
+  wrong?" There's no size in lines of code; you read the symptoms.
   **Too large:** one model juggles *conflicting invariants* (Inventory's
   "never negative" alongside Catalog's indifference to stock), god objects with
   many nullable fields, and different sub-teams fighting over the same model.
@@ -859,7 +859,7 @@ supporting vs generic).
   is why starting as a modular monolith (cheap to re-slice) beats premature
   service extraction (expensive to re-slice).
 
-- **"How do bounded contexts relate to team structure?"** Via **Conway's Law**:
+- "How do bounded contexts relate to team structure?" Via **Conway's Law**:
   the architecture mirrors team communication, so context and team boundaries
   co-evolve. Use the **inverse Conway maneuver** — organize teams around the
   contexts you want (one team per context) — and map the seams to Team

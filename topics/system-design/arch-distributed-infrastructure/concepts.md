@@ -904,28 +904,28 @@ All core styles on shared axes. "Coupling" = producer↔consumer / service↔ser
 
 ## Common follow-up questions
 
-- **"Microservices vs SOA — what actually differs?"** Granularity (fine vs coarse),
+- "Microservices vs SOA — what actually differs?" Granularity (fine vs coarse),
   pipes (dumb vs smart ESB), and data (private per service vs shared canonical
   model). Both are service-oriented; the coupling and governance differ sharply.
-- **"When would you NOT use microservices?"** Small team/early product (unknown
+- "When would you NOT use microservices?" Small team/early product (unknown
   boundaries), strong cross-entity consistency needs, or immature ops (no CI/CD,
   tracing, on-call). Start with a modular monolith.
-- **"Broker vs Event-Driven — same thing?"** Broker is the messaging *topology*
+- "Broker vs Event-Driven — same thing?" Broker is the messaging *topology*
   (intermediary routes messages); EDA is the broader *interaction style* built on
   events. EDA's broker topology uses a broker; its mediator topology orchestrates.
-- **"How does cell-based differ from sharding?"** Sharding partitions *data* for
+- "How does cell-based differ from sharding?" Sharding partitions *data* for
   scale; cell-based partitions the *whole stack* for **fault isolation** (bounded
   blast radius), scale being secondary.
-- **"Service mesh vs API gateway?"** Gateway = north-south (edge, client↔system);
+- "Service mesh vs API gateway?" Gateway = north-south (edge, client↔system);
   mesh = east-west (internal, service↔service). Often used together.
-- **"Serverless vs microservices?"** Serverless functions are finer-grained,
+- "Serverless vs microservices?" Serverless functions are finer-grained,
   ephemeral, and run on managed infra with scale-to-zero; microservices are
   long-running, self-managed units. A serverless function can implement a
   microservice or an event consumer.
-- **"Why is the distributed monolith the worst outcome?"** You pay the full
+- "Why is the distributed monolith the worst outcome?" You pay the full
   operational and network tax of microservices while retaining lock-step,
   shared-database coupling — the costs of both, benefits of neither.
-- **"Architecture style vs design pattern — what's the difference?"** Altitude:
+- "Architecture style vs design pattern — what's the difference?" Altitude:
   styles structure the *whole system's* deployment topology; GoF/enterprise design
   patterns structure *objects inside* one deployable. See the `dp-*` group.
 

@@ -2590,34 +2590,34 @@ a Query Object for DB execution.
 
 ## Common follow-up questions
 
-- **"When would you choose Transaction Script over a Domain Model?"** When the logic is
+- "When would you choose Transaction Script over a Domain Model?" When the logic is
   simple/CRUD-ish and the modelling cost of a Domain Model + ORM isn't justified; be ready
   to describe the complexity crossover point and the risk of Transaction Script rotting.
-- **"Active Record or Data Mapper for this service?"** Trade simplicity/speed (Active
+- "Active Record or Data Mapper for this service?" Trade simplicity/speed (Active
   Record, domain≈schema) against decoupling/testability/rich-domain support (Data Mapper).
   Mention the schema-coupling and unit-test-without-DB angle.
-- **"What's the difference between a Repository and a DAO?"** Repository = domain
+- "What's the difference between a Repository and a DAO?" Repository = domain
   collection of aggregates (ubiquitous language); DAO = data-source/persistence-tech
   abstraction (per-table CRUD). Note that teams blur them.
-- **"Is this class a DTO or a Value Object?"** DTO = dumb cross-boundary carrier; Value
+- "Is this class a DTO or a Value Object?" DTO = dumb cross-boundary carrier; Value
   Object = immutable, behaviour-rich, value-equality domain concept.
-- **"How do you prevent lost updates when a user edits a record over several minutes?"**
+- "How do you prevent lost updates when a user edits a record over several minutes?"
   Optimistic Offline Lock (version field, detect at commit) vs Pessimistic (lock before
   edit); choose by conflict probability and cost of redo; mention Implicit + Coarse-
   Grained Lock.
-- **"MVC vs MVP vs MVVM — which and why?"** Explain the progression: testable view (MVP),
+- "MVC vs MVP vs MVVM — which and why?" Explain the progression: testable view (MVP),
   data binding (MVVM), unidirectional immutable loop (MVU); match to platform capabilities.
-- **"What is the N+1 problem and which pattern causes it?"** Lazy Load iterated over a
+- "What is the N+1 problem and which pattern causes it?" Lazy Load iterated over a
   collection; fix with eager/`JOIN FETCH` or batch loading.
-- **"How do Unit of Work and Identity Map relate?"** Unit of Work tracks changes for one
+- "How do Unit of Work and Identity Map relate?" Unit of Work tracks changes for one
   atomic commit; Identity Map guarantees one object per identity within the session; ORMs
   implement both (JPA `EntityManager`).
-- **"How do you keep the domain independent of the database/framework?"** Separated
+- "How do you keep the domain independent of the database/framework?" Separated
   Interface + Data Mapper/Repository + Dependency Inversion (Hexagonal/Ports-and-Adapters).
-- **"What's the Anemic Domain Model and why is it an anti-pattern?"** Objects that are
+- "What's the Anemic Domain Model and why is it an anti-pattern?" Objects that are
   data bags with all behaviour in services — you pay Domain Model costs for Transaction
   Script benefits.
-- **"Where should session state live in a horizontally-scaled web app?"** Prefer stateless
+- "Where should session state live in a horizontally-scaled web app?" Prefer stateless
   servers with Client or Database (or shared-store Server) session state; discuss the
   scaling/failover/bandwidth trade-offs.
 

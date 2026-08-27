@@ -708,34 +708,34 @@ Reverse lookups (IP → name) live in dedicated trees:
 
 ## Common follow-up questions
 
-- **"Walk me through resolving `mail.example.co.uk` from a cold cache."** Root → `.uk`
+- "Walk me through resolving `mail.example.co.uk` from a cold cache." Root → `.uk`
   TLD → `.co.uk` → `example.co.uk` authoritative; note that `.co.uk` is a delegation
   point, not just a label — the public suffix matters.
-- **"Why is the answer sometimes returned over TCP?"** Truncation (TC bit) due to a
+- "Why is the answer sometimes returned over TCP?" Truncation (TC bit) due to a
   response exceeding the (EDNS-negotiated) UDP size, DNSSEC-inflated answers, or zone
   transfers.
-- **"How would you implement blue/green with DNS, and what's the catch?"** Weighted
+- "How would you implement blue/green with DNS, and what's the catch?" Weighted
   records + low TTL; catch is resolver caching means you can't instantly shift 100% and
   some clients ignore/clamp TTLs.
-- **"Difference between a CNAME and an ALIAS?"** CNAME is a standard record that can't
+- "Difference between a CNAME and an ALIAS?" CNAME is a standard record that can't
   sit at the apex and can't coexist with other types; ALIAS/ANAME is a provider
   synthesis that returns A/AAAA at query time and *can* live at the apex.
-- **"Does DNSSEC encrypt my queries?"** No — it authenticates/integrity-protects
+- "Does DNSSEC encrypt my queries?" No — it authenticates/integrity-protects
   answers. DoT/DoH provide confidentiality.
-- **"Why did my new subdomain 404/NXDOMAIN for a while even though I added the
-  record?"** Negative caching (RFC 2308) of the earlier non-existent answer for the SOA
+- "Why did my new subdomain 404/NXDOMAIN for a while even though I added the
+  record?" Negative caching (RFC 2308) of the earlier non-existent answer for the SOA
   minimum window.
-- **"What is EDNS Client Subnet and its trade-off?"** Forwards a truncated client subnet
+- "What is EDNS Client Subnet and its trade-off?" Forwards a truncated client subnet
   to authoritative servers for better GeoDNS accuracy, at a privacy cost; RFC 7871.
-- **"`dig` shows the answer but the app can't resolve it — why?"** `dig` talks straight to
+- "`dig` shows the answer but the app can't resolve it — why?" `dig` talks straight to
   a resolver; the app goes through `getaddrinfo`/nsswitch (hosts file, OS negative cache,
   Happy Eyeballs), and `resolv.conf` `search`/`ndots` can rewrite the name. The classic
   case is Kubernetes' default `ndots:5`, which appends search domains and fires several
   NXDOMAIN lookups before the absolute name — latency and NXDOMAIN storms.
-- **"Why do you need glue records?"** When a zone's nameservers live inside the zone
+- "Why do you need glue records?" When a zone's nameservers live inside the zone
   itself, the parent must publish their A/AAAA as glue in the referral, or resolution
   deadlocks trying to resolve the nameserver name.
-- **"Draw a DNS packet / how does a resolver match a response to its query?"** 12-byte
+- "Draw a DNS packet / how does a resolver match a response to its query?" 12-byte
   header (ID, flags, four counts) + Question/Answer/Authority/Additional; the response is
   matched by transaction ID plus the question (and, on UDP, the src IP/port tuple).
 

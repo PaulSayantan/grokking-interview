@@ -543,17 +543,17 @@ Spring walks the ordered `PropertySource`s and takes the **first** that has `ser
 
 ## Common follow-up questions
 
-- **What three annotations make up `@SpringBootApplication`, and why must the main class sit in a root package?** `@SpringBootConfiguration` + `@EnableAutoConfiguration` + `@ComponentScan`; component scan and `@AutoConfigurationPackage` default to the main class's package.
-- **Why does `@ConditionalOnMissingBean` reliably let user beans win?** Auto-configuration is processed *after* user configuration (via `DeferredImportSelector`), so the user bean is already present when the condition is checked.
-- **Where are auto-configuration classes registered in Boot 3?** `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`, one FQCN per line; classes are annotated `@AutoConfiguration`.
-- **Is `spring.factories` gone in Boot 3?** No — only the `EnableAutoConfiguration` auto-config registration moved out; `spring.factories` still registers listeners, initializers, `EnvironmentPostProcessor`, `FailureAnalyzer`, etc.
-- **How do you disable a specific auto-config?** `exclude`/`excludeName` on the annotation or `spring.autoconfigure.exclude` property.
-- **How do you change the embedded server?** Exclude `spring-boot-starter-tomcat` and add the Jetty/Undertow starter.
-- **What is the difference between a starter and a BOM?** A starter adds dependencies to the build; a BOM only manages their versions (`dependencyManagement`, adds nothing itself).
-- **Why can't `java -jar` normally load a Boot fat JAR's dependencies without the loader?** JVM can't read classes from nested JARs; Boot's `JarLauncher` + custom class loader handle `BOOT-INF/lib/*.jar`.
-- **What ordering do the SpringApplication lifecycle events follow?** starting → environmentPrepared → contextInitialized → prepared → (refresh) → started → runners → ready.
-- **`CommandLineRunner` vs `ApplicationRunner`?** Raw `String...` args vs parsed `ApplicationArguments`; both run after context ready, orderable with `@Order`.
-- **How does a custom starter get its beans loaded if its package isn't scanned?** Registration in the `AutoConfiguration.imports` file (not component scanning).
+- What three annotations make up `@SpringBootApplication`, and why must the main class sit in a root package? `@SpringBootConfiguration` + `@EnableAutoConfiguration` + `@ComponentScan`; component scan and `@AutoConfigurationPackage` default to the main class's package.
+- Why does `@ConditionalOnMissingBean` reliably let user beans win? Auto-configuration is processed *after* user configuration (via `DeferredImportSelector`), so the user bean is already present when the condition is checked.
+- Where are auto-configuration classes registered in Boot 3? `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`, one FQCN per line; classes are annotated `@AutoConfiguration`.
+- Is `spring.factories` gone in Boot 3? No — only the `EnableAutoConfiguration` auto-config registration moved out; `spring.factories` still registers listeners, initializers, `EnvironmentPostProcessor`, `FailureAnalyzer`, etc.
+- How do you disable a specific auto-config? `exclude`/`excludeName` on the annotation or `spring.autoconfigure.exclude` property.
+- How do you change the embedded server? Exclude `spring-boot-starter-tomcat` and add the Jetty/Undertow starter.
+- What is the difference between a starter and a BOM? A starter adds dependencies to the build; a BOM only manages their versions (`dependencyManagement`, adds nothing itself).
+- Why can't `java -jar` normally load a Boot fat JAR's dependencies without the loader? JVM can't read classes from nested JARs; Boot's `JarLauncher` + custom class loader handle `BOOT-INF/lib/*.jar`.
+- What ordering do the SpringApplication lifecycle events follow? starting → environmentPrepared → contextInitialized → prepared → (refresh) → started → runners → ready.
+- `CommandLineRunner` vs `ApplicationRunner`? Raw `String...` args vs parsed `ApplicationArguments`; both run after context ready, orderable with `@Order`.
+- How does a custom starter get its beans loaded if its package isn't scanned? Registration in the `AutoConfiguration.imports` file (not component scanning).
 
 ## References
 

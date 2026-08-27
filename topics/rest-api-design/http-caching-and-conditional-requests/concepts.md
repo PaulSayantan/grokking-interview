@@ -673,27 +673,27 @@ data that should have been revalidated?"
 
 ## Common follow-up questions
 
-- **What's the difference between `no-cache` and `no-store`?** `no-store` forbids storing
+- What's the difference between `no-cache` and `no-store`? `no-store` forbids storing
   at all; `no-cache` stores but revalidates before every reuse.
-- **How does a conditional GET save resources — bandwidth, round-trips, or both?** Bandwidth
+- How does a conditional GET save resources — bandwidth, round-trips, or both? Bandwidth
   (empty `304` body); the round-trip still happens. Freshness (`max-age`) saves the trip.
-- **Strong vs weak ETag — when must you use strong?** Range requests and `If-Match`
+- Strong vs weak ETag — when must you use strong? Range requests and `If-Match`
   require strong comparison; `If-None-Match` uses weak comparison.
-- **How do you prevent lost updates?** `ETag` + `If-Match` → `412` on mismatch; client
+- How do you prevent lost updates? `ETag` + `If-Match` → `412` on mismatch; client
   refetches and retries. Consider `428 Precondition Required` to force it.
-- **How do you make a PUT create-only (fail if it exists)?** `If-None-Match: *` → `412` if
+- How do you make a PUT create-only (fail if it exists)? `If-None-Match: *` → `412` if
   present. Update-only? `If-Match: *`.
-- **Why prefer `ETag` over `Last-Modified`?** `Last-Modified` has 1-second resolution and
+- Why prefer `ETag` over `Last-Modified`? `Last-Modified` has 1-second resolution and
   depends on clocks; `ETag` is exact and opaque.
-- **What does `Vary` do and what's the risk of `Vary: Cookie`?** It adds request headers to
+- What does `Vary` do and what's the risk of `Vary: Cookie`? It adds request headers to
   the cache key; high-cardinality headers destroy hit rates and can leak per-user data.
-- **`s-maxage` vs `max-age`?** `s-maxage` targets shared caches only and overrides
+- `s-maxage` vs `max-age`? `s-maxage` targets shared caches only and overrides
   `max-age`/`Expires` for them.
-- **Which status code for a failed precondition on a write vs a matched conditional GET?**
+- Which status code for a failed precondition on a write vs a matched conditional GET?
   `412 Precondition Failed` for writes; `304 Not Modified` for GETs.
-- **What happens with no caching headers at all?** Shared caches may apply heuristic
+- What happens with no caching headers at all? Shared caches may apply heuristic
   freshness and serve stale content — always be explicit.
-- **Which RFCs govern this today?** RFC 9110 (semantics/validators/conditionals) and RFC
+- Which RFCs govern this today? RFC 9110 (semantics/validators/conditionals) and RFC
   9111 (caching); RFC 5861 for stale-* extensions.
 
 ## References

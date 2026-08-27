@@ -536,22 +536,22 @@ trips where 1–2 would do. Fixes:
 
 ## Common follow-up questions
 
-- **"You added an index and the query is still slow — walk me through debugging it."**
+- "You added an index and the query is still slow — walk me through debugging it."
   Run `EXPLAIN ANALYZE`; check estimated vs actual rows (stale stats → `ANALYZE`); check
   whether the predicate is sargable (function on column? implicit cast? leading
   wildcard?); check leftmost-prefix for composite indexes; check selectivity (maybe a
   scan really is cheaper); check for a `Filter:` line indicating wrong column order.
-- **"Why not just index every column?"** Write amplification, storage, planner overhead,
+- "Why not just index every column?" Write amplification, storage, planner overhead,
   and diminishing returns — each index slows every write and most are never used.
-- **"Composite `(a,b)` vs two single-column indexes on `a` and `b`?"** The composite
+- "Composite `(a,b)` vs two single-column indexes on `a` and `b`?" The composite
   serves `a` and `(a,b)` with a single seek and can cover/sort; two singles let Postgres
   do a `BitmapAnd` but each alone is less selective. Prefer a composite tuned to the
   query, ordered equality-then-range.
-- **"Default isolation level, Postgres vs MySQL?"** PostgreSQL is READ COMMITTED;
+- "Default isolation level, Postgres vs MySQL?" PostgreSQL is READ COMMITTED;
   MySQL/InnoDB is REPEATABLE READ. (Deep-dived in the transactions topic.)
-- **"When does an index-only scan still hit the heap in Postgres?"** When the page is
+- "When does an index-only scan still hit the heap in Postgres?" When the page is
   not all-visible in the visibility map (recent writes, not yet vacuumed).
-- **"How does the planner know how many rows match?"** From `ANALYZE` statistics:
+- "How does the planner know how many rows match?" From `ANALYZE` statistics:
   n_distinct, MCV list, histogram, and correlation.
 
 ## References

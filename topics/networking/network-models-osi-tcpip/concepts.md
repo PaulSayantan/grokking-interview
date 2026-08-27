@@ -607,22 +607,22 @@ memorizers:
 
 ## Common follow-up questions
 
-- **Why does the Internet use TCP/IP instead of the "official" OSI protocols?** TCP/IP was
+- Why does the Internet use TCP/IP instead of the "official" OSI protocols? TCP/IP was
   simpler, already working, and freely implementable when the OSI protocol suite was still
   being standardized; the market chose the running code. OSI survives as the *model*.
-- **Is OSI obsolete?** The OSI *protocols* largely are, but the OSI *reference model* is
+- Is OSI obsolete? The OSI *protocols* largely are, but the OSI *reference model* is
   alive and universal — it is how engineers name and reason about layers.
-- **Why 4 vs 5 layers for TCP/IP?** RFC 1122 defines 4 (bundling physical + data link into
+- Why 4 vs 5 layers for TCP/IP? RFC 1122 defines 4 (bundling physical + data link into
   "link"); textbooks split those two apart to make 5. Same model.
-- **Does encapsulation add much overhead?** Headers cost bytes (e.g. 20 bytes IPv4 + 20
+- Does encapsulation add much overhead? Headers cost bytes (e.g. 20 bytes IPv4 + 20
   bytes TCP = 40 bytes before payload), which matters for small packets and is why header
   compression and larger MTUs/jumbo frames exist.
-- **At a router hop, what changes and what stays the same?** The L2 frame header (source/
+- At a router hop, what changes and what stays the same? The L2 frame header (source/
   dest MAC) is rewritten every hop; the L3 IP source/destination stay constant end-to-end
   (barring NAT); the TTL decrements.
-- **Where does NAT operate?** Layer 3 (rewrites IP addresses), and NAPT/PAT also touches
+- Where does NAT operate? Layer 3 (rewrites IP addresses), and NAPT/PAT also touches
   Layer 4 (rewrites ports) — so it deliberately breaks strict layering.
-- **Why can't a Layer 2 switch route between subnets?** It only reads MAC addresses and
+- Why can't a Layer 2 switch route between subnets? It only reads MAC addresses and
   has no concept of IP networks; crossing subnets requires an L3 device (router / L3
   switch).
 

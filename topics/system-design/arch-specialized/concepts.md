@@ -576,26 +576,26 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **"When would you actually choose Blackboard over a straightforward pipeline?"** When no
+- "When would you actually choose Blackboard over a straightforward pipeline?" When no
   deterministic algorithm exists and the answer must be assembled opportunistically from
   diverse specialists (perception, fusion, planning) — accept non-determinism as the price
   of flexibility.
-- **"Primary-Replica gives you read scaling — how do you scale *writes*?"** You don't with
+- "Primary-Replica gives you read scaling — how do you scale *writes*?" You don't with
   replication alone; you **shard** (partition data across multiple primaries), optionally
   each primary having its own replicas; or move to multi-primary/leaderless and accept
   conflict resolution.
-- **"Broker vs. API Gateway vs. Service Mesh — pick one."** Broker = internal
+- "Broker vs. API Gateway vs. Service Mesh — pick one." Broker = internal
   location-transparent RPC via a central mediator; API Gateway = edge/north-south routing;
   Service Mesh = the same cross-cutting concerns pushed into per-instance sidecars (no hub).
-- **"Isn't a message queue just a Broker?"** Yes — the *message-broker* form. POSA's Broker
+- "Isn't a message queue just a Broker?" Yes — the *message-broker* form. POSA's Broker
   is the request/response RPC form; the async pub-sub/queue form is covered in
   `message-queues-and-async`.
-- **"What's the difference between Master-Worker and Primary-Replica?"** Master-Worker
+- "What's the difference between Master-Worker and Primary-Replica?" Master-Worker
   partitions *compute*; Primary-Replica replicates *data* for reads/HA. Different problems.
-- **"Interpreter the architecture vs. Interpreter the GoF pattern?"** Altitude: the style
+- "Interpreter the architecture vs. Interpreter the GoF pattern?" Altitude: the style
   makes the *whole system* language-driven (ship an engine); the pattern is a class-per-rule
   solution *inside* a component.
-- **"Which -ility does each style optimize?"** Blackboard → extensibility; Primary-Replica →
+- "Which -ility does each style optimize?" Blackboard → extensibility; Primary-Replica →
   read scalability + availability; Broker → interoperability/evolvability; P2P → scalability
   + no-SPOF availability; Master-Worker → throughput + fault isolation; Interpreter →
   flexibility + portability.

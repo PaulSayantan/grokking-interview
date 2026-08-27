@@ -597,28 +597,28 @@ levels of sophistication:
 
 ## Common follow-up questions
 
-- **"What exactly does applying a CRD do?"** Registers a new API endpoint/kind that
+- "What exactly does applying a CRD do?" Registers a new API endpoint/kind that
   kube-apiserver serves and stores in etcd, with schema validation — but adds no behavior.
-- **"CRD vs custom controller vs operator?"** CRD = the data/type; controller = the loop that
+- "CRD vs custom controller vs operator?" CRD = the data/type; controller = the loop that
   acts on a kind; operator = CRD(s) + controller automating a specific stateful app.
-- **"Why must a reconciler be idempotent and level-triggered?"** Because reconcile is called
+- "Why must a reconciler be idempotent and level-triggered?" Because reconcile is called
   repeatedly (retries, resyncs, restarts) and may miss events; it must converge from whatever
   the current observed state is, every time.
-- **"Order of admission?"** Mutating webhooks/policies → schema validation → validating
+- "Order of admission?" Mutating webhooks/policies → schema validation → validating
   webhooks/policies → persist. Validating runs last and can't mutate.
-- **"How do you avoid a webhook bricking the cluster?"** Tight `rules`/`namespaceSelector`,
+- "How do you avoid a webhook bricking the cluster?" Tight `rules`/`namespaceSelector`,
   exclude system namespaces, sane `timeoutSeconds`, and consider `failurePolicy: Ignore` for
   non-critical policy; make the webhook HA.
-- **"Webhook vs CEL ValidatingAdmissionPolicy?"** CEL runs in-process (no server, no TLS, no
+- "Webhook vs CEL ValidatingAdmissionPolicy?" CEL runs in-process (no server, no TLS, no
   availability risk) for simple field rules; webhooks for arbitrary/external logic and
   mutation like sidecar injection.
-- **"Object stuck in Terminating — why?"** A finalizer whose controller is gone/failing;
+- "Object stuck in Terminating — why?" A finalizer whose controller is gone/failing;
   deletion is blocked until the finalizer is removed.
-- **"How does an operator clean up the Deployments/Services it created?"** Owner references +
+- "How does an operator clean up the Deployments/Services it created?" Owner references +
   garbage collection (cascading delete); external resources need finalizers.
-- **"CRD vs aggregation layer?"** CRD for etcd-backed declarative objects (most cases);
+- "CRD vs aggregation layer?" CRD for etcd-backed declarative objects (most cases);
   aggregation when you need custom storage/computed resources (e.g. metrics-server).
-- **"How does an HPA scale a custom resource?"** Enable the `scale` subresource on the CRD
+- "How does an HPA scale a custom resource?" Enable the `scale` subresource on the CRD
   so `/scale` exists; the HPA reads/writes replica count there.
 
 ## References

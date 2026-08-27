@@ -402,28 +402,28 @@ waking someone for. This is the signal-quality boundary of this topic (the human
 
 ## Common follow-up questions
 
-- **"What's the difference between an SLI, SLO, and SLA?"** SLI = the measurement (a
+- "What's the difference between an SLI, SLO, and SLA?" SLI = the measurement (a
   good/valid ratio); SLO = the internal target for it; SLA = an external contract with
   penalties. SLO is always set stricter than the SLA to leave reaction room.
-- **"How much downtime does 99.9% allow per month?"** ~43.2 minutes (`43200 min ×
+- "How much downtime does 99.9% allow per month?" ~43.2 minutes (`43200 min ×
   0.001`). 99.99% is ~4.3 minutes. Know the table.
-- **"Why not just alert when the error rate crosses a threshold?"** A single threshold is
+- "Why not just alert when the error rate crosses a threshold?" A single threshold is
   either too noisy (short window/low threshold) or too slow with bad reset time (long
   window). No single threshold gets precision, recall, detection time, and reset time all
   right.
-- **"Explain multi-window multi-burn-rate."** Multiple burn-rate thresholds (14.4× → page,
+- "Explain multi-window multi-burn-rate." Multiple burn-rate thresholds (14.4× → page,
   6× → page, 1× → ticket), each requiring both a long window (precision) and a short window
   = 1/12 of it (fast reset). Fast burn pages, slow burn tickets.
-- **"What is a burn rate of 1?"** Consuming the budget at exactly the rate that would
+- "What is a burn rate of 1?" Consuming the budget at exactly the rate that would
   exhaust it precisely at the end of the SLO window; `burn rate = error rate / (1 − SLO)`.
-- **"Why is average latency a bad SLI?"** Averages hide the tail; a few very slow requests
+- "Why is average latency a bad SLI?" Averages hide the tail; a few very slow requests
   are invisible in a mean. Use a threshold-count SLI ("fraction of requests < 300 ms") or
   percentiles.
-- **"What do you do when the budget is exhausted?"** Enforce the error budget policy —
+- "What do you do when the budget is exhausted?" Enforce the error budget policy —
   usually a feature freeze redirecting effort to reliability until back in SLO.
-- **"Request-based vs windows-based SLO?"** Event ratio (weights by traffic, default for
+- "Request-based vs windows-based SLO?" Event ratio (weights by traffic, default for
   APIs) vs good-minutes ratio (maps to downtime SLAs, treats each minute equally).
-- **"Why is 100% the wrong reliability target?"** Infinitely expensive and imperceptible
+- "Why is 100% the wrong reliability target?" Infinitely expensive and imperceptible
   to users, whose own network/devices are less reliable; leaves no budget for shipping.
 
 ## References

@@ -447,20 +447,20 @@ merge-based problems dominate.
 
 ## Common follow-up questions
 
-- **"Which sort would you use for nearly-sorted data / small arrays?"** Insertion sort (adaptive,
+- "Which sort would you use for nearly-sorted data / small arrays?" Insertion sort (adaptive,
   O(n) best, tiny constants) — which is exactly why Timsort uses it for short runs.
-- **"Merge sort vs quicksort — when each?"** Quicksort for in-memory arrays (in-place, fastest
+- "Merge sort vs quicksort — when each?" Quicksort for in-memory arrays (in-place, fastest
   constants); merge sort when you need **stability**, are sorting a **linked list**, or doing
   **external sorting**. Quicksort risks O(n²); merge sort guarantees O(n log n) but costs O(n) space.
-- **"How do you avoid quicksort's O(n²) worst case?"** Randomized or median-of-three pivot; 3-way
+- "How do you avoid quicksort's O(n²) worst case?" Randomized or median-of-three pivot; 3-way
   partition for duplicates; introsort-style fallback to heap sort on deep recursion.
-- **"Kth largest — heap or quickselect?"** Heap (size k) → O(n log k), streaming-friendly, doesn't
+- "Kth largest — heap or quickselect?" Heap (size k) → O(n log k), streaming-friendly, doesn't
   mutate input. Quickselect → O(n) average, best when the full array is in memory.
-- **"Can you sort in O(n)?"** Only non-comparison sorts, and only with bounded integer keys
+- "Can you sort in O(n)?" Only non-comparison sorts, and only with bounded integer keys
   (counting/radix) or uniform distribution (bucket). Otherwise Ω(n log n) by the decision-tree bound.
-- **"Is Java's `Arrays.sort` stable?"** For **objects** yes (Timsort); for **primitives** it's
+- "Is Java's `Arrays.sort` stable?" For **objects** yes (Timsort); for **primitives** it's
   dual-pivot quicksort (not stable, but irrelevant for primitives).
-- **"Why is heap sort rarely the default despite O(n log n) worst case?"** Poor cache locality and
+- "Why is heap sort rarely the default despite O(n log n) worst case?" Poor cache locality and
   higher constants than quicksort; not stable.
 
 ## References

@@ -935,43 +935,43 @@ actions, and use COOP to sever `window.opener`.
 
 ## Common follow-up questions
 
-- **"Walk me through fixing a reflected XSS in a search box."** Identify the sink (value
+- "Walk me through fixing a reflected XSS in a search box." Identify the sink (value
   echoed into HTML body/attribute), apply context-aware output encoding via the framework's
   auto-escaping, add a nonce-based CSP as defense in depth, and add a regression test with
   a payload like `"><script>`.
-- **"Reflected vs stored vs DOM XSS — which is worst and why?"** Stored (no lure needed,
+- "Reflected vs stored vs DOM XSS — which is worst and why?" Stored (no lure needed,
   hits every viewer, wormable). DOM-based is sneakiest (never touches the server, hides in
   the URL fragment). Reflected needs a lured click.
-- **"Why isn't input validation enough?"** Same value renders into multiple contexts;
+- "Why isn't input validation enough?" Same value renders into multiple contexts;
   legitimate data contains dangerous chars; blocklists are bypassable. Encode on output.
-- **"How does CSP actually stop XSS if the script is already injected?"** It blocks
+- "How does CSP actually stop XSS if the script is already injected?" It blocks
   *execution*: inline scripts without the right nonce/hash, and scripts from disallowed
   origins, don't run. It doesn't fix the injection.
-- **"Why is a host-allowlist CSP considered weak?"** JSONP endpoints and framework gadgets
+- "Why is a host-allowlist CSP considered weak?" JSONP endpoints and framework gadgets
   on allowlisted CDNs let attackers run code from allowed origins; use nonce +
   strict-dynamic.
-- **"Nonce vs hash?"** Nonce = fresh per-response random for dynamic server-rendered pages;
+- "Nonce vs hash?" Nonce = fresh per-response random for dynamic server-rendered pages;
   hash = fixed digest of static inline scripts, cache-friendly.
-- **"If cookies are HttpOnly, is XSS harmless?"** No — the attacker can't read the cookie
+- "If cookies are HttpOnly, is XSS harmless?" No — the attacker can't read the cookie
   but can still make authenticated requests in-page and do everything the user can.
-- **"Which headers would you set on a hardened app?"** CSP (nonce + strict-dynamic +
+- "Which headers would you set on a hardened app?" CSP (nonce + strict-dynamic +
   object-src 'none' + base-uri 'none' + frame-ancestors), HSTS (+ preload), nosniff,
   Referrer-Policy, X-Frame-Options (legacy fallback), Permissions-Policy, and Trusted
   Types.
-- **"What is mutation XSS (mXSS)?"** Sanitized HTML that the browser's parser mutates on
+- "What is mutation XSS (mXSS)?" Sanitized HTML that the browser's parser mutates on
   reinsertion into a form that becomes executable — why you use a maintained sanitizer,
   not regexes.
-- **"The sanitizer strips `<script>` and all handlers — get code execution."** DOM
+- "The sanitizer strips `<script>` and all handlers — get code execution." DOM
   clobbering (inject `id`/`name` to hijack a script `src` or a config global) or mXSS via
   SVG/MathML namespace confusion.
-- **"Which headers give cross-origin isolation, and what do they unlock?"** COOP
+- "Which headers give cross-origin isolation, and what do they unlock?" COOP
   `same-origin` + COEP `require-corp` ⇒ `crossOriginIsolated` ⇒ `SharedArrayBuffer` and
   high-res timers; CORP guards each resource against cross-site embedding.
-- **"One legacy `onclick` must stay under strict CSP — how?"** `'unsafe-hashes'` with the
+- "One legacy `onclick` must stay under strict CSP — how?" `'unsafe-hashes'` with the
   handler's hash (weaker than removing it; refactor it out when you can).
-- **"CSP blocks script but you can still exfiltrate the CSRF token — how?"**
+- "CSP blocks script but you can still exfiltrate the CSRF token — how?"
   Dangling-markup injection to an allowed `img-src`/`connect-src` host.
-- **"Nonce vs cached CDN pages?"** A cached nonce is reusable and worthless; use hash-based
+- "Nonce vs cached CDN pages?" A cached nonce is reusable and worthless; use hash-based
   CSP or per-request edge nonce injection.
 
 ## References

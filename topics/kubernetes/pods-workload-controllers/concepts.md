@@ -759,25 +759,25 @@ What that buys you, versus a regular init container and versus a plain sidecar:
 
 ## Common follow-up questions
 
-- **"What do all containers in a Pod share, and what don't they?"** Share: network namespace (one
+- "What do all containers in a Pod share, and what don't they?" Share: network namespace (one
   IP, `localhost`, port space), IPC, and any declared volumes; always co-scheduled on one node.
   Don't share by default: filesystem root (each has its own image), PID namespace (unless
   `shareProcessNamespace: true`).
-- **"Deployment vs StatefulSet — one line each?"** Deployment = interchangeable stateless replicas
+- "Deployment vs StatefulSet — one line each?" Deployment = interchangeable stateless replicas
   with rolling updates. StatefulSet = stable ordinal identity + stable per-Pod PVC + ordered
   operations, for stateful apps.
-- **"How is a DaemonSet's replica count set?"** It isn't — it's the number of matching nodes; the
+- "How is a DaemonSet's replica count set?" It isn't — it's the number of matching nodes; the
   controller adds/removes Pods as nodes join/leave.
-- **"Why did my `kubectl delete pod` not remove the app?"** It's controller-owned; the ReplicaSet
+- "Why did my `kubectl delete pod` not remove the app?" It's controller-owned; the ReplicaSet
   recreated it. Edit/scale/delete the controller instead.
-- **"A CronJob's runs overlap and corrupt data — fix?"** `concurrencyPolicy: Forbid` (or `Replace`).
-- **"Pod is `Running` but `0/1 Ready` — why?"** Readiness probe not passing; the `Ready` condition
+- "A CronJob's runs overlap and corrupt data — fix?" `concurrencyPolicy: Forbid` (or `Replace`).
+- "Pod is `Running` but `0/1 Ready` — why?" Readiness probe not passing; the `Ready` condition
   is False so it's excluded from Service endpoints.
-- **"Job Pod restarts forever / API rejects the Job — why?"** `restartPolicy: Always` is invalid for
+- "Job Pod restarts forever / API rejects the Job — why?" `restartPolicy: Always` is invalid for
   a Job; use `Never`/`OnFailure` with a `backoffLimit`.
-- **"When would you ever run a bare Pod?"** Debugging, one-shot manual tasks, and static Pods
+- "When would you ever run a bare Pod?" Debugging, one-shot manual tasks, and static Pods
   (kubelet-managed control-plane components) — not application workloads.
-- **"How do you run a helper that must live alongside the app but also let a Job finish?"** A native
+- "How do you run a helper that must live alongside the app but also let a Job finish?" A native
   sidecar (init container with `restartPolicy: Always`), v1.29+ (stable 1.33).
 
 ## References

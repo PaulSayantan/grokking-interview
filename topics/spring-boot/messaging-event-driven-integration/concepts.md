@@ -682,28 +682,28 @@ RabbitMQ supports AMQP 1.0 via a plugin/native in newer versions, but the exchan
 
 ## Common follow-up questions
 
-- **Why does Kafka only guarantee ordering within a partition, not a topic?** Each partition
+- Why does Kafka only guarantee ordering within a partition, not a topic? Each partition
   is an independent log consumed by one consumer in a group; across partitions there is no
   global clock. Use a partition key to co-locate related records.
-- **Does the Kafka idempotent producer give exactly-once?** No — it only dedups producer
+- Does the Kafka idempotent producer give exactly-once? No — it only dedups producer
   retries per partition. End-to-end EOS needs transactions (`transactional.id`,
   `read_committed`) or idempotent consumers for external sinks.
-- **How do you handle a poison message?** Bounded retries with backoff, then route to a
+- How do you handle a poison message? Bounded retries with backoff, then route to a
   DLQ/DLT; on Kafka prefer non-blocking `@RetryableTopic` to avoid head-of-line blocking.
-- **RabbitMQ: producer publishes to a queue — true or false?** False. Producers publish to
+- RabbitMQ: producer publishes to a queue — true or false? False. Producers publish to
   **exchanges**; bindings route to queues.
-- **How do you make a consumer idempotent?** Dedup on a business/message key (unique
+- How do you make a consumer idempotent? Dedup on a business/message key (unique
   constraint or cache), or use naturally idempotent/UPSERT operations, ideally committing the
   dedup marker in the same transaction as the side effect.
-- **What breaks message ordering on producer retries in Kafka?** `max.in.flight > 1` with a
+- What breaks message ordering on producer retries in Kafka? `max.in.flight > 1` with a
   non-idempotent producer and retries. Idempotency preserves order up to 5 in-flight.
-- **javax.jms vs jakarta.jms?** Spring Boot 3 / Spring 6 use `jakarta.jms`; Boot 2 uses
+- javax.jms vs jakarta.jms? Spring Boot 3 / Spring 6 use `jakarta.jms`; Boot 2 uses
   `javax.jms`. Same for the whole Jakarta EE migration.
-- **When would you pick sync REST over messaging?** When the caller needs an immediate result
+- When would you pick sync REST over messaging? When the caller needs an immediate result
   and both services are expected to be available (queries, synchronous validation).
-- **What is the dual-write problem and how do you fix it?** Writing DB + publishing an event
+- What is the dual-write problem and how do you fix it? Writing DB + publishing an event
   non-atomically. Fix with the transactional outbox + CDC/relay.
-- **Kafka consumer group with 3 consumers and 2 partitions?** One consumer sits idle; max
+- Kafka consumer group with 3 consumers and 2 partitions? One consumer sits idle; max
   useful consumers = partition count.
 
 ## References

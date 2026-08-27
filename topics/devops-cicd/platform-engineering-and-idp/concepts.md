@@ -528,23 +528,23 @@ resolved by the platform team, the abstraction is too opaque.
 
 ## Common follow-up questions
 
-- **"Is platform engineering just DevOps/NoOps rebranded?"** No — it keeps DevOps culture but adds a
+- "Is platform engineering just DevOps/NoOps rebranded?" No — it keeps DevOps culture but adds a
   product-managed, self-service internal platform to scale it and cut cognitive load. It is not a
   return to gatekeeping ops.
-- **"Portal vs platform — what's the difference?"** The portal (e.g. Backstage) is the UI/catalog
+- "Portal vs platform — what's the difference?" The portal (e.g. Backstage) is the UI/catalog
   front door; the platform (IDP) is the entire self-service capability behind it. You can have an IDP
   with no portal.
-- **"How do you know your platform is succeeding?"** Voluntary adoption rate + DevEx/DORA/SPACE
+- "How do you know your platform is succeeding?" Voluntary adoption rate + DevEx/DORA/SPACE
   outcomes (lead time, deploy frequency, time-to-first-deploy, developer-reported friction) — not
   features shipped.
-- **"Should golden paths be mandatory?"** Generally no — supported-but-optional. Mandates hide the
+- "Should golden paths be mandatory?" Generally no — supported-but-optional. Mandates hide the
   adoption signal; make the safe path the easy path so teams choose it.
-- **"When is it too early?"** When you have few teams and little duplication — build product, not a
+- "When is it too early?" When you have few teams and little duplication — build product, not a
   platform. Start with a thinnest viable platform seeded from real, repeated pain.
-- **"Platform team vs SRE team?"** Platform = developer self-service product (X-as-a-Service); SRE =
+- "Platform team vs SRE team?" Platform = developer self-service product (X-as-a-Service); SRE =
   reliability engineering (SLOs/error budgets). They complement; the platform can productize SRE
   practices.
-- **"How do you avoid the platform team becoming a bottleneck?"** Self-service (no humans in the
+- "How do you avoid the platform team becoming a bottleneck?" Self-service (no humans in the
   request path), X-as-a-Service interaction mode, escape hatches, and a product-managed roadmap.
 
 ## References

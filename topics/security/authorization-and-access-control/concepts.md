@@ -879,56 +879,56 @@ enforce obligations, or the "permit but redact" degrades to a plain permit.
 
 ## Common follow-up questions
 
-- **"Difference between authentication and authorization?"** AuthN = who you are (verified
+- "Difference between authentication and authorization?" AuthN = who you are (verified
   identity); AuthZ = what you may do (allow/deny per action/resource). AuthN first, then
   AuthZ using the identity + context.
-- **"401 vs 403?"** 401 = not authenticated (misnamed "Unauthorized"); 403 = authenticated
+- "401 vs 403?" 401 = not authenticated (misnamed "Unauthorized"); 403 = authenticated
   but not permitted. Sometimes 404 is returned to avoid disclosing a resource's existence.
-- **"RBAC vs ABAC — when do you pick each?"** RBAC for stable, role-shaped orgs and easy
+- "RBAC vs ABAC — when do you pick each?" RBAC for stable, role-shaped orgs and easy
   audit; ABAC when access depends on dynamic subject/resource/environment attributes and
   RBAC would explode into thousands of roles. Often combined.
-- **"When would you reach for ReBAC/Zanzibar?"** When access is defined by *relationships*
+- "When would you reach for ReBAC/Zanzibar?" When access is defined by *relationships*
   and *sharing/inheritance* (Docs, GitHub, folders/groups), and you need "who can access X"
   answered at scale.
-- **"BOLA vs BFLA?"** BOLA/IDOR = wrong *object* (horizontal); BFLA = wrong *function*
+- "BOLA vs BFLA?" BOLA/IDOR = wrong *object* (horizontal); BFLA = wrong *function*
   (vertical). Fix BOLA with per-object ownership checks; fix BFLA with per-function
   capability checks. Both must be server-side and deny-by-default.
-- **"Why isn't a random UUID enough to stop IDOR?"** Unguessable ≠ authorized; IDs leak
+- "Why isn't a random UUID enough to stop IDOR?" Unguessable ≠ authorized; IDs leak
   (URLs, logs, other endpoints), and authorization is still your job.
-- **"How do you avoid scattering authz checks?"** Centralize with a PEP/PDP (e.g., OPA/Rego)
+- "How do you avoid scattering authz checks?" Centralize with a PEP/PDP (e.g., OPA/Rego)
   so checks are consistent, testable, auditable, and enforced by default.
-- **"Why is SSRF a 'confused deputy'?"** The server misuses its own network authority on the
+- "Why is SSRF a 'confused deputy'?" The server misuses its own network authority on the
   attacker's behalf; the attacker borrows ambient authority.
-- **"How do you prevent a double-spend?"** Make check-and-act atomic: conditional update /
+- "How do you prevent a double-spend?" Make check-and-act atomic: conditional update /
   row lock / transaction / optimistic concurrency — that's the TOCTOU defense.
-- **"How do you isolate tenants in a shared DB?"** Scope every query by an authenticated
+- "How do you isolate tenants in a shared DB?" Scope every query by an authenticated
   `tenant_id`, ideally enforced by RLS or an un-bypassable query layer; never trust a
   client-supplied tenant id.
-- **"What is principle of least privilege and how do you apply it to a service?"** Minimum
+- "What is principle of least privilege and how do you apply it to a service?" Minimum
   rights for minimum time: scoped tokens, per-service DB users, JIT elevation, no wildcard
   grants — to shrink blast radius.
-- **"Object vs function vs property level — walk the three."** BOLA/API1 = wrong object
+- "Object vs function vs property level — walk the three." BOLA/API1 = wrong object
   (horizontal); BFLA/API5 = wrong function (vertical); BOPLA/API3 = wrong property (excessive
   data exposure on read + mass assignment on write). A request can pass the first two and still
   read/write a forbidden field.
-- **"A valid JWT with `scope: invoices:read` requests `/invoices/999` — what checks remain?"**
+- "A valid JWT with `scope: invoices:read` requests `/invoices/999` — what checks remain?"
   Scope is the app's delegated consent, not object ownership; the server must still verify this
   user may read invoice 999 (object-level authZ). Token = who, not which.
-- **"Build 'log in as user' for support staff safely."** Delegation (RFC 8693) with the agent
+- "Build 'log in as user' for support staff safely." Delegation (RFC 8693) with the agent
   identity preserved in `act`, gated by `may_act`/an allowlist, scoped, time-boxed, and
   immutably audited — never silent impersonation that erases the agent.
-- **"Access control passes at the proxy but the attacker still hits `/admin` — name bypasses."**
+- "Access control passes at the proxy but the attacker still hits `/admin` — name bypasses."
   `X-Original-URL`/`X-Rewrite-URL` header override, HTTP verb tampering, and
   path-normalization/case/suffix discrepancies. Fix: normalize then authorize, in the handler,
   for every method.
-- **"RBAC has 4,000 roles — what happened and what do you migrate to?"** Role explosion from
+- "RBAC has 4,000 roles — what happened and what do you migrate to?" Role explosion from
   encoding context into role names; migrate the contextual dimensions to ABAC attributes or a
   ReBAC relationship graph.
-- **"Which XACML combining algorithm for a deny-by-default PDP?"** deny-overrides — a single
+- "Which XACML combining algorithm for a deny-by-default PDP?" deny-overrides — a single
   deny wins. permit-overrides fails open.
-- **"SSD vs DSD?"** Static SoD forbids ever *assigning* conflicting roles; dynamic SoD allows
+- "SSD vs DSD?" Static SoD forbids ever *assigning* conflicting roles; dynamic SoD allows
   assignment but forbids *activating* both in the same session (maker-checker).
-- **"ACL vs capability?"** ACL stores permissions on the object and checks ambient identity
+- "ACL vs capability?" ACL stores permissions on the object and checks ambient identity
   (easy audit/revocation, but carries ambient authority → confused deputy); capabilities are
   unforgeable handles the caller presents (no ambient authority, but hard to revoke/enumerate).
 

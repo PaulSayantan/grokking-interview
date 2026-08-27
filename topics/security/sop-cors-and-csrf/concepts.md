@@ -725,52 +725,52 @@ Two nuances round out cookie-based CSRF defense:
 
 ## Common follow-up questions
 
-- **"What exactly defines an origin, and how does it differ from a site?"** Origin =
+- "What exactly defines an origin, and how does it differ from a site?" Origin =
   (scheme, host, port) exact match; site = registrable domain (eTLD+1), ignoring subdomain
   and port. SameSite cookies use *site*; SOP uses *origin*.
-- **"If SOP blocks cross-origin reads, why does CSRF work?"** Because SOP blocks reading the
+- "If SOP blocks cross-origin reads, why does CSRF work?" Because SOP blocks reading the
   *response*, not sending the *request*; the state change happens before/independent of the
   read.
-- **"Why does `Content-Type: application/json` trigger a preflight but a form POST not?"**
+- "Why does `Content-Type: application/json` trigger a preflight but a form POST not?"
   JSON isn't a CORS-safelisted content type; only `x-www-form-urlencoded`, `multipart/
   form-data`, and `text/plain` avoid preflight.
-- **"Is `Access-Control-Allow-Origin: *` with `Allow-Credentials: true` allowed?"** No —
+- "Is `Access-Control-Allow-Origin: *` with `Allow-Credentials: true` allowed?" No —
   browsers block wildcard + credentials. Attackers get around it by *reflecting* the origin
   with an allowlist bug.
-- **"Why must you add `Vary: Origin` when reflecting origins?"** So shared caches don't serve
+- "Why must you add `Vary: Origin` when reflecting origins?" So shared caches don't serve
   one origin's ACAO response to another origin.
-- **"Does putting the CSRF token in a cookie protect me?"** Only if double-submit is done
+- "Does putting the CSRF token in a cookie protect me?" Only if double-submit is done
   **with HMAC + session binding**; naive same-value double-submit is bypassable via cookie
   injection from a subdomain.
-- **"Why does requiring a custom header defend against CSRF?"** Custom headers force a CORS
+- "Why does requiring a custom header defend against CSRF?" Custom headers force a CORS
   preflight cross-origin, which the attacker's origin can't get approved — and forms can't
   set custom headers.
-- **"How is clickjacking different from CSRF, and what stops it?"** Clickjacking uses the
+- "How is clickjacking different from CSRF, and what stops it?" Clickjacking uses the
   victim's real clicks on a framed real page (defeating tokens); stop it with CSP
   `frame-ancestors` / `X-Frame-Options`.
-- **"Are bearer-token (Authorization header) APIs vulnerable to CSRF?"** Not to classic
+- "Are bearer-token (Authorization header) APIs vulnerable to CSRF?" Not to classic
   cookie CSRF, because the token isn't auto-attached by the browser — the app must add it
   explicitly. Cookie/Basic-auth sessions (and **JWT-in-cookie**) are the vulnerable case.
-- **"How do two windows on different origins communicate safely?"** `postMessage` with an
+- "How do two windows on different origins communicate safely?" `postMessage` with an
   explicit `targetOrigin` on send and an **exact** `event.origin` check on receive; never
   `"*"`, never a substring check, never sink `event.data` into an HTML/JS sink.
-- **"How do two subdomains share the DOM today?"** Not `document.domain` (deprecated, widens
+- "How do two subdomains share the DOM today?" Not `document.domain` (deprecated, widens
   trust to eTLD+1 and nulls the port; disabled by `Origin-Agent-Cluster`/COOP+COEP) — use
   `postMessage`.
-- **"A chat app authenticates its WebSocket handshake with cookies only — what's the risk?"**
+- "A chat app authenticates its WebSocket handshake with cookies only — what's the risk?"
   Cross-Site WebSocket Hijacking (CSWSH): an attacker page opens the socket cross-site with
   the victim's cookies and gets bidirectional read/write. Fix: server-side `Origin` check +
   CSRF ticket + `SameSite`.
-- **"A public site can reach `http://localhost:PORT` — what stops it now?"** Private Network
+- "A public site can reach `http://localhost:PORT` — what stops it now?" Private Network
   Access preflight (`Access-Control-Request/Allow-Private-Network`) plus `Host`-header
   validation; the same class of fix mitigates DNS rebinding.
-- **"`SameSite=Strict` everywhere — are we CSRF-immune?"** No — sibling-subdomain requests, a
+- "`SameSite=Strict` everywhere — are we CSRF-immune?" No — sibling-subdomain requests, a
   client-side (DOM) open-redirect gadget that re-issues a same-site request, and client-side
   CSRF all survive; still need a token/Origin check.
-- **"Our API only accepts JSON, so no CSRF?"** Only if you *enforce* the Content-Type — an
+- "Our API only accepts JSON, so no CSRF?" Only if you *enforce* the Content-Type — an
   attacker sends the JSON body as `text/plain` (a safelisted type, no preflight); GraphQL
   over GET/`text/plain` is the same trap.
-- **"Why `__Host-` over `__Secure-` for CSRF/session cookies?"** `__Host-` forbids `Domain`
+- "Why `__Host-` over `__Secure-` for CSRF/session cookies?" `__Host-` forbids `Domain`
   and requires `Path=/`, pinning the cookie to the exact host so a sibling subdomain can't
   overwrite it (hardens double-submit against cookie injection).
 

@@ -581,28 +581,28 @@ streaming borrows the REST `/v1 → /v2` parallel-run trick:
 
 ## Common follow-up questions
 
-- **"JSON vs Avro vs Protobuf — when each?"** JSON for public/external APIs and
+- "JSON vs Avro vs Protobuf — when each?" JSON for public/external APIs and
   low-volume human-facing data; Protobuf for gRPC/service RPC (schema compiled into
   both sides, tags in the bytes); Avro for high-volume Kafka streams and data lakes
   (tiny tag-free records, rich defaults, schema resolution — pairs with a registry).
-- **"What does BACKWARD compatibility actually let me do?"** Add optional/defaulted
+- "What does BACKWARD compatibility actually let me do?" Add optional/defaulted
   fields and delete fields; a new consumer can read data written by the previous
   schema. Upgrade **consumers first**.
-- **"Why must you never reuse a Protobuf field number?"** The wire format keys fields
+- "Why must you never reuse a Protobuf field number?" The wire format keys fields
   by number; a reused number makes old bytes decode as the wrong field — up to data
   corruption/PII leaks. Use `reserved`.
-- **"How does a consumer decode an Avro message it didn't produce?"** The message
+- "How does a consumer decode an Avro message it didn't produce?" The message
   carries a schema **ID**; the consumer fetches the **writer schema** from the registry
   and resolves it against its own **reader schema**.
-- **"Where does the compatibility check happen?"** At **schema registration** (produce
+- "Where does the compatibility check happen?" At **schema registration** (produce
   side / CI), not at consume time. The consumer just fetches and decodes.
-- **"How do you safely add an enum value?"** Model an `UNKNOWN`/`UNSPECIFIED` (0 in
+- "How do you safely add an enum value?" Model an `UNKNOWN`/`UNSPECIFIED` (0 in
   proto3), give Avro enums a `default` symbol, and always have a default branch —
   otherwise old strict consumers break.
-- **"Transitive vs non-transitive — why care?"** If consumers can see very old data
+- "Transitive vs non-transitive — why care?" If consumers can see very old data
   (topic replay, compaction), you need a **transitive** mode so the new schema is
   checked against *all* history, not just the latest version.
-- **"Why did proto3 drop `required`?"** A required field can never be safely
+- "Why did proto3 drop `required`?" A required field can never be safely
   added/removed, permanently breaking cross-version parsing — a well-known footgun.
 
 ## References

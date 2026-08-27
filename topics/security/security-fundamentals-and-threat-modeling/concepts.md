@@ -864,58 +864,58 @@ adversary is commodity crimeware is as wrong as the reverse.
 
 ## Common follow-up questions
 
-- **"Which is more important, C, I, or A?"** — It depends on the asset: a public news site
+- "Which is more important, C, I, or A?" — It depends on the asset: a public news site
   prioritizes availability and integrity over confidentiality; a health record system
   prioritizes confidentiality; a financial ledger prioritizes integrity. Security is choosing
   the balance the asset requires.
-- **"Authentication vs authorization — one-liner?"** — AuthN proves *who you are*; AuthZ
+- "Authentication vs authorization — one-liner?" — AuthN proves *who you are*; AuthZ
   decides *what you may do*. AuthN happens once (per session); AuthZ is checked on every
   action.
-- **"Does an HMAC give non-repudiation?"** — No. Both parties share the key, so either could
+- "Does an HMAC give non-repudiation?" — No. Both parties share the key, so either could
   have produced the tag. Non-repudiation needs an asymmetric *digital signature*.
-- **"STRIDE vs DREAD?"** — STRIDE *finds* threats (categorization/enumeration); DREAD *rates*
+- "STRIDE vs DREAD?" — STRIDE *finds* threats (categorization/enumeration); DREAD *rates*
   their severity. STRIDE is current; DREAD is largely deprecated in favor of CVSS.
-- **"STRIDE vs PASTA?"** — STRIDE is system-centric, lightweight, developer-run; PASTA is
+- "STRIDE vs PASTA?" — STRIDE is system-centric, lightweight, developer-run; PASTA is
   risk/attacker-centric, business-aligned, seven-stage and heavier.
-- **"Is a CVSS 9.8 always the first thing to patch?"** — No. CVSS Base is *severity*, not
+- "Is a CVSS 9.8 always the first thing to patch?" — No. CVSS Base is *severity*, not
   *risk*. Prioritize by exposure + EPSS (exploit probability) + CISA KEV (known exploited) +
   business impact. A patched 9.8 nobody can reach may wait; a 7.5 on the KEV list won't.
-- **"What's the difference between a vulnerability and a risk?"** — A vulnerability is a
+- "What's the difference between a vulnerability and a risk?" — A vulnerability is a
   weakness; risk is the *expected loss* (likelihood × impact) when a threat can exploit that
   weakness against a valuable asset. No threat/asset ⇒ little risk.
-- **"How do you threat model in 30 seconds?"** — Answer Shostack's four questions: what are we
+- "How do you threat model in 30 seconds?" — Answer Shostack's four questions: what are we
   building (DFD + trust boundaries), what can go wrong (STRIDE per element), what do we do
   about it (mitigate/eliminate/transfer/accept), did we do a good job (validate & iterate).
-- **"Fail-open or fail-closed?"** — For security controls, fail-*closed* (deny by default).
+- "Fail-open or fail-closed?" — For security controls, fail-*closed* (deny by default).
   The exception is life-safety systems, where "safe" may mean fail-open (unlock doors in a
   fire).
-- **"What is zero trust — is the internal network trusted?"** — No implicit trust based on
+- "What is zero trust — is the internal network trusted?" — No implicit trust based on
   network location; authenticate/authorize every request, per session, using dynamic context.
   Assume breach and micro-segment.
-- **"STRIDE vs LINDDUN?"** — STRIDE finds security threats; LINDDUN finds *privacy* threats
+- "STRIDE vs LINDDUN?" — STRIDE finds security threats; LINDDUN finds *privacy* threats
   (Linking, Identifying, Non-repudiation, Detecting, Data disclosure, Unawareness,
   Non-compliance). Note the inversion: non-repudiation is *desired* in STRIDE but is a *threat*
   in LINDDUN.
-- **"Kill chain vs ATT&CK?"** — Kill chain = linear phases, perimeter/malware-centric, weak on
+- "Kill chain vs ATT&CK?" — Kill chain = linear phases, perimeter/malware-centric, weak on
   insiders and lateral movement; ATT&CK = a non-linear TTP matrix with deep post-compromise
   coverage. Diamond Model links events across a campaign.
-- **"Quantify risk for the CFO — heat map or something better?"** — FAIR: Risk = LEF × LM with
+- "Quantify risk for the CFO — heat map or something better?" — FAIR: Risk = LEF × LM with
   input distributions and Monte Carlo, giving a loss-exceedance curve, not a single ALE or a
   subjective "High." Two "High" cells can differ 100× in expected loss.
-- **"How do you threat model 200 microservices?"** — Threat-modeling-as-code (pytm/Threagile in
+- "How do you threat model 200 microservices?" — Threat-modeling-as-code (pytm/Threagile in
   CI) + reusable component libraries + VAST's application vs operational split — not per-service
   whiteboards.
-- **"CWE vs CVE?"** — CWE is the weakness *class* (CWE-89 SQLi); CVE is a specific *instance* in a
+- "CWE vs CVE?" — CWE is the weakness *class* (CWE-89 SQLi); CVE is a specific *instance* in a
   product. CAPEC is the attack *pattern* that exploits the CWE.
-- **"Is defense-in-depth one of Saltzer & Schroeder's principles?"** — No. Defense in depth and
+- "Is defense-in-depth one of Saltzer & Schroeder's principles?" — No. Defense in depth and
   secure defaults are later additions; the canonical eight are economy of mechanism, fail-safe
   defaults, complete mediation, open design, separation of privilege, least privilege, least
   common mechanism, and psychological acceptability (plus work factor and compromise recording
   as bonus items).
-- **"Security vs assurance?"** — Security = the properties a system has; assurance = the evidence
+- "Security vs assurance?" — Security = the properties a system has; assurance = the evidence
   that they hold. You can be secure without assurance (unprovable) or have assurance without
   security (a passed checklist over a flawed system). ASVS L1/2/3 is an assurance ladder.
-- **"What control would have caught xz-utils / Log4Shell?"** — Treat dependency ingestion as a
+- "What control would have caught xz-utils / Log4Shell?" — Treat dependency ingestion as a
   trust boundary (A06/A08): SBOM to know what you ship, SLSA L3 build isolation + signed
   provenance verification to detect in-build tampering, and dependency pinning/review.
 

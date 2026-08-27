@@ -930,27 +930,27 @@ Senior interviews probe *why suites flake*:
 
 ## Common follow-up questions
 
-- **Why is `@SpringBootTest` slow and how do you speed the suite up?** Use slice
+- Why is `@SpringBootTest` slow and how do you speed the suite up? Use slice
   tests, share configuration so contexts are cached, avoid `@DirtiesContext`, and
   minimize distinct `@MockitoBean`/property combinations (each is a new cache key).
-- **`@WebMvcTest` fails with "no qualifying bean of type OrderService" — why?**
+- `@WebMvcTest` fails with "no qualifying bean of type OrderService" — why?
   The web slice doesn't load `@Service` beans; provide the collaborator as
   `@MockitoBean`/`@MockBean`.
-- **Difference between `@Mock` and `@MockBean`?** `@Mock` is plain Mockito (no
+- Difference between `@Mock` and `@MockBean`? `@Mock` is plain Mockito (no
   context); `@MockBean`/`@MockitoBean` registers the mock as a bean, replacing the
   real one in the Spring context.
-- **Why does my `@DataJpaTest` not fail on a constraint violation?** The test
+- Why does my `@DataJpaTest` not fail on a constraint violation? The test
   transaction hasn't flushed; call `flush()`/`persistAndFlush`, or the insert is
   rolled back before commit-time checks.
-- **`TestRestTemplate` gives connection refused in a `@SpringBootTest` — fix?**
+- `TestRestTemplate` gives connection refused in a `@SpringBootTest` — fix?
   Add `webEnvironment = RANDOM_PORT` (default `MOCK` starts no real server).
-- **How do you test outbound REST calls?** `@RestClientTest` +
+- How do you test outbound REST calls? `@RestClientTest` +
   `MockRestServiceServer`, or WireMock for full HTTP fidelity.
-- **How do you get production-like DB tests?** Testcontainers with
+- How do you get production-like DB tests? Testcontainers with
   `@ServiceConnection` (Boot 3.1+) and `@AutoConfigureTestDatabase(replace = NONE)`.
-- **Do you still add `@ExtendWith(SpringExtension.class)`?** No — Boot's test
+- Do you still add `@ExtendWith(SpringExtension.class)`? No — Boot's test
   annotations already include it.
-- **`@Mock` vs `@SpyBean`?** A mock replaces all behavior; a spy runs the real
+- `@Mock` vs `@SpyBean`? A mock replaces all behavior; a spy runs the real
   bean's methods unless stubbed, and is registered in the context (`@SpyBean`/`@MockitoSpyBean`).
 
 ---

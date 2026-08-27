@@ -538,36 +538,36 @@ per-message acknowledgement and low operational footprint.
 
 ## Common follow-up questions
 
-- **"Why is ordering only per-partition, and how do you get total order?"** Because each
+- "Why is ordering only per-partition, and how do you get total order?" Because each
   partition is an independent log; total order requires a single partition (which caps
   throughput) or ordering only within a key by routing that key to one partition.
-- **"acks=all guarantees no data loss — true or false?"** Not alone. You also need
+- "acks=all guarantees no data loss — true or false?" Not alone. You also need
   `min.insync.replicas >= 2` and RF ≥ 3; otherwise "all in-sync replicas" could be just the
   leader.
-- **"Default delivery semantic?"** At-least-once (process then commit) — design idempotent
+- "Default delivery semantic?" At-least-once (process then commit) — design idempotent
   consumers.
-- **"Idempotent producer vs transactions?"** Idempotent producer removes duplicate writes
+- "Idempotent producer vs transactions?" Idempotent producer removes duplicate writes
   to one partition within a session; transactions add atomic multi-partition writes plus
   atomic offset commit for true exactly-once processing (with `read_committed` consumers).
-- **"What breaks exactly-once?"** A side effect to an external non-transactional system;
+- "What breaks exactly-once?" A side effect to an external non-transactional system;
   it's only exactly-once within Kafka.
-- **"Consumers outnumber partitions — what happens?"** Extra consumers idle; parallelism is
+- "Consumers outnumber partitions — what happens?" Extra consumers idle; parallelism is
   capped by partition count.
-- **"How do you know consumers are keeping up?"** Watch consumer lag =
+- "How do you know consumers are keeping up?" Watch consumer lag =
   `log-end-offset − committed-offset` per partition (`kafka-consumer-groups --describe`,
   Burrow, JMX `records-lag-max`); rising lag = falling behind, scale partitions + consumers.
-- **"What do you do with a record that always fails to process?"** Kafka has no native DLQ;
+- "What do you do with a record that always fails to process?" Kafka has no native DLQ;
   a poison pill blocks the partition since offsets advance in order. Build a DLQ topic +
   skip-and-commit, retry topics with backoff, or error-handling deserializers.
-- **"How does exactly-once stop a zombie/duplicated producer?"** A fixed `transactional.id`
+- "How does exactly-once stop a zombie/duplicated producer?" A fixed `transactional.id`
   gets an incrementing epoch on `initTransactions`; a resurrected producer with a stale
   epoch is fenced (`ProducerFencedException`) — one active writer per id.
-- **"Why is Kafka fast?"** Sequential writes, page cache, zero-copy `sendfile`, batching +
+- "Why is Kafka fast?" Sequential writes, page cache, zero-copy `sendfile`, batching +
   compression — not per-message cleverness.
-- **"What is unclean leader election and when would you enable it?"** Electing an
+- "What is unclean leader election and when would you enable it?" Electing an
   out-of-sync replica as leader to restore availability at the cost of losing unreplicated
   records; enable only when availability beats durability.
-- **"What replaced ZooKeeper?"** KRaft (Raft-based controller quorum, metadata as an
+- "What replaced ZooKeeper?" KRaft (Raft-based controller quorum, metadata as an
   internal log); ZooKeeper removed in Kafka 4.0.
 
 ## References

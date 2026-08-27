@@ -482,27 +482,27 @@ Prefer **actionable metrics** tied to SLIs and user experience — error *ratio*
 
 ## Common follow-up questions
 
-- **Does Grafana store your metrics?** No. It queries data sources and renders results; its
+- Does Grafana store your metrics? No. It queries data sources and renders results; its
   own DB holds dashboards, users, data-source configs, and alert rules — not time series.
-- **How do you make one dashboard serve many services/environments?** Query template
+- How do you make one dashboard serve many services/environments? Query template
   variable `label_values(..., service)` + a data-source variable, interpolated into every
   query (`service=~"$service"`), and provision the JSON as code.
-- **Why `$__rate_interval` instead of `[5m]`?** It auto-sizes the rate window to ≥ 4× the
+- Why `$__rate_interval` instead of `[5m]`? It auto-sizes the rate window to ≥ 4× the
   scrape interval as you zoom, avoiding gaps/NaN in `rate()`.
-- **How do you jump from a latency spike to the actual slow request?** Exemplars: the
+- How do you jump from a latency spike to the actual slow request? Exemplars: the
   histogram sample carries a trace ID; click the exemplar to open the trace in Tempo/Jaeger.
-- **How is Grafana Unified Alerting different from Alertmanager?** Grafana-managed rules are
+- How is Grafana Unified Alerting different from Alertmanager? Grafana-managed rules are
   evaluated by Grafana over *any* data source and notified via an *embedded* Alertmanager
   (contact points + notification policies). Standalone Alertmanager only handles
   Prometheus-model alerts fired by the Prometheus/Mimir ruler; Grafana can also route to an
   external Alertmanager.
-- **Mixed data source — what is it?** A special panel data source where each query targets a
+- Mixed data source — what is it? A special panel data source where each query targets a
   different backend; frames are aligned on the shared time axis at render.
-- **Why prefer a heatmap over an average latency line?** Averages hide tail latency and
+- Why prefer a heatmap over an average latency line? Averages hide tail latency and
   bimodal distributions; a heatmap of histogram buckets exposes both.
-- **How do you version/review dashboards?** Dashboards-as-code: export the JSON model,
+- How do you version/review dashboards? Dashboards-as-code: export the JSON model,
   provision via files or Terraform/Grizzly, review in git — no click-ops drift.
-- **What's a vanity metric and why avoid it on an on-call dashboard?** A metric that looks
+- What's a vanity metric and why avoid it on an on-call dashboard? A metric that looks
   impressive but drives no decision (lifetime totals); it crowds out actionable SLI/RED
   signals.
 

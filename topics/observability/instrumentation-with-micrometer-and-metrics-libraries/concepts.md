@@ -537,24 +537,24 @@ query and storage side.
 
 ## Common follow-up questions
 
-- **"Counter vs Gauge — when do you use each?"** Counter for cumulative event counts you'll turn
+- "Counter vs Gauge — when do you use each?" Counter for cumulative event counts you'll turn
   into a rate; Gauge for an instantaneous value that rises and falls (queue depth, connections).
-- **"Why can't I average p99 across my pods?"** Percentiles aren't additive. Averaging pre-computed
+- "Why can't I average p99 across my pods?" Percentiles aren't additive. Averaging pre-computed
   quantiles is statistically invalid — use server-side histogram buckets and `histogram_quantile`
   over summed buckets.
-- **"My Prometheus fell over — what's the likely metrics cause?"** High cardinality: a tag with an
+- "My Prometheus fell over — what's the likely metrics cause?" High cardinality: a tag with an
   unbounded value (user id, raw URL, request id) multiplying series count. Template URLs, normalize
   values, apply a `MeterFilter`.
-- **"Timer vs LongTaskTimer?"** Timer records after completion; LongTaskTimer reports duration of
+- "Timer vs LongTaskTimer?" Timer records after completion; LongTaskTimer reports duration of
   tasks *still running* — needed to alert on a stuck long job.
-- **"Why is my metric named with `_seconds`/`_total` in Prometheus but not in my code?"** The
+- "Why is my metric named with `_seconds`/`_total` in Prometheus but not in my code?" The
   Prometheus `NamingConvention` adds base-unit and type suffixes; base time unit is seconds.
-- **"@Timed isn't recording anything."** You forgot the `TimedAspect` bean, or the call is a
+- "@Timed isn't recording anything." You forgot the `TimedAspect` bean, or the call is a
   self-invocation that bypasses the proxy.
-- **"How does Micrometer relate to OpenTelemetry?"** Micrometer can publish via an OTLP registry,
+- "How does Micrometer relate to OpenTelemetry?" Micrometer can publish via an OTLP registry,
   and its Observation API unifies metrics + tracing; OTel is the broader vendor-neutral telemetry
   standard covered in its own topic.
-- **"What's a MeterBinder?"** A reusable bundle of related meters (JVM, GC, pools, caches) bound to
+- "What's a MeterBinder?" A reusable bundle of related meters (JVM, GC, pools, caches) bound to
   a registry — Micrometer's auto-instrumentation mechanism.
 
 ## References

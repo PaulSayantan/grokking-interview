@@ -471,32 +471,32 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **"How do applications send traces to Jaeger today?"** OTLP (gRPC 4317 / HTTP
+- "How do applications send traces to Jaeger today?" OTLP (gRPC 4317 / HTTP
   4318) from the OpenTelemetry SDK. The old Jaeger Thrift/UDP agent path is
   superseded by running the OpenTelemetry Collector.
-- **"Cassandra or Elasticsearch for Jaeger storage?"** Cassandra for raw write
+- "Cassandra or Elasticsearch for Jaeger storage?" Cassandra for raw write
   throughput and predictable scaling; Elasticsearch/OpenSearch for flexible tag
   search and aggregation at higher operational cost.
-- **"You can't find the trace for a failed request — why?"** Almost always
+- "You can't find the trace for a failed request — why?" Almost always
   head-based sampling dropped it. Use tail-based sampling to reliably keep errors
   and slow traces.
-- **"The biggest span in the trace is 800 ms — is that the bottleneck?"** Only if
+- "The biggest span in the trace is 800 ms — is that the bottleneck?" Only if
   it's on the critical path and the parent was blocked on it. Check self-time vs
   children and whether it ran in parallel.
-- **"Duration vs self-time?"** Duration is total wall-clock; self-time is
+- "Duration vs self-time?" Duration is total wall-clock; self-time is
   duration minus children — the time in this span's own code. High self-time on
   the critical path = the span that owns the latency.
-- **"How does Jaeger build the service dependency graph?"** By aggregating
+- "How does Jaeger build the service dependency graph?" By aggregating
   CLIENT→SERVER span edges across (sampled) traces; historically a Spark/Flink
   job over storage.
-- **"What is SPM?"** RED metrics derived from spans via the Span Metrics
+- "What is SPM?" RED metrics derived from spans via the Span Metrics
   connector, exposed to Prometheus — request rate, error rate, latency per
   service/operation.
-- **"How do you get from a metric spike to the offending log line?"** Exemplar on
+- "How do you get from a metric spike to the offending log line?" Exemplar on
   the metric → trace → trace_id in structured logs. The trace ID is the join key.
-- **"What's a big gap with no child span?"** Unaccounted time: queueing, GC,
+- "What's a big gap with no child span?" Unaccounted time: queueing, GC,
   network, or missing instrumentation — often the last. Add a span.
-- **"What is Jaeger v2 architecturally?"** A customized distribution of the
+- "What is Jaeger v2 architecturally?" A customized distribution of the
   OpenTelemetry Collector, configured into collector/query/ingester roles.
 
 ---

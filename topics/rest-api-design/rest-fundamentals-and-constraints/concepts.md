@@ -865,29 +865,29 @@ the client's security surface, which is why the constraint stays optional.
 
 ## Common follow-up questions
 
-- **"Name Fielding's six constraints and which is optional."** Client-server, stateless,
+- "Name Fielding's six constraints and which is optional." Client-server, stateless,
   cacheable, uniform interface, layered system, code-on-demand — the last is optional.
-- **"What does statelessness actually forbid?"** Server-side *session/conversation*
+- "What does statelessness actually forbid?" Server-side *session/conversation*
   state between requests; each request must be self-contained. Resource state in a DB
   is fine.
-- **"Why is statelessness good for scaling?"** Any server can serve any request → no
+- "Why is statelessness good for scaling?" Any server can serve any request → no
   sticky sessions → trivial horizontal scaling, load balancing, and failover.
-- **"What are the four sub-constraints of the uniform interface?"** Resource
+- "What are the four sub-constraints of the uniform interface?" Resource
   identification via URIs; manipulation through representations; self-descriptive
   messages; HATEOAS.
-- **"Is a JSON-over-HTTP API automatically RESTful?"** No — it's usually RMM level 2 and
+- "Is a JSON-over-HTTP API automatically RESTful?" No — it's usually RMM level 2 and
   typically lacks hypermedia; and RESTfulness is about constraints, not the format.
-- **"REST vs RPC — when would you pick RPC?"** For tightly-coupled, high-throughput
+- "REST vs RPC — when would you pick RPC?" For tightly-coupled, high-throughput
   internal service calls where a tailored, efficient action-oriented contract (e.g.
   gRPC) beats a uniform interface; REST for broad, cacheable, evolvable, public APIs.
-- **"What does the Richardson Maturity Model add?"** A shared vocabulary (levels 0–3)
+- "What does the Richardson Maturity Model add?" A shared vocabulary (levels 0–3)
   for how thoroughly an API adopts resources, verbs, and hypermedia.
-- **"Resource vs representation?"** The resource is the named abstract thing (URI); the
+- "Resource vs representation?" The resource is the named abstract thing (URI); the
   representation is a concrete serialized snapshot in some media type. Clients exchange
   representations.
-- **"Which constraint enables API gateways and CDNs?"** Layered system (with
+- "Which constraint enables API gateways and CDNs?" Layered system (with
   statelessness making the layering transparent).
-- **"Why is the uniform interface a trade-off?"** It sacrifices per-application
+- "Why is the uniform interface a trade-off?" It sacrifices per-application
   efficiency (standardized rather than tailored payloads) to buy generality,
   decoupling, and evolvability.
 

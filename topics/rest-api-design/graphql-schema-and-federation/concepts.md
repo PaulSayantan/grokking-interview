@@ -508,25 +508,25 @@ Prefer REST (or gRPC) when:
 
 ## Common follow-up questions
 
-- **"Why is GraphQL hard to cache and how do you cope?"** Single `POST` endpoint bypasses
+- "Why is GraphQL hard to cache and how do you cope?" Single `POST` endpoint bypasses
   HTTP caching; cope with client normalized caches, persisted queries/APQ (enabling `GET` +
   CDN), and auth-scoped response caches keyed on (query hash, variables, scope).
-- **"What is the N+1 problem and how does DataLoader fix it?"** Per-field resolvers fire
+- "What is the N+1 problem and how does DataLoader fix it?" Per-field resolvers fire
   once per parent object → N+1 queries; DataLoader batches `.load` calls in one tick into a
   single `IN (…)` query and memoizes per request.
-- **"Errors as data or top-level errors?"** Expected/domain errors → typed in the schema
+- "Errors as data or top-level errors?" Expected/domain errors → typed in the schema
   (union/payload `userErrors`); unexpected faults → top-level `errors` array with
   `extensions.code`.
-- **"How do you stop a client from DoSing your GraphQL API?"** Depth limit + complexity/cost
+- "How do you stop a client from DoSing your GraphQL API?" Depth limit + complexity/cost
   analysis + `first`/`last` caps + timeouts + persisted-query allowlist; rate-limit by cost,
   not request count.
-- **"Should nullability default to non-null?"** No — keep downstream-dependent fields
+- "Should nullability default to non-null?" No — keep downstream-dependent fields
   nullable so partial failures degrade gracefully; reserve `!` for IDs and invariants.
-- **"Federation vs stitching?"** Federation is declarative (`@key`, router plans);
+- "Federation vs stitching?" Federation is declarative (`@key`, router plans);
   stitching centralizes join config in the gateway — federation scales org-wise better.
-- **"How do mutations differ from queries in execution?"** Top-level mutation fields run
+- "How do mutations differ from queries in execution?" Top-level mutation fields run
   **serially in order**; query fields run in parallel.
-- **"How do clients handle polymorphism?"** Inline fragments (`... on Type`) plus
+- "How do clients handle polymorphism?" Inline fragments (`... on Type`) plus
   `__typename` on interfaces/unions.
 
 ## References

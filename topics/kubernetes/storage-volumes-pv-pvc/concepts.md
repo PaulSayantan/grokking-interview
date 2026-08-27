@@ -639,23 +639,23 @@ Choosing storage for a stateful app is a chain of decisions:
 
 ## Common follow-up questions
 
-- **"Deployment vs StatefulSet for a database — why?"** A Deployment shares one pod template
+- "Deployment vs StatefulSet for a database — why?" A Deployment shares one pod template
   and (for RWO storage) can't give each replica its own disk; pods on other nodes hit
   Multi-Attach errors. StatefulSets give stable network identity + per-pod PVCs via
   `volumeClaimTemplates`. See `pods-workload-controllers`.
-- **"Why is my PVC stuck Pending?"** No matching static PV *and* no StorageClass (or class
+- "Why is my PVC stuck Pending?" No matching static PV *and* no StorageClass (or class
   can't provision); or `WaitForFirstConsumer` waiting for a pod; or an impossible request
   (RWX from a block driver, capacity too large). `kubectl describe pvc` shows events.
-- **"Difference between `emptyDir` and a PVC?"** `emptyDir` lives and dies with the pod; a PVC
+- "Difference between `emptyDir` and a PVC?" `emptyDir` lives and dies with the pod; a PVC
   is an independent object whose data survives pod deletion and rescheduling.
-- **"What actually happens when I delete a PVC?"** Reclaim policy decides: `Delete` destroys
+- "What actually happens when I delete a PVC?" Reclaim policy decides: `Delete` destroys
   the backing disk; `Retain` keeps it (PV → `Released`). In-use protection delays deletion
   until no pod mounts it.
-- **"Can two pods share one PVC?"** Only if the access mode allows it — RWX for cross-node,
+- "Can two pods share one PVC?" Only if the access mode allows it — RWX for cross-node,
   RWO for same-node; `ReadWriteOncePod` explicitly forbids sharing.
-- **"How do I resize a volume live?"** `allowVolumeExpansion: true` + patch the PVC bigger;
+- "How do I resize a volume live?" `allowVolumeExpansion: true` + patch the PVC bigger;
   grow-only, driver-dependent online support.
-- **"CSI vs in-tree?"** CSI is the out-of-tree standard; in-tree cloud plugins are removed and
+- "CSI vs in-tree?" CSI is the out-of-tree standard; in-tree cloud plugins are removed and
   migrated to CSI drivers transparently.
 
 ---

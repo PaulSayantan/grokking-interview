@@ -338,14 +338,14 @@ Key reading: definitions exist only from phase B onward and can still change thr
 
 ## Common follow-up questions
 
-- **Are `@Component`, `@Service`, and `@Repository` interchangeable?** For bean registration, essentially yes — but `@Repository` adds exception translation, `@Controller` is needed for MVC handler mapping, and the specific stereotype documents intent and enables layer-specific AOP/pointcuts.
-- **What is the default bean name for a scanned component?** The uncapitalized simple class name (`OrderService` → `orderService`), via `AnnotationBeanNameGenerator`. Override with the annotation's `value`.
-- **Why does calling one `@Bean` method from another return the same instance?** Because `@Configuration` classes run in full mode: CGLIB proxies intercept inter-bean method calls and return the managed singleton.
-- **What does `proxyBeanMethods = false` do?** Switches the config class to lite mode (no CGLIB proxy) for faster startup; only safe when you never call one `@Bean` method from another.
-- **How do you register a bean for a class you can't annotate?** Declare a `@Bean` method for it in a `@Configuration` class (or an XML `<bean>`).
-- **Difference between `<context:annotation-config/>` and `<context:component-scan>`?** annotation-config only wires annotations on already-registered beans; component-scan also detects and registers classes and implies annotation-config.
-- **Can you create your own stereotype?** Yes — meta-annotate a custom annotation with `@Component` (or a stereotype) and it becomes scannable; add `@Scope`, `@Primary`, etc. as needed.
-- **Why doesn't a plain `@Component` with `@RequestMapping` get mapped by MVC?** MVC's `RequestMappingHandlerMapping` looks for `@Controller` (or `@RequestMapping` at type level with the controller stereotype); a generic component is not treated as a handler.
+- Are `@Component`, `@Service`, and `@Repository` interchangeable? For bean registration, essentially yes — but `@Repository` adds exception translation, `@Controller` is needed for MVC handler mapping, and the specific stereotype documents intent and enables layer-specific AOP/pointcuts.
+- What is the default bean name for a scanned component? The uncapitalized simple class name (`OrderService` → `orderService`), via `AnnotationBeanNameGenerator`. Override with the annotation's `value`.
+- Why does calling one `@Bean` method from another return the same instance? Because `@Configuration` classes run in full mode: CGLIB proxies intercept inter-bean method calls and return the managed singleton.
+- What does `proxyBeanMethods = false` do? Switches the config class to lite mode (no CGLIB proxy) for faster startup; only safe when you never call one `@Bean` method from another.
+- How do you register a bean for a class you can't annotate? Declare a `@Bean` method for it in a `@Configuration` class (or an XML `<bean>`).
+- Difference between `<context:annotation-config/>` and `<context:component-scan>`? annotation-config only wires annotations on already-registered beans; component-scan also detects and registers classes and implies annotation-config.
+- Can you create your own stereotype? Yes — meta-annotate a custom annotation with `@Component` (or a stereotype) and it becomes scannable; add `@Scope`, `@Primary`, etc. as needed.
+- Why doesn't a plain `@Component` with `@RequestMapping` get mapped by MVC? MVC's `RequestMappingHandlerMapping` looks for `@Controller` (or `@RequestMapping` at type level with the controller stereotype); a generic component is not treated as a handler.
 
 ## References
 

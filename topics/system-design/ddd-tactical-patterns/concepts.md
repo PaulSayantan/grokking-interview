@@ -656,35 +656,35 @@ business complexity** — that's where a rich model pays back its cost.
 
 ## Common follow-up questions
 
-- **"What's the difference between an entity and a value object?"** Identity + lifecycle +
+- "What's the difference between an entity and a value object?" Identity + lifecycle +
   by-id equality + mutability (entity) vs no identity + immutable + by-value equality +
   freely replaceable (value object). Prefer value objects when you only care *what* it is.
-- **"Why one transaction per aggregate?"** The aggregate is the consistency boundary; small
+- "Why one transaction per aggregate?" The aggregate is the consistency boundary; small
   single-aggregate transactions keep locks short, avoid deadlocks, allow sharding/service
   splits, and force you to decide what *must* be atomic vs what can be eventually
   consistent.
-- **"How do you keep two aggregates consistent?"** Not in one transaction — update one,
+- "How do you keep two aggregates consistent?" Not in one transaction — update one,
   raise a domain event, react in a second transaction (eventual consistency). If the second
   transaction can fail, add retries plus a compensating action (a saga). For reliable
   delivery use the transactional outbox (See also: event-driven-cqrs-saga-cdc).
-- **"Two requests modify the same aggregate at once — how is the invariant protected?"**
+- "Two requests modify the same aggregate at once — how is the invariant protected?"
   Optimistic locking: the root has a version field; save is a compare-and-set on that
   version, and the stale writer fails and retries (reloading and re-checking the invariant).
   Pessimistic (`SELECT ... FOR UPDATE`) is the higher-contention alternative at a throughput
   cost. Constant retries mean the aggregate is too big — split it.
-- **"Why reference other aggregates by id?"** Keeps aggregates small and independently
+- "Why reference other aggregates by id?" Keeps aggregates small and independently
   loadable, prevents accidental multi-aggregate transactions, and makes the model work
   across shards/services.
-- **"Repository vs DAO?"** Repository = aggregate-oriented collection illusion in the
+- "Repository vs DAO?" Repository = aggregate-oriented collection illusion in the
   ubiquitous language, one per root; DAO = table/CRUD-oriented.
-- **"Domain service vs application service?"** Domain service holds domain logic with no
+- "Domain service vs application service?" Domain service holds domain logic with no
   single aggregate owner (in the domain layer); application service is a thin orchestrator
   (transaction, load/save, dispatch) with no business rules.
-- **"What's wrong with an anemic model?"** Data and behavior are split; you pay the model's
+- "What's wrong with an anemic model?" Data and behavior are split; you pay the model's
   cost without its benefit and invariants leak into scattered services.
-- **"When would you NOT use DDD?"** Simple CRUD, prototypes, supporting/generic
+- "When would you NOT use DDD?" Simple CRUD, prototypes, supporting/generic
   subdomains — use Transaction Script/Active Record instead.
-- **"Where do invariants live?"** Inside the aggregate root, enforced at mutation, so the
+- "Where do invariants live?" Inside the aggregate root, enforced at mutation, so the
   aggregate can never be saved invalid.
 
 ## References

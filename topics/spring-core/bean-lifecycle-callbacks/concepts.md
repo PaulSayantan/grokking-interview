@@ -710,39 +710,39 @@ different beans are created and destroyed is governed by dependencies:
 
 ## Common follow-up questions
 
-- **In what order do `@PostConstruct`, `afterPropertiesSet()`, and a custom
-  `init-method` run?** `@PostConstruct` first, then `afterPropertiesSet()`, then
+- In what order do `@PostConstruct`, `afterPropertiesSet()`, and a custom
+  `init-method` run? `@PostConstruct` first, then `afterPropertiesSet()`, then
   the custom init method. Destruction mirrors this: `@PreDestroy`,
   `DisposableBean.destroy()`, then the custom destroy method.
 
-- **Why doesn't my prototype bean's `@PreDestroy` run?** Because the container
+- Why doesn't my prototype bean's `@PreDestroy` run? Because the container
   does not manage prototype destruction — it forgets the instance after handing
   it out. You must clean up prototypes yourself.
 
-- **What's the difference between `BeanPostProcessor` and
-  `BeanFactoryPostProcessor`?** The former works on bean *instances* during
+- What's the difference between `BeanPostProcessor` and
+  `BeanFactoryPostProcessor`? The former works on bean *instances* during
   initialization (and can return a proxy); the latter works on bean *definitions*
   before any singleton is instantiated. Factory-processors run first.
 
-- **When are `*Aware` callbacks invoked?** After property population, before the
+- When are `*Aware` callbacks invoked? After property population, before the
   before-init `BeanPostProcessor` hooks and `@PostConstruct`. `BeanNameAware`,
   `BeanFactoryAware`, `BeanClassLoaderAware` are called directly; the
   ApplicationContext-family ones are called via `ApplicationContextAwareProcessor`.
 
-- **Can I access field-injected dependencies in the constructor?** No — field and
+- Can I access field-injected dependencies in the constructor? No — field and
   setter injection happen after instantiation. Use constructor injection or move
   the logic into `@PostConstruct`.
 
-- **Where does AOP proxying happen in the lifecycle?** In
+- Where does AOP proxying happen in the lifecycle? In
   `postProcessAfterInitialization` — the auto-proxy creator returns a proxy that
   replaces the raw bean, so callers receive the proxy.
 
-- **javax vs jakarta?** Spring Framework 6 / Spring Boot 3 use
+- javax vs jakarta? Spring Framework 6 / Spring Boot 3 use
   `jakarta.annotation.PostConstruct` / `PreDestroy`. Spring 5 and earlier use
   `javax.annotation.*`. `@PostConstruct`/`@PreDestroy` support also requires the
   Jakarta/Java annotation API on the classpath.
 
-- **What triggers singleton destruction callbacks?** Closing the context —
+- What triggers singleton destruction callbacks? Closing the context —
   `ctx.close()` or a shutdown hook via `ctx.registerShutdownHook()`. Without
   closing the context, destruction callbacks do not fire.
 

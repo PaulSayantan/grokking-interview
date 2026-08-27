@@ -939,30 +939,30 @@ bytes into a layer at all. The commands above tell you which of the two you got 
 
 ## Common follow-up questions
 
-- **"Which Dockerfile instructions create layers?"** — `RUN`, `COPY` and `ADD`, plus the base
+- "Which Dockerfile instructions create layers?" — `RUN`, `COPY` and `ADD`, plus the base
   layers `FROM` brings in. `ENV`, `WORKDIR`, `CMD`, `ENTRYPOINT`, `LABEL`, `EXPOSE`, `USER`,
   `ARG`, `VOLUME` and `HEALTHCHECK` write config fields instead.
-- **"What invalidates the build cache?"** — A changed instruction string; for `COPY`/`ADD` a
+- "What invalidates the build cache?" — A changed instruction string; for `COPY`/`ADD` a
   change in the copied files' contents or metadata, mtime excluded; a changed build argument.
   And a miss on one instruction re-runs it plus every instruction below it.
-- **"Why does my `npm install`/`pip install` re-run on every code change?"** — The source was
+- "Why does my `npm install`/`pip install` re-run on every code change?" — The source was
   copied above the install, so a code edit invalidates the install's parent layer. Copy the
   dependency manifest, install, then copy the source.
-- **"I `rm` a big file in a later `RUN` but the image is still huge — why?"** — The bytes are
+- "I `rm` a big file in a later `RUN` but the image is still huge — why?" — The bytes are
   in the earlier layer and the `rm` only wrote a whiteout in a later one. Layers are immutable,
   so delete inside the same `RUN` or use a multi-stage build.
-- **"COPY or ADD?"** — `COPY` unless you need local tar extraction, a remote or git fetch, or
+- "COPY or ADD?" — `COPY` unless you need local tar extraction, a remote or git fetch, or
   `--checksum` verification. For downloads that must not survive into the image, `RUN curl`
   with verification and cleanup in one instruction.
-- **"ARG vs ENV?"** — `ARG` exists only during the build and is not persisted; `ENV` is written
+- "ARG vs ENV?" — `ARG` exists only during the build and is not persisted; `ENV` is written
   into the image config and is visible to the running process. Secrets belong in neither.
-- **"How do you keep a package-manager download cache across builds?"** — A BuildKit cache
+- "How do you keep a package-manager download cache across builds?" — A BuildKit cache
   mount, `RUN --mount=type=cache,target=...`, which persists between builds and is not part of
   any layer.
-- **"Why pin a digest instead of a tag?"** — A tag can be moved to different contents, which
+- "Why pin a digest instead of a tag?" — A tag can be moved to different contents, which
   changes your base layers silently; a digest names exact bytes, so the build is reproducible
   and the base layer stays cached.
-- **"How do you cut build context and stabilise cache?"** — Add a `.dockerignore` covering
+- "How do you cut build context and stabilise cache?" — Add a `.dockerignore` covering
   `.git`, `node_modules`, build output and logs, so the files are never sent and never feed a
   `COPY`'s cache key.
 

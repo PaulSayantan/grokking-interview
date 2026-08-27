@@ -1028,29 +1028,29 @@ custom methods are the escape hatch, still tunneled over `POST` (occasionally
 
 ## Common follow-up questions
 
-- **"Which HTTP methods are idempotent, and why does it matter for retries?"**
+- "Which HTTP methods are idempotent, and why does it matter for retries?"
   GET, HEAD, OPTIONS, TRACE, PUT, DELETE. Idempotency lets clients/proxies
   safely auto-retry after a timeout; POST/PATCH aren't idempotent, so they need
   an `Idempotency-Key` to be retry-safe.
-- **"Difference between PUT and PATCH?"** PUT replaces the whole resource
+- "Difference between PUT and PATCH?" PUT replaces the whole resource
   (idempotent, omitted fields cleared); PATCH applies a partial change (not
   guaranteed idempotent).
-- **"When 201 vs 202?"** 201 = created and done (has `Location`); 202 = accepted
+- "When 201 vs 202?" 201 = created and done (has `Location`); 202 = accepted
   for async processing, may still fail.
-- **"401 vs 403?"** 401 = not authenticated (send `WWW-Authenticate`, can retry
+- "401 vs 403?" 401 = not authenticated (send `WWW-Authenticate`, can retry
   after auth); 403 = authenticated but not permitted.
-- **"400 vs 422?"** 400 = malformed/unparseable request; 422 = well-formed but
+- "400 vs 422?" 400 = malformed/unparseable request; 422 = well-formed but
   fails semantic/business validation.
-- **"404 vs 409?"** 404 = no such resource; 409 = conflicts with current state
+- "404 vs 409?" 404 = no such resource; 409 = conflicts with current state
   (duplicate, concurrent edit, illegal state transition).
-- **"What must a 405 include?"** An `Allow` header listing supported methods.
-- **"What must a 201 include?"** A `Location` header pointing at the new
+- "What must a 405 include?" An `Allow` header listing supported methods.
+- "What must a 201 include?" A `Location` header pointing at the new
   resource.
-- **"500 vs 503?"** 500 = unexpected bug in this service; 503 = temporary
+- "500 vs 503?" 500 = unexpected bug in this service; 503 = temporary
   unavailability, include `Retry-After`, retry-worthy.
-- **"Is DELETE idempotent even though the second call returns 404?"** Yes —
+- "Is DELETE idempotent even though the second call returns 404?" Yes —
   idempotency is about resulting server state, not the response code.
-- **"Can GET have a body?"** No defined semantics; don't design APIs that
+- "Can GET have a body?" No defined semantics; don't design APIs that
   require it — use query params or a POST search endpoint.
 
 ## References

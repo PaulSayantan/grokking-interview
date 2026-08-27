@@ -466,23 +466,23 @@ Grouped by DP family. All are canonical, frequently-asked problems that drill st
 
 ## Common follow-up questions
 
-- **"Memoization or tabulation — which and why?"** Both are `O(#states × transition)`.
+- "Memoization or tabulation — which and why?" Both are `O(#states × transition)`.
   Top-down is easier to derive and only touches reachable states; bottom-up avoids
   recursion-depth limits and enables rolling-array space optimization. Pick top-down to get
   it right, then convert if space/stack matters.
-- **"What's the time and space complexity?"** Always answer as **#states × transition cost**
+- "What's the time and space complexity?" Always answer as **#states × transition cost**
   for time, and number of retained states for space. Mention rolling-array reductions.
-- **"Can you reduce the space?"** Identify the dependency window: if `dp[i]` needs only the
+- "Can you reduce the space?" Identify the dependency window: if `dp[i]` needs only the
   previous row / last two entries, keep just those. Name the direction pitfall for 0/1 vs
   unbounded knapsack.
-- **"How do you reconstruct the actual solution, not just its value?"** Store parent
+- "How do you reconstruct the actual solution, not just its value?" Store parent
   pointers / choices, or walk the finished table backward following which transition was
   taken (e.g. in edit distance, retrace the argmin).
-- **"Why is knapsack called pseudo-polynomial?"** `O(nW)` is polynomial in the *numeric
+- "Why is knapsack called pseudo-polynomial?" `O(nW)` is polynomial in the *numeric
   value* `W`, but `W` takes `log W` bits to encode, so it is exponential in input *size*.
-- **"When is greedy enough instead of DP?"** When a local optimum is provably global (via
+- "When is greedy enough instead of DP?" When a local optimum is provably global (via
   an exchange argument). Otherwise, weighing overlapping choices needs DP.
-- **"How do you spot the state?"** The state variables are exactly the arguments your brute-
+- "How do you spot the state?" The state variables are exactly the arguments your brute-
   force recursion branches on; anything that changes across recursive calls and affects the
   answer belongs in the state key.
 

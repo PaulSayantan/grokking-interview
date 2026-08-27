@@ -380,15 +380,15 @@ Trace the cursor: the proxy calls `proceed()` → audit interceptor logs "begin"
 
 ## Common follow-up questions
 
-- **Q: In Spring AOP, what is the only kind of join point?** Method execution. Field access, constructor calls, etc. are not supported (that's AspectJ).
-- **Q: Difference between `@After` and `@AfterReturning`?** `@After` runs regardless of outcome (finally semantics); `@AfterReturning` runs only on normal return and can capture the returned value.
-- **Q: Why did my `@Transactional` / `@Cacheable` not work on an internal call?** Self-invocation — the internal call bypasses the proxy. Move the method to another bean or use `AopContext.currentProxy()`.
-- **Q: When does Spring use CGLIB instead of a JDK proxy?** When the target has no interface, or when `proxyTargetClass=true` is set. (And by default in Spring Boot.)
-- **Q: Can Spring AOP advise `private` or `final` methods?** No. `private` methods are never advised; CGLIB cannot override `final` methods or subclass `final` classes; JDK proxies only see interface methods.
-- **Q: Does `@Aspect` make a class a Spring bean?** No — you also need `@Component`/`@Bean`. And you need `@EnableAspectJAutoProxy` to activate proxying.
-- **Q: What must an `@Around` advice do?** Accept a `ProceedingJoinPoint` and call `proceed()` (unless it deliberately short-circuits); it can alter arguments, the return value, or handle exceptions.
-- **Q: How do you order multiple aspects?** Implement `Ordered` or annotate with `@Order`; lower value = higher precedence (runs first on the way in).
-- **Q: Is Spring AOP the same as AspectJ?** No. Spring AOP is proxy-based, runtime, method-execution-only; it uses AspectJ's annotations and pointcut syntax but not its weaver.
+- Q: In Spring AOP, what is the only kind of join point? Method execution. Field access, constructor calls, etc. are not supported (that's AspectJ).
+- Q: Difference between `@After` and `@AfterReturning`? `@After` runs regardless of outcome (finally semantics); `@AfterReturning` runs only on normal return and can capture the returned value.
+- Q: Why did my `@Transactional` / `@Cacheable` not work on an internal call? Self-invocation — the internal call bypasses the proxy. Move the method to another bean or use `AopContext.currentProxy()`.
+- Q: When does Spring use CGLIB instead of a JDK proxy? When the target has no interface, or when `proxyTargetClass=true` is set. (And by default in Spring Boot.)
+- Q: Can Spring AOP advise `private` or `final` methods? No. `private` methods are never advised; CGLIB cannot override `final` methods or subclass `final` classes; JDK proxies only see interface methods.
+- Q: Does `@Aspect` make a class a Spring bean? No — you also need `@Component`/`@Bean`. And you need `@EnableAspectJAutoProxy` to activate proxying.
+- Q: What must an `@Around` advice do? Accept a `ProceedingJoinPoint` and call `proceed()` (unless it deliberately short-circuits); it can alter arguments, the return value, or handle exceptions.
+- Q: How do you order multiple aspects? Implement `Ordered` or annotate with `@Order`; lower value = higher precedence (runs first on the way in).
+- Q: Is Spring AOP the same as AspectJ? No. Spring AOP is proxy-based, runtime, method-execution-only; it uses AspectJ's annotations and pointcut syntax but not its weaver.
 
 ---
 

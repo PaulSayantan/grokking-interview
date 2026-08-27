@@ -657,16 +657,16 @@ helm test web -n prod               # run resources annotated helm.sh/hook: test
 
 ## Common follow-up questions
 
-- **Where does Helm 3 store release state, and in what format?** As a Secret
+- Where does Helm 3 store release state, and in what format? As a Secret
   (`sh.helm.release.v1.<release>.v<rev>`, type `helm.sh/release.v1`) in the release namespace
   by default — a gzipped, base64-encoded blob of the release. Configurable via `HELM_DRIVER`
   (`secret`/`configmap`/`sql`).
-- **What is the difference between chart `version` and `appVersion`?** `version` is the SemVer
+- What is the difference between chart `version` and `appVersion`? `version` is the SemVer
   of the chart package (bump on any chart change); `appVersion` is the version of the
   application shipped and is informational (often used as the default image tag).
-- **How do you make an upgrade idempotent in CI?** `helm upgrade --install` (installs if
+- How do you make an upgrade idempotent in CI? `helm upgrade --install` (installs if
   absent, upgrades if present), typically with `--atomic --wait`.
-- **Why did my env-var change not take effect after `helm upgrade`?** If nothing in the Pod
+- Why did my env-var change not take effect after `helm upgrade`? If nothing in the Pod
   template changed, the Deployment isn't rolled; a common trick is a checksum annotation of
   the ConfigMap/Secret (`checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}`)
   so config changes force a rollout. *Why it works:* editing the ConfigMap changes its
@@ -676,11 +676,11 @@ helm test web -n prod               # run resources annotated helm.sh/hook: test
   pod-template hash, which it treats as a new ReplicaSet → a rolling update. A ConfigMap edit
   alone never touches the Pod template, so without this annotation the pods keep their old
   mounted/env values until they happen to restart for another reason.
-- **Can Helm merge into a list value?** No — `--set`/`-f` replace arrays wholesale; only maps
+- Can Helm merge into a list value? No — `--set`/`-f` replace arrays wholesale; only maps
   deep-merge.
-- **How do hooks differ from normal resources?** They run at lifecycle phases, are ordered by
+- How do hooks differ from normal resources? They run at lifecycle phases, are ordered by
   weight, aren't part of the tracked release, and follow their own delete policy.
-- **Argo CD / Flux and Helm?** GitOps controllers can render and apply charts (see the
+- Argo CD / Flux and Helm? GitOps controllers can render and apply charts (see the
   `gitops-continuous-delivery` topic) — often using `helm template` server-side rather than
   `helm install`, so the GitOps controller owns reconciliation.
 

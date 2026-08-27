@@ -880,36 +880,36 @@ Mental model:
 
 ## Common follow-up questions
 
-- **"Is Singleton an anti-pattern?"** Often, yes — it's global mutable state with
+- "Is Singleton an anti-pattern?" Often, yes — it's global mutable state with
   hidden dependencies that hurts testability and coupling. Prefer a **DI
   container's singleton scope**, which gives one instance without the static global
   access point.
-- **"Write a thread-safe Singleton."** Know the spectrum: eager, synchronized
+- "Write a thread-safe Singleton." Know the spectrum: eager, synchronized
   accessor, **double-checked locking with `volatile`** (and *why* `volatile` is
   required + why DCL was broken pre-Java-5), **initialization-on-demand holder
   idiom**, and **enum singleton** (why Bloch prefers it — serialization/reflection
   safety).
-- **"Factory Method vs Abstract Factory?"** One product via inheritance vs a family
+- "Factory Method vs Abstract Factory?" One product via inheritance vs a family
   of related products via composition; Abstract Factory is frequently *implemented
   with* Factory Methods.
-- **"Simple Factory vs Factory Method?"** A static `switch` (not GoF, not
+- "Simple Factory vs Factory Method?" A static `switch` (not GoF, not
   polymorphic, violates OCP) vs an overridable hook that subclasses specialize.
-- **"When Builder over a constructor?"** Many (optional) parameters, required
+- "When Builder over a constructor?" Many (optional) parameters, required
   immutability + validation, or genuine multi-step assembly — to kill the
   telescoping constructor.
-- **"Shallow vs deep copy in Prototype?"** Shallow shares nested references (bug
+- "Shallow vs deep copy in Prototype?" Shallow shares nested references (bug
   source); deep duplicates the whole graph (tricky with cycles). Prefer copy
   constructors over `Cloneable`/`clone()`.
-- **"DI vs Service Locator?"** Push (inject) vs pull (client asks a registry); DI
+- "DI vs Service Locator?" Push (inject) vs pull (client asks a registry); DI
   keeps dependencies explicit and testable — Fowler's canonical contrast.
-- **"Is DI the same as IoC?"** No — DI is *one form* of IoC (inversion of
+- "Is DI the same as IoC?" No — DI is *one form* of IoC (inversion of
   dependency construction specifically).
-- **"Object Pool vs just allocating?"** Pool only when creation is genuinely
+- "Object Pool vs just allocating?" Pool only when creation is genuinely
   expensive or the resource is scarce/bounded; for cheap objects modern GCs make
   pooling a premature optimization that adds reset/leak/starvation bugs.
-- **"Singleton vs Multiton?"** One total vs one per key; Multiton multiplies the
+- "Singleton vs Multiton?" One total vs one per key; Multiton multiplies the
   downsides and risks an unbounded-map memory leak.
-- **"How can a Singleton be broken?"** Reflection, serialization, cloning — the
+- "How can a Singleton be broken?" Reflection, serialization, cloning — the
   enum form is immune to all three.
 
 ## References

@@ -974,22 +974,22 @@ are deliberately *outside* the normal noun space and standardized so clients don
 
 ## Common follow-up questions
 
-- **"Walk me through modeling an e-commerce API's URIs."** Expect collections (`/orders`,
+- "Walk me through modeling an e-commerce API's URIs." Expect collections (`/orders`,
   `/products`), item URIs (`/orders/42`), one level of scoping (`/users/42/orders`), a flat
   canonical URI for each item, query params for filter/sort/paginate, and a couple of action
   endpoints (`/orders/42/cancel`) justified as non-CRUD exceptions.
-- **"Path or query for a required filter that's really an identity?"** If it selects *the*
+- "Path or query for a required filter that's really an identity?" If it selects *the*
   resource, it's a path segment; if it refines a collection, it's a query param.
-- **"Integer, UUID, or slug ids?"** Cover enumeration/BOLA risk of sequential ids, opacity of
+- "Integer, UUID, or slug ids?" Cover enumeration/BOLA risk of sequential ids, opacity of
   UUIDs (not an authz control), and slug mutability; typical answer = opaque immutable canonical
   id, optional decorative slug.
-- **"How do you avoid breaking clients when the model changes?"** Flat canonical URIs + links,
+- "How do you avoid breaking clients when the model changes?" Flat canonical URIs + links,
   additive change, redirects (`301`/`308`), and deliberate versioning.
-- **"Is `POST /orders/42/cancel` RESTful?"** It's a pragmatic action sub-resource; acceptable as
+- "Is `POST /orders/42/cancel` RESTful?" It's a pragmatic action sub-resource; acceptable as
   a scoped exception, keep it rare and use `POST`.
-- **"Why not `/orders/42.json`?"** Content type belongs in `Accept`/`Content-Type` negotiation,
+- "Why not `/orders/42.json`?" Content type belongs in `Accept`/`Content-Type` negotiation,
   not the path; extensions couple the URI to a format.
-- **"Trailing slash — does it matter?"** Yes; different URIs per RFC 3986. Canonicalize (usually
+- "Trailing slash — does it matter?" Yes; different URIs per RFC 3986. Canonicalize (usually
   no trailing slash) and redirect the other form.
 
 ## References

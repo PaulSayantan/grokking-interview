@@ -493,25 +493,25 @@ budgets give the *service* view. Deeper DORA treatment lives in
 
 ## Common follow-up questions
 
-- **"Why is 100% the wrong reliability target?"** Because it's unreachable (dependencies,
+- "Why is 100% the wrong reliability target?" Because it's unreachable (dependencies,
   clients, and networks fail), the marginal nines cost exponentially more than users can
   perceive (their own devices are less reliable), and a 100% target leaves zero error
   budget — no room to ship changes.
-- **"Give me the SLI/SLO/SLA in one line each."** SLI = the measurement (good/valid ratio);
+- "Give me the SLI/SLO/SLA in one line each." SLI = the measurement (good/valid ratio);
   SLO = the internal target for that measurement over a window; SLA = the external contract
   with a penalty. SLO is stricter than SLA.
-- **"How much downtime does 99.99% allow per month?"** About **4.3 minutes** (52.6 min/year).
-- **"What happens when the error budget is exhausted?"** The error-budget policy kicks in —
+- "How much downtime does 99.99% allow per month?" About **4.3 minutes** (52.6 min/year).
+- "What happens when the error budget is exhausted?" The error-budget policy kicks in —
   typically a feature freeze until the budget recovers; only reliability/P0 fixes ship.
-- **"How is SRE different from DevOps?"** DevOps is the philosophy; SRE is a specific,
+- "How is SRE different from DevOps?" DevOps is the philosophy; SRE is a specific,
   opinionated implementation (SLOs, error budgets, 50% toil cap, blameless postmortems).
-- **"What's toil and why cap it at 50%?"** Manual/repetitive/automatable work that scales
+- "What's toil and why cap it at 50%?" Manual/repetitive/automatable work that scales
   O(n); capped so reliability doesn't scale with headcount and engineers keep automating.
-- **"How do you wire error budgets into CI/CD?"** A pipeline gate queries SLO status and
+- "How do you wire error budgets into CI/CD?" A pipeline gate queries SLO status and
   blocks non-critical deploys when the budget is gone (see the GitHub Actions snippet).
-- **"SLO window: rolling vs calendar?"** Rolling (e.g. 28 days) avoids abrupt calendar
+- "SLO window: rolling vs calendar?" Rolling (e.g. 28 days) avoids abrupt calendar
   resets and reflects recent experience; calendar windows align with monthly SLA reporting.
-- **"How do dependency availabilities combine?"** Serial dependencies multiply
+- "How do dependency availabilities combine?" Serial dependencies multiply
   (`0.999^n`), so long chains cap your ceiling; use redundancy to raise it.
 
 ## References

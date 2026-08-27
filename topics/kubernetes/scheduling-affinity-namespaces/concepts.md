@@ -542,24 +542,24 @@ kubectl uncordon node-7
 
 ## Common follow-up questions
 
-- **"Requests or limits — which affects scheduling?"** Requests. Limits are runtime enforcement
+- "Requests or limits — which affects scheduling?" Requests. Limits are runtime enforcement
   (CPU throttling / OOMKill). A node can be "full" for scheduling while barely utilized.
-- **"Difference between a toleration and node affinity?"** A toleration only *permits* a Pod onto a
+- "Difference between a toleration and node affinity?" A toleration only *permits* a Pod onto a
   tainted node; it doesn't attract. Node affinity/nodeSelector *attracts*. Dedicated nodes usually
   need both.
-- **"Why is my Pod Pending?"** Insufficient requestable resources on any node, unsatisfiable
+- "Why is my Pod Pending?" Insufficient requestable resources on any node, unsatisfiable
   nodeSelector/affinity, an un-tolerated taint, a `DoNotSchedule` topology-spread violation, unbound
   PVC, or hard anti-affinity with more replicas than nodes. Read `kubectl describe pod` events.
-- **"How does preemption pick victims?"** Lowest-priority Pods on a node that, once removed, let the
+- "How does preemption pick victims?" Lowest-priority Pods on a node that, once removed, let the
   pending high-priority Pod fit; PDBs honored best-effort; victims get graceful termination.
-- **"nodeSelector vs node affinity vs pod affinity?"** nodeSelector = simple exact node-label match;
+- "nodeSelector vs node affinity vs pod affinity?" nodeSelector = simple exact node-label match;
   node affinity = expressive node-label match (hard/soft, operators); pod affinity/anti-affinity =
   placement relative to *other Pods* within a topology domain.
-- **"Is a namespace enough to isolate tenants?"** No — add RBAC + quota + NetworkPolicy for soft
+- "Is a namespace enough to isolate tenants?" No — add RBAC + quota + NetworkPolicy for soft
   tenancy; use separate/virtual clusters or sandboxes for hard tenancy.
-- **"Anti-affinity vs topology spread?"** Anti-affinity is binary and expensive; topology spread is
+- "Anti-affinity vs topology spread?" Anti-affinity is binary and expensive; topology spread is
   quantitative (`maxSkew`) and cheaper — prefer it for even distribution.
-- **"What does drain do that delete doesn't?"** Drain cordons + evicts via the Eviction API,
+- "What does drain do that delete doesn't?" Drain cordons + evicts via the Eviction API,
   respecting PDBs and skipping/handling DaemonSets; raw delete ignores PDBs and the node stays
   schedulable.
 

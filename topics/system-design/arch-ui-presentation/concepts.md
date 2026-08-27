@@ -1019,36 +1019,36 @@ what's rejected is *one giant store as the default home for every value*.
 
 ## Common follow-up questions
 
-- **"What's the actual difference between MVP and MVVM?"** Both remove logic from the
+- "What's the actual difference between MVP and MVVM?" Both remove logic from the
   View. MVP's Presenter holds a reference to the View interface and **pushes** state in
   manually; MVVM's ViewModel has **no View reference** — a binding engine syncs them
   (often two-way). MVVM needs framework binding support; MVP doesn't.
-- **"Why did the React world pick Redux over two-way binding?"** For predictable,
+- "Why did the React world pick Redux over two-way binding?" For predictable,
   debuggable, serializable state — one-way flow makes "what changed the state?" answerable
   and enables time-travel debugging; two-way binding does not.
-- **"Is server-side MVC the same as Smalltalk MVC?"** No. Classic MVC has a live
+- "Is server-side MVC the same as Smalltalk MVC?" No. Classic MVC has a live
   View↔Model Observer link; web MVC (Model 2) is per-request Front/Page Controller with a
   stateless template — no observer.
-- **"When is MVVM the wrong choice?"** On platforms without binding, or when you need
+- "When is MVVM the wrong choice?" On platforms without binding, or when you need
   fully predictable/debuggable state flow (prefer MVU/Redux), or when binding "magic"
   makes debugging and memory management too costly.
-- **"How do these relate to Clean/Hexagonal architecture?"** VIPER applies Clean layering
+- "How do these relate to Clean/Hexagonal architecture?" VIPER applies Clean layering
   per screen (Interactor = use case). Presentation architectures sit *inside* the
   presentation/adapter ring of Hexagonal/Onion/Clean — they don't replace them.
-- **"Which optimizes testability most?"** MVU/Redux (pure functions) ≳ Passive View / MVP
+- "Which optimizes testability most?" MVU/Redux (pure functions) ≳ Passive View / MVP
   / MVVM (mockable View / testable ViewModel) ≫ classic MVC (View-coupled).
-- **"Where does the Humble Object fit?"** It's the underlying testability principle:
+- "Where does the Humble Object fit?" It's the underlying testability principle:
   Passive View is Humble Object applied to the View; MVP/MVVM/MVU all rely on it.
-- **"Isn't Redux-everywhere an anti-pattern now?"** Yes, as a *default*. Splitting a giant
+- "Isn't Redux-everywhere an anti-pattern now?" Yes, as a *default*. Splitting a giant
   global store into server-state caching (TanStack/RTK Query), a small shared-client-state
   store (Zustand/Jotai), and component-local state is the current guidance. The one-way
   pure-update principle stays; the single-dumping-ground store is what's rejected.
-- **"How do signals relate to two-way binding vs unidirectional flow?"** Signals are
+- "How do signals relate to two-way binding vs unidirectional flow?" Signals are
   observable properties like MVVM binding, but with *automatic* dependency tracking and
   *surgical* re-render (only the reading node updates). Reads flow one way (View reads
   state) and writes are an explicit `set` — so you keep unidirectional predictability while
   avoiding both whole-tree diffing (Redux/MVU) and digest-cycle cost (AngularJS).
-- **"MVC vs PAC?"** MVC is one triad with a possible View↔Model link; PAC is a hierarchy
+- "MVC vs PAC?" MVC is one triad with a possible View↔Model link; PAC is a hierarchy
   of agents whose Presentation and Abstraction are fully decoupled through Control.
 
 ---

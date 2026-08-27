@@ -475,25 +475,25 @@ moved to stable groups.
 
 ## Common follow-up questions
 
-- **"What does a managed control plane (EKS/GKE) NOT manage for you?"** — Your worker nodes,
+- "What does a managed control plane (EKS/GKE) NOT manage for you?" — Your worker nodes,
   workloads, RBAC/NetworkPolicy, and (usually) triggering node-group upgrades. You lose direct
   etcd/apiserver-flag access.
-- **"Why is CoreDNS Pending right after kubeadm init?"** — No CNI installed yet; Pods can't get an
+- "Why is CoreDNS Pending right after kubeadm init?" — No CNI installed yet; Pods can't get an
   IP until a pod-network plugin is applied.
-- **"Can I upgrade from 1.34 straight to 1.36?"** — No. One minor version at a time (1.34 → 1.35 →
+- "Can I upgrade from 1.34 straight to 1.36?" — No. One minor version at a time (1.34 → 1.35 →
   1.36); the apiserver must not skip minors.
-- **"kubelet is 1.33, apiserver is 1.36 — is that OK?"** — Yes, kubelet may lag by up to 3 minors.
+- "kubelet is 1.33, apiserver is 1.36 — is that OK?" — Yes, kubelet may lag by up to 3 minors.
   But you can't upgrade the apiserver to 1.37 until you bump that kubelet, or skew hits 4.
-- **"My drain is hanging forever — why?"** — A PodDisruptionBudget can't be satisfied (e.g.
+- "My drain is hanging forever — why?" — A PodDisruptionBudget can't be satisfied (e.g.
   `minAvailable` = replica count, or single-replica app), or a bare/unmanaged Pod without
   `--force`. DaemonSet Pods need `--ignore-daemonsets`.
-- **"Cluster died ~1 year after install with TLS errors."** — Control-plane certs expired
+- "Cluster died ~1 year after install with TLS errors." — Control-plane certs expired
   (kubeadm default 1yr). `kubeadm certs renew all` + restart; upgrade regularly to auto-renew.
-- **"How do you back up a cluster?"** — etcd snapshot (whole state) + Velero (selective objects +
+- "How do you back up a cluster?" — etcd snapshot (whole state) + Velero (selective objects +
   PV data) + GitOps (declarative manifests). Test restores.
-- **"Odd vs even etcd members?"** — Odd. 4 members tolerate the same 1 failure as 3 but cost more;
+- "Odd vs even etcd members?" — Odd. 4 members tolerate the same 1 failure as 3 but cost more;
   quorum = floor(N/2)+1.
-- **"What replaced PodSecurityPolicy?"** — Pod Security Standards enforced via the built-in Pod
+- "What replaced PodSecurityPolicy?" — Pod Security Standards enforced via the built-in Pod
   Security admission controller (PSP removed in 1.25). See `security-rbac` /
   `workload-network-security`.
 

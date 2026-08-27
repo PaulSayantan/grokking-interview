@@ -428,22 +428,22 @@ a container ran at all, `kubectl logs --previous`. Everything else is following 
 
 ## Common follow-up questions
 
-- **What's the difference between `CrashLoopBackOff` and `ImagePullBackOff`?** The former means the
+- What's the difference between `CrashLoopBackOff` and `ImagePullBackOff`? The former means the
   container *starts and crashes* (app problem — read `logs --previous`); the latter means the image
   *never downloaded* (registry/tag/auth — read Events; there are no logs).
-- **Exit code 137 vs 143?** 137 = 128+9 (SIGKILL, typically OOMKilled or forced kill); 143 = 128+15
+- Exit code 137 vs 143? 137 = 128+9 (SIGKILL, typically OOMKilled or forced kill); 143 = 128+15
   (SIGTERM, graceful shutdown, e.g. the container was asked to stop).
-- **Why does `kubectl logs` show nothing for a Pending or ImagePullBackOff Pod?** No container is running
+- Why does `kubectl logs` show nothing for a Pending or ImagePullBackOff Pod? No container is running
   yet, so there's no stdout/stderr — the diagnosis lives in `describe`/Events.
-- **My events disappeared — where did they go?** Events have a ~1-hour TTL in etcd and are
+- My events disappeared — where did they go? Events have a ~1-hour TTL in etcd and are
   garbage-collected. Ship them to a persistent store for post-mortems.
-- **`kubectl top` says "Metrics API not available."** Install/repair **metrics-server**; on some clusters
+- `kubectl top` says "Metrics API not available." Install/repair **metrics-server**; on some clusters
   it needs `--kubelet-insecure-tls`.
-- **Pod is `Running` but the Service returns nothing.** Check `kubectl get endpoints <svc>` (empty means
+- Pod is `Running` but the Service returns nothing. Check `kubectl get endpoints <svc>` (empty means
   the selector doesn't match or readiness fails), then DNS resolution.
-- **Node is `NotReady` — where do I look?** `kubectl describe node` Conditions/Events, then the node's
+- Node is `NotReady` — where do I look? `kubectl describe node` Conditions/Events, then the node's
   kubelet and container-runtime logs.
-- **How do I debug a distroless container with no shell?** `kubectl debug` with an ephemeral container
+- How do I debug a distroless container with no shell? `kubectl debug` with an ephemeral container
   (`--target`) or a Pod copy (`--copy-to --set-image`).
 
 ## References

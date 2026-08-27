@@ -723,46 +723,46 @@ to the Java type globally.
 
 ## Common follow-up questions
 
-- **What does `getBean("&myFactory")` return?** The `FactoryBean` instance
+- What does `getBean("&myFactory")` return? The `FactoryBean` instance
   itself, not the product of `getObject()`. Without `&`, you get the product.
 
-- **Why would `getObjectType()` return `null`, and what breaks?** When the
+- Why would `getObjectType()` return `null`, and what breaks? When the
   product type isn't known before instantiation. It degrades type-based
   autowiring and `getBeansOfType` matching, since the container can't match by
   type without creating the factory.
 
-- **How does `@Lazy` break a circular dependency?** On the injection point it
+- How does `@Lazy` break a circular dependency? On the injection point it
   supplies a proxy instead of the real bean, so the first bean can finish
   constructing before the second exists. Works for constructor cycles that
   otherwise throw `BeanCurrentlyInCreationException`.
 
-- **`@Lazy` on a bean vs on an injection point?** On the bean/definition it
+- `@Lazy` on a bean vs on an injection point? On the bean/definition it
   defers that bean's creation until first requested; on an injection point it
   injects a lazy-resolving proxy for that specific dependency.
 
-- **`ObjectProvider` vs `@Lookup` vs scoped proxy for prototype-in-singleton?**
+- `ObjectProvider` vs `@Lookup` vs scoped proxy for prototype-in-singleton?
   All give a fresh prototype per use. `ObjectProvider.getObject()` /
   `Provider.get()` are the modern, no-subclassing choices; `@Lookup` uses CGLIB
   method overriding; a scoped proxy wraps the target.
 
-- **`getIfAvailable()` vs `getIfUnique()`?** `getIfAvailable` returns `null`
+- `getIfAvailable()` vs `getIfUnique()`? `getIfAvailable` returns `null`
   only when there are zero candidates (throws on ambiguity unless primary);
   `getIfUnique` returns `null` when there are zero *or* multiple candidates.
 
-- **Difference between `BeanFactoryPostProcessor`, `BeanDefinitionRegistryPostProcessor`,
-  and `BeanPostProcessor`?** BDRPP adds definitions; BFPP mutates existing
+- Difference between `BeanFactoryPostProcessor`, `BeanDefinitionRegistryPostProcessor`,
+  and `BeanPostProcessor`? BDRPP adds definitions; BFPP mutates existing
   definitions; both act on metadata before instantiation. BPP acts on bean
   instances during initialization.
 
-- **`ImportSelector` vs `ImportBeanDefinitionRegistrar`?** A selector returns
+- `ImportSelector` vs `ImportBeanDefinitionRegistrar`? A selector returns
   class *names* for Spring to import; a registrar registers bean *definitions*
   directly against the registry. Registrars are used for `@EnableXxx` scanning
   annotations.
 
-- **Is `@ConditionalOnMissingBean` part of core Spring?** No — it's Spring Boot.
+- Is `@ConditionalOnMissingBean` part of core Spring? No — it's Spring Boot.
   Core Spring provides only `@Conditional` + `Condition` (and `@Profile`).
 
-- **How is `@Profile` related to `@Conditional`?** `@Profile` is meta-annotated
+- How is `@Profile` related to `@Conditional`? `@Profile` is meta-annotated
   with `@Conditional(ProfileCondition.class)`; it's a specialization.
 
 ---

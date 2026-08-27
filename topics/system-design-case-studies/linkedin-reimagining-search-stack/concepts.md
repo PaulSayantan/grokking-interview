@@ -238,29 +238,29 @@ once rather than optimizing a single proxy.
 
 ## Common follow-up questions
 
-- **"Why not just put a big LLM directly in the query path?"** At millions of QPS,
+- "Why not just put a big LLM directly in the query path?" At millions of QPS,
   a large LLM's latency and compute cost are prohibitive. The entire design — distill
   to small models, prune, compress context, precompute embeddings/summaries — exists
   to hit LLM quality at RecSys cost.
-- **"Why a bi-encoder for retrieval but a cross-encoder for ranking?"** Bi-encoders
+- "Why a bi-encoder for retrieval but a cross-encoder for ranking?" Bi-encoders
   encode query and document separately, so document vectors precompute offline and
   retrieval over 1.6B items stays cheap. Cross-encoders read query and document
   together for far higher accuracy but can't be precomputed — so you only run them on
   the few hundred candidates retrieval returns.
-- **"Why exhaustive k-NN instead of approximate nearest neighbor?"** Brute-force
+- "Why exhaustive k-NN instead of approximate nearest neighbor?" Brute-force
   dot-product search on CUDA GPUs is fast enough at their scale and avoids the recall
   loss that approximate methods (ANN) introduce — you compare against every item
   vector, so you never miss a good candidate to an index approximation.
-- **"How do they compress job descriptions without wrecking quality?"** Two ways:
+- "How do they compress job descriptions without wrecking quality?" Two ways:
   summarize descriptions offline with a semantics-preserving, length-aware objective,
   and condense each item into a single-token embedding while keeping key raw fields
   (title, company, location). Dropping the text outright severely degrades relevance,
   so they preserve meaning rather than discard it.
-- **"What did they build first, and why?"** An LLM-based, product-policy-grounded
+- "What did they build first, and why?" An LLM-based, product-policy-grounded
   evaluation framework (the judge), distilled to an 8B model and calibrated to human
   PMs at Cohen's Kappa ≥ 0.8. With a stable definition of "good," every downstream
   retrieval and ranking model can be trained and measured consistently.
-- **"How big was the quality win?"** Job-Ranking Click AUC rose from a 0.61 RecSys
+- "How big was the quality win?" Job-Ranking Click AUC rose from a 0.61 RecSys
   baseline to 0.67, and LinkedIn reports "double-digit improvements in search quality
   and member engagement" overall — achieved while keeping inference cost comparable to
   the traditional RecSys models.

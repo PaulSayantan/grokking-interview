@@ -645,47 +645,47 @@ the largest size that still gets a reply reveals the true path MTU.
 
 ## Common follow-up questions
 
-- **Why is the minimum Ethernet frame 64 bytes?** So a station on classic half-duplex
+- Why is the minimum Ethernet frame 64 bytes? So a station on classic half-duplex
   CSMA/CD Ethernet is still transmitting when the earliest possible collision signal
   returns, guaranteeing collision detection within the slot time. Short frames are padded.
-- **What's the difference between the EtherType and the 802.3 length field?** They share
+- What's the difference between the EtherType and the 802.3 length field? They share
   the same 2 bytes. Values ≥ 1536 (0x0600) are an EtherType (protocol); ≤ 1500 are a
   length (802.3, usually with an LLC/SNAP header inside).
-- **How does a host decide whether to ARP for the destination or the gateway?** It applies
+- How does a host decide whether to ARP for the destination or the gateway? It applies
   its subnet mask: if the destination is in the same subnet, it ARPs for the host;
   otherwise it ARPs for the default gateway.
-- **What happens to the MAC and IP addresses across multiple router hops?** IP src/dst stay
+- What happens to the MAC and IP addresses across multiple router hops? IP src/dst stay
   constant end-to-end (barring NAT); the L2 src/dst are rewritten at every hop, and the
   IPv4 TTL decrements by one per hop.
-- **Does IPv6 use ARP?** No — it uses NDP (Neighbor Discovery, ICMPv6) with Neighbor
+- Does IPv6 use ARP? No — it uses NDP (Neighbor Discovery, ICMPv6) with Neighbor
   Solicitation/Advertisement over multicast.
-- **What is unknown-unicast flooding and why does it happen?** When a switch has no table
+- What is unknown-unicast flooding and why does it happen? When a switch has no table
   entry for a destination MAC, it floods the frame to all ports in the VLAN; the reply
   teaches it the correct port. A MAC-flooding attack overflows the CAM table to force
   constant flooding (turning the switch into a hub for sniffing).
-- **How do VLANs and subnets relate?** Typically 1:1 — each VLAN is one broadcast domain
+- How do VLANs and subnets relate? Typically 1:1 — each VLAN is one broadcast domain
   and maps to one IP subnet; moving between them requires L3 routing.
-- **Why does a VPN or tunnel sometimes break large transfers but not pings?** The tunnel
+- Why does a VPN or tunnel sometimes break large transfers but not pings? The tunnel
   lowers the path MTU; if PMTUD ICMP is filtered, full-size TCP segments are dropped
   silently — small packets (ping, TLS handshake) succeed, bulk transfer stalls. Fix with
   MSS clamping or proper ICMP.
-- **Why is a bridging loop so much worse at L2 than a routing loop at L3?** Ethernet has no
+- Why is a bridging loop so much worse at L2 than a routing loop at L3? Ethernet has no
   TTL, so looped BUM traffic never dies — a broadcast storm plus MAC flapping melts the
   segment in milliseconds. IP's TTL kills looped packets in ≤255 hops. STP/RSTP exist
   precisely because L2 has no such backstop.
-- **A port takes ~30 s to pass traffic after a device boots (PXE/DHCP fails) — why?** The
+- A port takes ~30 s to pass traffic after a device boots (PXE/DHCP fails) — why? The
   switch port is running STP listening→learning (15 s each). Fix by enabling PortFast/edge
   on host-facing ports (and pair with BPDU Guard).
-- **You bonded two 10G links but one backup job still hits only ~10G — why?** LACP hashes
+- You bonded two 10G links but one backup job still hits only ~10G — why? LACP hashes
   each flow onto a single member link to preserve ordering, so a single TCP flow is pinned
   to one 10G member. Aggregation helps only across many flows.
-- **A MAC is flapping between two ports in the logs — what does it mean?** Either a physical
+- A MAC is flapping between two ports in the logs — what does it mean? Either a physical
   L2 loop (STP failed/disabled), a duplicate MAC, or a misconfigured NIC team — the same
   source MAC is arriving on two ports, destabilizing the CAM table.
-- **How does an attacker on an access port reach another VLAN?** DTP switch-spoofing (negotiate
+- How does an attacker on an access port reach another VLAN? DTP switch-spoofing (negotiate
   a trunk) or 802.1Q double-tagging (outer = native VLAN stripped by switch 1, inner delivered
   by switch 2). Harden the native VLAN and disable DTP.
-- **Cut-through vs store-and-forward — which validates the FCS?** Store-and-forward buffers the
+- Cut-through vs store-and-forward — which validates the FCS? Store-and-forward buffers the
   whole frame and checks the CRC before forwarding (drops corrupt frames); cut-through starts
   forwarding after the destination MAC, so it can propagate corrupt frames.
 

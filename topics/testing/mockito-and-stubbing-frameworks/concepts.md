@@ -478,27 +478,27 @@ dependency.
 
 ## Common follow-up questions
 
-- **Why does `when(spy.get(0))` throw but `doReturn(...).when(spy).get(0)` doesn't?**
+- Why does `when(spy.get(0))` throw but `doReturn(...).when(spy).get(0)` doesn't?
   `when(...)` evaluates its argument, which runs the real method on a spy; the
   `doReturn(...).when(spy)` form never invokes the real method.
-- **My test fails with `InvalidUseOfMatchersException` — why?** You mixed a raw value with
+- My test fails with `InvalidUseOfMatchersException` — why? You mixed a raw value with
   a matcher in the same call. Wrap literals in `eq(...)`; all args must be matchers or all
   raw.
-- **What is `UnnecessaryStubbingException` telling me?** Under STRICT_STUBS you declared a
+- What is `UnnecessaryStubbingException` telling me? Under STRICT_STUBS you declared a
   stub that no test path exercised. Delete the dead stub, or mark it `lenient()` only if it
   is legitimate shared conditional setup.
-- **`@InjectMocks` field is null at runtime — why?** Mockito couldn't match a field for
+- `@InjectMocks` field is null at runtime — why? Mockito couldn't match a field for
   injection (type/name mismatch) and injection fails silently. Prefer constructor injection
   and plain `new` in tests.
-- **How do I stub a `void` method?** `doNothing()/doThrow()/doAnswer().when(mock).voidM()` —
+- How do I stub a `void` method? `doNothing()/doThrow()/doAnswer().when(mock).voidM()` —
   you cannot use `when(mock.voidM())`.
-- **Do I still need `mockito-inline` to mock statics?** Not on Mockito 5+ (inline is
+- Do I still need `mockito-inline` to mock statics? Not on Mockito 5+ (inline is
   default). On 2–4 you add the `mockito-inline` artifact.
-- **`thenReturn` vs `thenAnswer`?** `thenReturn` fixes a value at stub time; `thenAnswer`
+- `thenReturn` vs `thenAnswer`? `thenReturn` fixes a value at stub time; `thenAnswer`
   is a lambda run per call that can read the actual arguments.
-- **When do you verify vs assert state?** Verify commands (side-effecting, void); assert
+- When do you verify vs assert state? Verify commands (side-effecting, void); assert
   state/returned values for queries.
-- **Is BDDMockito more powerful than plain Mockito?** No — pure syntax alias
+- Is BDDMockito more powerful than plain Mockito? No — pure syntax alias
   (given/willReturn/then-should).
 
 ---

@@ -475,15 +475,15 @@ A consolidated list of the ways placeholder/property resolution throws or misbeh
 
 ## Common follow-up questions
 
-- **Why must a `PropertySourcesPlaceholderConfigurer` `@Bean` method be `static`?** Because it is a `BeanFactoryPostProcessor` that must run before the `@Configuration` class is enhanced/instantiated; a non-static method would force early instantiation of the config class and break CGLIB enhancement.
-- **What is the difference between `${...}` and `#{...}` in `@Value`?** `${...}` is a property placeholder resolved against the `Environment` by PSPC; `#{...}` is a SpEL expression evaluated by the SpEL engine. They are independent and can be nested.
-- **Does `@PropertySource` support YAML?** Not out of the box in core Spring — you must supply a custom `PropertySourceFactory`. YAML support in `application.yml` is a Spring Boot feature.
-- **What is the property precedence order?** For a `StandardEnvironment`: system properties beat OS environment variables, both beat `@PropertySource` files. First matching source wins.
-- **How do inter-`@Bean` method calls stay singletons?** The CGLIB proxy created for a full `@Configuration` class intercepts method calls and returns the managed bean; with `proxyBeanMethods=false` or lite mode, they don't.
-- **`@Profile("default")` vs no `@Profile`?** A bean with no `@Profile` is always registered; `@Profile("default")` is registered only when no active profile is set.
-- **How do you activate multiple profiles?** Comma-separated in `spring.profiles.active` / `SPRING_PROFILES_ACTIVE`, or `setActiveProfiles("a","b")`.
-- **What throws when a placeholder can't be resolved and has no default?** `IllegalArgumentException` (Could not resolve placeholder) during bean creation, unless `ignoreUnresolvablePlaceholders` is true.
-- **Difference between `getProperty` and `getRequiredProperty`?** The latter throws `IllegalStateException` if the key is missing rather than returning null.
+- Why must a `PropertySourcesPlaceholderConfigurer` `@Bean` method be `static`? Because it is a `BeanFactoryPostProcessor` that must run before the `@Configuration` class is enhanced/instantiated; a non-static method would force early instantiation of the config class and break CGLIB enhancement.
+- What is the difference between `${...}` and `#{...}` in `@Value`? `${...}` is a property placeholder resolved against the `Environment` by PSPC; `#{...}` is a SpEL expression evaluated by the SpEL engine. They are independent and can be nested.
+- Does `@PropertySource` support YAML? Not out of the box in core Spring — you must supply a custom `PropertySourceFactory`. YAML support in `application.yml` is a Spring Boot feature.
+- What is the property precedence order? For a `StandardEnvironment`: system properties beat OS environment variables, both beat `@PropertySource` files. First matching source wins.
+- How do inter-`@Bean` method calls stay singletons? The CGLIB proxy created for a full `@Configuration` class intercepts method calls and returns the managed bean; with `proxyBeanMethods=false` or lite mode, they don't.
+- `@Profile("default")` vs no `@Profile`? A bean with no `@Profile` is always registered; `@Profile("default")` is registered only when no active profile is set.
+- How do you activate multiple profiles? Comma-separated in `spring.profiles.active` / `SPRING_PROFILES_ACTIVE`, or `setActiveProfiles("a","b")`.
+- What throws when a placeholder can't be resolved and has no default? `IllegalArgumentException` (Could not resolve placeholder) during bean creation, unless `ignoreUnresolvablePlaceholders` is true.
+- Difference between `getProperty` and `getRequiredProperty`? The latter throws `IllegalStateException` if the key is missing rather than returning null.
 
 ## References
 

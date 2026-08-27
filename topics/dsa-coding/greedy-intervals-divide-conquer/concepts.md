@@ -389,22 +389,22 @@ Greedy and interval problems, grouped by sub-pattern.
 
 ## Common follow-up questions
 
-- **"How do you know greedy is correct here?"** — State the greedy choice, then give the
+- "How do you know greedy is correct here?" — State the greedy choice, then give the
   exchange argument: swapping the optimal solution's first choice for the greedy choice
   never makes it worse.
-- **"When would greedy fail and you'd need DP?"** — When the greedy-choice property fails,
+- "When would greedy fail and you'd need DP?" — When the greedy-choice property fails,
   e.g. general coin change {1,3,4} or 0/1 knapsack; local optima don't compose into a
   global optimum, so you must consider all choices (DP).
-- **"Merge intervals: sort by start or end?"** — Start, so overlaps are adjacent and you
+- "Merge intervals: sort by start or end?" — Start, so overlaps are adjacent and you
   extend the running interval. For "keep max compatible / erase fewest," sort by end.
-- **"Meeting Rooms II without a heap?"** — Sweep line: `+1` at each start, `−1` at each
+- "Meeting Rooms II without a heap?" — Sweep line: `+1` at each start, `−1` at each
   end, sort events, track the running max = peak concurrency.
-- **"Max subarray: D&C vs Kadane?"** — D&C is `O(n log n)` (left, right, crossing); Kadane
+- "Max subarray: D&C vs Kadane?" — D&C is `O(n log n)` (left, right, crossing); Kadane
   is `O(n)` / `O(1)` and is the preferred answer.
-- **"Why does quickselect average `O(n)` but quicksort `O(n log n)`?"** — Quickselect
+- "Why does quickselect average `O(n)` but quicksort `O(n log n)`?" — Quickselect
   recurses into only one partition (`T(n)=T(n/2)+O(n)` geometric = `O(n)`); quicksort
   recurses into both.
-- **"Give the merge-sort recurrence and solve it."** — `T(n)=2T(n/2)+O(n)`; Master Theorem
+- "Give the merge-sort recurrence and solve it." — `T(n)=2T(n/2)+O(n)`; Master Theorem
   Case 2 → `Θ(n log n)`.
 
 ## References

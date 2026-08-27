@@ -464,20 +464,20 @@ Grouped roughly by the structure/composition they drill.
 
 ## Common follow-up questions
 
-- **"Make your LRU cache thread-safe."** Guard operations with a lock; discuss the contention on
+- "Make your LRU cache thread-safe." Guard operations with a lock; discuss the contention on
   the single list, striping, or a concurrent design (e.g., Java's `ConcurrentLinkedHashMap` /
   Caffeine, which approximate LRU with sampling to reduce lock contention).
-- **"How does a real cache (Redis, Guava, Caffeine) do eviction?"** Often **approximate LRU/LFU**
+- "How does a real cache (Redis, Guava, Caffeine) do eviction?" Often **approximate LRU/LFU**
   via sampling or frequency sketches (Caffeine's TinyLFU with a count-min sketch) — exact LRU's
   per-access bookkeeping is expensive at scale.
-- **"LRU vs LFU — when does each win?"** LRU adapts fast to changing working sets but is fooled by
+- "LRU vs LFU — when does each win?" LRU adapts fast to changing working sets but is fooled by
   one-off scans; LFU keeps genuinely hot items but can be polluted by stale once-popular keys
   (needs aging/decay).
-- **"Extend LRU to a TTL cache."** Add expiry timestamps and a second ordering (min-heap by
+- "Extend LRU to a TTL cache." Add expiry timestamps and a second ordering (min-heap by
   expiry, or lazy expiry on access).
-- **"Why doubly and not singly linked?"** O(1) unlink of an arbitrary node needs its predecessor.
-- **"getRandom with weighted probabilities?"** Prefix-sum array + binary search, or alias method.
-- **"Two-stack queue worst case?"** A single dequeue can be O(n) when pouring stacks over; it's
+- "Why doubly and not singly linked?" O(1) unlink of an arbitrary node needs its predecessor.
+- "getRandom with weighted probabilities?" Prefix-sum array + binary search, or alias method.
+- "Two-stack queue worst case?" A single dequeue can be O(n) when pouring stacks over; it's
   **amortized** O(1), and worst-case O(1) needs a more elaborate (functional) queue.
 
 ## References

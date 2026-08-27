@@ -753,48 +753,48 @@ in RFC 7323.
 
 ## Common follow-up questions
 
-- **Why exactly three packets in the handshake, not two or four?** Each direction must
+- Why exactly three packets in the handshake, not two or four? Each direction must
   synchronize its ISN and have it acknowledged; the server piggy-backs its SYN onto the
   ACK of the client's SYN, collapsing four logical steps to three.
-- **Why does the SYN consume a sequence number if it carries no data?** So the SYN itself
+- Why does the SYN consume a sequence number if it carries no data? So the SYN itself
   can be reliably acknowledged (`ack=ISN+1`); the same is true of FIN.
-- **Who ends up in TIME_WAIT and why is it 2·MSL?** The side that sends the first FIN
+- Who ends up in TIME_WAIT and why is it 2·MSL? The side that sends the first FIN
   (active close); 2·MSL guarantees the final ACK can be retransmitted and that old
   duplicate segments drain before the 4-tuple is reused.
-- **Difference between flow control and congestion control?** Flow control (rwnd)
+- Difference between flow control and congestion control? Flow control (rwnd)
   protects the receiver's buffer; congestion control (cwnd) protects the network. Sender
   is bounded by `min(rwnd, cwnd)`.
-- **Why 3 duplicate ACKs for fast retransmit?** To tolerate mild packet reordering, which
+- Why 3 duplicate ACKs for fast retransmit? To tolerate mild packet reordering, which
   can produce 1–2 dup ACKs without real loss.
-- **What does a cumulative ACK actually tell you, and what does SACK add?** Cumulative ACK
+- What does a cumulative ACK actually tell you, and what does SACK add? Cumulative ACK
   = "I have everything below N." SACK adds reports of non-contiguous blocks above N so the
   sender retransmits only the true gaps.
-- **Why can HTTP/2 still suffer head-of-line blocking?** Its streams share one ordered TCP
+- Why can HTTP/2 still suffer head-of-line blocking? Its streams share one ordered TCP
   byte stream; one lost segment stalls delivery of all streams until retransmitted.
-- **When would you set TCP_NODELAY?** For small, latency-sensitive request/response
+- When would you set TCP_NODELAY? For small, latency-sensitive request/response
   traffic where Nagle + delayed ACK can add ~200 ms stalls.
-- **How does CUBIC differ from Reno?** Cubic (RTT-independent) window growth instead of
+- How does CUBIC differ from Reno? Cubic (RTT-independent) window growth instead of
   linear additive increase; scales much better on high-bandwidth, high-latency links.
-- **Why is BBR different in kind from CUBIC?** BBR models bottleneck bandwidth and RTT and
+- Why is BBR different in kind from CUBIC? BBR models bottleneck bandwidth and RTT and
   paces to the BDP rather than treating loss as the congestion signal.
-- **Why can't three dup ACKs detect a tail loss?** There is no later data behind the lost
+- Why can't three dup ACKs detect a tail loss? There is no later data behind the lost
   tail segments to generate dup ACKs; RACK's time-based detection plus TLP's tail probe
   fix this without waiting for an RTO.
-- **Large transfers hang but SSH and ping work — why?** A PMTUD black-hole: ICMP
+- Large transfers hang but SSH and ping work — why? A PMTUD black-hole: ICMP
   "fragmentation needed" is filtered, so the sender never shrinks its segments. Fix with
   MSS clamping or PLPMTUD.
-- **A high-BDP link is stuck at a few Mbps despite headroom — why?** Throughput ≤
+- A high-BDP link is stuck at a few Mbps despite headroom — why? Throughput ≤
   window/RTT; likely the Window Scale option was never negotiated or was stripped by a
   middlebox, capping the window at 64 KiB.
-- **CLOSE_WAIT pile-up vs FIN_WAIT_2 pile-up?** CLOSE_WAIT = your app never called close
+- CLOSE_WAIT pile-up vs FIN_WAIT_2 pile-up? CLOSE_WAIT = your app never called close
   (never times out on its own); FIN_WAIT_2 = peer isn't closing (bounded by
   `tcp_fin_timeout`).
-- **SO_REUSEADDR vs SO_REUSEPORT?** REUSEADDR lets you rebind a port with TIME_WAIT
+- SO_REUSEADDR vs SO_REUSEPORT? REUSEADDR lets you rebind a port with TIME_WAIT
   lingering; REUSEPORT lets many sockets share one port and load-balances accepts across
   workers.
-- **BBR vs CUBIC on a shared link — who wins?** BBRv1 can starve CUBIC by not backing off
+- BBR vs CUBIC on a shared link — who wins? BBRv1 can starve CUBIC by not backing off
   on loss; BBRv2/v3 add a loss/ECN response to fix it.
-- **Design a low-latency datacenter transport?** Address incast with DCTCP/ECN, µs-scale
+- Design a low-latency datacenter transport? Address incast with DCTCP/ECN, µs-scale
   RTO_min, and L4S/DualQ for sub-ms queuing.
 
 ## References

@@ -704,23 +704,23 @@ allowed to be sent over a secured (encrypted) channel, so tokens aren't leaked i
 
 ## Common follow-up questions
 
-- **Why must `te: trailers` be sent?** It tells intermediaries the client accepts HTTP/2
+- Why must `te: trailers` be sent? It tells intermediaries the client accepts HTTP/2
   trailers, which gRPC requires to deliver `grpc-status`. Some proxies strip trailers and
   break gRPC.
-- **Why is the HTTP status 200 even on an error?** gRPC always returns HTTP 200 for a
+- Why is the HTTP status 200 even on an error? gRPC always returns HTTP 200 for a
   well-formed call; the RPC-level result is separately in the `grpc-status` trailer. Non-200
   HTTP is reserved for transport/protocol errors (e.g., 404 for a missing service).
-- **How big can a field number get and why care about 1–15?** Up to 2^29−1; 1–15 fit their
+- How big can a field number get and why care about 1–15? Up to 2^29−1; 1–15 fit their
   tag in one byte, so hot fields should use them.
-- **What's the difference between `int32` and `sint32` on the wire?** Both are VARINT, but
+- What's the difference between `int32` and `sint32` on the wire? Both are VARINT, but
   `sint32` ZigZag-encodes so negatives are compact; they are *not* wire-compatible.
-- **Can you distinguish "unset" from "0" in proto3?** Only if you mark the field `optional`
+- Can you distinguish "unset" from "0" in proto3? Only if you mark the field `optional`
   (which adds explicit presence tracking) or wrap it (e.g., `Int32Value`).
-- **What happens to a field number you delete?** `reserved` it so it can never be reused;
+- What happens to a field number you delete? `reserved` it so it can never be reused;
   otherwise a future field could collide and corrupt data.
-- **Does gRPC do load balancing?** It's client-side/L7 aware because one connection carries
+- Does gRPC do load balancing? It's client-side/L7 aware because one connection carries
   many streams; naive L4 balancers can pin all streams to one backend — a classic gotcha.
-- **How do retries interact with status codes?** Retry on `UNAVAILABLE`; be careful with
+- How do retries interact with status codes? Retry on `UNAVAILABLE`; be careful with
   non-idempotent calls; `ABORTED`/`RESOURCE_EXHAUSTED` may need backoff at a higher layer.
 
 ---

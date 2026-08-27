@@ -546,28 +546,28 @@ credentials. Three mainstream solutions keep Git as source of truth without plai
 
 ## Common follow-up questions
 
-- **Why pull over push?** Credentials stay in the cluster, continuous drift detection/self-heal,
+- Why pull over push? Credentials stay in the cluster, continuous drift detection/self-heal,
   Git is the auditable source of truth, and clusters with no inbound access can still be managed.
-- **How do you roll back in GitOps?** `git revert` the bad commit and let the agent reconcile;
+- How do you roll back in GitOps? `git revert` the bad commit and let the agent reconcile;
   never rely on `kubectl rollout undo` when self-heal is on — it'll be reverted.
-- **App-of-apps vs ApplicationSet?** App-of-apps is a root Application pointing at child
+- App-of-apps vs ApplicationSet? App-of-apps is a root Application pointing at child
   Application manifests (fixed, curated set); ApplicationSet templates many Applications from a
   generator (clusters/dirs/PRs) — use it for programmatic fan-out.
-- **What's the difference between sync status and health?** Sync = "does live match Git?";
+- What's the difference between sync status and health? Sync = "does live match Git?";
   health = "is the resource actually working?" Waves wait on *health*, not just apply.
-- **Sync waves vs hooks?** Waves order the resources you're applying; hooks inject extra Jobs at
+- Sync waves vs hooks? Waves order the resources you're applying; hooks inject extra Jobs at
   PreSync/Sync/PostSync (e.g. DB migration as a PreSync hook).
-- **How do canary/blue-green work if a Deployment can't?** Argo Rollouts (`Rollout` CRD) or
+- How do canary/blue-green work if a Deployment can't? Argo Rollouts (`Rollout` CRD) or
   Flagger (`Canary` wrapping a Deployment) add traffic shifting + metric analysis + auto-rollback,
   usually via a service mesh or compatible ingress.
-- **Why is my app perpetually OutOfSync?** Something mutates the live object outside Git (HPA on
+- Why is my app perpetually OutOfSync? Something mutates the live object outside Git (HPA on
   `replicas`, a mutating webhook, controller-written fields). Use `ignoreDifferences` or remove the
   contested field from Git.
-- **How do you keep secrets out of plaintext Git?** Sealed Secrets, SOPS, or External Secrets
+- How do you keep secrets out of plaintext Git? Sealed Secrets, SOPS, or External Secrets
   Operator — never a raw base64 `Secret`.
-- **Argo CD vs Flux?** Argo CD = app-centric with UI + multi-cluster hub + ApplicationSet; Flux =
+- Argo CD vs Flux? Argo CD = app-centric with UI + multi-cluster hub + ApplicationSet; Flux =
   CRD/CLI toolkit, per-cluster agent, native image automation. Both CNCF-graduated.
-- **What does `prune` do and why is it off by default?** It deletes live resources removed from
+- What does `prune` do and why is it off by default? It deletes live resources removed from
   Git; off by default to avoid accidental deletions.
 
 ## References

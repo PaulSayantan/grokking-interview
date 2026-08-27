@@ -211,26 +211,26 @@ is not. Several distinct problems surfaced, each a great interview story:
 
 ## Common follow-up questions
 
-- **"Why move to an edge network instead of adding more cloud regions?"** Because cloud
+- "Why move to an edge network instead of adding more cloud regions?" Because cloud
   providers only build ~30–40 regions in ~30 cities; an edge network already runs in 300+
   cities, so it can put a voice server near users (Reykjavik, Auckland) that no hyperscaler
   would ever serve directly. Proximity is the whole quality lever.
-- **"Why host an entire call on a single SFU instead of splitting it?"** Simplicity: all of
+- "Why host an entire call on a single SFU instead of splitting it?" Simplicity: all of
   a call's media forwarding lives in one place. The trade-off is that host selection becomes
   critical — the Iceland case showed a local host can *hurt* a mixed-region call, so the
   placement logic matters more than raw closeness.
-- **"How does discovery work when the edge scheduler kills hosts constantly?"** Hosts
+- "How does discovery work when the edge scheduler kills hosts constantly?" Hosts
   self-register on boot and re-register periodically into Valkey with a ten-minute TTL, so
   dead hosts expire automatically. During migration the new directory double-wrote legacy
   records before etcd was retired, keeping cutover reversible.
-- **"How do you avoid dropping calls when a host is reclaimed?"** A supervisor catches the
+- "How do you avoid dropping calls when a host is reclaimed?" A supervisor catches the
   shutdown signal and delays exit by five minutes so replacements come up first and clients
   reconnect to new *local* hosts, avoiding a zero-count window and long-distance re-routes.
-- **"Why did the 'closest' PoP sometimes make things worse?"** Two reasons the post gives:
+- "Why did the 'closest' PoP sometimes make things worse?" Two reasons the post gives:
   (1) one host holds the whole call, so a corner-of-the-network host hurts mixed-region
   calls; (2) the path to a nearby PoP can be congested (saturated transit/peering), so
   proximity on a map doesn't equal a good route. Hence peering analysis before rollout.
-- **"What's the general lesson for interviews?"** Latency-sensitive real-time media on
+- "What's the general lesson for interviews?" Latency-sensitive real-time media on
   shared, general-purpose hardware surfaces problems web workloads never hit — NIC queue
   contention, runtime fairness starvation, disk-flush stalls, softirq contention. You need
   slow metrics-in-the-loop ramps, peering checks before each region, kernel-level (eBPF)

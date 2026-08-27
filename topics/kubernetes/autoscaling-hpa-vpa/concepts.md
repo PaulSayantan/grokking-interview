@@ -602,22 +602,22 @@ autoscaler that reacts too slowly or oscillates is worse than a well-sized stati
 
 ## Common follow-up questions
 
-- **"HPA shows `<unknown>/50%` — what's wrong?"** metrics-server isn't installed/healthy, or the
+- "HPA shows `<unknown>/50%` — what's wrong?" metrics-server isn't installed/healthy, or the
   Pods have no CPU **request** so utilization is undefined.
-- **"Can HPA scale to zero?"** Not for resource metrics (min ≥1). Use **KEDA** for scale-to-zero on
+- "Can HPA scale to zero?" Not for resource metrics (min ≥1). Use **KEDA** for scale-to-zero on
   event sources.
-- **"Why can't I run HPA and VPA together on CPU?"** VPA changes the request (HPA's denominator);
+- "Why can't I run HPA and VPA together on CPU?" VPA changes the request (HPA's denominator);
   they form a feedback loop and oscillate. Use HPA on a custom metric + VPA on resources, or pick one.
-- **"Load spiked, HPA added replicas, but they're all Pending — why?"** No node capacity; you need a
+- "Load spiked, HPA added replicas, but they're all Pending — why?" No node capacity; you need a
   **node** autoscaler (CA/Karpenter), and it may be capped at max or blocked by taints/affinity/PVC
   zones.
-- **"Karpenter vs Cluster Autoscaler?"** CA scales fixed node groups; Karpenter provisions
+- "Karpenter vs Cluster Autoscaler?" CA scales fixed node groups; Karpenter provisions
   right-sized instances just-in-time with no node groups and consolidates for cost.
-- **"Why does my HPA flap?"** Metric near target within tolerance, or scale-down too aggressive —
+- "Why does my HPA flap?" Metric near target within tolerance, or scale-down too aggressive —
   tune `behavior.stabilizationWindowSeconds` and policies.
-- **"Does CA scale on CPU usage?"** No — on **scheduling pressure** (unschedulable Pods) and
+- "Does CA scale on CPU usage?" No — on **scheduling pressure** (unschedulable Pods) and
   **requests**, not live utilization.
-- **"VPA restarted my Pods — expected?"** Yes in `Auto`/`Recreate` (pre in-place resize); use a PDB,
+- "VPA restarted my Pods — expected?" Yes in `Auto`/`Recreate` (pre in-place resize); use a PDB,
   `Initial`/`Off`, or `InPlaceOrRecreate` on new versions.
 
 ## References

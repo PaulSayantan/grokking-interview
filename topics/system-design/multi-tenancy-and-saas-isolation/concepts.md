@@ -689,28 +689,28 @@ cost via tagged usage signals."
 
 ## Common follow-up questions
 
-- **"What's the difference between silo, pool, and bridge?"** Silo = dedicated stack per
+- "What's the difference between silo, pool, and bridge?" Silo = dedicated stack per
   tenant (strong isolation, high cost, poor density). Pool = shared everything with a
   `tenant_id` (cheap, scalable, leak/noisy-neighbor risk). Bridge = hybrid, typically
   shared app + per-tenant data.
-- **"How do you prevent cross-tenant data leaks?"** Server-derived tenant context,
+- "How do you prevent cross-tenant data leaks?" Server-derived tenant context,
   automatic query scoping, RLS as a DB backstop, ownership checks on every object,
   tenant-aware cache keys, and automated cross-tenant tests.
-- **"Isn't RBAC enough for isolation?"** No — authz controls actions *within* a tenant;
+- "Isn't RBAC enough for isolation?" No — authz controls actions *within* a tenant;
   isolation controls the tenant boundary. A correct authz check that forgets the tenant
   scope still leaks.
-- **"How do you handle noisy neighbors?"** Per-*tenant* quotas/rate limits, fair
+- "How do you handle noisy neighbors?" Per-*tenant* quotas/rate limits, fair
   scheduling, bulkheads, admission control, and moving offenders to their own silo/shard.
-- **"How do you satisfy a customer who demands their data in the EU only?"** Map the
+- "How do you satisfy a customer who demands their data in the EU only?" Map the
   tenant to an EU deployment/shard (bridge/silo), and ensure backups, caches, logs, and
   analytics inherit the residency constraint.
-- **"How do you migrate a tenant from pool to silo?"** Provision the silo, export/replay
+- "How do you migrate a tenant from pool to silo?" Provision the silo, export/replay
   or dual-write the tenant's data, verify, flip the tenant→deployment mapping, then
   decommission the pooled rows.
-- **"How do you prove you deleted a departing tenant's data?"** Easiest with
+- "How do you prove you deleted a departing tenant's data?" Easiest with
   db-per-tenant/schema-per-tenant — drop the database/schema; in pool you run scoped
   deletes across every table plus caches/indexes/backups.
-- **"Where do you store `tenant_id` and how do you trust it?"** In the authenticated
+- "Where do you store `tenant_id` and how do you trust it?" In the authenticated
   token/claim, derived server-side — never from a client-supplied parameter.
 
 ---

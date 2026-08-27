@@ -518,24 +518,24 @@ keep in sync with your source of truth.
 
 ## Common follow-up questions
 
-- **Why doesn't a B-tree work for vector search?** B-trees give total order on a single
+- Why doesn't a B-tree work for vector search? B-trees give total order on a single
   key; there's no meaningful total ordering of high-dimensional points, and spatial trees
   degrade to O(N) past ~10–20 dims (curse of dimensionality). ANN graph/quantization indexes
   are required.
-- **HNSW vs IVF-PQ — when each?** HNSW for in-memory, high-recall, low-latency interactive
+- HNSW vs IVF-PQ — when each? HNSW for in-memory, high-recall, low-latency interactive
   search with incremental inserts. IVF-PQ for billion-scale, memory-constrained batch/large
   workloads where you accept lower recall (recovered by re-ranking).
-- **What's the single knob to raise recall at query time?** HNSW: `ef_search`. IVF:
+- What's the single knob to raise recall at query time? HNSW: `ef_search`. IVF:
   `nprobe`. Both cost latency, neither needs a rebuild.
-- **Why normalize embeddings?** So cosine = dot product; lets you use the cheaper inner-product
+- Why normalize embeddings? So cosine = dot product; lets you use the cheaper inner-product
   path and keeps rankings consistent. Never mix normalized and unnormalized vectors.
-- **How do you delete from HNSW?** Usually soft-delete/tombstone + filter at query time, with
+- How do you delete from HNSW? Usually soft-delete/tombstone + filter at query time, with
   periodic full rebuilds — in-place deletion damages graph connectivity.
-- **Post-filter returned too few results — why?** ANN found top-k first, then the predicate
+- Post-filter returned too few results — why? ANN found top-k first, then the predicate
   removed most of them. Use pre-filter/in-index filtering or over-fetch.
-- **How do you keep the vector store in sync with the source of truth?** CDC/streaming or dual
+- How do you keep the vector store in sync with the source of truth? CDC/streaming or dual
   writes; re-embed on model change; treat the vector DB as a derived index, not the SoR.
-- **How do you evaluate a vector search?** recall@k against an exact-kNN ground truth, plus
+- How do you evaluate a vector search? recall@k against an exact-kNN ground truth, plus
   latency percentiles and QPS at that recall — the standard ann-benchmarks methodology.
 
 ---

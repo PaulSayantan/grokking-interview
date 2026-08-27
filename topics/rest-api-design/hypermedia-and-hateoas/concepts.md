@@ -776,25 +776,25 @@ Two widely-cited public guideline sets sharpen the pragmatic picture:
 
 ## Common follow-up questions
 
-- **"What does HATEOAS stand for and who coined it?"** Hypermedia As The Engine Of Application
+- "What does HATEOAS stand for and who coined it?" Hypermedia As The Engine Of Application
   State; from Roy Fielding's 2000 REST dissertation and later blog posts.
-- **"What Richardson level is a typical REST API, and why not Level 3?"** Level 2 — proper
+- "What Richardson level is a typical REST API, and why not Level 3?" Level 2 — proper
   verbs/status codes; Level 3 (hypermedia) is skipped because generic clients that exploit it
   are rare and the cost seldom pays off.
-- **"Can HAL describe a POST with a body?"** No — HAL carries links only (href + rel), not
+- "Can HAL describe a POST with a body?" No — HAL carries links only (href + rel), not
   method or fields. Use Siren, Collection+JSON, or JSON-LD/Hydra for full actions.
-- **"Which RFC defines the `Link` header, and what did it obsolete?"** RFC 8288 (Web Linking),
+- "Which RFC defines the `Link` header, and what did it obsolete?" RFC 8288 (Web Linking),
   which obsoletes RFC 5988.
-- **"How does a hypermedia client avoid hard-coding URLs?"** It stores link relations (`self`,
+- "How does a hypermedia client avoid hard-coding URLs?" It stores link relations (`self`,
   `next`, custom rels) and follows the `href` the server returns, so the server can relocate
   resources without breaking clients.
-- **"How do hypermedia formats reduce chattiness?"** Embedding related resources inline
+- "How do hypermedia formats reduce chattiness?" Embedding related resources inline
   (HAL `_embedded`, JSON:API `included`, Siren sub-`entities`) so one response can satisfy
   several needs.
-- **"Registered vs. extension link relations?"** Registered rels are bare IANA tokens
+- "Registered vs. extension link relations?" Registered rels are bare IANA tokens
   (`self`, `next`); extension rels must be absolute URIs to stay globally unambiguous — CURIEs
   abbreviate them.
-- **"Isn't JSON-LD just for SEO?"** It's a W3C Linked-Data format widely used for SEO
+- "Isn't JSON-LD just for SEO?" It's a W3C Linked-Data format widely used for SEO
   (schema.org), but with the Hydra vocabulary it becomes a full hypermedia API format.
 
 ## References

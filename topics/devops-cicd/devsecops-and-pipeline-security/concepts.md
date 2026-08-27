@@ -411,26 +411,26 @@ scanning downstream is moot. Key threats (see OWASP **Top 10 CI/CD Security Risk
 
 ## Common follow-up questions
 
-- **"SAST vs DAST vs SCA in one line each?"** SAST reads your *source* for insecure patterns (early,
+- "SAST vs DAST vs SCA in one line each?" SAST reads your *source* for insecure patterns (early,
   many false positives); DAST attacks the *running app* from outside (late, exploitable, low false
   positives); SCA inventories *third-party deps* and matches known CVEs.
-- **"Why not fail the build on every vulnerability?"** Noise → developers disable/bypass the scan.
+- "Why not fail the build on every vulnerability?" Noise → developers disable/bypass the scan.
   Gate on critical + fixable + reachable; keep the rest advisory and tracked.
-- **"What's the single most cost-effective security scan to add first?"** Usually **secret
+- "What's the single most cost-effective security scan to add first?" Usually **secret
   scanning** (server-side push protection) + **SCA** — cheap, high signal, catch the most common and
   most damaging incidents (leaked keys, known-CVE deps).
-- **"How does OIDC remove secrets from CI?"** CI presents a short-lived signed identity token; the
+- "How does OIDC remove secrets from CI?" CI presents a short-lived signed identity token; the
   cloud trusts the IdP and mints temporary scoped credentials — no static key is stored, and leaked
   tokens expire in minutes.
-- **"What is dependency confusion?"** A public package impersonating your internal one with a higher
+- "What is dependency confusion?" A public package impersonating your internal one with a higher
   version, pulled by a resolver that falls back to public — fixed by namespacing and locking to a
   private registry.
-- **"Why pin GitHub Actions to a SHA?"** A mutable tag (`@v3`) can be repointed by whoever controls
+- "Why pin GitHub Actions to a SHA?" A mutable tag (`@v3`) can be repointed by whoever controls
   it, silently changing what runs in your pipeline; a full commit SHA is immutable.
-- **"Where does image scanning fit if I already have SCA?"** Image scanning also covers the **OS
+- "Where does image scanning fit if I already have SCA?" Image scanning also covers the **OS
   packages and base image** baked into layers, which app-level SCA misses; it should also re-scan
   in the registry as new CVEs appear.
-- **"Guardrails vs gates?"** Guardrails are automated, self-service, in-workflow feedback (they
+- "Guardrails vs gates?" Guardrails are automated, self-service, in-workflow feedback (they
   scale); manual approval gates slow delivery and — per Accelerate — don't improve stability.
 
 ## References

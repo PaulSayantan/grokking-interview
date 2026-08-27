@@ -587,14 +587,14 @@ Filters run outside `DispatcherServlet`, wrapping it. Their **order is determine
 
 ## Common follow-up questions
 
-- **What is the difference between the root and servlet `WebApplicationContext`?** The root context (via `ContextLoaderListener`) holds shared services/repositories; each `DispatcherServlet` has a child web context (controllers, resolvers) that can see the parent but not vice versa.
-- **What does `@EnableWebMvc` actually do?** It imports `DelegatingWebMvcConfiguration`, which registers the well-configured MVC infrastructure beans (`RequestMappingHandlerMapping`, `RequestMappingHandlerAdapter`, message converters, etc.) and lets you customize them via `WebMvcConfigurer`.
-- **How does Spring pick which `HttpMessageConverter` to use?** By matching the request `Content-Type` (for `@RequestBody`) or the `Accept` header (for the response, i.e. content negotiation) against each converter's supported media types and the parameter/return type.
-- **What happens if two handlers match the same request?** The mapping raises `IllegalStateException`/ambiguous-mapping errors at request time; more specific patterns win over less specific ones.
-- **Is `DispatcherServlet` thread-safe / how are controllers scoped?** `@Controller` beans are singletons by default and must be stateless; the container serves requests concurrently on separate threads, and per-request data lives in method arguments/request scope, not controller fields.
-- **What's the difference between `redirect:` and `forward:`?** `redirect:` sends a 3xx to the client causing a new request (URL changes); `forward:` is a server-internal dispatch (URL unchanged, same request).
-- **How do exceptions get turned into responses?** Via `HandlerExceptionResolver`s — e.g. `@ExceptionHandler` methods (through `ExceptionHandlerExceptionResolver`), `@ResponseStatus` on exceptions (`ResponseStatusExceptionResolver`), and `DefaultHandlerExceptionResolver` for standard Spring MVC exceptions.
-- **Filter vs interceptor for authentication?** Spring Security is implemented as servlet filters (runs before MVC); use a `HandlerInterceptor` for lighter, MVC-aware checks that need the resolved handler.
+- What is the difference between the root and servlet `WebApplicationContext`? The root context (via `ContextLoaderListener`) holds shared services/repositories; each `DispatcherServlet` has a child web context (controllers, resolvers) that can see the parent but not vice versa.
+- What does `@EnableWebMvc` actually do? It imports `DelegatingWebMvcConfiguration`, which registers the well-configured MVC infrastructure beans (`RequestMappingHandlerMapping`, `RequestMappingHandlerAdapter`, message converters, etc.) and lets you customize them via `WebMvcConfigurer`.
+- How does Spring pick which `HttpMessageConverter` to use? By matching the request `Content-Type` (for `@RequestBody`) or the `Accept` header (for the response, i.e. content negotiation) against each converter's supported media types and the parameter/return type.
+- What happens if two handlers match the same request? The mapping raises `IllegalStateException`/ambiguous-mapping errors at request time; more specific patterns win over less specific ones.
+- Is `DispatcherServlet` thread-safe / how are controllers scoped? `@Controller` beans are singletons by default and must be stateless; the container serves requests concurrently on separate threads, and per-request data lives in method arguments/request scope, not controller fields.
+- What's the difference between `redirect:` and `forward:`? `redirect:` sends a 3xx to the client causing a new request (URL changes); `forward:` is a server-internal dispatch (URL unchanged, same request).
+- How do exceptions get turned into responses? Via `HandlerExceptionResolver`s — e.g. `@ExceptionHandler` methods (through `ExceptionHandlerExceptionResolver`), `@ResponseStatus` on exceptions (`ResponseStatusExceptionResolver`), and `DefaultHandlerExceptionResolver` for standard Spring MVC exceptions.
+- Filter vs interceptor for authentication? Spring Security is implemented as servlet filters (runs before MVC); use a `HandlerInterceptor` for lighter, MVC-aware checks that need the resolved handler.
 
 ## References
 

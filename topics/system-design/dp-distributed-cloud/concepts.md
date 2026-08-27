@@ -2421,28 +2421,28 @@ underneath).
 
 ## Common follow-up questions
 
-- **"What problem does this pattern solve?"** — the universal opener. For every pattern,
+- "What problem does this pattern solve?" — the universal opener. For every pattern,
   state the pain in one sentence before the mechanism (that's why each section leads with it).
-- **Retry vs Circuit Breaker vs Timeout vs Bulkhead** — the resilience quartet: retry handles
+- Retry vs Circuit Breaker vs Timeout vs Bulkhead — the resilience quartet: retry handles
   transient blips, timeout bounds one call, breaker stops calling a downed dependency, bulkhead
   isolates resource pools. They compose; they're not alternatives.
-- **Sharding vs Consistent Hashing vs Deployment Stamps vs Geodes** — partition one store
+- Sharding vs Consistent Hashing vs Deployment Stamps vs Geodes — partition one store
   (sharding) / place keys with minimal movement (consistent hashing) / replicate the whole
   stack as isolated units (stamps) / active-active geo nodes (geodes).
-- **Orchestration vs Choreography (Saga)** — central coordinator (visible, coupled) vs
+- Orchestration vs Choreography (Saga) — central coordinator (visible, coupled) vs
   event-reactive (decoupled, emergent). Know when each wins.
-- **Transactional Outbox vs Idempotent Consumer (Inbox)** — reliable send vs reliable dedup
+- Transactional Outbox vs Idempotent Consumer (Inbox) — reliable send vs reliable dedup
   receive; you usually need both for exactly-once *effect* over at-least-once delivery.
-- **Claim-Check vs Event-Carried State Transfer** — hide a big payload behind a pointer vs put
+- Claim-Check vs Event-Carried State Transfer — hide a big payload behind a pointer vs put
   the state into the event; opposite answers for opposite payload sizes.
-- **Gateway Routing vs Aggregation vs Offloading vs BFF vs Gatekeeper** — dispatch / compose /
+- Gateway Routing vs Aggregation vs Offloading vs BFF vs Gatekeeper — dispatch / compose /
   cross-cutting concerns / per-client gateway / security broker.
-- **Ambassador & Sidecar vs GoF Proxy & Decorator; ACL & Adapter vs GoF Adapter; Pipes-and-
-  Filters vs Chain of Responsibility** — the recurring "distributed pattern vs GoF pattern"
+- Ambassador & Sidecar vs GoF Proxy & Decorator; ACL & Adapter vs GoF Adapter; Pipes-and-
+  Filters vs Chain of Responsibility — the recurring "distributed pattern vs GoF pattern"
   probe: out-of-process/network boundary vs in-process class-level.
-- **Saga vs 2PC** — eventual consistency with compensations and no lock vs atomic-but-blocking
+- Saga vs 2PC — eventual consistency with compensations and no lock vs atomic-but-blocking
   distributed transaction that doesn't scale.
-- **Why do all these patterns exist?** — the fallacies of distributed computing; be ready to
+- Why do all these patterns exist? — the fallacies of distributed computing; be ready to
   name them and map each to a pattern.
 
 ## References

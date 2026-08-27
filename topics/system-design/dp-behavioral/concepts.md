@@ -1143,30 +1143,30 @@ elsewhere in the system-design domain — cross-reference rather than duplicate:
 
 ## Common follow-up questions
 
-- **"Strategy or State — they look identical, how do I choose?"** Ask who drives the change:
+- "Strategy or State — they look identical, how do I choose?" Ask who drives the change:
   the client picks a Strategy; the object transitions its own State. States know about
   transitions; strategies don't.
-- **"When is Chain of Responsibility dangerous?"** When a request can fall off the end
+- "When is Chain of Responsibility dangerous?" When a request can fall off the end
   unhandled and there's no terminal/default handler — receipt isn't guaranteed.
-- **"Why not just return null instead of a Null Object?"** Null Object removes caller null
+- "Why not just return null instead of a Null Object?" Null Object removes caller null
   checks — but be careful: it can *hide* errors that should fail loudly; sometimes you *want*
   the NPE.
-- **"How does Visitor achieve double dispatch and what does it cost?"** `accept` dispatches on
+- "How does Visitor achieve double dispatch and what does it cost?" `accept` dispatches on
   element type, `visit` on visitor type; cost is that adding a new element type breaks every
   visitor (Expression Problem).
-- **"Command vs. Memento for undo?"** Command stores the *operation* to reverse; Memento stores
+- "Command vs. Memento for undo?" Command stores the *operation* to reverse; Memento stores
   the *state* to restore. Use Command when the inverse is cheap to compute, Memento when it
   isn't; they're often combined.
-- **"Observer vs. Pub/Sub — same thing?"** No — Observer has direct references and synchronous
+- "Observer vs. Pub/Sub — same thing?" No — Observer has direct references and synchronous
   in-process notification; Pub/Sub inserts a broker for async, cross-process, decoupled fan-out.
-- **"Template Method vs. Strategy for varying behavior?"** Template Method varies *steps* via
+- "Template Method vs. Strategy for varying behavior?" Template Method varies *steps* via
   inheritance (compile-time); Strategy swaps the *whole algorithm* via composition (runtime).
-- **"Give a real library example of each of the big five."** Strategy → `Comparator`;
+- "Give a real library example of each of the big five." Strategy → `Comparator`;
   Observer → `PropertyChangeListener`/RxJava; Command → `Runnable`; Template Method →
   `JdbcTemplate`/`InputStream.read`; Iterator → `java.util.Iterator`.
-- **"Is Mediator just a fancy Observer?"** Mediators are often *implemented with* Observer, but
+- "Is Mediator just a fancy Observer?" Mediators are often *implemented with* Observer, but
   a Mediator coordinates known peers bidirectionally with rules; Observer only broadcasts.
-- **"Which pattern fights combinatorial conditionals?"** Both State (state-based conditionals)
+- "Which pattern fights combinatorial conditionals?" Both State (state-based conditionals)
   and Strategy (algorithm-selection conditionals) replace `switch` ladders with polymorphism.
 
 ---

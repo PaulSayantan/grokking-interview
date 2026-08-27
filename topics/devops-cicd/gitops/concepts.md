@@ -440,23 +440,23 @@ observability domain's SLO topic.
 
 ## Common follow-up questions
 
-- **"Is CI that runs `kubectl apply` GitOps?"** No — that's push-based CD. GitOps requires an
+- "Is CI that runs `kubectl apply` GitOps?" No — that's push-based CD. GitOps requires an
   in-cluster agent that *pulls* and *continuously reconciles*; CI ends by committing to the config
   repo.
-- **"How do you roll back?"** `git revert` the bad commit; the agent reconciles to the prior state.
+- "How do you roll back?" `git revert` the bad commit; the agent reconciles to the prior state.
   Avoid imperative `kubectl rollout undo`, which makes Git lie.
-- **"Why is pull more secure than push?"** Cluster credentials never leave the cluster, and only
+- "Why is pull more secure than push?" Cluster credentials never leave the cluster, and only
   outbound Git connections are needed — a CI compromise can't reach prod.
-- **"How do you handle secrets?"** Encrypt in Git (Sealed Secrets, SOPS) or externalize (External
+- "How do you handle secrets?" Encrypt in Git (Sealed Secrets, SOPS) or externalize (External
   Secrets Operator, Vault). Never commit plaintext or base64-only Secrets.
-- **"How do you stop the agent fighting the HPA?"** Use `ignoreDifferences` (Argo) to exclude
+- "How do you stop the agent fighting the HPA?" Use `ignoreDifferences` (Argo) to exclude
   HPA-managed fields like `replicas` from the diff so self-heal doesn't thrash.
-- **"App repo vs config repo?"** Common practice is to **separate** application source code from the
+- "App repo vs config repo?" Common practice is to **separate** application source code from the
   deployment/config repo, so CI on the app repo doesn't trigger reconciliation and the config repo
   has its own review/RBAC.
-- **"How do you promote to prod?"** Bump the immutable image digest via a PR into the prod
+- "How do you promote to prod?" Bump the immutable image digest via a PR into the prod
   overlay/branch; approval is the gate, and the PR is the audit record.
-- **"Argo CD vs Flux?"** Same principles; Argo CD has a strong built-in UI and `Application` model,
+- "Argo CD vs Flux?" Same principles; Argo CD has a strong built-in UI and `Application` model,
   Flux is a Git-native toolkit of controllers with built-in image automation.
 
 ## References

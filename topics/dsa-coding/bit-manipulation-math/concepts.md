@@ -431,21 +431,21 @@ Grouped by sub-pattern; all are classic SDE-interview bit/math problems.
 
 ## Common follow-up questions
 
-- **Why does `n & (n-1)` clear the lowest set bit?** Subtracting 1 flips the lowest 1 to 0 and
+- Why does `n & (n-1)` clear the lowest set bit? Subtracting 1 flips the lowest 1 to 0 and
   all trailing 0s to 1s; ANDing with `n` erases that entire low run.
-- **How do you count set bits in O(popcount) instead of O(width)?** Brian Kernighan's loop:
+- How do you count set bits in O(popcount) instead of O(width)? Brian Kernighan's loop:
   `n &= n-1` per iteration removes one set bit; count iterations. (Hardware `POPCNT` /
   `Integer.bitCount` is O(1).)
-- **Why XOR for Single Number but not Single Number II?** XOR cancels pairs (`a^a=0`) but a
+- Why XOR for Single Number but not Single Number II? XOR cancels pairs (`a^a=0`) but a
   triple `a^a^a = a` does not vanish; you need counting mod 3.
-- **Why compute midpoints / products in `long`?** To avoid 32-bit overflow before the modulo
+- Why compute midpoints / products in `long`? To avoid 32-bit overflow before the modulo
   or comparison; cast *before* the operation, not after.
-- **What's the difference between `>>` and `>>>` in Java?** `>>` is arithmetic (sign-extends);
+- What's the difference between `>>` and `>>>` in Java? `>>` is arithmetic (sign-extends);
   `>>>` is logical (fills 0). Python has no `>>>` because ints are unbounded and non-two's-
   complement.
-- **How do you divide under a modulus?** Multiply by the modular inverse — `a^(m-2) mod m` for
+- How do you divide under a modulus? Multiply by the modular inverse — `a^(m-2) mod m` for
   prime `m` (Fermat's little theorem), computed with fast modular exponentiation.
-- **Why start the sieve's inner loop at `p*p`?** All smaller multiples of `p` have a smaller
+- Why start the sieve's inner loop at `p*p`? All smaller multiples of `p` have a smaller
   prime factor and were already crossed off.
 
 ## References

@@ -519,22 +519,22 @@ Grouped by the technique they drill. All are canonical, high-frequency SDE quest
 
 ## Common follow-up questions
 
-- **What's the space complexity of a recursive traversal?** O(h) for the call stack —
+- What's the space complexity of a recursive traversal? O(h) for the call stack —
   O(log n) balanced, O(n) for a skewed tree. Interviewers love this because candidates
   say O(1) forgetting the stack.
-- **When would BFS use more memory than DFS?** On a wide/balanced tree: BFS holds up to
+- When would BFS use more memory than DFS? On a wide/balanced tree: BFS holds up to
   the widest level (~n/2 nodes) while DFS holds only the current path (height).
-- **How do you validate a BST correctly?** Bounded range passed down, or check that an
+- How do you validate a BST correctly? Bounded range passed down, or check that an
   inorder traversal is strictly increasing — never just compare a node to its immediate
   children.
-- **Why does a plain BST degrade to O(n)?** Sorted or nearly-sorted insertions build a
+- Why does a plain BST degrade to O(n)? Sorted or nearly-sorted insertions build a
   skewed chain of height n−1; balancing (AVL/red-black) restores O(log n).
-- **Can you rebuild a tree from a single traversal?** Not in general — you need two
+- Can you rebuild a tree from a single traversal? Not in general — you need two
   (preorder + inorder), *unless* the traversal includes null markers (serialize) or the
   tree is a BST (preorder alone suffices, since inorder is the sorted order).
-- **Iterative vs recursive traversal — why bother iterating?** To avoid stack overflow
+- Iterative vs recursive traversal — why bother iterating? To avoid stack overflow
   on very deep trees and to demonstrate you understand the implicit recursion stack.
-- **Morris traversal?** Inorder in O(1) extra space by temporarily threading nodes to
+- Morris traversal? Inorder in O(1) extra space by temporarily threading nodes to
   their inorder predecessor — a strong bonus answer for "can you do it without a stack?"
 
 ## References

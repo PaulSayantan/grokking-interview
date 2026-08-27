@@ -824,40 +824,40 @@ absent, "we used JWTs because they're modern" is an antipattern.
 
 ## Common follow-up questions
 
-- **"Is a JWT encrypted?"** No — a default JWT is a JWS: signed and integrity-protected,
+- "Is a JWT encrypted?" No — a default JWT is a JWS: signed and integrity-protected,
   but the payload is base64url and readable. Encryption needs JWE.
-- **"Why is `alg:none` dangerous and how do you stop it?"** It tells the verifier to skip
+- "Why is `alg:none` dangerous and how do you stop it?" It tells the verifier to skip
   the signature. Fix: pin an algorithm allowlist at the verifier; never read the algorithm
   from the token.
-- **"Explain the RS256→HS256 confusion attack."** The public RSA key is fed to an HMAC
+- "Explain the RS256→HS256 confusion attack." The public RSA key is fed to an HMAC
   verifier as its secret; since the key is public, anyone can forge. Fix: bind algorithm
   to key type.
-- **"HS256 vs RS256 — when each?"** HS256 within one trust boundary with a strong random
+- "HS256 vs RS256 — when each?" HS256 within one trust boundary with a strong random
   secret; RS256/ES256 when multiple/third-party services must verify without being able to
   mint.
-- **"How do you revoke a JWT before it expires?"** No purely stateless way — short TTL +
+- "How do you revoke a JWT before it expires?" No purely stateless way — short TTL +
   revocable refresh tokens, plus `jti` denylist or per-user token-version bump for instant
   revocation.
-- **"Which claims do you always validate?"** Signature first, then `exp` (not expired),
+- "Which claims do you always validate?" Signature first, then `exp` (not expired),
   `nbf`, `aud` (for this service), and `iss` (trusted issuer).
-- **"localStorage or cookie for the token?"** Trade-off between XSS (localStorage) and CSRF
+- "localStorage or cookie for the token?" Trade-off between XSS (localStorage) and CSRF
   (cookie); `HttpOnly; Secure; SameSite` cookies mitigate XSS theft but need CSRF defense.
-- **"What are sender-constrained tokens?"** mTLS-bound (RFC 8705) or DPoP (RFC 9449) tokens
+- "What are sender-constrained tokens?" mTLS-bound (RFC 8705) or DPoP (RFC 9449) tokens
   that bind the token to a client-held key so a stolen bearer token is useless.
-- **"A token has an inline `jwk` header and verifies — what's wrong?"** The verifier is
+- "A token has an inline `jwk` header and verifies — what's wrong?" The verifier is
   trusting the key advertised in the token; an attacker self-signs with their own key. Same
   root cause as `jku`/`x5c`/`alg:none`: resolve keys only from trusted config, never the token.
-- **"A revoked ES256 token still works despite a denylist — why?"** The denylist keys on a
+- "A revoked ES256 token still works despite a denylist — why?" The denylist keys on a
   hash of the raw token; ECDSA malleability `(r, -s mod n)` yields a byte-different but valid
   token. Key the denylist on `(jti, iss)` from the signed payload instead.
-- **"ES256 verifies an all-zero signature on Java 17.0.2 — name it."** CVE-2022-21449
+- "ES256 verifies an all-zero signature on Java 17.0.2 — name it." CVE-2022-21449
   "psychic signatures": the JVM skipped the `1 <= r,s < n` / point-at-infinity check.
-- **"A 200-byte JWE spikes the verifier to gigabytes — why?"** A `zip:"DEF"` decompression
+- "A 200-byte JWE spikes the verifier to gigabytes — why?" A `zip:"DEF"` decompression
   bomb (python-jose CVE-2024-33664); cap decompression output — RFC 8725 §3.6.
-- **"A resource server accepts an OIDC ID token as an access token — class and fix?"**
+- "A resource server accepts an OIDC ID token as an access token — class and fix?"
   Cross-JWT confusion (RFC 8725 §2.8); enforce explicit typing `typ: at+jwt` and per-resource
   `aud` per RFC 9068.
-- **"When would you NOT use a JWT?"** When you need instant revocation, carry lots of mutable
+- "When would you NOT use a JWT?" When you need instant revocation, carry lots of mutable
   state, or have a single trust boundary — an opaque server session is simpler and revokes now.
 
 ## References

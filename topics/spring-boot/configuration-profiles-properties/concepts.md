@@ -778,30 +778,30 @@ public record AppProps(
 
 ## Common follow-up questions
 
-- **"Given `java -Dserver.port=8081 -jar app.jar --server.port=9090`, what port
-  starts?"** → 9090. Command-line `--` args (item 11) beat system properties
+- "Given `java -Dserver.port=8081 -jar app.jar --server.port=9090`, what port
+  starts?" → 9090. Command-line `--` args (item 11) beat system properties
   `-D` (item 6).
-- **"An env var `SERVER_PORT=8082` and `application.yml` sets `server.port: 8080`
-  — which wins?"** → 8082; OS env vars outrank config data files.
-- **"Why doesn't my `@Value("${my-app.page-size}")` pick up `MYAPP_PAGESIZE`?"**
+- "An env var `SERVER_PORT=8082` and `application.yml` sets `server.port: 8080`
+  — which wins?" → 8082; OS env vars outrank config data files.
+- "Why doesn't my `@Value("${my-app.page-size}")` pick up `MYAPP_PAGESIZE`?"
   → `@Value` doesn't do relaxed binding; only `@ConfigurationProperties` does.
-- **"How do you validate config at startup?"** → `@ConfigurationProperties` +
+- "How do you validate config at startup?" → `@ConfigurationProperties` +
   `@Validated` + `jakarta.validation` constraints + Hibernate Validator on the
   classpath; app fails fast on invalid values.
-- **"How do you load YAML with `@PropertySource`?"** → Not supported directly;
+- "How do you load YAML with `@PropertySource`?" → Not supported directly;
   supply a custom `PropertySourceFactory`, or just use `application.yml` /
   `spring.config.import`.
-- **"Difference between active and default profile?"** → default profile applies
+- "Difference between active and default profile?" → default profile applies
   only when no profile is active; active profiles are the currently enabled ones,
   additive, last-wins on collisions.
-- **"How do you turn one profile into many?"** → `spring.profiles.group.<name>`.
-- **"Can you set `spring.profiles.active` inside `application-prod.yml`?"** → No;
+- "How do you turn one profile into many?" → `spring.profiles.group.<name>`.
+- "Can you set `spring.profiles.active` inside `application-prod.yml`?" → No;
   use a profile group instead.
-- **"Constructor vs setter binding for `@ConfigurationProperties`?"** →
+- "Constructor vs setter binding for `@ConfigurationProperties`?" →
   Constructor binding gives immutability (records/final fields); in Boot 3.x it's
   inferred for a single constructor. Don't combine constructor binding with
   `@Component`.
-- **"javax vs jakarta validation in Boot 3?"** → Boot 3 requires
+- "javax vs jakarta validation in Boot 3?" → Boot 3 requires
   `jakarta.validation.*`; `javax.validation.*` no longer works.
 
 ## References

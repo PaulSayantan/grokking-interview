@@ -732,27 +732,27 @@ Beyond RPKI origin validation (already covered), seniors should know the layers:
 
 ## Common follow-up questions
 
-- **What's the difference between the routing table and the forwarding table (RIB vs
-  FIB)?** RIB = all routes learned by all protocols (control plane); FIB = the pruned,
+- What's the difference between the routing table and the forwarding table (RIB vs
+  FIB)? RIB = all routes learned by all protocols (control plane); FIB = the pruned,
   hardware-optimized best-path table used per packet (data plane).
-- **Two routes match a destination — how is the winner chosen?** Longest prefix first;
+- Two routes match a destination — how is the winner chosen? Longest prefix first;
   ties broken by administrative distance/preference between protocols, then by metric
   within a protocol, then ECMP if still equal.
-- **Why can't RIP scale?** 15-hop diameter, slow (timer-based, count-to-infinity)
+- Why can't RIP scale? 15-hop diameter, slow (timer-based, count-to-infinity)
   convergence, and periodic full-table broadcasts.
-- **Why does BGP run over TCP?** It needs reliable, ordered delivery of incremental
+- Why does BGP run over TCP? It needs reliable, ordered delivery of incremental
   updates without reimplementing transport; TCP 179.
-- **Does the destination IP change hop by hop?** No — the L3 destination IP is constant
+- Does the destination IP change hop by hop? No — the L3 destination IP is constant
   end-to-end (unless NAT rewrites it); the L2 MAC addresses change every hop, and TTL
   decrements every hop.
-- **How does traceroute use TTL?** It sends probes with TTL 1, 2, 3… so each successive
+- How does traceroute use TTL? It sends probes with TTL 1, 2, 3… so each successive
   router expires one and returns ICMP Time Exceeded, revealing the path.
-- **Why do we still see NAT if IPv6 exists?** IPv4 exhaustion and slow IPv6 adoption; NAT
+- Why do we still see NAT if IPv6 exists? IPv4 exhaustion and slow IPv6 adoption; NAT
   also gives a crude "default deny inbound" that some operators like. IPv6 removes the
   address-scarcity reason but not firewalling.
-- **What breaks behind NAT and how is it fixed?** Unsolicited inbound (port-forward/PCP),
+- What breaks behind NAT and how is it fixed? Unsolicited inbound (port-forward/PCP),
   payload-embedded addresses (ALGs), IPsec (NAT-T), P2P (STUN/TURN/ICE).
-- **What is CGNAT and why is it controversial?** Carrier-grade NAT shares one public IP
+- What is CGNAT and why is it controversial? Carrier-grade NAT shares one public IP
   across many subscribers; it worsens the end-to-end problems and complicates abuse
   attribution and per-user rate limiting.
 

@@ -531,30 +531,30 @@ flowchart LR
 
 ## Common follow-up questions
 
-- **"Why is average latency a bad metric?"** It is pulled by outliers on a
+- "Why is average latency a bad metric?" It is pulled by outliers on a
   skewed distribution and hides the tail; it is also usually corrupted by
   coordinated omission. Report percentiles (p95/p99/p999) and never average
   percentiles across intervals.
-- **"What is coordinated omission and how do you avoid it?"** A closed-model
+- "What is coordinated omission and how do you avoid it?" A closed-model
   generator stops sending requests while the system stalls, omitting exactly the
   worst samples, so the tail looks artificially good. Avoid it with an open
   (arrival-rate) model and/or HdrHistogram's coordinated-omission correction.
-- **"Open vs closed workload — which and why?"** Closed = fixed VUs, self-
+- "Open vs closed workload — which and why?" Closed = fixed VUs, self-
   throttles under load (unrealistic for internet traffic, hides overload). Open
   = fixed arrival rate, keeps offering load as the system degrades — usually
   correct for internet-facing services.
-- **"How do you pick the number of VUs / arrival rate?"** Little's Law:
+- "How do you pick the number of VUs / arrival rate?" Little's Law:
   `concurrency = throughput × latency` (add think time). Derive one from the
   others; don't guess.
-- **"How would you detect a memory leak?"** A soak/endurance test — moderate load
+- "How would you detect a memory leak?" A soak/endurance test — moderate load
   over many hours — watching heap-after-GC, RSS, and connection counts trend
   upward. A short load test cannot see it.
-- **"Load test passes but prod is slow — why?"** Environment fidelity: empty/
+- "Load test passes but prod is slow — why?" Environment fidelity: empty/
   small DB, non-prod instance types, missing think time, closed-model back-
   pressure, or coordinated omission hiding the tail.
-- **"Stress vs spike?"** Stress ramps *gradually past* capacity to find the
+- "Stress vs spike?" Stress ramps *gradually past* capacity to find the
   ceiling and failure mode; spike jumps *instantly* to test elasticity/recovery.
-- **"Where do performance tests fit in the pyramid?"** They sit outside it —
+- "Where do performance tests fit in the pyramid?" They sit outside it —
   they run against a deployed, integrated system, not a unit — typically as a
   scheduled/pre-release stage plus a lightweight per-PR smoke gate.
 

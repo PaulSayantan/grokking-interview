@@ -610,23 +610,23 @@ spec:
 
 ## Common follow-up questions
 
-- **"Pod IP changes on restart — how do clients cope?"** They target the Service's stable VIP
+- "Pod IP changes on restart — how do clients cope?" They target the Service's stable VIP
   and DNS name; the EndpointSlice controller keeps the live Pod IPs behind it in sync.
-- **"Difference between ClusterIP, NodePort, LoadBalancer?"** Layers: ClusterIP = internal VIP;
+- "Difference between ClusterIP, NodePort, LoadBalancer?" Layers: ClusterIP = internal VIP;
   NodePort = ClusterIP + a static port on every node; LoadBalancer = NodePort + a cloud LB.
-- **"What is a headless Service and when do you use it?"** `clusterIP: None`, no VIP, DNS
+- "What is a headless Service and when do you use it?" `clusterIP: None`, no VIP, DNS
   returns per-Pod IPs; used for StatefulSets / clustered apps that address individual Pods.
-- **"Where does kube-proxy sit in the data path?"** Nowhere — it programs kernel
+- "Where does kube-proxy sit in the data path?" Nowhere — it programs kernel
   (iptables/IPVS/nftables) rules; the kernel DNATs Service-VIP packets to Pods.
-- **"Service exists but connections fail — how do you debug?"** Check EndpointSlices for ready
+- "Service exists but connections fail — how do you debug?" Check EndpointSlices for ready
   addresses (selector/readiness), then CoreDNS resolution, then kube-proxy health, then CNI.
-- **"How do you preserve the real client IP for external traffic?"** `externalTrafficPolicy:
+- "How do you preserve the real client IP for external traffic?" `externalTrafficPolicy:
   Local` (with the imbalance / node-health trade-off).
-- **"iptables vs IPVS vs nftables mode?"** iptables = default but linear-scan scaling; IPVS =
+- "iptables vs IPVS vs nftables mode?" iptables = default but linear-scan scaling; IPVS =
   hash-table, more algorithms, now deprecated (v1.35); nftables = GA v1.33, the modern path.
-- **"Why prefer Ingress over many LoadBalancer Services?"** One cloud LB with host/path routing
+- "Why prefer Ingress over many LoadBalancer Services?" One cloud LB with host/path routing
   and TLS termination instead of one costly LB per Service.
-- **"How does a Pod reach a Service in another namespace?"** Use the cross-namespace name
+- "How does a Pod reach a Service in another namespace?" Use the cross-namespace name
   `svc.other-ns` or the FQDN `svc.other-ns.svc.cluster.local`.
 
 ## References

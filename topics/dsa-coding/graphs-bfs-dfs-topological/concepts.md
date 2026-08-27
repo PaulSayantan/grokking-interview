@@ -488,26 +488,26 @@ Master the traversal template on these and most graph interviews become mechanic
 
 ## Common follow-up questions
 
-- **"Why is BFS/DFS `O(V + E)` and not `O(V·E)`?"** — Each vertex is processed once and
+- "Why is BFS/DFS `O(V + E)` and not `O(V·E)`?" — Each vertex is processed once and
   each edge is examined once (twice for undirected, still `O(E)`). The visited set
   guarantees no vertex is re-expanded. On a matrix it becomes `O(V²)` because you scan a
   full row per vertex.
-- **"When would you pick an adjacency matrix over a list?"** — Dense graphs, frequent
+- "When would you pick an adjacency matrix over a list?" — Dense graphs, frequent
   `O(1)` edge-existence queries, or matrix algorithms (Floyd-Warshall, transitive
   closure). Otherwise the list's `O(V+E)` space wins.
-- **"How do you detect a cycle differently in directed vs undirected graphs?"** —
+- "How do you detect a cycle differently in directed vs undirected graphs?" —
   Directed: gray/black DFS coloring, a back edge to a gray (on-stack) node is a cycle; or
   Kahn's producing `< V` nodes. Undirected: a visited neighbor that isn't the parent, or
   union-find where an edge connects two already-joined vertices.
-- **"Why mark visited on enqueue, not dequeue, in BFS?"** — To prevent the same vertex
+- "Why mark visited on enqueue, not dequeue, in BFS?" — To prevent the same vertex
   being queued multiple times, which breaks the `O(V+E)` bound and can corrupt distances.
-- **"A DAG has how many topological orders?"** — Potentially many; any linear extension
+- "A DAG has how many topological orders?" — Potentially many; any linear extension
   of the partial order is valid. Use a heap in Kahn's for the lexicographically smallest.
-- **"BFS found a path but it's not shortest — why?"** — The graph is weighted; BFS
+- "BFS found a path but it's not shortest — why?" — The graph is weighted; BFS
   assumes unit weights. Switch to Dijkstra.
-- **"How do you turn Course Schedule into detecting *which* course causes the deadlock?"**
+- "How do you turn Course Schedule into detecting *which* course causes the deadlock?"
   — After Kahn's, the vertices still with in-degree > 0 are exactly those on cycles.
-- **"BFS solves Word Ladder — can you make it faster?"** — Use **bidirectional BFS**.
+- "BFS solves Word Ladder — can you make it faster?" — Use **bidirectional BFS**.
   When both the start and target are known and edges are reversible (undirected), run BFS
   alternately from *each* end, always expanding the smaller frontier, and stop when the two
   frontiers meet. Intuition on the cost: a one-directional search to depth `d` with

@@ -689,29 +689,29 @@ Solutions:
 
 ## Common follow-up questions
 
-- **Is `ApplicationContext` a `BeanFactory`?** Yes — `ApplicationContext` extends
+- Is `ApplicationContext` a `BeanFactory`? Yes — `ApplicationContext` extends
   `BeanFactory` (via `ListableBeanFactory` and `HierarchicalBeanFactory`), so every
   `ApplicationContext` *is* a `BeanFactory` with added enterprise features.
-- **What is the default bean scope, and how are singletons initialized?** The default
+- What is the default bean scope, and how are singletons initialized? The default
   scope is `singleton` (one instance per container). In an `ApplicationContext`,
   non-lazy singletons are created eagerly during `refresh()`; a plain `BeanFactory`
   creates them lazily on first request.
-- **How do you make an `ApplicationContext` bean lazy?** Annotate it with `@Lazy`
+- How do you make an `ApplicationContext` bean lazy? Annotate it with `@Lazy`
   (or `lazy-init="true"` in XML), or set `@Lazy` on a `@Configuration` class to make
   all its `@Bean`s lazy.
-- **Difference between `BeanFactoryPostProcessor` and `BeanPostProcessor`?** The
+- Difference between `BeanFactoryPostProcessor` and `BeanPostProcessor`? The
   former modifies bean *definitions* before instantiation; the latter intercepts
   bean *instances* during initialization.
-- **Which context implementation for annotation-based Java config?**
+- Which context implementation for annotation-based Java config?
   `AnnotationConfigApplicationContext`.
-- **What triggers eager singleton creation?** The
+- What triggers eager singleton creation? The
   `finishBeanFactoryInitialization()` phase of `refresh()`, which calls
   `preInstantiateSingletons()` on the underlying `DefaultListableBeanFactory`.
-- **javax vs jakarta:** Spring Framework 6.x (and Boot 3.x) migrated to the
+- javax vs jakarta: Spring Framework 6.x (and Boot 3.x) migrated to the
   `jakarta.*` namespace (e.g., `jakarta.annotation.PostConstruct`,
   `jakarta.inject.Inject`). Spring 5.x and earlier use `javax.*`. The IoC container
   concepts are unchanged; only the annotation package names differ.
-- **Does Spring Boot change this?** Spring Boot builds on the same container; its
+- Does Spring Boot change this? Spring Boot builds on the same container; its
   `SpringApplication` still creates an `ApplicationContext` (e.g., a
   web `ServletWebServerApplicationContext`) and calls `refresh()`. Auto-configuration
   is a Boot feature layered on top — the core IoC container is identical Spring

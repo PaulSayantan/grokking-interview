@@ -718,26 +718,26 @@ the authored **observability** domain.
 
 ## Common follow-up questions
 
-- **"Walk me through debugging a server that's slow / out of disk / has a port conflict."**
+- "Walk me through debugging a server that's slow / out of disk / has a port conflict."
   Slow: `top`/`htop` for CPU, `free -h` for memory pressure/swap, `iostat`/`iotop` for I/O,
   `ss`/`ping` for network. Disk full: `df -h` (also `df -i` for inodes), then `du -sh /*` to
   drill down, check for open-but-deleted files with `lsof | grep deleted`. Port conflict:
   `ss -ltnp | grep :PORT` or `lsof -i :PORT` to find the owning PID, then decide.
-- **"Your bash script silently ignored a failure — why, and how do you prevent it?"**
+- "Your bash script silently ignored a failure — why, and how do you prevent it?"
   Default bash continues past errors and pipelines report only the last command's status.
   Add `set -euo pipefail`; be aware `set -e` is suppressed inside `if`/`&&`/`||` and by
   `local x=$(cmd)`.
-- **"How do you keep a service running and see its logs?"** Run it under systemd with
+- "How do you keep a service running and see its logs?" Run it under systemd with
   `Restart=on-failure`, `systemctl enable --now`, and read logs via `journalctl -u`.
-- **"grep vs sed vs awk — when do you reach for each?"** grep to *find* matching lines, sed
+- "grep vs sed vs awk — when do you reach for each?" grep to *find* matching lines, sed
   to *edit/substitute* lines in a stream, awk to work with *columns* and *aggregate*.
-- **"Why did my SSH key stop working after I copied it?"** Permissions — SSH ignores keys
+- "Why did my SSH key stop working after I copied it?" Permissions — SSH ignores keys
   and `~/.ssh` that are too open; need `700` on `~/.ssh`, `600` on the private key.
-- **"Cron job works when I run it but not from cron."** Minimal cron environment: short
+- "Cron job works when I run it but not from cron." Minimal cron environment: short
   `PATH`, no profile sourced. Use absolute paths and set env explicitly; redirect output.
-- **"What does exit code 137 mean in a CI/container log?"** 128 + 9 = killed by SIGKILL,
+- "What does exit code 137 mean in a CI/container log?" 128 + 9 = killed by SIGKILL,
   usually the OOM killer / a memory limit.
-- **"SIGTERM vs SIGKILL, and why do orchestrators send SIGTERM first?"** SIGTERM is
+- "SIGTERM vs SIGKILL, and why do orchestrators send SIGTERM first?" SIGTERM is
   catchable and lets the app drain/clean up; SIGKILL is immediate and uncatchable. Graceful
   shutdown needs the app to trap SIGTERM.
 

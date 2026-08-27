@@ -326,21 +326,21 @@ Design sizing for a URL-shortener-style read-heavy service, narrated the way you
 
 ## Common follow-up questions
 
-- **"Why do you round 86,400 to 100,000 — isn't that a 16% error?"** Because at estimation
+- "Why do you round 86,400 to 100,000 — isn't that a 16% error?" Because at estimation
   precision I care about order of magnitude, and one significant figure keeps the mental
   math reliable; a ~15% skew never changes the "one box vs a fleet" decision. I'd use exact
   numbers only when the decision is genuinely close.
-- **"You assumed a 5x peak factor — defend it."** It's a placeholder for daily/spiky traffic
+- "You assumed a 5x peak factor — defend it." It's a placeholder for daily/spiky traffic
   I'd normally get from dashboards; 2x for smooth global traffic, higher for regional or
   launch spikes. The key is that I sized for *peak*, not average, so we don't fall over at
   the evening surge — and I'd confirm the real factor before provisioning.
-- **"Your storage estimate ignores compression and media — redo it."** Fair: text
+- "Your storage estimate ignores compression and media — redo it." Fair: text
   compresses ~2–5x, so raw is an upper bound; media (photos/video) is ~1000x text and would
   dominate, so I'd split blob storage from the metadata DB and estimate them separately.
-- **"How many application servers do you need for 10K QPS?"** Little's Law: concurrency =
+- "How many application servers do you need for 10K QPS?" Little's Law: concurrency =
   10K × per-request latency. At 50 ms that's 500 in-flight; at ~200 threads/box, ~3 boxes
   plus headroom and redundancy — call it 4–5.
-- **"A user across the ocean says the app is slow — where's the time going?"** Start with
+- "A user across the ocean says the app is slow — where's the time going?" Start with
   the ~150 ms transatlantic round trip (physics), times any chatty calls, before server
   work. Fix with edge/CDN and regional replicas, not by optimizing the handler.
 

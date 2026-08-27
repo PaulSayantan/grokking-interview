@@ -527,26 +527,26 @@ Grouped by the structure/technique they drill.
 
 ## Common follow-up questions
 
-- **"Fenwick or segment tree here?"** If the query is a prefix/range **sum** with point
+- "Fenwick or segment tree here?" If the query is a prefix/range **sum** with point
   updates, Fenwick (smaller code, better constant). If you need range min/max, custom
   merges, or range *assign/add* updates → segment tree (add lazy propagation for range
   updates).
-- **"Why can't a Fenwick tree do range minimum?"** Prefix decomposition relies on
+- "Why can't a Fenwick tree do range minimum?" Prefix decomposition relies on
   *subtracting* one prefix from another; min has no inverse, so `sum(r) - sum(l-1)` has no
   min analogue. Segment trees combine children directly and need no inverse.
-- **"What does the LPS/failure array actually store?"** For each prefix, the length of the
+- "What does the LPS/failure array actually store?" For each prefix, the length of the
   longest proper prefix that is also a suffix (the longest *border*). It encodes how far
   the pattern can safely slide on a mismatch.
-- **"Rabin-Karp is O(n+m) average but what's the worst case, and why?"** `O(n·m)`, when
+- "Rabin-Karp is O(n+m) average but what's the worst case, and why?" `O(n·m)`, when
   hash collisions (or an adversarial modulus) force a full character comparison at every
   window; mitigate with a large prime modulus or double hashing.
-- **"Why is a balanced BST worse than a hash map for lookup but sometimes preferred?"**
+- "Why is a balanced BST worse than a hash map for lookup but sometimes preferred?"
   Hash map is `O(1)` average but unordered; a balanced BST is `O(log n)` but supports
   floor/ceiling, range queries, and in-order (sorted) traversal.
-- **"AVL vs red-black — when does each win?"** AVL is more strictly balanced → faster
+- "AVL vs red-black — when does each win?" AVL is more strictly balanced → faster
   lookups (read-heavy); red-black does fewer rotations per write (write-heavy), which is
   why standard libraries use it.
-- **"Longest palindromic substring in linear time?"** Manacher's algorithm — `O(n)` via
+- "Longest palindromic substring in linear time?" Manacher's algorithm — `O(n)` via
   the transformed string and mirror-symmetry radius reuse; expand-around-center is the
   `O(n²)` interview default.
 

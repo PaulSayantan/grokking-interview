@@ -921,29 +921,29 @@ storage on the other side.
 
 ## Common follow-up questions
 
-- **"Where do named volumes physically live?"** On Linux, under
+- "Where do named volumes physically live?" On Linux, under
   `/var/lib/docker/volumes/<name>/_data` for the `local` driver; `docker volume inspect` shows
   the `Mountpoint`. Don't depend on that path — other drivers do not use it, and on Docker
   Desktop it is a path inside the Linux VM.
-- **"What's the difference between stopping and removing a container for data?"** `stop`
+- "What's the difference between stopping and removing a container for data?" `stop`
   keeps the writable layer; `rm` destroys it. Volumes survive both. A tmpfs mount survives
   neither — it goes at `stop`.
-- **"Does `docker rm` delete the volumes?"** No — named volumes persist. `docker rm -v`
+- "Does `docker rm` delete the volumes?" No — named volumes persist. `docker rm -v`
   removes the container's *anonymous* volumes only.
-- **"I added a bind mount and my app's files vanished — why?"** Bind mounts obscure the
+- "I added a bind mount and my app's files vanished — why?" Bind mounts obscure the
   container directory; only volumes copy the image's existing files in, and only on first mount
   of an empty volume.
-- **"Why does my non-root container get permission denied on a bind mount?"** UID mismatch;
+- "Why does my non-root container get permission denied on a bind mount?" UID mismatch;
   bind mounts don't remap ownership. `chown` the host dir to the container's UID, or run with
   `--user`. If the daemon uses user-namespace remapping, `chown` to the *mapped* host UID.
-- **"Can two containers share a volume?"** Yes for access; you own the concurrency safety.
+- "Can two containers share a volume?" Yes for access; you own the concurrency safety.
   Don't point two databases at one volume.
-- **"How do I persist data across `docker compose down`?"** Named volumes survive `down`;
+- "How do I persist data across `docker compose down`?" Named volumes survive `down`;
   only `down -v` deletes them.
-- **"Volume vs bind mount for a database in prod?"** Named volume — portable, out from under the
+- "Volume vs bind mount for a database in prod?" Named volume — portable, out from under the
   layer stack, backup-able through the volume API — or a networked volume, or a managed database
   service.
-- **"Why did my `RUN` after a `VOLUME` line lose its writes?"** On the legacy builder the write
+- "Why did my `RUN` after a `VOLUME` line lose its writes?" On the legacy builder the write
   went into the build-time anonymous volume, which is discarded rather than committed into the
   layer; BuildKit keeps such changes.
 

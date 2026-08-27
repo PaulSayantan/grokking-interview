@@ -502,25 +502,25 @@ Trade-offs and gotchas:
 
 ## Common follow-up questions
 
-- **"How do you tell a flaky failure from a real one?"** Re-run the exact same
+- "How do you tell a flaky failure from a real one?" Re-run the exact same
   commit: a real failure reproduces deterministically; a flaky one flips. Track
   flip-rate historically rather than judging per-run.
-- **"A test is flaky and blocking everyone. What now?"** Quarantine it (move out
+- "A test is flaky and blocking everyone. What now?" Quarantine it (move out
   of the blocking gate but keep running/reporting), open an owned ticket with an
   SLA, then fix the determinism root cause or delete it — don't leave it
   ignored-but-running.
-- **"Should you retry failed tests in CI?"** Not unit tests — a flaky unit test
+- "Should you retry failed tests in CI?" Not unit tests — a flaky unit test
   is a determinism bug retrying only hides. A bounded retry at the E2E/network
   boundary can be pragmatic, but only with flakiness tracking so you still see
   and fix it.
-- **"Your PR build takes 40 minutes. How do you fix it?"** Rebalance the pyramid,
+- "Your PR build takes 40 minutes. How do you fix it?" Rebalance the pyramid,
   parallelize/shard, apply test impact analysis on PRs (full suite nightly),
   reuse expensive fixtures, and kill the slow tail — measure suite duration as a
   tracked metric.
-- **"Why not just require 100% coverage?"** Coverage measures execution, not
+- "Why not just require 100% coverage?" Coverage measures execution, not
   assertion quality; it's gameable and punishes legacy code. Gate on new-code
   coverage and pair it with mutation testing.
-- **"Tests pass locally but fail in CI — why?"** Environment nondeterminism:
+- "Tests pass locally but fail in CI — why?" Environment nondeterminism:
   timezone/locale/encoding defaults, machine speed (timing races), test ordering,
   shared state, ephemeral vs fixed ports, missing external deps.
 

@@ -352,26 +352,26 @@ Advanced / union-by-size & offline:
 
 ## Common follow-up questions
 
-- **"Is DSU truly O(1)?"** No — it's **O(α(n))** amortized with both optimizations,
+- "Is DSU truly O(1)?" No — it's **O(α(n))** amortized with both optimizations,
   where α is inverse Ackermann (≤ ~4 in practice). A single `find` can be O(log n) before
   compression flattens the path.
-- **"Union by rank vs by size — which and why?"** Both give O(log n) height alone and
+- "Union by rank vs by size — which and why?" Both give O(log n) height alone and
   O(α(n)) with compression. Use **size** when the problem asks about component sizes;
   rank is a slightly smaller counter but functionally equivalent.
-- **"Can you delete an edge / un-union?"** Not with plain DSU — it only merges. Handle
+- "Can you delete an edge / un-union?" Not with plain DSU — it only merges. Handle
   deletions **offline in reverse** (turn deletions into unions) or use a different
   structure (e.g. link-cut trees / Euler tour trees for fully dynamic connectivity).
-- **"Why does path compression not need to update rank?"** Rank stays an *upper bound* on
+- "Why does path compression not need to update rank?" Rank stays an *upper bound* on
   height; compression only lowers real height, so ranks remain valid (never
   recomputed) — that's why the combined analysis still holds.
-- **"DSU or BFS/DFS here?"** DSU for incremental unions + repeated connectivity queries;
+- "DSU or BFS/DFS here?" DSU for incremental unions + repeated connectivity queries;
   BFS/DFS for a one-shot static labeling or when you need actual paths / shortest paths.
-- **"How would you make find iterative to avoid stack overflow?"** Use path halving, or a
+- "How would you make find iterative to avoid stack overflow?" Use path halving, or a
   two-pass loop (find root, then relink each node to it).
-- **"How does Kruskal's use it?"** Sort edges by weight; for each edge, `union` the
+- "How does Kruskal's use it?" Sort edges by weight; for each edge, `union` the
   endpoints if they're in different sets (DSU rejects cycle-forming edges), stopping after
   n-1 edges.
-- **"Can DSU track more than membership?"** Yes — **weighted / relational DSU** stores a
+- "Can DSU track more than membership?" Yes — **weighted / relational DSU** stores a
   relation to the parent (a parity bit, or a numeric offset/ratio) alongside each parent
   pointer, and *combines* those relations during `find` as it compresses the path. This
   answers "what's the relationship between a and b?", not just "same set?". Uses:

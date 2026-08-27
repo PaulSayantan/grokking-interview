@@ -434,21 +434,21 @@ Grouped by sub-pattern. These are the canonical drills for this topic family.
 
 ## Common follow-up questions
 
-- **"Why does a sliding window fail with negative numbers for exact-sum problems?"**
+- "Why does a sliding window fail with negative numbers for exact-sum problems?"
   Expanding the window can *decrease* the sum, so "shrink when the sum exceeds target" no
   longer restores validity — there's no monotonic relationship between window length and
   sum. Use prefix sum + hashmap instead.
-- **"3Sum without sorting?"** Possible with a hashset per anchor (`O(n²)` time, `O(n)`
+- "3Sum without sorting?" Possible with a hashset per anchor (`O(n²)` time, `O(n)`
   space), but de-duplication is messier; sorting is the cleaner interview answer.
-- **"Container With Most Water — why is greedily moving the shorter wall safe?"** Area is
+- "Container With Most Water — why is greedily moving the shorter wall safe?" Area is
   bounded by the shorter wall × width. Moving the taller wall inward can only shrink width
   while the height stays capped by the shorter wall, so it can never improve; moving the
   shorter wall is the only move that *might* help. This is the same exchange argument as
   the converging-pointer proof.
-- **"How do prefix sums extend to updates?"** A static prefix array is `O(n)` to rebuild
+- "How do prefix sums extend to updates?" A static prefix array is `O(n)` to rebuild
   per update. If updates and queries interleave, switch to a Fenwick tree (BIT) or segment
   tree for `O(log n)` update and query.
-- **"Fixed window sum — how do you avoid re-summing?"** Add the entering element and
+- "Fixed window sum — how do you avoid re-summing?" Add the entering element and
   subtract the leaving element each slide (`window += a[right] - a[right-k]`), turning
   `O(n·k)` into `O(n)`.
 

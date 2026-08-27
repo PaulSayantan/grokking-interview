@@ -721,25 +721,25 @@ Beyond the everyday codes, senior interviews probe these:
 
 ## Common follow-up questions
 
-- **Why can't TCP just deliver "one request"?** TCP is a byte stream with no message
+- Why can't TCP just deliver "one request"? TCP is a byte stream with no message
   boundaries; HTTP must frame messages itself (start line + headers + blank line + body).
-- **How does the receiver know the body length?** `Content-Length`, or
+- How does the receiver know the body length? `Content-Length`, or
   `Transfer-Encoding: chunked` (0-size chunk terminates), or connection close (HTTP/1.0
   style). Never both CL and chunked — that enables request smuggling.
-- **Why is the `Host` header mandatory in HTTP/1.1?** To support name-based virtual
+- Why is the `Host` header mandatory in HTTP/1.1? To support name-based virtual
   hosting — many hostnames on one IP. Missing `Host` → 400.
-- **What changed from HTTP/1.0 to 1.1?** Persistent connections by default, mandatory
+- What changed from HTTP/1.0 to 1.1? Persistent connections by default, mandatory
   `Host`, chunked encoding, better caching, ranges, `100 Continue`.
-- **How do sessions work if HTTP is stateless?** State is carried in each request via
+- How do sessions work if HTTP is stateless? State is carried in each request via
   cookies/tokens; the server keeps session data keyed by an opaque session ID (or uses
   self-contained signed tokens).
-- **Why is pipelining dead?** In-order response requirement causes HOL blocking; proxies
+- Why is pipelining dead? In-order response requirement causes HOL blocking; proxies
   mishandled it. Browsers used parallel connections instead, and HTTP/2 multiplexing
   replaced it.
-- **Difference between `Content-Encoding` and `Transfer-Encoding`?** `Content-Encoding`
+- Difference between `Content-Encoding` and `Transfer-Encoding`? `Content-Encoding`
   (e.g. gzip/br) is an end-to-end property of the representation; `Transfer-Encoding`
   (e.g. chunked) is a hop-by-hop framing of the message body for one connection.
-- **Why does compression need `Vary: Accept-Encoding`?** So caches don't hand a
+- Why does compression need `Vary: Accept-Encoding`? So caches don't hand a
   br-encoded body to a client that only accepts gzip.
 
 ## References

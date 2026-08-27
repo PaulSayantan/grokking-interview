@@ -447,30 +447,30 @@ the reliability-and-operations domain; here we stay at what makes a *signal* goo
 
 ## Common follow-up questions
 
-- **"Is observability just monitoring rebranded?"** No. Monitoring watches predefined
+- "Is observability just monitoring rebranded?" No. Monitoring watches predefined
   signals for known-unknowns; observability is the capacity to ask arbitrary questions
   about unknown-unknowns from existing rich telemetry. Monitoring is a use case built
   on observable data.
-- **"You have all three pillars — are you observable?"** Not necessarily. If they're
+- "You have all three pillars — are you observable?" Not necessarily. If they're
   disconnected silos you can't correlate (no shared `trace_id`, no exemplars) or your
   metrics can't be sliced by the dimension that matters (cardinality), you're not.
-- **"Why can't I just put `user_id` in a metric label?"** Cardinality explosion —
+- "Why can't I just put `user_id` in a metric label?" Cardinality explosion —
   each label-value combination is a separate time series; series count is the product
   of label cardinalities, so a high-cardinality label can OOM the TSDB. Put identity in
   traces/logs/wide events.
-- **"Golden signals vs RED vs USE?"** Golden signals (Latency/Traffic/Errors/Saturation)
+- "Golden signals vs RED vs USE?" Golden signals (Latency/Traffic/Errors/Saturation)
   and RED (Rate/Errors/Duration) are request/service-centric; USE
   (Utilization/Saturation/Errors) is resource-centric. Use RED for the symptom, USE
   to find the constrained resource.
-- **"SLI vs SLO vs SLA?"** SLI = measured indicator; SLO = internal target; SLA =
+- "SLI vs SLO vs SLA?" SLI = measured indicator; SLO = internal target; SLA =
   external contract with penalties. SLAs are looser than SLOs.
-- **"What's an error budget and why 99.9% not 100%?"** The allowed unreliability
+- "What's an error budget and why 99.9% not 100%?" The allowed unreliability
   (1 − SLO). 100% is infinitely costly and blocks feature velocity; the budget lets
   you trade reliability for speed explicitly.
-- **"How do you jump from a metric spike to the cause?"** Exemplars link a histogram
+- "How do you jump from a metric spike to the cause?" Exemplars link a histogram
   bucket to a representative `trace_id`; the trace localizes the slow/failed span; the
   span's `trace_id` in structured logs surfaces the exact log line.
-- **"White-box vs black-box — which do you alert on?"** Alert primarily on black-box /
+- "White-box vs black-box — which do you alert on?" Alert primarily on black-box /
   symptom SLIs (user-facing); use white-box for diagnosis and a few impending-cause
   alerts.
 

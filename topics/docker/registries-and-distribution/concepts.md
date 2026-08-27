@@ -371,21 +371,21 @@ That closes the loop this topic opened. You can now name an image, address it so
 
 ## Common follow-up questions
 
-- **Tag vs digest — when do you use each?** Tags for humans and rolling channels
+- Tag vs digest — when do you use each? Tags for humans and rolling channels
   (`:1`, `:stable`); digests for anything that must be reproducible or auditable —
   production deploys, base-image pinning, admission control.
-- **Why did my `arm64`-built image fail on the server?** Legacy `docker build` produced a
+- Why did my `arm64`-built image fail on the server? Legacy `docker build` produced a
   single-arch image for the build host. Use `docker buildx --platform` to build a
   multi-arch index that also covers the server's architecture.
-- **Why is CI hitting `toomanyrequests`?** Docker Hub's anonymous pull limit, counted
+- Why is CI hitting `toomanyrequests`? Docker Hub's anonymous pull limit, counted
   against the shared CI egress IP. Authenticate the runners, or mirror the base images.
-- **Does `docker tag` copy data?** No — it adds another pointer to the same image; no
+- Does `docker tag` copy data? No — it adds another pointer to the same image; no
   layers are duplicated.
-- **Why does deleting tags not free disk space on my registry?** Untagging leaves the
+- Why does deleting tags not free disk space on my registry? Untagging leaves the
   blobs behind. You must delete by digest and run mark-and-sweep garbage collection.
-- **How do I run my own registry?** `docker run -d -p 5000:5000 registry:2`, or Harbor for
+- How do I run my own registry? `docker run -d -p 5000:5000 registry:2`, or Harbor for
   RBAC, scanning, and replication; configure a pull-through cache to dodge Hub limits.
-- **What's the difference between image ID and digest?** Image ID = the config-blob hash
+- What's the difference between image ID and digest? Image ID = the config-blob hash
   (local); RepoDigest = the manifest hash (as stored on the registry).
 
 ## References

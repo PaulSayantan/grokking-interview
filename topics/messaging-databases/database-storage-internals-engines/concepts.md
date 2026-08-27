@@ -564,29 +564,29 @@ Points interviewers like to hear:
 
 ## Common follow-up questions
 
-- **"Why do write-heavy systems favor LSM-trees?"** They convert random in-place page writes
+- "Why do write-heavy systems favor LSM-trees?" They convert random in-place page writes
   into sequential appends (memtable flush + WAL), and defer/merge the real I/O in background
   compaction — great for flash endurance and ingest throughput, at the cost of read and
   compaction (write) amplification.
-- **"What is write amplification and why does it matter on SSDs?"** Bytes physically written ÷
+- "What is write amplification and why does it matter on SSDs?" Bytes physically written ÷
   logical bytes. On flash it drives wear (limited program/erase cycles) and steals write
   bandwidth; LSM compaction and B+tree page rewrites are the main sources.
-- **"Difference between the redo log, undo log, and binlog?"** Redo = physical, roll-forward
+- "Difference between the redo log, undo log, and binlog?" Redo = physical, roll-forward
   committed changes at recovery (durability). Undo = reverse changes / build MVCC snapshots.
   Binlog = MySQL server-layer logical log for replication & PITR (not crash recovery).
-- **"Why does a long-running transaction hurt Postgres?"** It pins the oldest snapshot, so
+- "Why does a long-running transaction hurt Postgres?" It pins the oldest snapshot, so
   autovacuum can't reclaim dead tuples → table/index **bloat**; in InnoDB the same thing blocks
   **purge** → undo history growth and slow scans.
-- **"What does a checkpoint do?"** Flushes dirty pages and records a WAL position so recovery
+- "What does a checkpoint do?" Flushes dirty pages and records a WAL position so recovery
   can start there (bounds recovery time) and old WAL can be recycled.
-- **"How does ARIES guarantee correctness across repeated crashes?"** Redo is idempotent
+- "How does ARIES guarantee correctness across repeated crashes?" Redo is idempotent
   (guarded by `pageLSN`), and undo logs CLRs, so recovery can be interrupted and restarted and
   still converge.
-- **"When would you tune `innodb_flush_log_at_trx_commit=2` or `synchronous_commit=off`?"** For
+- "When would you tune `innodb_flush_log_at_trx_commit=2` or `synchronous_commit=off`?" For
   non-authoritative data (metrics, logs, caches, derived tables) where a bounded loss of the
   last ~1s of committed transactions on power loss is acceptable in exchange for throughput —
   never for a system of record.
-- **"Row vs column store — which for reporting?"** Column store: it reads only the needed
+- "Row vs column store — which for reporting?" Column store: it reads only the needed
   columns and compresses homogeneous data far better, ideal for scans/aggregations.
 
 ## References

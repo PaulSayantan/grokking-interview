@@ -915,37 +915,37 @@ Deepening the replay discussion:
 
 ## Common follow-up questions
 
-- **Does HTTP/2 require TLS?** The spec allows cleartext (`h2c`), but every major **browser**
+- Does HTTP/2 require TLS? The spec allows cleartext (`h2c`), but every major **browser**
   requires TLS, so in practice HTTP/2 = TLS + ALPN `h2`. HTTP/3 mandates encryption.
-- **What transport does HTTP/3 use?** QUIC, which runs over **UDP** — not TCP, not a raw new
+- What transport does HTTP/3 use? QUIC, which runs over **UDP** — not TCP, not a raw new
   IP protocol (middleboxes wouldn't pass it).
-- **Why not just fix TCP?** TCP is implemented in the OS kernel and ossified by middleboxes;
+- Why not just fix TCP? TCP is implemented in the OS kernel and ossified by middleboxes;
   changing it globally is infeasible. QUIC in user space over UDP can evolve freely.
-- **Is server push used?** No — it's effectively deprecated; browsers removed it. Use
+- Is server push used? No — it's effectively deprecated; browsers removed it. Use
   `preload` and `103 Early Hints` instead.
-- **HPACK vs QPACK?** Same goal; QPACK decouples dynamic-table updates onto separate streams
+- HPACK vs QPACK? Same goal; QPACK decouples dynamic-table updates onto separate streams
   so out-of-order QUIC delivery doesn't reintroduce HOL blocking.
-- **What breaks a TCP connection that QUIC survives?** An IP/port change (Wi-Fi↔cellular, NAT
+- What breaks a TCP connection that QUIC survives? An IP/port change (Wi-Fi↔cellular, NAT
   rebind). QUIC's Connection ID lets it migrate without a new handshake.
-- **Why can 0-RTT be dangerous?** Early data can be replayed by an attacker; only idempotent
+- Why can 0-RTT be dangerous? Early data can be replayed by an attacker; only idempotent
   requests should use it.
-- **Does HTTP/3 fully eliminate HOL blocking?** It eliminates *cross-stream* transport HOL
+- Does HTTP/3 fully eliminate HOL blocking? It eliminates *cross-stream* transport HOL
   blocking; ordering *within* a single stream still applies.
-- **How does a browser learn a site speaks HTTP/3?** Via the `Alt-Svc` header (RFC 7838) or
+- How does a browser learn a site speaks HTTP/3? Via the `Alt-Svc` header (RFC 7838) or
   an HTTPS DNS record (RFC 9460); the actual protocol pick is via ALPN `h3` in the QUIC
   handshake.
-- **CONTINUATION Flood vs Rapid Reset?** Both are HTTP/2 DoS: Rapid Reset churns
+- CONTINUATION Flood vs Rapid Reset? Both are HTTP/2 DoS: Rapid Reset churns
   open+`RST_STREAM` pairs (visible, bypasses concurrency limit); CONTINUATION Flood sends
   `HEADERS` + endless `CONTINUATION` with no `END_HEADERS` (invisible in logs, OOM/CPU burn).
-- **How does QUIC avoid being a DDoS amplifier?** The 3× anti-amplification limit on
+- How does QUIC avoid being a DDoS amplifier? The 3× anti-amplification limit on
   unvalidated addresses plus Retry-token return-routability validation (RFC 9000 §8).
-- **Why did HTTP/3 look like H2 on the first request?** `Alt-Svc` is learned only after a
+- Why did HTTP/3 look like H2 on the first request? `Alt-Svc` is learned only after a
   prior connection; only an HTTPS/SVCB DNS record (RFC 9460) enables first-flight HTTP/3.
-- **Can WebSocket run over HTTP/2 or HTTP/3?** Yes — Extended CONNECT (`:protocol`, RFC 8441)
+- Can WebSocket run over HTTP/2 or HTTP/3? Yes — Extended CONNECT (`:protocol`, RFC 8441)
   with `SETTINGS_ENABLE_CONNECT_PROTOCOL`; over HTTP/3 it is RFC 9220.
-- **Why did domain sharding make HTTP/2 slower?** Sharding across subdomains fights H2/H3
+- Why did domain sharding make HTTP/2 slower? Sharding across subdomains fights H2/H3
   multiplexing and connection coalescing; consolidate to one origin.
-- **How does QUIC recover from a rebooted server?** A Stateless Reset using a token from a
+- How does QUIC recover from a rebooted server? A Stateless Reset using a token from a
   prior `NEW_CONNECTION_ID` frame tells the peer the connection is dead.
 
 ---

@@ -519,26 +519,26 @@ incidents well is what lets a team keep its foot on the delivery gas without bre
 
 ## Common follow-up questions
 
-- **"You just deployed and error rate spiked — walk me through what you do."** Roll back
+- "You just deployed and error rate spiked — walk me through what you do." Roll back
   first (mitigate — timing implicates the deploy), verify recovery, communicate, *then*
   diagnose in the postmortem. Do not "add logging and reproduce" while customers burn.
-- **"When is rollback the wrong move?"** When it's unsafe/impossible: irreversible DB
+- "When is rollback the wrong move?" When it's unsafe/impossible: irreversible DB
   migration, already-corrupted data, schema change old code can't read. Then roll forward
   with a fast fix. This is why backward-compatible, reversible changes matter.
-- **"IC vs Ops Lead — why separate them?"** Coordination and hands-on work compete for
+- "IC vs Ops Lead — why separate them?" Coordination and hands-on work compete for
   attention; one person can't steer and debug at once. IC decides and delegates; Ops fixes.
-- **"Difference between MTTR and MTBF?"** MTTR = recovery speed (fault→restored); MTBF =
+- "Difference between MTTR and MTBF?" MTTR = recovery speed (fault→restored); MTBF =
   reliability/frequency (healthy time between incidents). Availability ≈ MTBF/(MTBF+MTTR).
-- **"What makes a postmortem *blameless*, and why bother?"** Focus on systems/contributing
+- "What makes a postmortem *blameless*, and why bother?" Focus on systems/contributing
   factors, never punish individuals — because blame makes people hide failures, destroying
   the information you need to improve. Reject "human error" as a root cause.
-- **"Severity vs priority?"** Severity = impact; priority = order of work. Correlated but
+- "Severity vs priority?" Severity = impact; priority = order of work. Correlated but
   distinct; a low-sev issue can be high-priority.
-- **"How do you keep on-call sustainable?"** Actionable-only paging, sane rotation, caps on
+- "How do you keep on-call sustainable?" Actionable-only paging, sane rotation, caps on
   incidents/shift, compensation, follow-the-sun, and killing alert fatigue at the source.
-- **"What's the deliverable of a postmortem?"** Owned, tracked, prioritized action items —
+- "What's the deliverable of a postmortem?" Owned, tracked, prioritized action items —
   not the document.
-- **"5 Whys limitation?"** Real outages usually have multiple contributing factors (Swiss
+- "5 Whys limitation?" Real outages usually have multiple contributing factors (Swiss
   cheese), not one linear root cause; use it to start, not to oversimplify.
 
 ---

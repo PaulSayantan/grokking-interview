@@ -417,23 +417,23 @@ overridden `removeEldestEntry` gives the same behavior in a few lines.
 
 ## Common follow-up questions
 
-- **Why is `get` O(1) on average but O(n) worst?** Uniform hashing → constant-length
+- Why is `get` O(1) on average but O(n) worst? Uniform hashing → constant-length
   buckets on average; adversarial/bad hashing → all keys in one bucket → linear scan.
-- **What does load factor 0.75 mean and why that number?** size/capacity threshold at
+- What does load factor 0.75 mean and why that number? size/capacity threshold at
   which Java doubles+rehashes; balances collision length vs wasted memory.
-- **Chaining vs open addressing — trade-offs?** Chaining tolerates α>1 and deletes easily
+- Chaining vs open addressing — trade-offs? Chaining tolerates α>1 and deletes easily
   but chases pointers; open addressing has great cache locality but needs tombstones and
   α<1.
-- **Why must `equals` and `hashCode` agree, and why immutable keys?** Lookup finds the
+- Why must `equals` and `hashCode` agree, and why immutable keys? Lookup finds the
   bucket by hash then confirms by equals; a key whose hash changes after insertion becomes
   unreachable.
-- **What happens on resize?** Allocate 2× array, rehash all entries (O(n) once), amortized
+- What happens on resize? Allocate 2× array, rehash all entries (O(n) once), amortized
   O(1) per insert.
-- **Why did Java 8 add tree bins?** To cap worst-case bucket cost at O(log n) and defend
+- Why did Java 8 add tree bins? To cap worst-case bucket cost at O(log n) and defend
   against hash-flooding DoS.
-- **How would you build an LRU cache?** Hash map for O(1) lookup + doubly linked list for
+- How would you build an LRU cache? Hash map for O(1) lookup + doubly linked list for
   O(1) recency reordering/eviction (or `LinkedHashMap` in access-order mode).
-- **HashMap vs TreeMap vs LinkedHashMap — when each?** HashMap for speed/no order; TreeMap
+- HashMap vs TreeMap vs LinkedHashMap — when each? HashMap for speed/no order; TreeMap
   for sorted/range queries at O(log n); LinkedHashMap for predictable iteration or LRU.
 
 ## References

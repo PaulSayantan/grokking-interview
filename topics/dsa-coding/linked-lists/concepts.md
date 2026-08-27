@@ -418,20 +418,20 @@ Grouped by the technique they drill. All are canonical, frequently-asked problem
 
 ## Common follow-up questions
 
-- **Why is `ArrayList` usually faster than `LinkedList` in Java even for inserts?**
+- Why is `ArrayList` usually faster than `LinkedList` in Java even for inserts?
   Cache locality and amortized O(1) append; `LinkedList` pays a cache miss per node and
   allocates a node object per element, so its constant factors dwarf the asymptotic edge.
-- **How do you detect a cycle in O(1) space, and why does resetting to the head find the
-  entry?** Floyd's algorithm; explain the `a = (L − b) mod L` congruence.
-- **Delete a node given only a pointer to it (not the head), singly linked.** Copy the next
+- How do you detect a cycle in O(1) space, and why does resetting to the head find the
+  entry? Floyd's algorithm; explain the `a = (L − b) mod L` congruence.
+- Delete a node given only a pointer to it (not the head), singly linked. Copy the next
   node's value into this node and delete the next node — O(1); note it fails for the tail.
-- **Reverse only a sublist / in groups of k.** Combine the dummy-head trick with segmented
+- Reverse only a sublist / in groups of k. Combine the dummy-head trick with segmented
   reversal.
-- **How would you merge k sorted lists efficiently?** Min-heap of heads → O(N log k), or
+- How would you merge k sorted lists efficiently? Min-heap of heads → O(N log k), or
   divide-and-conquer pairwise merge.
-- **Recursive vs iterative reversal trade-off?** Same O(n) time; recursion uses O(n) call
+- Recursive vs iterative reversal trade-off? Same O(n) time; recursion uses O(n) call
   stack and can overflow on long lists, iterative is O(1) space.
-- **Why do LRU caches use a doubly-linked list rather than an array or singly-linked list?**
+- Why do LRU caches use a doubly-linked list rather than an array or singly-linked list?
   O(1) removal of an arbitrary (recently-used) node given a hash-map pointer to it, plus
   O(1) move-to-front.
 

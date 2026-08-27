@@ -457,29 +457,29 @@ affordable.
 
 ## Common follow-up questions
 
-- **"APM vs OpenTelemetry — do I need both?"** OTel is the open instrumentation + OTLP
+- "APM vs OpenTelemetry — do I need both?" OTel is the open instrumentation + OTLP
   transport standard; APM is a backend/UI (often with its own agent). Modern best practice:
   instrument with OTel, export OTLP to whatever backend (including a commercial APM) so you
   avoid lock-in but keep a good UI.
-- **"Why can't eBPF just see all my HTTP traffic?"** TLS. On the wire it's ciphertext; you
+- "Why can't eBPF just see all my HTTP traffic?" TLS. On the wire it's ciphertext; you
   must uprobe the crypto library before encryption, which is fragile and incomplete. Plus
   HTTP/2 multiplexing is hard to reconstruct within verifier limits.
-- **"eBPF or SDK for tracing?"** eBPF for zero-touch, language-agnostic, fleet-wide baseline +
+- "eBPF or SDK for tracing?" eBPF for zero-touch, language-agnostic, fleet-wide baseline +
   network signals; SDK/OTel for deep app context and reliable cross-service distributed trace
   context propagation. Layer them.
-- **"Why is continuous profiling the 'fourth pillar'?"** It's a distinct always-on signal
+- "Why is continuous profiling the 'fourth pillar'?" It's a distinct always-on signal
   attributing CPU/memory to specific functions/lines — the "why is resource use high" answer
   that metrics/logs/traces don't give at code granularity.
-- **"What's the overhead of continuous profiling?"** Sampling profilers at ~100 Hz cost a few
+- "What's the overhead of continuous profiling?" Sampling profilers at ~100 Hz cost a few
   percent or less — low enough to run always-on in production; that's the whole point vs
   on-demand profiling.
-- **"Frame pointers vs DWARF unwinding?"** Frame pointers make stack walking cheap but are
+- "Frame pointers vs DWARF unwinding?" Frame pointers make stack walking cheap but are
   often omitted by compilers; DWARF/debug-info unwinding works without them but is heavier —
   eBPF profilers bundle unwinders to cope.
-- **"Can eBPF do distributed tracing?"** It can produce per-service RED metrics and local
+- "Can eBPF do distributed tracing?" It can produce per-service RED metrics and local
   spans easily, but stitching a full distributed trace needs trace-context propagation
   (W3C `traceparent`) that typically requires the app/SDK to inject headers.
-- **"Does APM auto-instrument Go?"** Poorly — Go is compiled with no runtime bytecode
+- "Does APM auto-instrument Go?" Poorly — Go is compiled with no runtime bytecode
   rewriting, so Go coverage often relies on manual instrumentation, compile-time
   instrumentation, or eBPF.
 

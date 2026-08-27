@@ -183,30 +183,30 @@ Stripe grounds the story in real scale — quote these in an interview:
 
 ## Common follow-up questions
 
-- **"Why not just use MongoDB's built-in sharding / MongoDB Atlas?"** When Stripe
+- "Why not just use MongoDB's built-in sharding / MongoDB Atlas?" When Stripe
   started (2011), Atlas didn't exist and off-the-shelf options didn't meet their
   needs (financial-grade consistency/availability, their proxy layer, their
   migration guarantees). They'd already invested in a custom platform, so they built
   horizontal scaling into it as the Data Movement Platform.
-- **"How is the migration invisible to the application?"** The app only ever talks to
+- "How is the migration invisible to the application?" The app only ever talks to
   the Go **proxy layer**, which routes via the chunk→shard map. Migration updates
   that map; the app keeps issuing identical queries and never learns data moved. The
   only observable event is a sub-two-second route switch.
-- **"Where does the risk of data loss hide, and how is it handled?"** In the gap
+- "Where does the risk of data loss hide, and how is it handled?" In the gap
   between the snapshot and "now." Asynchronous replication from the oplog closes that
   gap; a snapshot-based correctness check proves source and target match before the
   switch; and versioned gating stops source writes for the chunk at the instant of
   cutover so nothing is written to the old location afterward.
-- **"Why replicate from CDC instead of reading the source directly?"** Reading the
+- "Why replicate from CDC instead of reading the source directly?" Reading the
   source's live data for catch-up would steal throughput from production traffic and
   strain the oplog. The CDC stream already captures every change durably (into Kafka
   and S3), so replaying from it is both cheaper on the source and resumable from
   checkpoints.
-- **"What is 'versioned gating' actually doing?"** It bumps a version token on the
+- "What is 'versioned gating' actually doing?" It bumps a version token on the
   source so the source begins rejecting requests for the migrating chunk; that fence
   guarantees no straggler writes hit the source after cutover, giving a clean,
   consistent hand-off before the route is repointed to the target.
-- **"How does this pattern generalize?"** It's the canonical online-resharding
+- "How does this pattern generalize?" It's the canonical online-resharding
   playbook: snapshot + change-log catch-up + verify + fast cutover appears in
   Vitess/MySQL resharding, database logical-replication migrations, and CDC-based
   system migrations everywhere. The specifics differ; the six-step shape does not.

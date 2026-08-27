@@ -925,46 +925,46 @@ cipher:
 
 ## Common follow-up questions
 
-- **Why is ECB mode insecure even with AES-256?** Deterministic per-block encryption leaks
+- Why is ECB mode insecure even with AES-256? Deterministic per-block encryption leaks
   plaintext patterns and allows block reordering; key size doesn't help.
-- **What exactly breaks if you reuse an AES-GCM nonce?** Both confidentiality (keystream
+- What exactly breaks if you reuse an AES-GCM nonce? Both confidentiality (keystream
   reuse → P1⊕P2 leaks) and integrity (GHASH subkey `H` recovered → tag forgery).
-- **MAC vs signature vs hash — when do you use each?** Hash = integrity vs accidents; MAC =
+- MAC vs signature vs hash — when do you use each? Hash = integrity vs accidents; MAC =
   integrity+authenticity with a shared secret (no non-repudiation); signature =
   integrity+authenticity+non-repudiation, publicly verifiable.
-- **Why can't you use SHA-256 to store passwords?** It's fast → GPUs brute-force billions/s;
+- Why can't you use SHA-256 to store passwords? It's fast → GPUs brute-force billions/s;
   use a slow, memory-hard, salted function (Argon2id/bcrypt/scrypt/PBKDF2).
-- **HKDF vs Argon2 — why not one function for both?** KDFs assume high-entropy input and must
+- HKDF vs Argon2 — why not one function for both? KDFs assume high-entropy input and must
   be fast; password hashes assume low-entropy input and must be deliberately slow/memory-hard.
-- **Why is `Math.random()` dangerous for tokens?** It's a predictable PRNG; an attacker can
+- Why is `Math.random()` dangerous for tokens? It's a predictable PRNG; an attacker can
   recover state and forge tokens/session IDs. Use a CSPRNG with ≥128 bits of entropy.
-- **Why does ephemeral (EC)DHE give forward secrecy but static RSA key transport doesn't?**
+- Why does ephemeral (EC)DHE give forward secrecy but static RSA key transport doesn't?
   Ephemeral session keys aren't derivable from the long-term key, so a later key compromise
   can't decrypt recorded past sessions.
-- **Is HMAC-SHA1 broken because SHA-1 is broken?** No — HMAC security doesn't depend on
+- Is HMAC-SHA1 broken because SHA-1 is broken? No — HMAC security doesn't depend on
   collision resistance; but migrate to HMAC-SHA256 anyway.
-- **What is AEAD and why prefer it?** One primitive giving confidentiality + integrity +
+- What is AEAD and why prefer it? One primitive giving confidentiality + integrity +
   associated-data authentication, failing closed on tamper — removes error-prone manual
   MAC composition.
-- **Why is deterministic ECDSA (RFC 6979) or Ed25519 safer?** They remove the per-signature
+- Why is deterministic ECDSA (RFC 6979) or Ed25519 safer? They remove the per-signature
   RNG whose failure/reuse leaks the private key.
-- **What survives quantum computers?** Symmetric (AES-256) and hashes are only weakened;
+- What survives quantum computers? Symmetric (AES-256) and hashes are only weakened;
   RSA/ECC/DH are broken (Shor) → migrate to ML-KEM/ML-DSA.
-- **Why isn't "it's AEAD" enough for a shared/password-based vault blob?** AEAD isn't
+- Why isn't "it's AEAD" enough for a shared/password-based vault blob? AEAD isn't
   key-committing → partitioning-oracle attacks; use a **committing AEAD**.
-- **Is "we patched the RSA padding check" enough to close a Bleichenbacher finding in 2024?**
+- Is "we patched the RSA padding check" enough to close a Bleichenbacher finding in 2024?
   No — **Marvin** is a timing leak in the bignum layer (affects OAEP too); drop RSA key
   transport, use (EC)DHE.
-- **Why did TLS 1.2 CBC suites get Lucky13 but AEAD suites didn't?** CBC used
+- Why did TLS 1.2 CBC suites get Lucky13 but AEAD suites didn't? CBC used
   **MAC-then-encrypt**; decryption/padding-removal before the MAC check created a timing
   oracle. Correct order is **encrypt-then-MAC** / AEAD.
-- **Only a few bits of the ECDSA nonce leak across many signatures — is the key safe?** No —
+- Only a few bits of the ECDSA nonce leak across many signatures — is the key safe? No —
   a **lattice/HNP attack** (Minerva, TPM-Fail, LadderLeak) recovers the full key.
-- **A static-ECDH endpoint accepts arbitrary points — what's the risk?**
+- A static-ECDH endpoint accepts arbitrary points — what's the risk?
   **Invalid-curve/small-subgroup** key recovery; validate points or use X25519.
-- **Encrypt 10¹² messages under one AES-GCM key with random nonces?** Unsafe (>2³² nonce
+- Encrypt 10¹² messages under one AES-GCM key with random nonces? Unsafe (>2³² nonce
   bound); use counter nonces, **AES-GCM-SIV**, or **XChaCha20-Poly1305**, and rotate keys.
-- **How would you make TLS/key-exchange post-quantum-ready?** **Hybrid** (X25519 +
+- How would you make TLS/key-exchange post-quantum-ready? **Hybrid** (X25519 +
   ML-KEM-768) + crypto-agility; HNDL makes KEM migration the priority.
 
 ## References

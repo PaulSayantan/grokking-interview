@@ -413,14 +413,14 @@ Every 502 maps to exactly one pillar: a premature listener close is the deregist
 
 ## Common follow-up questions
 
-- **Does `HEALTHCHECK` restart an unhealthy container?** No. Plain Docker only reports the status; a consumer (Swarm, a load balancer, an autoheal sidecar) has to act on it. `restart: unless-stopped` reacts to the process *exiting*, not to health flipping.
-- **Why is `curl` in my HEALTHCHECK failing on a distroless image?** `curl` is not installed, so the check exits `127` and the container is stuck unhealthy. Use a tool that exists, or a self-contained health binary (`CMD ["/app","-healthcheck"]`).
-- **What is the difference between liveness and readiness?** Liveness = should we restart it; readiness = should we send it traffic. Docker has one combined health status; Kubernetes splits them (and ignores the Docker `HEALTHCHECK`).
-- **My container's disk filled up — why?** Almost always unrotated `json-file` logs. Set `max-size`/`max-file`, or use the `local` driver.
-- **Why doesn't `docker logs` show anything?** The container uses a driver that does not keep a local copy (`fluentd`, `awslogs`, `splunk`, `gelf`, `syslog`, `none`). Only `json-file`, `local`, and `journald` support `docker logs`.
-- **My app ignores `SIGTERM` and always takes 10s to stop — why?** Shell-form `CMD`/`ENTRYPOINT` makes `/bin/sh` PID 1, which swallows the signal. Use exec form; add `tini`/`--init` if needed.
-- **Should the health endpoint check downstream dependencies?** Be careful — a deep check can flap under load and cause cascading unhealthiness. Keep the liveness check cheap; put dependency checks in readiness.
-- **How long should the stop grace period be?** Longer than your longest expected in-flight request plus drain time; otherwise `SIGKILL` truncates requests.
+- Does `HEALTHCHECK` restart an unhealthy container? No. Plain Docker only reports the status; a consumer (Swarm, a load balancer, an autoheal sidecar) has to act on it. `restart: unless-stopped` reacts to the process *exiting*, not to health flipping.
+- Why is `curl` in my HEALTHCHECK failing on a distroless image? `curl` is not installed, so the check exits `127` and the container is stuck unhealthy. Use a tool that exists, or a self-contained health binary (`CMD ["/app","-healthcheck"]`).
+- What is the difference between liveness and readiness? Liveness = should we restart it; readiness = should we send it traffic. Docker has one combined health status; Kubernetes splits them (and ignores the Docker `HEALTHCHECK`).
+- My container's disk filled up — why? Almost always unrotated `json-file` logs. Set `max-size`/`max-file`, or use the `local` driver.
+- Why doesn't `docker logs` show anything? The container uses a driver that does not keep a local copy (`fluentd`, `awslogs`, `splunk`, `gelf`, `syslog`, `none`). Only `json-file`, `local`, and `journald` support `docker logs`.
+- My app ignores `SIGTERM` and always takes 10s to stop — why? Shell-form `CMD`/`ENTRYPOINT` makes `/bin/sh` PID 1, which swallows the signal. Use exec form; add `tini`/`--init` if needed.
+- Should the health endpoint check downstream dependencies? Be careful — a deep check can flap under load and cause cascading unhealthiness. Keep the liveness check cheap; put dependency checks in readiness.
+- How long should the stop grace period be? Longer than your longest expected in-flight request plus drain time; otherwise `SIGKILL` truncates requests.
 
 ## References
 

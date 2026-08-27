@@ -759,26 +759,26 @@ really transaction surprises.
 
 ## Common follow-up questions
 
-- **Is Spring Data JPA an ORM?** No — it's a repository abstraction that delegates to a JPA
+- Is Spring Data JPA an ORM? No — it's a repository abstraction that delegates to a JPA
   provider (usually Hibernate). Hibernate is the ORM.
-- **How is a repository interface turned into a working bean?** Spring Data creates a dynamic proxy
+- How is a repository interface turned into a working bean? Spring Data creates a dynamic proxy
   at startup (`JpaRepositoryFactoryBean` → `SimpleJpaRepository`); derived methods are parsed and
   validated then, not at first call.
-- **When would you use `JdbcTemplate` instead of Spring Data JPA?** For full SQL control,
+- When would you use `JdbcTemplate` instead of Spring Data JPA? For full SQL control,
   performance-critical reads, reporting queries, or when object mapping/dirty checking is unwanted.
-- **Why is `DataAccessException` unchecked?** To avoid forcing boilerplate `catch`/`throws`, to keep
+- Why is `DataAccessException` unchecked? To avoid forcing boilerplate `catch`/`throws`, to keep
   DAO APIs clean, and to enable default transaction rollback on runtime exceptions.
-- **What does `@Repository` actually add on a JPA DAO?** Component scanning eligibility *and*
+- What does `@Repository` actually add on a JPA DAO? Component scanning eligibility *and*
   automatic native-to-`DataAccessException` translation (via
   `PersistenceExceptionTranslationPostProcessor`).
-- **`Page` vs `Slice`?** `Page` runs an extra count query and exposes totals; `Slice` only knows if
+- `Page` vs `Slice`? `Page` runs an extra count query and exposes totals; `Slice` only knows if
   there's a next slice and is cheaper.
-- **Difference between `findById` and `getReferenceById`?** `findById` runs a `SELECT` and returns
+- Difference between `findById` and `getReferenceById`? `findById` runs a `SELECT` and returns
   `Optional`; `getReferenceById` returns a lazy proxy and defers the DB hit.
-- **How do you fix N+1?** `JOIN FETCH`, `@EntityGraph`, batch fetching, or DTO projections.
-- **`javax` vs `jakarta`?** Spring Framework 6 / Spring Data 3 use `jakarta.persistence.*`;
+- How do you fix N+1? `JOIN FETCH`, `@EntityGraph`, batch fetching, or DTO projections.
+- `javax` vs `jakarta`? Spring Framework 6 / Spring Data 3 use `jakarta.persistence.*`;
   Spring 5 / Spring Data 2 use `javax.persistence.*`.
-- **Why must `@Modifying` accompany an update `@Query`?** So Spring executes it as an
+- Why must `@Modifying` accompany an update `@Query`? So Spring executes it as an
   `executeUpdate()` (DML) rather than a `getResultList()` (SELECT).
 
 ## References

@@ -424,29 +424,29 @@ spec:
 
 ## Common follow-up questions
 
-- **"What's the difference between RBAC, NetworkPolicy, and securityContext?"** — RBAC = who can
+- "What's the difference between RBAC, NetworkPolicy, and securityContext?" — RBAC = who can
   call the K8s API (control-plane authz); NetworkPolicy = which Pods can talk over the network
   (L3/L4 data plane); securityContext = what the container can do to the node/kernel (runtime
   isolation). Orthogonal layers of defense-in-depth.
-- **"What replaced PodSecurityPolicy?"** — Pod Security Admission (built-in, namespace-label
+- "What replaced PodSecurityPolicy?" — Pod Security Admission (built-in, namespace-label
   driven, enforces the Pod Security Standards). PSP was deprecated in v1.21 and removed in v1.25;
   PSA went GA in v1.25.
-- **"What's the default NetworkPolicy behavior?"** — None: Pods are non-isolated, all traffic
+- "What's the default NetworkPolicy behavior?" — None: Pods are non-isolated, all traffic
   allowed. The *first* policy selecting a Pod for a direction flips that direction to
   deny-by-default.
-- **"I created a NetworkPolicy but it isn't enforced — why?"** — Your CNI doesn't implement
+- "I created a NetworkPolicy but it isn't enforced — why?" — Your CNI doesn't implement
   NetworkPolicy (e.g. plain flannel). The object is accepted but silently ignored; switch to
   Calico/Cilium.
-- **"Are Kubernetes Secrets encrypted?"** — Only base64-encoded by default. Enable encryption at
+- "Are Kubernetes Secrets encrypted?" — Only base64-encoded by default. Enable encryption at
   rest (`EncryptionConfiguration`, ideally a KMS provider) and lock down Secret RBAC.
-- **"How do you stop containers running as root?"** — `securityContext.runAsNonRoot: true`
+- "How do you stop containers running as root?" — `securityContext.runAsNonRoot: true`
   (+ `runAsUser`), and enforce it cluster-wide with PSA `restricted` (or a policy engine).
-- **"enforce: restricted on a namespace but my Deployment shows 0 replicas and no error — why?"**
+- "enforce: restricted on a namespace but my Deployment shows 0 replicas and no error — why?"
   — enforce mode rejects *Pods*, not the Deployment; the ReplicaSet can't create Pods. Use
   `warn`/`audit` to catch it at apply time.
-- **"How do you enforce org-specific rules PSA can't express?"** — A policy engine (Kyverno or
+- "How do you enforce org-specific rules PSA can't express?" — A policy engine (Kyverno or
   OPA Gatekeeper) as a validating/mutating admission webhook.
-- **"AND vs OR in a NetworkPolicy `from` block?"** — Selectors under one list item = AND;
+- "AND vs OR in a NetworkPolicy `from` block?" — Selectors under one list item = AND;
   separate list items = OR.
 
 ## References

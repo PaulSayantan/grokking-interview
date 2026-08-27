@@ -578,23 +578,23 @@ learning curve (now you debug Envoy/xDS too). Adopt it when the benefits outweig
 
 ## Common follow-up questions
 
-- **"Does the app know it's in a mesh?"** No — sidecar/ztunnel intercept traffic via
+- "Does the app know it's in a mesh?" No — sidecar/ztunnel intercept traffic via
   iptables/eBPF transparently. The app makes ordinary calls; the proxy applies policy. The
   one thing apps *should* still do is propagate trace-context headers.
-- **"What happens to traffic if the control plane (istiod) goes down?"** Existing traffic
+- "What happens to traffic if the control plane (istiod) goes down?" Existing traffic
   keeps flowing on the proxies' last-known config. You lose *config updates* and *new cert
   issuance* until it recovers — not existing connectivity.
-- **"Sidecar vs ambient — the elevator pitch?"** Sidecar = one Envoy per Pod, full L7
+- "Sidecar vs ambient — the elevator pitch?" Sidecar = one Envoy per Pod, full L7
   everywhere, higher overhead, restart-to-upgrade. Ambient = per-node ztunnel for
   L4/mTLS + optional per-namespace waypoint for L7, lower overhead, upgrade without app
   restarts. GA in Istio 1.24.
-- **"Mesh mTLS vs NetworkPolicy — same thing?"** No. NetworkPolicy is L3/L4 allow/deny by
+- "Mesh mTLS vs NetworkPolicy — same thing?" No. NetworkPolicy is L3/L4 allow/deny by
   Pod selector/IP (firewall). Mesh mTLS is cryptographic identity + encryption + L7 authZ.
   Use both: NetworkPolicy for coarse segmentation, mesh for identity-based zero-trust.
-- **"Why did my VirtualService return 503 no-healthy-upstream when Pods are healthy?"**
+- "Why did my VirtualService return 503 no-healthy-upstream when Pods are healthy?"
   Almost always a missing/mismatched `DestinationRule` subset, or `STRICT` mTLS rejecting an
   unmeshed client. Check subsets and `PeerAuthentication` mode.
-- **"Are retries always safe?"** No — only for idempotent operations, and beware retry
+- "Are retries always safe?" No — only for idempotent operations, and beware retry
   storms amplifying failures up a call chain. Use retry budgets and small attempt counts.
 
 ## References

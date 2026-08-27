@@ -701,28 +701,28 @@ becoming a bottleneck or single point of failure. Best shown with a `flowchart`.
 
 ## Common follow-up questions
 
-- **"How is an architectural style different from a design pattern?"** A style structures the
+- "How is an architectural style different from a design pattern?" A style structures the
   whole application (module shape, dependency direction, deployment unit); a design pattern wires
   a handful of objects inside a module. Repository/Adapter are the *tactics* that implement a
   style's *rule* like "invert the persistence dependency."
-- **"Layered points dependencies down; why is that a problem?"** Business logic ends up depending
+- "Layered points dependencies down; why is that a problem?" Business logic ends up depending
   on persistence, so you cannot test it without a database and cannot swap the database without
   editing business code. Hexagonal/Clean/Onion invert that so the domain has no outward deps.
-- **"Hexagonal vs Clean vs Onion — pick one."** They are the same dependency-inversion idea in
+- "Hexagonal vs Clean vs Onion — pick one." They are the same dependency-inversion idea in
   different vocabularies. Choose the one your team knows; the inward-pointing discipline is what
   matters, not the ring count.
-- **"When would you NOT use Clean/Hexagonal?"** Thin CRUD with no real domain logic — the ports,
+- "When would you NOT use Clean/Hexagonal?" Thin CRUD with no real domain logic — the ports,
   adapters, DTOs, and mappers become pure ceremony with no payoff.
-- **"Modular monolith or microservices for a new product?"** Usually start modular monolith: you
+- "Modular monolith or microservices for a new product?" Usually start modular monolith: you
   get bounded-context boundaries and simple ops, and can extract services later where they truly
   need independent scale or deploy. Going distributed first pays the complexity tax before you
   have the scale to justify it.
-- **"What is the architecture sinkhole anti-pattern?"** When most requests pass straight through
+- "What is the architecture sinkhole anti-pattern?" When most requests pass straight through
   layers doing no business logic — a sign layered is adding cost without value for that workload.
-- **"Which style maximizes testability of business rules?"** Hexagonal/Clean/Onion, because the
+- "Which style maximizes testability of business rules?" Hexagonal/Clean/Onion, because the
   domain depends on no infrastructure and can run against fake adapters.
-- **"Which style maximizes extensibility for an ecosystem of add-ons?"** Microkernel/Plug-in.
-- **"Which style best isolates change to a single feature?"** Vertical Slice.
+- "Which style maximizes extensibility for an ecosystem of add-ons?" Microkernel/Plug-in.
+- "Which style best isolates change to a single feature?" Vertical Slice.
 
 ## References
 

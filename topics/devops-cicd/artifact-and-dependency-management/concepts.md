@@ -559,30 +559,30 @@ artifact came from the expected source and builder — not a compromised laptop.
 
 ## Common follow-up questions
 
-- **"Why build once and promote, instead of rebuilding per environment?"** Because a
+- "Why build once and promote, instead of rebuilding per environment?" Because a
   rebuild for prod is a *different* binary than the one you tested in staging (re-resolved
   deps, drifted base image/toolchain). Promoting the identical bytes guarantees test-to-prod
   fidelity and reliable rollback.
-- **"What's the difference between a mutable and an immutable tag, and why does it matter?"**
+- "What's the difference between a mutable and an immutable tag, and why does it matter?"
   `latest` can be re-pointed; a version/digest can't. Deploying mutable tags destroys
   reproducibility and rollback — you can't say what's actually running.
-- **"Should I commit my lockfile? What does it buy me?"** Yes. It records exact resolved
+- "Should I commit my lockfile? What does it buy me?" Yes. It records exact resolved
   versions (and often hashes) for the whole transitive tree, so `npm ci`/`poetry
   install`/`go mod verify` reproduce the identical dependency set and can detect tampering.
-- **"How do you key a CI dependency cache correctly?"** On the **lockfile hash**, so the
+- "How do you key a CI dependency cache correctly?" On the **lockfile hash**, so the
   cache invalidates exactly when dependencies change. Keying on branch or time gives stale
   or poisoned caches.
-- **"What is a proxy/remote repository and why front public registries with one?"**
+- "What is a proxy/remote repository and why front public registries with one?"
   Availability (survive upstream outages/rate limits), speed, a single governance/scanning
   choke point, and protection against packages being changed or unpublished upstream.
-- **"How do you stop a retention policy from deleting something you still need?"** Protect
+- "How do you stop a retention policy from deleting something you still need?" Protect
   released/promoted and currently-deployed artifacts explicitly (labels/status), prune only
   snapshots/PR builds by age or last-N, and honor legal holds.
-- **"What is dependency confusion and how do you defend against it?"** An attacker publishes
+- "What is dependency confusion and how do you defend against it?" An attacker publishes
   a higher-versioned package under your private package's name on a public registry so the
   resolver picks it. Defend with scoped/namespaced names, resolving internal names from your
   local repo first, and not letting the public proxy shadow internal names.
-- **"Reproducible builds vs build-once — aren't they the same?"** No. Build-once means you
+- "Reproducible builds vs build-once — aren't they the same?" No. Build-once means you
   never rebuild between envs; reproducibility means a rebuild yields identical bytes. They're
   complementary.
 

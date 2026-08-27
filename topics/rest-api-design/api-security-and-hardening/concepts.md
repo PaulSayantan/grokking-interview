@@ -870,27 +870,27 @@ not have. The gateway sees a well-formed, authenticated request to
 
 ## Common follow-up questions
 
-- **"What's the difference between BOLA and BFLA?"** BOLA (API1) = wrong
+- "What's the difference between BOLA and BFLA?" BOLA (API1) = wrong
   *object* (can I access another user's record by changing an id?); BFLA (API5) =
   wrong *function/role* (can I call an admin operation as a normal user?). Both
   are authorization gaps; one is per-object, one is per-operation.
-- **"Are bearer-token APIs vulnerable to CSRF?"** Generally no — the token isn't
+- "Are bearer-token APIs vulnerable to CSRF?" Generally no — the token isn't
   sent automatically by the browser and cross-site pages can't read/set the
   `Authorization` header. CSRF is a concern for *cookie/Basic/cert* auth.
-- **"Does `Access-Control-Allow-Origin: *` leak my users' data?"** Not by itself:
+- "Does `Access-Control-Allow-Origin: *` leak my users' data?" Not by itself:
   wildcard + credentials is blocked by browsers, so no cookie-authed data is
   readable. The dangerous pattern is *reflecting the Origin* with
   `Allow-Credentials: true`.
-- **"How do UUIDs relate to BOLA?"** They make object ids hard to guess but are
+- "How do UUIDs relate to BOLA?" They make object ids hard to guess but are
   not access control. You still must verify ownership; ids leak through logs,
   URLs, and referrers.
-- **"Where does injection sit in the 2023 list?"** It's largely folded into
+- "Where does injection sit in the 2023 list?" It's largely folded into
   Security Misconfiguration (API8) and mitigated with schema validation +
   parameterized queries; it's no longer the standalone #1 it is for web apps.
-- **"How do you stop `alg: none` and algorithm-confusion JWT attacks?"** Pin the
+- "How do you stop `alg: none` and algorithm-confusion JWT attacks?" Pin the
   expected algorithm server-side; never trust the token's `alg` header to select
   the verification method; validate `exp`/`iss`/`aud`.
-- **"CORS vs CSRF — do they solve the same thing?"** No. CORS controls what a
+- "CORS vs CSRF — do they solve the same thing?" No. CORS controls what a
   browser lets a *script read* cross-origin; CSRF is about a browser *sending* an
   authenticated state-changing request. A permissive CORS policy can enable data
   theft; CSRF defenses (SameSite, tokens) stop forged writes.

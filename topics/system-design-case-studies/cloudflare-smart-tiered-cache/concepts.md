@@ -242,24 +242,24 @@ supply them — don't fabricate them.
 
 ## Common follow-up questions
 
-- **"Why does a tiered cache need a single upper tier at all — why not let every data
-  center hit the origin?"** Because hundreds of independent caches all missing the
+- "Why does a tiered cache need a single upper tier at all — why not let every data
+  center hit the origin?" Because hundreds of independent caches all missing the
   same object hammer your origin and keep hit ratio low. Funneling misses through one
   warm upper tier concentrates them so most are served from that cache, and the origin
   sees far fewer requests.
-- **"Why did the original latency-probe approach fail on public clouds?"** Cloud
+- "Why did the original latency-probe approach fail on public clouds?" Cloud
   origins sit behind anycast or regional front ends, so one IP looks equally close to
   many data centers — the probes have nothing to lock onto, and picking wrong causes
   hairpinning (a cross-continent U-turn that adds hundreds of milliseconds).
-- **"How does Cloudflare *detect* that an origin is anycast?"** A speed-of-light
+- "How does Cloudflare *detect* that an origin is anycast?" A speed-of-light
   check: sum the probe latencies from two far-apart checkpoints; if that's faster than
   light in fiber could travel between them, no single machine could have answered
   both, so the IP must be anycast.
-- **"Once latency is useless, how is the upper tier chosen?"** By structure, not
+- "Once latency is useless, how is the upper tier chosen?" By structure, not
   measurement: match the origin's subnet to a cloud region using provider IP-range
   files, then have the region's subnets cast weighted votes (based on their existing
   upper-tier assignments) to elect a primary and a fallback on a different PoP.
-- **"What's the general principle here for interviews?"** Auto-tuning heuristics rest
+- "What's the general principle here for interviews?" Auto-tuning heuristics rest
   on assumptions; make the assumption's failure *detectable* (here, an independent
   physical constraint), and have a structural fallback (region maps + voting) plus a
   safe bootstrap (closest Tier 1 PoP) for when your primary signal is unavailable.

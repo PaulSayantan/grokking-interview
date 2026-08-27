@@ -597,33 +597,33 @@ The `trace_id` (and `span_id`) is the join key that unifies the three pillars:
 
 ## Common follow-up questions
 
-- **"How does a trace get stitched together across services?"** Shared
+- "How does a trace get stitched together across services?" Shared
   `trace_id` propagated in headers; each callee extracts the caller's
   SpanContext and creates a child span under the same trace, inheriting the
   sampled flag. No central coordinator — it's the traveling context.
-- **"What's the difference between parent-child and a span link?"** Parent-child
+- "What's the difference between parent-child and a span link?" Parent-child
   = synchronous, parent blocked on child, same trace. Link = causal but not
   awaited, can cross traces (batches, fan-in, async).
-- **"Walk me through the `traceparent` header."** `version-trace_id-span_id-flags`,
+- "Walk me through the `traceparent` header." `version-trace_id-span_id-flags`,
   all lowercase hex: `00`, 32-hex trace-id (128-bit), 16-hex parent span-id
   (64-bit), 2-hex flags with bit 0 = sampled.
-- **"Head vs tail sampling — which keeps the errors?"** Tail — it decides after
+- "Head vs tail sampling — which keeps the errors?" Tail — it decides after
   the trace completes so it can keep errored/slow traces; head decides at the
   root and propagates a flag (cheap but blind to outcome).
-- **"Why does my downstream service show up as a separate trace?"** Broken
+- "Why does my downstream service show up as a separate trace?" Broken
   propagation: an un-instrumented hop, stripped headers, or format mismatch
   (e.g. B3 vs W3C) — or in-process context lost across a thread pool.
-- **"Why does a child span appear to start before its parent?"** Clock skew
+- "Why does a child span appear to start before its parent?" Clock skew
   between hosts; backends apply skew-adjustment using the causal (parent-child)
   constraint.
-- **"How is context propagated through Kafka?"** Producer injects the
+- "How is context propagated through Kafka?" Producer injects the
   SpanContext into record headers; consumer extracts and usually creates a
   **linked** span (batch = one span linked to many producer spans).
-- **"Baggage vs span attributes vs tracestate?"** Baggage = your app's k/v
+- "Baggage vs span attributes vs tracestate?" Baggage = your app's k/v
   propagated to all downstream services; attributes = local to one span (indexed
   for query); tracestate = tracing-vendor state, ≤32 entries, propagated with
   traceparent.
-- **"How do you keep sampling consistent across services?"** Propagate the
+- "How do you keep sampling consistent across services?" Propagate the
   sampled flag (ParentBased sampler) so children honor the root's decision, or
   use tail sampling / consistent trace-id-based probability sampling.
 
