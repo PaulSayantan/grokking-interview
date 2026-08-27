@@ -59,6 +59,7 @@ from validate_content import (  # noqa: E402  (path shim above must run first)
 REQUIRED_KEYS = ("domain", "schema", "pass", "reading_order_source", "position", "plan")
 ALLOWED_KEYS = set(REQUIRED_KEYS) | {
     "group",
+    "wave_start_position",
     "canonical_terms",
     "assumed_prior_knowledge",
     # Written by the rolling compaction (every 5 topics) so a reader can tell what was
@@ -268,8 +269,13 @@ def check_position(led: dict, slugs: list[str], where: str, f: Findings) -> None
     # rewritten" forever with every other gate green. topics[] is the durable per-file
     # completion marker and the thing a resumed session trusts, so a silent gap is the one
     # ledger defect that cannot be recovered from the ledger itself.
+    # A wave need not start at position 1: a standalone rewrite (or a domain worked out of
+    # order) sets `wave_start_position` to the first README index it covers, so only landed
+    # positions from there up to `position` must carry a completion marker. Defaults to 1,
+    # so a full sequential domain (docker) is unaffected.
+    wave_start = led.get("wave_start_position", 1)
     recorded = {t["position"] for t in done if isinstance(t.get("position"), int)}
-    gaps = sorted(set(range(1, pos)) - recorded)
+    gaps = sorted(set(range(wave_start, pos)) - recorded)
     if gaps:
         f.error(
             where,

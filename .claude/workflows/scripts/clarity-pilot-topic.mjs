@@ -1,6 +1,6 @@
 export const meta = {
-  name: 'clarity-pilot-docker-topic',
-  description: 'One docker pilot topic through the full loop: brief -> writer -> adversarial verifier + web fact-check -> repair',
+  name: 'clarity-pilot-topic',
+  description: 'One clarity-pilot topic through the full loop: brief -> writer -> adversarial verifier + web fact-check -> repair',
   phases: [
     { title: 'Brief', detail: 'absorb ledger/MCQs/next-topic into a compact brief' },
     { title: 'Write', detail: 'whole-file clarity rewrite + prompts.yaml, written incrementally' },
@@ -12,13 +12,23 @@ export const meta = {
 const ROOT = '/path/to/interview-prep'
 const DIR = ROOT + '/.claude/skills/clarity-standard'
 const SKILL = DIR + '/SKILL.md'
-const LEDGER = ROOT + '/docs/continuity/docker.yaml'
 
 const A = args || {}
+// DOMAIN is parameterized (default docker, backward-compatible with the 16-topic pilot).
+const DOMAIN = A.domain || 'docker'
+const COUNT = A.count || 16               // topics in the domain's plan, for "N of M" framing
+const TRAPS = A.traps ||                   // domain-specific fact-check traps (see the web pass)
+  'a container described as "just a process" without qualification; copy-on-write conflated with the writable layer; whether an image digest is of the manifest or the index; docker stop grace timing; and whether a stated base-image size is compressed or on-disk.'
+const SIZENOTE = A.sizeNote ||             // domain-specific 'facts to watch' hint
+  'Docker image sizes drift with base-image releases, so any stated size needs a pinned tag or a hedge.'
+const SOURCES = A.sources ||               // domain-specific primary sources for the web fact-check
+  'Primary sources only: **official Docker docs**, the **OCI image-spec and runtime-spec**, containerd/runc docs and release notes, and Linux kernel docs for namespaces/cgroups/overlayfs. Never a blog, never StackOverflow, never recollection.'
+const LEDGER = ROOT + '/docs/continuity/' + DOMAIN + '.yaml'
+
 const SLUG = A.slug
 const POS = A.position
 const OUT = A.out
-const TDIR = ROOT + '/topics/docker/' + SLUG
+const TDIR = ROOT + '/topics/' + DOMAIN + '/' + SLUG
 const FILE = TDIR + '/concepts.md'
 
 // ---------------------------------------------------------------- shared framing (SHORT on purpose)
@@ -26,7 +36,7 @@ const FILE = TDIR + '/concepts.md'
 const WHY = [
   '# Why this work exists',
   '',
-  'Repo ' + ROOT + ', branch clarity-pilot-docker. Students reported the study content is **informative but hard to understand and exhausting to read**. The user instruction:',
+  'Repo ' + ROOT + ', domain `' + DOMAIN + '`. Students reported the study content is **informative but hard to understand and exhausting to read**. The user instruction:',
   '',
   '> "the concepts can be an expert level ideas and knowledge, but the explanation of the same shouldn\'t be complex. Re-think on how these can be explained clearly. Emphasis on Clarity."',
   '',
@@ -40,7 +50,7 @@ const WHY = [
   '',
   'Root diagnosis: **writing quality degrades monotonically down the depth stack.** A Beginner tier gets an analogy; an Advanced tier gets dense unreadable prose. The prose is worst exactly where the material is hardest, which is where readers quit.',
   '',
-  'docker is the pilot domain, and its prose is ALREADY GOOD (audit: 4.94 clarity). That is the test: does the standard improve good writing, or just bloat it?',
+  'The test is always the same: take the base prose as it is and lower the EXPLANATION complexity to near zero at zero information loss — improve it without bloating it or dumbing it down.',
 ].join('\n')
 
 const CONSTRAINTS = [
@@ -96,14 +106,14 @@ const brief = A.skipBrief
   [
     WHY,
     '',
-    '# YOUR TASK: build the writer brief for docker topic ' + POS + ' of 16 — `' + SLUG + '`',
+    '# YOUR TASK: build the writer brief for ' + DOMAIN + ' topic ' + POS + ' of ' + COUNT + ' — `' + SLUG + '`',
     '',
     'You are the orientation pass. A writer agent will rewrite this topic, and it must NOT have to read the heavy sources itself — that is what killed five previous attempts. Absorb them and hand over something compact.',
     '',
     '**Read:**',
     '- ' + LEDGER + ' — the continuity ledger. Find this topic `plan[]` row, its `depends_on`, its `seam_to_next` block (pattern + seam + seam_strength), any `known_defects` entries naming this file, `canonical_terms` where this topic is the `defined_in` teaching site, `running_example` and its current state, `claims_established`, `approximations_open`, `assumed_prior_knowledge`, and anything under `owed`.',
     '- ' + TDIR + '/questions.yaml — **do not summarise every question.** Extract only: the distinct `ref` anchors, and for each anchor a one-line note on what its questions actually test. That is what the prose must keep supporting, and it is the concrete meaning of "no information loss".',
-    '- ' + ROOT + '/topics/docker/README.md — confirm row order and the next topic slug.',
+    '- ' + ROOT + '/topics/' + DOMAIN + '/README.md — confirm row order and the next topic slug.',
     '- The NEXT topic concepts.md — its H2 list and enough prose to confirm the seam payoff genuinely exists there.',
     '',
     '**Write ' + OUT + '/brief.md** (aim for under 1,200 words) containing, in this order:',
@@ -114,7 +124,7 @@ const brief = A.skipBrief
     '5. **Known defects to fix**, quoted from the ledger, with the line numbers in the current file.',
     '6. **The cliffhanger seam**: the pattern, the exact seam, the next topic slug and title, the payoff anchor, and the verbatim sentence(s) from the next topic that prove the payoff is really there.',
     '7. **Inherited loop**: what the previous topic cliffhanger left open that this topic must settle (for topic 1, state that there is none).',
-    '8. **Facts to watch**: every number, version, size and citation in the current file, listed, flagged for whether it needs web verification. Docker image sizes drift with base-image releases, so any stated size needs a pinned tag or a hedge.',
+    '8. **Facts to watch**: every number, version, size and citation in the current file, listed, flagged for whether it needs web verification. ' + SIZENOTE,
     '9. **The C12 floor**: the ledger `assumed_prior_knowledge` list verbatim (the domain entry bar — what the writer may name without teaching it), plus a short list of places in the CURRENT file where a claim leans on something the file never explains: a mechanism named only as a cause, a citation standing in for the requirement it cites, a magnitude gestured at rather than given. Also run `python3 scripts/clarity_report.py --file ' + FILE + '` and report its `c12_punt_hits` figure and, if non-zero, quote the line. These are the gaps the rewrite has to CLOSE, not carry forward.',
     '',
     'Write the file early and refine it. Keep the structured output short.',
@@ -151,7 +161,7 @@ const written = await agent(
   [
     WHY, '', CONSTRAINTS, '', FACTS, '', ANTISTALL,
     '',
-    '# YOUR TASK: rewrite docker topic ' + POS + ' of 16 — `' + SLUG + '`',
+    '# YOUR TASK: rewrite ' + DOMAIN + ' topic ' + POS + ' of ' + COUNT + ' — `' + SLUG + '`',
     '',
     '**Read exactly these three things, in this order, and nothing else:**',
     '1. ' + SKILL + ' — the authoritative standard. Read it fully. Open a file under ' + DIR + '/references/ ONLY when you want a concrete example of a rule; the rules themselves are all in SKILL.md.',
@@ -223,7 +233,7 @@ const [verify, factcheck] = await parallel([
         '',
         'Session 44 proved one pass is insufficient, and this effort own proof rewrite proved a writer cannot audit itself — its 36-item self-audit missed a false claim it had introduced.',
         '',
-        '**Read:** ' + OUT + '/concepts.md, prompts.yaml, audit.md, ledger-append.yaml, brief.md. **Original:** `git show HEAD:topics/docker/' + SLUG + '/concepts.md`. Open it — do not trust audit.md.',
+        '**Read:** ' + OUT + '/concepts.md, prompts.yaml, audit.md, ledger-append.yaml, brief.md. **Original:** `git show HEAD:topics/' + DOMAIN + '/' + SLUG + '/concepts.md`. Open it — do not trust audit.md.',
         '',
         'Checks, hardest first:',
         '1. **REGISTER SWAP (binding).** Per section, sample THREE paragraphs — A the opener, B the deep beat FIRST body paragraph, C its last — and test BOTH pairs (A vs B, A vs C). Can you tell which is which from vocabulary and clause depth alone? Judge the DEEPEST passages hardest — the predictable failure is a lovely opener above an expert passage that reads exactly like the unimproved original. **Do not accept the writer own report:** on the first pilot topic a writer scored itself 11/11 PASS because it sampled only A and C, while the two densest paragraphs in the file — a 46-word and a 42-word sentence — sat in B. Quote sentences.',
@@ -283,13 +293,13 @@ const [verify, factcheck] = await parallel([
         '',
         'You have web access. **Use it.** This is the gate that would have caught Session 44, and it only works if you actually open primary sources.',
         '',
-        '**Read:** ' + OUT + '/concepts.md, ' + OUT + '/audit.md, and the "Facts to watch" section of ' + OUT + '/brief.md. **Original:** `git show HEAD:topics/docker/' + SLUG + '/concepts.md`.',
+        '**Read:** ' + OUT + '/concepts.md, ' + OUT + '/audit.md, and the "Facts to watch" section of ' + OUT + '/brief.md. **Original:** `git show HEAD:topics/' + DOMAIN + '/' + SLUG + '/concepts.md`.',
         '',
-        'Primary sources only: **official Docker docs**, the **OCI image-spec and runtime-spec**, containerd/runc docs and release notes, and Linux kernel docs for namespaces/cgroups/overlayfs. Never a blog, never StackOverflow, never recollection.',
+        SOURCES + '',
         '',
         'Check: every number with a unit or bound (image sizes, layer counts, timeouts, defaults) — and whether it changed from the original; every version claim, including that the behaviour is attributed to the right version; every spec citation, quoting the line; every entry in audit.md ADDED CLAIMS plus any added causal claim missing from it; and anything marked UNVERIFIED or hedged.',
         '',
-        'Docker-specific traps to press on: a container described as "just a process" without qualification; copy-on-write conflated with the writable layer; whether an image digest is of the manifest or the index; docker stop grace timing; and whether a stated base-image size is compressed or on-disk.',
+        'Domain-specific traps to press on: ' + TRAPS,
         '',
         '**Never fabricate a citation** — no primary source means UNVERIFIABLE plus a recommended hedge. Prefer softening to a correct range over asserting a different precise number. Re-derive arithmetic. Scratch to ' + OUT + '/factcheck-notes.md.',
       ].join('\n'),
@@ -334,7 +344,7 @@ const repair = await agent(
     '',
     'A writer produced the rewrite; an adversarial verifier and a web fact-checker attacked it. Apply what is real, reject what is not, leave nothing silent.',
     '',
-    '**Read:** ' + OUT + '/concepts.md, prompts.yaml, audit.md, ledger-append.yaml, brief.md, and the original via `git show HEAD:topics/docker/' + SLUG + '/concepts.md`. You are the last chance to catch information loss.',
+    '**Read:** ' + OUT + '/concepts.md, prompts.yaml, audit.md, ledger-append.yaml, brief.md, and the original via `git show HEAD:topics/' + DOMAIN + '/' + SLUG + '/concepts.md`. You are the last chance to catch information loss.',
     '',
     '**Write:** ' + OUT + '/final-concepts.md, ' + OUT + '/final-prompts.yaml, ' + OUT + '/final-ledger-append.yaml, ' + OUT + '/repair-log.md.',
     '',
