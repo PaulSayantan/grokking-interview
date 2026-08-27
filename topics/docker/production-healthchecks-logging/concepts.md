@@ -33,7 +33,7 @@ The signal has to come from somewhere. The next section is the Dockerfile instru
 `HEALTHCHECK` is the Dockerfile instruction that supplies that command: the engine runs it *inside* the running container on a schedule, and the command's exit code is the entire contract.
 
 ```dockerfile
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 COPY . .
 RUN npm ci --omit=dev

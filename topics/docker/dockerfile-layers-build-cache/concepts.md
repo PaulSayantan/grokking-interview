@@ -8,7 +8,7 @@ reach back and evict them is settled in
 Two teams ship the same Express-style Node API. One team changes a single line of
 `server.js` and has a new image 2 seconds later; the image is 80 MB. The other team changes
 the same line, waits 8 minutes while `npm ci` reinstalls every dependency from scratch, and
-gets a 1.2 GB image. Same source, same `node:20-alpine` base, same install command. The
+gets a 1.2 GB image. Same source, same `node:22-alpine` base, same install command. The
 difference is the order of six lines in a Dockerfile, plus one file that was never written.
 So: what exactly does the builder compare before it decides it may skip an instruction, and
 what does an instruction leave behind in the image forever?
@@ -234,7 +234,7 @@ copies its source above `RUN npm ci`, so every code change makes the install a m
 
 ```mermaid
 flowchart TB
-  A["FROM node:20-alpine"] -->|hit| B["COPY package*.json ."]
+  A["FROM node:22-alpine"] -->|hit| B["COPY package*.json ."]
   B -->|hit| C["RUN npm ci"]
   C -->|MISS: source changed| D["COPY . ."]
   D -->|forced rebuild| E["RUN npm run build"]
@@ -349,7 +349,7 @@ not below it.
 The version that gets it wrong is also the shorter one, which is why it gets written first:
 
 ```dockerfile
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 COPY . .              # <- source copied first; ANY code change busts this layer...
 RUN npm ci            # <- ...so npm ci re-runs on every single build (slow!)
@@ -363,7 +363,7 @@ is doing nothing different from last time. It re-runs because of where it sits.
 Splitting the copy in two fixes it:
 
 ```dockerfile
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 COPY package.json package-lock.json ./   # changes rarely
 RUN npm ci                               # cached until deps change
@@ -772,7 +772,7 @@ deciding deliberately: which base image every stage starts from.
 
 ## Base images: FROM, scratch, tags and digests
 
-`FROM node:20-alpine` decides how many layers and how many megabytes your image starts with
+`FROM node:22-alpine` decides how many layers and how many megabytes your image starts with
 before you have written a single instruction of your own. It also decides what a shell, a
 package manager and a CVE feed look like for that image. Every rung of the ladder below
 answers the same question differently: how much operating system does this program actually
@@ -781,7 +781,7 @@ need at runtime?
 - **Full distro** (`ubuntu:22.04`, `debian:bookworm`) — familiar, has a shell + package
   manager, but large (tens–hundreds of MB) and more CVEs.
 - **Slim** (`python:3.12-slim`, `debian:bookworm-slim`) — trimmed distro, good default.
-- **Alpine** (`alpine:3.20`, `node:20-alpine`) — single-digit megabytes (Docker Hub's own
+- **Alpine** (`alpine:3.20`, `node:22-alpine`) — single-digit megabytes (Docker Hub's own
   blurb rounds `alpine` to 5 MB), musl libc rather than glibc.
 - **Distroless** (`gcr.io/distroless/*`) — just your app + runtime libs, **no shell, no
   package manager** → tiny attack surface.
@@ -838,14 +838,14 @@ the whole class of problem.
 
 ### The version-specific truth: tags move, digests do not
 
-`FROM node:20-alpine` today and `FROM node:20-alpine` next month can be two different images.
+`FROM node:22-alpine` today and `FROM node:22-alpine` next month can be two different images.
 A tag is a movable label, which is topic 1's point with a build consequence. The base layers
 under your image can change without a line of your Dockerfile changing. So the cache breaks
 for every instruction below `FROM`, and today's build stops being reproducible against last
 week's. Pinning the digest removes the ambiguity, because a digest names the exact bytes:
 
 ```dockerfile
-FROM node:20-alpine@sha256:abc123...   # pinned; always the exact same base layers
+FROM node:22-alpine@sha256:abc123...   # pinned; always the exact same base layers
 ```
 
 `latest` is worth calling out because its name misleads. The tag does not mean "the newest

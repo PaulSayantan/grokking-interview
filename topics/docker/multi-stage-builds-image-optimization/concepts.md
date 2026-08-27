@@ -105,7 +105,7 @@ the image it built in.
 
 ```dockerfile
 # ANTI-PATTERN — everything ends up in the final image
-FROM node:20
+FROM node:22
 WORKDIR /app
 COPY . .
 RUN npm install          # includes devDependencies, build tools
@@ -114,7 +114,7 @@ CMD ["node", "dist/server.js"]
 ```
 
 Four separate kinds of freight are in that image, and only one of them serves a request. The
-full `node:20` image is around a gigabyte unpacked on disk, and it carries a complete Debian
+full `node:22` image is around a gigabyte unpacked on disk, and it carries a complete Debian
 userland, `npm`, a C toolchain and Python for `node-gyp` builds — none of which the server
 calls. `npm install` then installs `devDependencies` too, so the test runner, the bundler and
 the linter are all present forever. `COPY . .` adds the source tree, `.git` and any fixtures
@@ -315,7 +315,7 @@ completely, because its dependency tree contains both kinds mixed together in on
 
 ```dockerfile
 # Stage 1: build with the full toolchain + devDependencies
-FROM node:20 AS builder
+FROM node:22 AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci                      # installs ALL deps (incl. devDependencies: tsc, webpack…)
@@ -323,13 +323,13 @@ COPY . .
 RUN npm run build               # emits compiled output to /app/dist
 
 # Stage 2: production deps only, reinstalled clean
-FROM node:20 AS prod-deps
+FROM node:22 AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev           # prod deps ONLY — no tsc/webpack/jest
 
 # Stage 3: tiny runtime — copy artifacts, never the builder's node_modules
-FROM gcr.io/distroless/nodejs20-debian12 AS final
+FROM gcr.io/distroless/nodejs22-debian12 AS final
 WORKDIR /app
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=builder   /app/dist         ./dist
@@ -338,7 +338,7 @@ CMD ["dist/server.js"]          # exec form — distroless has no shell
 
 That last line looks like it violates what the previous topic taught, because exec form
 executes your list directly and `dist/server.js` is not an executable file. It works because
-the image supplies the missing word: `gcr.io/distroless/nodejs20-debian12` ships
+the image supplies the missing word: `gcr.io/distroless/nodejs22-debian12` ships
 `ENTRYPOINT ["/nodejs/bin/node"]`, and a `CMD` list is appended to `ENTRYPOINT` as arguments,
 so the process that runs is `/nodejs/bin/node dist/server.js`. Change the base to one without
 that entrypoint and the same `CMD` fails, which is why the two lines have to be read together.
@@ -449,7 +449,7 @@ The variants exist because "runtime libraries" means different things per langua
 carries the least and suits binaries that link nothing; `base` adds glibc and its friends;
 `cc` adds the C and C++ runtime for dynamically linked programs; and `java`, `python3` and
 `nodejs` each add that language's runtime. Their tags carry the language version and the Debian
-release — `nodejs20-debian12` in the Node example earlier — so a bare `distroless/java` names
+release — `nodejs22-debian12` in the Node example earlier — so a bare `distroless/java` names
 a family rather than a tag you can pin.
 
 Three things follow from removing the userland. The image is small, which matters least. The attack surface shrinks in a specific way: an attacker who achieves code
@@ -502,7 +502,7 @@ kubelet opens the connection itself,
 so the image needs no client at all.
 
 ```dockerfile
-FROM gcr.io/distroless/nodejs20-debian12 AS final
+FROM gcr.io/distroless/nodejs22-debian12 AS final
 COPY --from=builder /app /app
 WORKDIR /app
 # exec form is mandatory — no shell to parse a string
@@ -730,7 +730,7 @@ download at all.
 ## Layer reuse across images and caching
 
 Layers are content-addressed, so identical bytes are stored once and transferred once no matter
-how many images contain them. Ten services built `FROM gcr.io/distroless/nodejs20-debian12`
+how many images contain them. Ten services built `FROM gcr.io/distroless/nodejs22-debian12`
 all reference the same base layers by the same digests, so a node that has run any one of them
 already holds those bytes, and pulling the tenth transfers only that service's own thin
 application layer.
@@ -812,13 +812,13 @@ a1b2c3d4e5f6   2 min ago     CMD ["node" "dist/server.js"]                   0B
 <missing>      3 min ago     COPY . . (source, .git, tests, fixtures)        45MB
 <missing>      4 min ago     RUN apt-get install -y build-essential          120MB
 <missing>      5 min ago     WORKDIR /app                                    0B
-<missing>      2 weeks ago   /bin/sh -c #(nop) ... node:20 base userland     75MB
+<missing>      2 weeks ago   /bin/sh -c #(nop) ... node:22 base userland     75MB
 ```
 
 Those rows sum to `75 + 120 + 45 + 300 + 40 = 580 MB`, which is less than the roughly one
-gigabyte quoted for `node:20` earlier. Read the trace as a teaching simplification before you
+gigabyte quoted for `node:22` earlier. Read the trace as a teaching simplification before you
 read the rows. The bottom row is one rounded line standing in for the base's entire layer stack;
-`docker history` on a real `node:20` build prints that stack as several `<missing>` rows
+`docker history` on a real `node:22` build prints that stack as several `<missing>` rows
 totalling nearer a gigabyte unpacked. What *this Dockerfile itself* added is the four rows above
 the base, `120 + 45 + 300 + 40 = 505 MB`, and that is the number the rest of this section works
 on. The published image is the base plus those 505 MB, which is how a single-stage build of a
@@ -833,7 +833,7 @@ never cleaned `/var/lib/apt/lists/*`; it belongs in a builder stage, where both 
 disappear at once. The 45 MB `COPY . .` row is the context: `.git`, tests and fixtures that a
 `.dockerignore` plus explicit `COPY` paths mostly removes. The 40 MB `npm run build` row is
 bundler output, of which only `dist/` needs to ship. And the 75 MB base row shrinks by
-switching the *final* stage to `distroless/nodejs20`, which is a different base from the one
+switching the *final* stage to `distroless/nodejs22`, which is a different base from the one
 the builder used.
 
 Rewritten as three stages, the final image carries a distroless base, the pruned

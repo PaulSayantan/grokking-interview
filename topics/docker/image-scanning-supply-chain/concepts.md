@@ -2,7 +2,7 @@
 
 Topic 12 hardened what a container may *do* once it runs — drop capabilities, apply a seccomp filter, mount the root filesystem read-only — and every one of those controls assumes the image already holds the bytes you think it holds. A hijacked base image, or a dependency published yesterday, is inside that boundary before any runtime control gets a say; this file is where that gap gets its name.
 
-Run `trivy image myorg/api:1.4.2` on a service you just built and the report can come back with thirty CVEs, not one of them in code you wrote. They arrived with `FROM node:20`, which unpacks a whole Debian userland — openssl, glibc, zlib, dozens of OS packages — each with its own advisory history. So the runtime controls of topic 12 come *after* a prior question this file exists to answer: can you trust the bytes at all — both that nothing known-vulnerable is inside, and that what you deploy is byte-for-byte what your pipeline built?
+Run `trivy image myorg/api:1.4.2` on a service you just built and the report can come back with thirty CVEs, not one of them in code you wrote. They arrived with `FROM node:22`, which unpacks a whole Debian userland — openssl, glibc, zlib, dozens of OS packages — each with its own advisory history. So the runtime controls of topic 12 come *after* a prior question this file exists to answer: can you trust the bytes at all — both that nothing known-vulnerable is inside, and that what you deploy is byte-for-byte what your pipeline built?
 
 > [!KEY-TAKEAWAY]
 > A container image is a supply chain, not a single file: your app code, its language
@@ -23,11 +23,11 @@ Run `trivy image myorg/api:1.4.2` on a service you just built and the report can
 
 ## The image supply-chain threat model
 
-A deployed image is assembled from inputs you never wrote, and each one is a way in. Take `FROM node:20`: it drags in a Debian userland with dozens of OS packages. A flaw in any one of them — a **CVE**, the public catalogue number for one disclosed vulnerability — is now yours to answer for, even if your own code is perfect. The threats sort into three groups by *where* the bad bytes enter.
+A deployed image is assembled from inputs you never wrote, and each one is a way in. Take `FROM node:22`: it drags in a Debian userland with dozens of OS packages. A flaw in any one of them — a **CVE**, the public catalogue number for one disclosed vulnerability — is now yours to answer for, even if your own code is perfect. The threats sort into three groups by *where* the bad bytes enter.
 
-Two of them are already baked into the image when it is built. A vulnerable base image is the first: the OS packages under `FROM node:20` (openssl, glibc, zlib and the rest) carry known flaws you inherited. A vulnerable application dependency is the second — the Log4Shell pattern (`CVE-2021-44228`), where a transitive library pulled by npm, pip or Maven ships a known remote-code-execution bug into your `node_modules` or your JARs.
+Two of them are already baked into the image when it is built. A vulnerable base image is the first: the OS packages under `FROM node:22` (openssl, glibc, zlib and the rest) carry known flaws you inherited. A vulnerable application dependency is the second — the Log4Shell pattern (`CVE-2021-44228`), where a transitive library pulled by npm, pip or Maven ships a known remote-code-execution bug into your `node_modules` or your JARs.
 
-Two more swap bytes in *after* the build, between the registry and the machine that runs the image. A tag is a mutable pointer, the payoff of `registries-and-distribution`. The `node:20` you built on last month can point at different bytes today, so a compromised or typosquatted upstream can serve you a backdoored layer under a name you trust. And a man-in-the-middle, or a compromised registry, can substitute a malicious layer in transit.
+Two more swap bytes in *after* the build, between the registry and the machine that runs the image. A tag is a mutable pointer, the payoff of `registries-and-distribution`. The `node:22` you built on last month can point at different bytes today, so a compromised or typosquatted upstream can serve you a backdoored layer under a name you trust. And a man-in-the-middle, or a compromised registry, can substitute a malicious layer in transit.
 
 The last threat gets in *before* the build even starts: a build-system compromise, the SolarWinds pattern, where the attacker injects into the build itself so clean source produces a poisoned artifact. Answering that one needs build provenance, which the general framework in `devops-cicd` owns; this file stops at the image.
 
@@ -129,7 +129,7 @@ The bases line up in a rough hierarchy, most packages and most CVEs at the top:
 | Base | Contents | CVE surface |
 |---|---|---|
 | `ubuntu`, `debian` | full glibc userland, shell, apt, many libs | Highest |
-| `node:20`, `python:3.12` | language runtime on a Debian base | High |
+| `node:22`, `python:3.12` | language runtime on a Debian base | High |
 | `-slim` variants | trimmed Debian | Medium |
 | `alpine` | musl libc, busybox, apk (~5 MB, and the figure drifts with each Alpine release) | Low |
 | `distroless` (`gcr.io/distroless/*`) | just the runtime + your app; no shell, no package manager | Very low |
@@ -164,7 +164,7 @@ A minimal base cuts today's count, but that count is not fixed: the same frozen 
 
 ## Keeping bases updated & rebuild cadence
 
-An image you built on `node:20` in January and never rebuilt grows more vulnerable every week, even though its bytes never change. New CVEs are disclosed against the OS packages and libraries frozen inside it, and the image cannot patch itself: "immutable image" and "immune image" are different words for a reason. Freshness is therefore a cadence problem, not a one-time fix, and it has four moving parts that answer the one question — how do you stop a shipped image from silently rotting?
+An image you built on `node:22` in January and never rebuilt grows more vulnerable every week, even though its bytes never change. New CVEs are disclosed against the OS packages and libraries frozen inside it, and the image cannot patch itself: "immutable image" and "immune image" are different words for a reason. Freshness is therefore a cadence problem, not a one-time fix, and it has four moving parts that answer the one question — how do you stop a shipped image from silently rotting?
 
 Two of them refresh the bytes. Rebuilding on a schedule — nightly or weekly — picks up patched base images and updated packages even when your own source has not changed. Running `apt`/`apk` upgrade inside that build pulls the latest package versions too, with a reproducibility tension the digest-pinning section resolves. The other two automate and observe. Dependabot and Renovate open pull requests that bump the `FROM` digest and your lockfiles, so a human reviews a patch instead of remembering to hunt for one, and CI scans the result. Continuous registry scanning re-evaluates *already-published* images against today's database, so you learn that a shipped image has become vulnerable without rebuilding it first.
 
@@ -270,29 +270,29 @@ Cosign can also attach attestations — an SBOM, provenance, or a SLSA statement
 
 ## Pinning base images by digest
 
-`FROM node:20` pins nothing durable. The `node:20` tag is a mutable pointer — `registries-and-distribution`'s payoff — that upstream re-points at fresh bytes on every patch release. Two builds of the same Dockerfile weeks apart can resolve to different base images. Pinning `FROM …@sha256:<digest>` instead names the base by its digest, the `sha256:` hash that content-addresses the image (from `images-vs-containers`), which makes it immutable: that reference can only ever mean one exact image.
+`FROM node:22` pins nothing durable. The `node:22` tag is a mutable pointer — `registries-and-distribution`'s payoff — that upstream re-points at fresh bytes on every patch release. Two builds of the same Dockerfile weeks apart can resolve to different base images. Pinning `FROM …@sha256:<digest>` instead names the base by its digest, the `sha256:` hash that content-addresses the image (from `images-vs-containers`), which makes it immutable: that reference can only ever mean one exact image.
 
 ```dockerfile
 # Floating tag — reproducibility hazard + tag-hijack surface
-FROM node:20-slim
+FROM node:22-slim
 
 # Pinned by digest — byte-for-byte reproducible; tag re-points can't affect you
-FROM node:20-slim@sha256:2b3f1e...c9
+FROM node:22-slim@sha256:2b3f1e...c9
 ```
 
 You do not hand-copy that `sha256:` from Docker Hub; you resolve it. `docker buildx imagetools inspect` reads a tag's manifest digest straight from the registry without pulling the whole image, and `docker inspect` reads the repo digest off an image you already pulled:
 
 ```bash
 # Preferred: inspect the tag's manifest digest without pulling the whole image
-docker buildx imagetools inspect node:20-slim | grep Digest
+docker buildx imagetools inspect node:22-slim | grep Digest
 # → Digest: sha256:2b3f1e...c9
 
 # Or, if you've already pulled it, read the repo digest off the local image
-docker inspect --format '{{index .RepoDigests 0}}' node:20-slim
-# → node:20-slim@sha256:2b3f1e...c9
+docker inspect --format '{{index .RepoDigests 0}}' node:22-slim
+# → node:22-slim@sha256:2b3f1e...c9
 ```
 
-Pinning buys three things. Reproducibility: the same Dockerfile always resolves to the same base bytes, so builds are deterministic and the cache behaves predictably. Tag-hijack defence: if an attacker or a mistaken push re-points `node:20`, your build is untouched, because you moved only when you deliberately changed the digest. And auditability: the exact base is recorded in git.
+Pinning buys three things. Reproducibility: the same Dockerfile always resolves to the same base bytes, so builds are deterministic and the cache behaves predictably. Tag-hijack defence: if an attacker or a mistaken push re-points `node:22`, your build is untouched, because you moved only when you deliberately changed the digest. And auditability: the exact base is recorded in git.
 
 The catch is the mirror image of the benefit. A pinned digest never receives a security update on its own, so pinning and never bumping trades "unexpected changes" for "silently rotting on old CVEs" — the pin-and-forget anti-pattern. Digest pinning is safe only when it is paired with an automated update-and-rescan loop. Renovate or Dependabot resolve and bump the digest for you and open a PR that CI scans, so in practice you pin once and let the bot type the hash. Pinning without that loop is how a base freezes on a vulnerable build no one notices.
 

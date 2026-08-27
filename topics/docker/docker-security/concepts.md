@@ -35,7 +35,7 @@ takeover of the host. Which levers actually shrink it, and which only look like 
 
 A container is an ordinary Linux process, and its security is only ever as strong as the one
 kernel it shares with every other container and the host. When you run
-`docker run node:20-slim`, the kernel does not build a second computer around that process; it
+`docker run node:22-slim`, the kernel does not build a second computer around that process; it
 shows the process a private view of the machine and then lets it call the very same kernel code
 everything else calls.
 
@@ -119,7 +119,7 @@ equivalence before anything else has to hold. You set it in the Dockerfile with 
 instruction:
 
 ```dockerfile
-FROM node:20-slim
+FROM node:22-slim
 # create a dedicated unprivileged user
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --create-home app
 WORKDIR /app

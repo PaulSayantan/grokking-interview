@@ -277,7 +277,7 @@ the container sees at that path is the host's directory itself.
 # The Node API's source, mounted in for live reload during development
 docker run -d --name web \
   --mount type=bind,src="$(pwd)"/src,dst=/app/src \
-  node:20 npm run dev
+  node:22 npm run dev
 ```
 
 Every difference from a volume traces back to one fact: the host filesystem owns the storage,

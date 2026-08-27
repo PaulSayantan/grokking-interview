@@ -133,7 +133,7 @@ The same misreading bites in a few predictable places:
 - `docker run myorg/api` pulls `:latest`, which may be months stale or absent entirely on that registry.
 - `FROM node:latest` in a Dockerfile makes the build non-reproducible: the base image drifts under you between builds, silently changing your runtime and occasionally breaking the build outright.
 
-The fix is to stop leaning on the default. In production Dockerfiles and manifests, use explicit version tags such as `node:20.11-slim`. For full reproducibility, pin the base by digest too — `FROM node:20.11-slim@sha256:…` — so neither the tag nor the bytes behind it can move.
+The fix is to stop leaning on the default. In production Dockerfiles and manifests, use explicit version tags such as `node:22.11-slim`. For full reproducibility, pin the base by digest too — `FROM node:22.11-slim@sha256:…` — so neither the tag nor the bytes behind it can move.
 
 All of this assumed the pull just works. The moment a repository is private, or you want to push at all, the registry first asks who you are.
 
