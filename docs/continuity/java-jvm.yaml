@@ -2,7 +2,7 @@ domain: java-jvm
 schema: 1
 pass: clarity-v1
 reading_order_source: topics/java-jvm/README.md
-position: 5
+position: 6
 wave_start_position: 5
 plan:
 - slug: jvm-architecture-class-loading
@@ -62,7 +62,57 @@ plan:
   covers: Java Platform Module System (JPMS)
 - slug: parallelism-parallel-streams-forkjoin
   covers: 'Parallelism: Parallel Streams, Fork/Join & Data Parallelism'
-canonical_terms: {}
+canonical_terms:
+  happens-before:
+    canonical: happens-before
+    defined_in: synchronized-volatile-jmm
+    gloss: A partial order over memory actions. An edge X -> Y guarantees Y sees every write X made and may not observe
+      a state older than X's. It says nothing about wall-clock order.
+    banned_variants:
+    - happens before in time
+    - executes before
+    - runs earlier
+    - happens-before in wall-clock time
+  data race:
+    canonical: data race
+    defined_in: synchronized-volatile-jmm
+    gloss: Two actions on the same non-final, non-volatile location with no happens-before edge between them, at least one
+      of which is a write.
+    banned_variants:
+    - race condition
+  monitor:
+    canonical: monitor
+    defined_in: synchronized-volatile-jmm
+    gloss: 'An object''s intrinsic lock together with the two queues the JVM keeps for it once inflated: the entry list
+      of threads blocked trying to enter, and the wait set of threads that called wait().'
+    banned_variants:
+    - mutex
+    - semaphore
+    - object lock
+  memory barrier:
+    canonical: memory barrier
+    defined_in: synchronized-volatile-jmm
+    gloss: An instruction that forbids the compiler and the CPU from moving certain memory operations across it. It computes
+      nothing. StoreLoad additionally drains the core's store buffer. "Fence" is an accepted synonym and is used interchangeably
+      in the prose.
+    banned_variants:
+    - cache flush
+  CAS:
+    canonical: CAS
+    defined_in: synchronized-volatile-jmm
+    gloss: 'Compare-and-swap: write a new value to a location only if it still holds the value you expected, and report
+      which happened. Compares a value, never a history, which is the ABA gap.'
+    banned_variants:
+    - atomic swap
+    - compare-and-set used as a different operation
+  cache line:
+    canonical: cache line
+    defined_in: synchronized-volatile-jmm
+    gloss: The fixed-size block, commonly 64 bytes, that the coherence hardware moves between memory and core caches and
+      tracks ownership of. It is the granularity at which invalidation happens.
+    banned_variants:
+    - cache block
+    - word
 assumed_prior_knowledge:
 - a Java thread is an OS-scheduled unit of execution; multiple threads run concurrently in one JVM process
 - the JVM heap is shared across threads and each thread has its own stack
@@ -76,9 +126,128 @@ assumed_prior_knowledge:
 - the multithreading-concurrency topic (the prior README row) covers thread lifecycle, race/deadlock/livelock/starvation,
   wait/notify, ThreadLocal, and the atomicity/visibility/ordering framing this topic deepens — but it is NOT yet
   a clarity-rewritten topic, so nothing is 'ledger-established' and this topic teaches its own terms fresh
-claims_established: []
-approximations_open: []
+claims_established:
+- Every visibility and ordering guarantee in Java reduces to buying a happens-before edge. The eight rules this domain uses
+  are split across JLS 17.4.4 (the synchronizes-with cases) and 17.4.5 (the happens-before clauses built on them), and of
+  those eight only the monitor lock rule and the volatile rule give an edge between two threads that neither started, joined
+  nor interrupted each other — the ordinary case of two workers in a pool. DRF-SC is what a race-free program buys.
+- volatile buys visibility, ordering and single-access atomicity (including 64-bit) and never compound atomicity. A volatile
+  write costs a StoreLoad fence and a store-buffer drain; a volatile read on x86 costs no barrier instruction, which is
+  why the two are not symmetric.
+- A monitor gives mutual exclusion plus an unlock -> lock edge covering every plain field written inside. It has exactly
+  one acquisition mode, block until owned, so lock-order deadlock can be prevented by a global lock order but never recovered
+  from with synchronized alone.
+- Atomics are a volatile field plus an indivisible read-modify-write, built on CAS. They give lock-freedom, not wait-freedom.
+  Striping (LongAdder) trades an exact snapshot for write scalability, and needs per-cell cache-line padding as well as
+  striping to actually scale.
+- An object whose fields are all final and whose `this` never escapes its constructor is safe to publish through a data
+  race (JLS 17.5 freeze, implemented as a StoreStore before publication). False sharing is a layout problem, not a synchronization
+  problem, and adding a lock worsens it.
+approximations_open:
+- id: APPROX-1
+  from: synchronized-volatile-jmm
+  text: The false-sharing slowdown has no magnitude in the prose. The base file claimed "roughly an order of magnitude"
+    with no attribution; this pass removed the figure and replaced it with the mechanism (one cross-core coherence transfer
+    per write instead of an L1 hit) plus an explicit statement that the multiplier depends on core count, interconnect and
+    line size. A measured two-thread benchmark on a named machine would close it.
+  correction_owed_by: synchronized-volatile-jmm
+- id: APPROX-2
+  from: synchronized-volatile-jmm
+  text: '"On a typical server OS it moves the unit from nanoseconds to microseconds" for a contended monitor''s park-and-wake
+    round trip. Hedged in the prose as OS- and machine-dependent and subject to HotSpot''s adaptive spinning, but no source
+    is cited for the range.'
+  correction_owed_by: executor-framework-concurrency-utils
 known_defects: []
-owed: []
-exemptions: []
-topics: []
+owed:
+- file: topics/java-jvm/synchronized-volatile-jmm/concepts.md
+  note: '"Calling wait() needs a wait set to be parked in, so it inflates even with no contention" is sourced from HotSpot
+    behaviour, not from a file I read this pass. Confirm against ObjectSynchronizer::wait in synchronizer.cpp.'
+- file: topics/java-jvm/synchronized-volatile-jmm/concepts.md
+  note: The mark-word table now carries the verified tag encodings 00/01/10/11 from markWord.hpp, and that header has been
+    revised more than once (the pass corrected a draft that still described the displaced-header stack lock as current).
+    Re-check the row text whenever HotSpot's header layout changes again, including under UseCompactObjectHeaders.
+- file: topics/java-jvm/synchronized-volatile-jmm/questions.yaml
+  note: 'MCQ-drift risk this concepts-only pass must not fix. Five corrections may now disagree with a distractor, a correct
+    option or an explanation: (1) a thin lock''s mark word is described as recording that the object is fast-locked rather
+    than as holding a pointer to a lock record; (2) biased locking is stated as removed in JDK 18 by JDK-8256425, not only
+    disabled in JDK 15, and the flag is stated as obsoleted in 18 / expired in 19; (3) using @Contended from application
+    code is stated to need --add-exports as well as -XX:-RestrictContended; (4) NEW — the prose now says there is no `VarHandle.getPlain`,
+    while the explanation on questions.yaml L652 still lists `getPlain` among the access modes (the same inherited error
+    the base prose carried); (5) NEW — Q038''s correct option calls @Contended "the supported mechanism" while the prose
+    now concludes application code should not use it at all. It is still the best of the four options, so this is a wording
+    tension rather than a wrong key. Check all five against the 68 questions.'
+- file: topics/java-jvm/synchronized-volatile-jmm/concepts.md
+  note: 'Pre-existing MCQ gap the rewrite neither caused nor closed: Q064 asks about IRIW (two readers disagreeing about
+    two independent writes), and the causality section still describes ONE reader seeing two orders at two different times.
+    The base''s "not transitively consistent across variables" was equally silent. Either add the two-reader shape here
+    or move the question.'
+- file: topics/java-jvm/synchronized-volatile-jmm/concepts.md
+  note: '"That puts it in the same range as one atomic instruction, and nowhere near the range of a system call" (volatile
+    write cost) is a comparative the audit never logged. The web pass judged it true in substance and safely hedged as a
+    range rather than a figure, but no primary source was cited for it. Cite a measured figure or leave the hedge.'
+exemptions:
+- file: synchronized-volatile-jmm
+  rule: C9
+  terms:
+  - model
+  reason: The topic's subject is the Java Memory Model, and it also has to name hardware memory models (x86 TSO, ARM/POWER).
+    "Model" here is the technical noun, not a Pinker container word, and it cannot be find-and-replaced without renaming
+    the specification.
+- file: synchronized-volatile-jmm
+  rule: K2
+  terms:
+  - cache flush
+  reason: Not a synonym here. L57 lists 'a cache flush, a fence, or nothing' as three ALTERNATIVE implementations a JVM
+    may choose for one happens-before edge — 'fence' appears in the same list, so replacing 'cache flush' with the canonical
+    'memory barrier' would collapse two distinct items and destroy the sentence. The passage's whole point is that the JMM
+    defines nothing in terms of caches, so naming the cache-flush implementation is required to say what the model does
+    NOT commit to.
+- file: synchronized-volatile-jmm
+  rule: K2
+  terms:
+  - word
+  reason: Different concept, not a variant of 'cache line'. Every hit is either the HotSpot object header's *mark word*
+    (L25, L446-465 — a 64-bit field holding lock state) or JLS 17.7 *word tearing* (L135, L174). Neither denotes a unit
+    of cache coherence; the file uses 'cache line' correctly and separately for that, with 'commonly 64 bytes'.
+open_cliffhanger:
+  from: synchronized-volatile-jmm
+  to_position: 6
+  pattern: A
+  key_noun_for_K1_grep: tryLock
+  gap: This topic proves `synchronized` has exactly one acquisition mode and no way to give up, and it names the timed alternative
+    without showing how a plain Java class can offer a timeout that the `monitorenter` bytecode cannot express, or what
+    the queueing and parking cost.
+  payoff_anchor: concepts.md#locks-reentrantlock-readwritelock-and-stampedlock
+  verified_present: true
+running_example:
+  name: the eight-thread hit counter
+  established_in: synchronized-volatile-jmm
+  state: 'One shared `Metrics` object: a `volatile boolean stop` a ninth thread sets at shutdown, a counter eight request-handling
+    threads increment on eight cores, and a neighbouring counter beside it. Fixed numbers, extend but never change: 8 threads,
+    8 cores, 8,000,000 increments, the t1-t6 lost-update trace starting from `v == 5` and ending at 6 instead of 7, a 64-byte
+    cache line, an 8-byte `long`, 7 pad longs (7 x 8 = 56 bytes) placing the second counter at offset 64. Used in Visibility
+    (the hang), volatile (the lost update), synchronized (the fix), Atomic classes (the CAS retry and the LongAdder cells)
+    and False sharing (the layout).'
+topics:
+- position: 5
+  slug: synchronized-volatile-jmm
+  commit: TBD-orchestrator
+  one_liner: Rebuilt the whole file around buying a happens-before edge; added mark-word, inflation, roach-motel, coarsening,
+    elision, opaque and fence prose the MCQs already tested.
+  reading_minutes:
+    before: 21
+    after: 62
+  factlines:
+    emitted: 46
+    verified: 29
+  adversarial_signoff: 'signed off. The adversarial verifier passed the register swap on all 9 sections and all 12 H3s,
+    confirmed 11/11 H2 byte-identical, 68/68 MCQ refs resolving and 68/68 answerable, and found no dumbing-down (all 7 load-bearing
+    base hedges verbatim). It raised 9 findings; 8 were applied and 1 (audit.md''s own "None retained" gate line) is recorded
+    in repair-log.md instead, since audit.md is a pass artifact and not shipped content. The web fact-checker checked every
+    fact-shaped line against primary sources and returned 4 WRONG/IMPRECISE-plus-4-more defects, all 8 applied: getPlain
+    is not a VarHandle method (inherited from the base), JLS 17.5.3 does define a freeze after a reflective final write,
+    "properly constructed" is not the spec''s own phrase, the UseBiasedLocking flag was obsoleted in 18 and expired in 19
+    rather than removed with the code, the model "defines nothing in terms of" registers and caches rather than never mentioning
+    them, the object header is a mark word plus a class pointer rather than two machine words, the eight rules span JLS
+    17.4.4 and 17.4.5, and CAS costs a handful of instructions rather than one. The one UNVERIFIABLE magnitude (park/unpark,
+    APPROX-2) kept its hedge and was not sharpened.'
