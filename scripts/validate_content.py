@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import NamedTuple
 
@@ -108,13 +109,34 @@ PROMPT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*-p\d{3,}$")
 def slugify_heading(text: str) -> str:
     """GitHub heading-anchor slugification.
 
-    Matches github-slugger: lowercase, strip punctuation except word chars /
-    whitespace / hyphens, then replace each whitespace char with a hyphen WITHOUT
-    collapsing runs. So "A & B" -> "a--b" (the removed "&" leaves two spaces).
+    Matches github-slugger (what `rehype-slug` uses to mint the ids the site
+    actually renders): lowercase, strip punctuation and symbols, then replace each
+    whitespace char with a hyphen WITHOUT collapsing runs. So "A & B" -> "a--b"
+    (the removed "&" leaves two spaces behind).
+
+    WHY THIS IS NOT `re.sub(r"[^\\w\\s-]", "", text)`, which it used to be:
+    Python's `\\w` is Unicode-aware, so it KEPT characters github-slugger DROPS —
+    most visibly superscripts. `O(n²)` slugged to `on²` here but to `on` in the
+    browser, so this validator reported a ref as resolving while the rendered page
+    had no such id. That shipped 5 dead anchors in dsa-coding/sorting-and-selection
+    and nothing caught it, because the validator was checking the refs against its
+    own wrong answer.
+
+    The keep-set is therefore explicit: Unicode LETTERS (café keeps its é, which
+    github-slugger also keeps), combining marks, ASCII digits, `_`, `-`, and
+    whitespace. Everything else — punctuation, symbols, and non-ASCII numerics
+    such as `²` (category No) — is removed.
     """
     text = text.strip().lower()
-    text = re.sub(r"[^\w\s-]", "", text)
-    text = re.sub(r"\s", "-", text)
+    kept: list[str] = []
+    for ch in text:
+        if ch.isspace() or ch in "-_" or (ch.isascii() and ch.isdigit()):
+            kept.append(ch)
+            continue
+        cat = unicodedata.category(ch)
+        if cat.startswith("L") or cat in ("Mn", "Mc"):
+            kept.append(ch)
+    text = re.sub(r"\s", "-", "".join(kept))
     return text
 
 
