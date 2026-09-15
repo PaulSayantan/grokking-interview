@@ -115,6 +115,49 @@ and 5 new domains added; counts below reflect the current READMEs.
 
 ## Session log
 
+- **Session 48 (2026-09-15) — five pages redesigned + java-jvm clarity topic 1/25, BOTH MERGED TO MAIN.**
+  `main` is `3afd01a`. Two independent efforts, landed as separate commits.
+  - **Web (`8801926`).** Landing + `/catalog` in the `instrument` direction (won a 3-judge panel
+    24.5 / 22.5 / 15 against `editorial` and `stage`); `/domain`, `/topic`, `/study` in the `atlas`
+    direction (user pick from 4 self-contained HTML mocks built on real content). Deleted, all
+    measured first: a hero parallax whose 5 layers sheared because `--depth-z` inverted the travel
+    ladder under perspective (the h1 moved −51px while the mark above it moved −110px) and left a
+    ~330px empty panel; a sticky card deck costing 3,171px for 1,073px of content (33.6% of page
+    scroll); 10 infinite ambient animations; an 87-line pointer-tilt script; 49 stuck `will-change`.
+    Page height 9,443 → 7,082px at 1440. **`global.css` is byte-identical** — it is shared with
+    out-of-scope routes, and `check:marketing` now guards that. Reading measure capped at **79ch** so
+    the line stops growing with the monitor (95 chars/line at 1440/1920/2560, was 95/118/128); body
+    17.2 → 19.8px. Tests 99 → 377 across 19 files.
+  - **Content (`723b888`, `3afd01a`).** `java-jvm/synchronized-volatile-jmm` through the full pilot
+    loop. 21 → **62 rendered minutes** (+186% words), well past docker's ~84% bar — reported, not
+    gated, per the standing uncapped-growth decision. The loop earned it: the verifier caught a FALSE
+    UNIVERSAL ("the only edges you can create deliberately between two arbitrary threads" —
+    `interrupt()`, `start()` and `join()` are too) that had **already been copied into the ledger's
+    `claims_established`**, where every later java-jvm topic would have inherited it as settled. The
+    web pass fixed 8 more, incl. `VarHandle.getPlain` (does not exist; inherited from the base file)
+    and JLS 17.5.3 (a freeze IS added after each reflective final-field write).
+  - **A 5-dimension adversarial review before merging** (10 findings → 6 confirmed, 4 refuted 3/3)
+    caught `/topic` corrupting its own `aria-label` on all 460 pages — the label was derived from
+    itself and the hydrator ran twice per cold load — and a WCAG 2.1.4 violation: the R/P/D
+    accelerators had no off switch, no remap and no focus scope while calling `a.click()` to navigate
+    away. **The shortcuts were withdrawn**, not patched (`Shift+letter` is still a single character;
+    `Alt+D` collides with Chrome's address bar). A second review of the content branch (23 → 3
+    surviving) caught two prose regressions the rewrite introduced, one of which **the base file had
+    got right**. MCQ reconciliation then fixed 6 questions with **no answer key moved**.
+  - **Fixed, pre-existing, not from this work:** the header overflowed 36px at 360px on `/progress`,
+    `/study/*`, `/domain/*` and `/topic/*`, pushing the theme toggle off-screen. Proven pre-existing
+    by testing `/progress`, which neither redesign touched. Brand wordmark now visually hidden below
+    400px (kept in the a11y tree); brand link 28px → 44px tap target.
+  - **KNOWN BUG, still open:** some `questions.yaml` `ref` anchors do not resolve against
+    `rehype-slug`'s ids — `validate_content.py` and `rehype-slug` disagree on slugs containing
+    punctuation runs, so the validator reports 100% resolution while the site cannot find them.
+    Surfaced by `manifest.ts`: `docker/buildkit-advanced-builds` showed "0 q" beside 5 sections
+    holding 19 questions. The web app now degrades honestly (em dash, never a false 0); **the refs in
+    `topics/` are still wrong** and need a content pass plus a validator fix. Not present in java-jvm.
+  - Gates on main: validator 460/28,064/180 prompts, anchors lock 8,702 intact, continuity clean,
+    clarity FLAGS none, astro check 0, 377/377 tests, build 1,423 files. **Still no git remote, so
+    merging main does not deploy** — Vercel is a manual push.
+
 - **Session 47 (2026-08-24) — clarity machinery MERGED TO MAIN; docker pilot 2/16.**
   **`main` fast-forwarded to `1619705`: 15 infra commits, no content rewrites.** Includes a live
   site bug fix — `system-design-case-studies/README.md` had 1 table row for 23 directories, so 22
