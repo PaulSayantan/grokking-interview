@@ -1,0 +1,163 @@
+name: Deploy
+
+# Publish the static site to Netlify on every push to main — but ONLY after the
+# content and web gates pass. This repo's premise is that quality is enforced by
+# gates rather than intentions, so a push that breaks the 28,064-ref anchor
+# integrity, the frozen reading contract, or the unit tests must not ship.
+#
+# Why a workflow instead of Netlify's native Git integration: native builds start
+# on push regardless of whether CI succeeded, so a failing validator would still
+# reach production. Gating requires the deploy to be a job that `needs:` the others.
+#
+# HEADERS, and why the deploy DIRECTORY is the whole story:
+#   `npm run build` ends in scripts/gen-csp-headers.mjs, which hashes the built
+#   inline scripts and writes dist/_headers. Netlify reads _headers from INSIDE the
+#   published directory and merges it with the [[headers]] blocks in the root
+#   netlify.toml. So publishing `web/dist` carries the CSP with it. Do not
+#   "optimise" this by publishing a subdirectory or skipping the post-build step.
+#
+# REQUIRED REPOSITORY SECRETS (Settings -> Secrets and variables -> Actions):
+#   NETLIFY_AUTH_TOKEN  personal access token (Netlify: User settings -> Applications)
+#   NETLIFY_SITE_ID     the target site's API ID (Site configuration -> General)
+
+on:
+  push:
+    branches: ["main"]
+  # Manual re-deploy without a code change (e.g. after rotating a secret).
+  workflow_dispatch:
+
+# Never let two deploys race to production. A newer push supersedes a queued one,
+# but an in-flight deploy is allowed to finish rather than leaving the site
+# half-published.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------- gate 1
+  gate-content:
+    name: Gate — content integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: pip install pyyaml
+      - name: Validate every questions.yaml and prompts.yaml
+        run: python scripts/validate_content.py
+      - name: Anchors lock (the 28,064 MCQ refs depend on it)
+        run: python scripts/validate_content.py --check-lock
+      - name: Continuity check (clarity waves)
+        run: python scripts/continuity_check.py
+
+  # ---------------------------------------------------------------- gate 2
+  gate-web:
+    name: Gate — type-check, tests, guards
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Type-check
+        run: npm run check
+      - name: Unit tests
+        run: npm test
+      - name: Marketing-page guards
+        run: npm run check:marketing
+
+  # ---------------------------------------------------------------- deploy
+  deploy:
+    name: Build + deploy to Netlify
+    needs: [gate-content, gate-web]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail early if the deploy secrets are missing
+        env:
+          TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          SITE: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$SITE" ]; then
+            echo "::error::NETLIFY_AUTH_TOKEN and/or NETLIFY_SITE_ID is not set."
+            echo "::error::Add both under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          echo "Both deploy secrets are present."
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      # Runs sync-content -> astro build -> pagefind -> gen-csp-headers, so the
+      # CSP in dist/_headers matches the inline scripts THIS build produced.
+      - name: Build the static site
+        working-directory: web
+        run: npm run build
+
+      - name: Verify the build emitted what we are about to publish
+        run: |
+          test -f web/dist/index.html || { echo "::error::no index.html in web/dist"; exit 1; }
+          test -f web/dist/_headers   || { echo "::error::gen-csp-headers did not write dist/_headers"; exit 1; }
+          grep -q 'Content-Security-Policy' web/dist/_headers \
+            || { echo "::error::dist/_headers carries no CSP"; exit 1; }
+          pages=$(find web/dist -name index.html | wc -l)
+          echo "index.html files: $pages"
+          # A healthy build is ~1,400 pages. A collapse to a handful means the
+          # content sync silently produced nothing — do not publish that.
+          [ "$pages" -ge 1000 ] || { echo "::error::only $pages pages built; refusing to deploy"; exit 1; }
+
+      - name: Deploy to Netlify
+        id: deploy
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          npx --yes netlify-cli@17 deploy \
+            --dir=web/dist \
+            --site="$NETLIFY_SITE_ID" \
+            --auth="$NETLIFY_AUTH_TOKEN" \
+            --prod \
+            --message "${GITHUB_SHA::7} ${GITHUB_REF_NAME}" \
+            --json > deploy.json
+          url=$(node -e "const d=require('./deploy.json');process.stdout.write(d.ssl_url||d.url||d.deploy_url||'')")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Deployed: $url"
+
+      - name: Smoke-test the live deployment
+        run: |
+          url="${{ steps.deploy.outputs.url }}"
+          [ -n "$url" ] || { echo "::error::no deploy URL returned"; exit 1; }
+          for path in "/" "/catalog"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 5 "$url$path")
+            echo "$path -> $code"
+            [ "$code" = "200" ] || { echo "::error::$path returned $code"; exit 1; }
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### Deployed to Netlify"
+            echo ""
+            echo "- URL: ${{ steps.deploy.outputs.url }}"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+            echo "- Gates: content integrity + type-check/tests/guards passed before this ran."
+          } >> "$GITHUB_STEP_SUMMARY"
