@@ -148,12 +148,17 @@ and 5 new domains added; counts below reflect the current READMEs.
     `/study/*`, `/domain/*` and `/topic/*`, pushing the theme toggle off-screen. Proven pre-existing
     by testing `/progress`, which neither redesign touched. Brand wordmark now visually hidden below
     400px (kept in the a11y tree); brand link 28px → 44px tap target.
-  - **KNOWN BUG, still open:** some `questions.yaml` `ref` anchors do not resolve against
-    `rehype-slug`'s ids — `validate_content.py` and `rehype-slug` disagree on slugs containing
-    punctuation runs, so the validator reports 100% resolution while the site cannot find them.
-    Surfaced by `manifest.ts`: `docker/buildkit-advanced-builds` showed "0 q" beside 5 sections
-    holding 19 questions. The web app now degrades honestly (em dash, never a false 0); **the refs in
-    `topics/` are still wrong** and need a content pass plus a validator fix. Not present in java-jvm.
+  - **Slug-mismatch bug — FOUND AND FIXED in `21417a3`, and much smaller than first reported.**
+    `slugify_heading()` used `re.sub(r"[^\w\s-]", "", text)`; Python's `\w` is Unicode-aware, so it
+    kept characters github-slugger drops. `O(n²)` slugged to `on²` in the validator but `on` in the
+    browser, so the validator checked every ref against its own wrong answer. **Real scope: ONE
+    topic, 5 questions, 2 anchors** (`dsa-coding/sorting-and-selection`) — not the four topics an
+    earlier pass claimed. That pass's example was wrong: `docker/buildkit-advanced-builds` is clean
+    (48 questions, all resolving; `run---mounttypecache…` resolves fine, and its only zero-question
+    H2s are "Common follow-up questions" and "References", which correctly have none). Fixed with an
+    explicit keep-set, cross-validated by running all 8,817 corpus headings through both the Python
+    slugger and real github-slugger: **0 mismatches**. Anchor lock re-baselined 8,702 → 8,817, which
+    also locks the 115 H3 additions that were previously floating unlocked.
   - Gates on main: validator 460/28,064/180 prompts, anchors lock 8,702 intact, continuity clean,
     clarity FLAGS none, astro check 0, 377/377 tests, build 1,423 files. **Still no git remote, so
     merging main does not deploy** — Vercel is a manual push.
