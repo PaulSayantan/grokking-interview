@@ -9,6 +9,7 @@ import rehypeCallouts from "./plugins/rehype-callouts.mjs";
 import remarkMermaid from "./plugins/rehype-mermaid.mjs";
 import rehypeLede from "./plugins/rehype-lede.mjs";
 import rehypePrompts from "./plugins/rehype-prompts.mjs";
+import rehypePlates from "./plugins/rehype-plates.mjs";
 
 // Static site (output: "static" is the Astro default — no SSR adapter).
 // `site` is used for canonical URLs / sitemaps; override via env for prod.
@@ -59,6 +60,12 @@ export default defineConfig({
       // sidecar (read via file.data.astro.frontmatter.prompts). A no-op on the ~460
       // topics that carry no sidecar.
       rehypePrompts,
+      // GRAFT 2 (CONTRACT.md §13.1) — root-level code fences and tables become
+      // numbered plates. LAST, and after Shiki (which @astrojs/markdown-remark runs
+      // before every user rehype plugin), so it reads the `data-language` Shiki
+      // emitted and numbers the final tree. It walks `tree.children` only, so a
+      // `pre` inside a callout is untouched, and mermaid is still a raw node here.
+      rehypePlates,
     ],
     // Shiki is Astro's built-in syntax highlighter.
     // `defaultColor: false` disables inline color styles entirely — Shiki

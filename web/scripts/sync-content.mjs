@@ -37,6 +37,27 @@ const TOPICS_DIR = path.join(REPO_ROOT, "topics");
 const CONCEPTS_OUT = path.join(WEB_ROOT, "src/content/concepts");
 const QUESTIONS_OUT = path.join(WEB_ROOT, "public/questions");
 const CATALOG_OUT = path.join(WEB_ROOT, "src/data/catalog.json");
+/**
+ * Per-subtopic `ref:` tallies — `{ "<domain>/<slug>": { "concepts.md#<anchor>": n } }`.
+ *
+ * WHY IT LIVES IN `src/data/` AND NOT READ BACK OUT OF `public/`. /topic's section
+ * manifest needs to know how many questions were authored against each `## H2`, and
+ * every question already carries the `ref:` that answers it. Reading the pools back
+ * from `public/questions/` in a page's frontmatter LOOKS equivalent and is not: Vite
+ * inlines a lib into the page chunk, so `import.meta.url` becomes
+ * `dist/pages/topic/_domain_/_slug_.astro.mjs` and every relative path breaks — a
+ * silent, whole-column failure that still builds and still renders (observed, not
+ * theorised). As a module under `src/data/` it is imported exactly the way
+ * `catalog.json` is, so it cannot miss.
+ *
+ * THE ANCHOR IS NOT RESOLVED HERE. Mapping an anchor onto its owning heading needs
+ * rehype-slug's own slugs, which exist only after the markdown is rendered, so this
+ * file stays a faithful projection of what was authored and `@lib/manifest` does the
+ * mapping against `render(entry).headings`. Re-implementing github-slugger here to
+ * pre-resolve them is exactly how the manifest and the study page's anchors would
+ * drift apart.
+ */
+const REFS_OUT = path.join(WEB_ROOT, "src/data/question-refs.json");
 // Astro's content-layer cache. We fully regenerate CONCEPTS_OUT every run, so a
 // stale data store makes the glob loader re-add ids it already cached and emit
 // "[glob-loader] Duplicate id" warnings. Invalidate it whenever we re-sync.
@@ -329,12 +350,19 @@ const SD_GROUP_LABELS = {
 // Display order for system-design groups.
 const SD_GROUP_ORDER = ["core", "advanced", "patterns", "architecture", "ccp", "aws", "cdp"];
 
+/**
+ * `"<domain>/<slug>" -> { "<ref>": count }`, filled as each subtopic is processed and
+ * written once at the end. Plain object, not a Map, because it is serialised as-is.
+ */
+const questionRefCounts = {};
+
 // --- Main ------------------------------------------------------------------
 
 async function clean() {
   await rm(CONCEPTS_OUT, { recursive: true, force: true });
   await rm(QUESTIONS_OUT, { recursive: true, force: true });
   await rm(CATALOG_OUT, { force: true });
+  await rm(REFS_OUT, { force: true });
   // Drop the stale content-layer cache so regenerated entries aren't seen as
   // duplicates of previously-cached ids. Astro rebuilds it on the next load.
   for (const store of ASTRO_DATA_STORES) await rm(store, { force: true });
@@ -397,6 +425,16 @@ async function processAuthoredDomain(domainSlug) {
         topic_slug: slug,
       };
     });
+
+    // --- Tally each question's `ref:` for /topic's section manifest ---
+    // Counted from `outQuestions`, i.e. after normalisation, so the tally can never
+    // disagree with the pool that ships. A question with no ref is counted nowhere.
+    const refCounts = {};
+    for (const q of outQuestions) {
+      if (typeof q.ref !== "string" || q.ref.length === 0) continue;
+      refCounts[q.ref] = (refCounts[q.ref] ?? 0) + 1;
+    }
+    questionRefCounts[`${domainSlug}/${slug}`] = refCounts;
 
     // --- Write per-subtopic questions JSON (full + slim) ---
     const domQDir = path.join(QUESTIONS_OUT, domainSlug);
@@ -580,14 +618,25 @@ async function main() {
 
   const catalog = { domains };
   await writeFile(CATALOG_OUT, JSON.stringify(catalog, null, 2) + "\n", "utf8");
+  // Unindented: ~6k keys that nothing reads by eye, and the pretty form is 3x the
+  // bytes for a file every /topic page imports at build time.
+  await writeFile(REFS_OUT, JSON.stringify(questionRefCounts) + "\n", "utf8");
 
   const authored = domains.filter((d) => d.authored);
   const totalSub = authored.reduce((n, d) => n + d.subtopicCount, 0);
   const totalQ = authored.reduce((n, d) => n + d.questionCount, 0);
+  // The ref total is printed BESIDE the question total on purpose: /topic's section
+  // manifest is only as complete as this number, so the gap between the two is the
+  // one figure that says "some questions are not attributed to a section".
+  const totalRefs = Object.values(questionRefCounts).reduce(
+    (n, counts) => n + Object.values(counts).reduce((m, c) => m + c, 0),
+    0,
+  );
   console.log(
     `[sync] ${domains.length} domains (${authored.length} authored, ` +
       `${COMING_SOON_DOMAINS.length} coming-soon), ${totalSub} subtopics, ` +
-      `${totalQ} questions in ${Date.now() - started}ms`,
+      `${totalQ} questions (${totalRefs} with a section ref) ` +
+      `in ${Date.now() - started}ms`,
   );
   for (const d of authored) {
     console.log(

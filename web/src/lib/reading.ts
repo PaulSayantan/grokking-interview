@@ -64,8 +64,16 @@ export const SETTLE_MS = 1_500;
  */
 export const READ_BAND_MARGIN = "-88px 0px -25% 0px";
 
-/** Root-level block tags that count toward a section's coverage. */
-export const BLOCK_SELECTOR = "p, ul, ol, pre, table, h3, blockquote";
+/**
+ * Root-level block tags that count toward a section's coverage.
+ *
+ * `figure` is here for GRAFT 2 (CONTRACT.md §13.1): `plugins/rehype-plates.mjs`
+ * wraps every root-level code fence and table in `<figure class="atl-plate">`, so
+ * without it a code-heavy section would silently lose most of its blocks and
+ * `coverageMet()` would quietly start measuring something else on all 460 topics.
+ * One plate is one block, exactly as the bare `pre` / `table` was.
+ */
+export const BLOCK_SELECTOR = "p, ul, ol, pre, table, figure, h3, blockquote";
 
 // --- pure signal math ------------------------------------------------------
 
