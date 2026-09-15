@@ -3,7 +3,7 @@
 This is the **Foundation design-system contract**. It sits on top of (and does not
 replace) `CONTRACT.md`. Feature agents restyling individual pages must consume the tokens,
 utilities, and patterns below rather than inventing new ones. All paths are relative to
-`/path/to/interview-prep/web`.
+the repo's `web/` directory.
 
 The look is **bold, modern, expressive, highly responsive** — an indigo→violet accent family
 over a refined cool-neutral base, OKLCH-authored for perceptually-even light/dark themes,

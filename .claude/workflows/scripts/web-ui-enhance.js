@@ -9,7 +9,7 @@ export const meta = {
   ],
 }
 
-const WEB = '/path/to/interview-prep/web'
+const WEB = REPO + '/web'
 
 // ---- Verified research findings the agents MUST follow (from the deep-research run) ----
 const RESEARCH = `

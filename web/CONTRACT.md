@@ -4,7 +4,7 @@ This document is the **frozen contract** for feature agents building pages on to
 Foundation scaffold. The toolchain, data shapes, shared components, helpers, and route
 map below are stable. Do not change generated-data shapes, the `concepts` collection API,
 `BaseLayout` props, or the global CSS token/class names without a Foundation-phase
-sign-off. All paths are relative to `/path/to/interview-prep/web` unless
+sign-off. All paths are relative to the repo's `web/` directory unless
 stated otherwise.
 
 ## 1. Tech stack (frozen)
@@ -95,7 +95,7 @@ web/
 ## 3. Content sync (`npm run sync`)
 
 `scripts/sync-content.mjs` reads the **read-only** source at
-`/path/to/interview-prep/topics` and regenerates everything below. It is
+the repo's `topics/` directory and regenerates everything below. It is
 **idempotent** — it deletes its output dirs first, so re-running always mirrors source.
 Wired into `dev` and `build` (both run sync first). Never edit generated files by hand;
 never modify anything under `topics/`.

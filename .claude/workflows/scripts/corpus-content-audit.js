@@ -8,8 +8,12 @@ export const meta = {
   ],
 }
 
-const REPO = '/path/to/interview-prep'
-const CACHE = '/Users/dev/.claude/projects/<this-repo-project-dir>/audit-cache'
+// Repo root. Pass `args.root` when invoking this workflow, or edit the
+// fallback for your clone. The fallback is deliberately not a real path so a
+// misconfigured run fails loudly instead of reading the wrong tree.
+const REPO = (typeof args !== 'undefined' && args && args.root)
+  || '/path/to/interview-prep'
+const CACHE = '/tmp/interview-prep-cache/audit-cache'
 
 // args is the {domain: [slug, ...]} structure — may arrive as an object OR a JSON string.
 let STRUCT = null

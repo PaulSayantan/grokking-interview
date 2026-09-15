@@ -3,7 +3,11 @@ export const meta = {
   description: 'Rebalance MCQ distractor lengths in the case-study topics where the correct answer is systematically the longest option (a length giveaway). One agent per file: trim/extend ONLY distractor text so option lengths are mixed and the correct answer lands mid-pack across the 10 questions. Never touches correct-option text, answer index, question, explanation, or facts. Verifies by recomputing lengths.',
   phases: [{ title: 'Balance', detail: 'one agent per flagged file mixes distractor lengths' }],
 }
-const REPO = '/path/to/interview-prep'
+// Repo root. Pass `args.root` when invoking this workflow, or edit the
+// fallback for your clone. The fallback is deliberately not a real path so a
+// misconfigured run fails loudly instead of reading the wrong tree.
+const REPO = (typeof args !== 'undefined' && args && args.root)
+  || '/path/to/interview-prep'
 const SLUGS = Array.isArray(args) ? args : (typeof args === 'string' ? JSON.parse(args) : null)
 if (!SLUGS || !SLUGS.length) throw new Error('args must be an array of topic slugs')
 

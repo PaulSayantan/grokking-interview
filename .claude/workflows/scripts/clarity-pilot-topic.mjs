@@ -9,7 +9,11 @@ export const meta = {
   ],
 }
 
-const ROOT = '/path/to/interview-prep'
+// Repo root. Pass `args.root` when invoking this workflow, or edit the
+// fallback for your clone. The fallback is deliberately not a real path so a
+// misconfigured run fails loudly instead of reading the wrong tree.
+const ROOT = (typeof args !== 'undefined' && args && args.root)
+  || '/path/to/interview-prep'
 const DIR = ROOT + '/.claude/skills/clarity-standard'
 const SKILL = DIR + '/SKILL.md'
 

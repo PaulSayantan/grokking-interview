@@ -8,7 +8,11 @@ export const meta = {
   ],
 }
 
-const REPO = '/path/to/interview-prep'
+// Repo root. Pass `args.root` when invoking this workflow, or edit the
+// fallback for your clone. The fallback is deliberately not a real path so a
+// misconfigured run fails loudly instead of reading the wrong tree.
+const REPO = (typeof args !== 'undefined' && args && args.root)
+  || '/path/to/interview-prep'
 const FACTS = `
 Repo facts (verified before this run — treat as ground truth, but READ FILES to confirm specifics):
 - Content: 430 topics across 19 domains; each is topics/<domain>/<slug>/{concepts.md, questions.yaml}.

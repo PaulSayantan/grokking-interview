@@ -7,7 +7,11 @@ export const meta = {
   ],
 }
 
-const REPO = '/path/to/interview-prep'
+// Repo root. Pass `args.root` when invoking this workflow, or edit the
+// fallback for your clone. The fallback is deliberately not a real path so a
+// misconfigured run fails loudly instead of reading the wrong tree.
+const REPO = (typeof args !== 'undefined' && args && args.root)
+  || '/path/to/interview-prep'
 const DIR = `${REPO}/topics/system-design`
 // Per-slug audit findings live here (JSON map slug -> {clarity,example,depth,priority,verdict,issues}).
 const FINDINGS_FILE = `${REPO}/.refine-tmp/sd-findings.json`
