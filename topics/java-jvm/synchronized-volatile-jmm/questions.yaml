@@ -68,8 +68,9 @@ questions:
     explanation: |
       With no happens-before edge, nothing forces the reader to re-read stop, so the JIT can
       hoist it, producing an infinite loop. volatile establishes the needed edge. Java does not
-      flush caches every iteration, there is no such exception, and multi-core makes it worse,
-      not better.
+      flush caches every iteration, there is no such exception, and cache snooping is beside the
+      point: the read was deleted, not stale, so the hoist would happen on a machine with no
+      caches at all.
     ref: "concepts.md#visibility-reordering-and-atomicity"
   - id: synchronized-volatile-jmm-005
     difficulty: beginner
@@ -385,8 +386,11 @@ questions:
     answer: 3
     explanation: |
       JEP 142 delivered @Contended in Java 8 (originally sun.misc.Contended, later
-      jdk.internal.vm.annotation.Contended). Application use requires
-      -XX:-RestrictContended since it is restricted to JDK internals by default.
+      jdk.internal.vm.annotation.Contended). It is a JDK-internal facility behind two gates:
+      application code needs --add-exports java.base/jdk.internal.vm.annotation=ALL-UNNAMED to
+      name the annotation at all AND -XX:-RestrictContended for the layouter to honour it.
+      The two gates fail differently: miss the export and it will not compile, so you find out
+      immediately; pass only the export and the annotation compiles and silently does nothing.
     ref: "concepts.md#false-sharing"
   - id: synchronized-volatile-jmm-023
     difficulty: intermediate
@@ -576,6 +580,9 @@ questions:
       JEP 374 disabled biased locking by default and deprecated it in JDK 15 (it could still be
       re-enabled via a flag then). It was not fully removed in 15, was not newly added, and is
       not recommended-on. Modern atomic-instruction costs made its bookkeeping a net loss.
+      The removal came later: JDK-8256425 deleted the implementation in JDK 18, where
+      -XX:+UseBiasedLocking became obsolete (accepted, ignored, warned about); JDK 19 expired
+      the flag and rejects it outright.
     ref: "concepts.md#synchronized-monitors-and-reentrancy"
   - id: synchronized-volatile-jmm-033
     difficulty: advanced
@@ -649,9 +656,10 @@ questions:
       - "Java 9"
     answer: 3
     explanation: |
-      VarHandle shipped in Java 9 (JEP 193), exposing access modes such as getPlain, getOpaque,
-      getAcquire/setRelease, getVolatile, and compareAndSet — a standard-API alternative to the
-      unofficial sun.misc.Unsafe.
+      VarHandle shipped in Java 9 (JEP 193), exposing access modes such as plain get/set,
+      getOpaque, getAcquire/setRelease, getVolatile, and compareAndSet — a standard-API
+      alternative to the unofficial sun.misc.Unsafe. Note there is no getPlain: plain access is
+      exactly what get and set already mean.
     ref: "concepts.md#atomic-classes-and-cas"
   - id: synchronized-volatile-jmm-037
     difficulty: advanced
@@ -687,14 +695,16 @@ questions:
     options:
       - "Cache lines are only 8 bytes wide on modern CPUs, so seven padding longs never span enough memory to isolate the hot field."
       - "Padding fields must each be declared volatile, otherwise the JVM coalesces them into a single slot and the padding has no effect."
-      - "The JIT (and field layout) may eliminate or reorder unused fields, so the intended padding is not guaranteed; @Contended is the supported mechanism."
+      - "The JIT (and field layout) may eliminate or reorder unused fields, so the intended padding is not guaranteed; only the JVM's layouter can force it."
       - "Manual padding bloats each object so much that it triggers an OutOfMemoryError once many instances are allocated under load."
     answer: 2
     explanation: |
       Unused fields can be optimized away or laid out unexpectedly, so hand-rolled padding is
-      fragile. The JVM's @Contended annotation (JEP 142, Java 8) is the supported way to force a
-      field/class onto its own cache line; LongAdder and ForkJoin use it internally. Cache lines
-      are typically 64 bytes, not 8.
+      fragile. Only the JVM's own field layouter can guarantee the gap, and the annotation that
+      asks it to — @Contended (JEP 142, Java 8) — is JDK-internal: it needs both --add-exports
+      and -XX:-RestrictContended, so application code should not reach for it. Use the classes
+      that already carry it (LongAdder's cells, fork/join) instead. Cache lines are typically 64
+      bytes, not 8.
     ref: "concepts.md#false-sharing"
   - id: synchronized-volatile-jmm-039
     difficulty: advanced
@@ -848,16 +858,18 @@ questions:
       Which statement about reflectively changing a `final` field after construction is most
       accurate with respect to the JMM?
     options:
-      - "It is outside the final-field guarantees; readers may observe either the old or new value with no ordering promises, and the behavior is effectively unspecified for optimization purposes."
+      - "It is outside the final-field reader guarantees; readers may observe either the old or new value with no ordering promise, and the behavior is unspecified for optimization purposes."
       - "The change is guaranteed visible to all threads immediately, exactly like a volatile write, because reflective mutation inserts a release fence on the field."
       - "It always throws IllegalAccessException regardless of setAccessible, because the JLS forbids reflectively writing any final field after construction."
       - "It is fully equivalent to a normal non-final field write, carrying the same sequential-consistency semantics that the JMM grants ordinary stores."
     answer: 0
     explanation: |
-      The final-field model assumes finals do not change after the freeze; reflective mutation
-      breaks that assumption, so the JMM offers no visibility/ordering guarantees for the new
-      value (the JIT may have constant-folded the old one). It is not treated as volatile, not
-      SC, and with setAccessible(true) it does not necessarily throw.
+      JLS 17.5.3 does add a freeze after each reflective modification, exactly as at the end of a
+      constructor — what it withholds is the reader's half. The rules that let a read see a
+      frozen value are written for a reader that obtains the reference after the freeze, so a
+      thread already holding the reference may keep seeing the old value indefinitely (the JIT
+      may have constant-folded it), and no synchronization on its side changes that. It is not
+      treated as volatile, not SC, and with setAccessible(true) it does not necessarily throw.
     ref: "concepts.md#final-field-semantics"
   - id: synchronized-volatile-jmm-047
     difficulty: expert

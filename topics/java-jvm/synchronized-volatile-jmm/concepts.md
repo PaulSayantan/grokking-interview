@@ -907,10 +907,11 @@ build the object, then register it, in the caller.
 
 The guarantee is also narrower than "everything reachable is safe". For a `final` reference to a
 *mutable* object, only the reference itself and the values reachable through final fields at
-construction time are covered. A `final List` field is guaranteed to point at the same list; the
-list's contents get no protection at all, and a mutation made after construction needs the same
-ordinary synchronization as any other shared write. An immutable wrapper around a mutable interior is
-not immutable in the sense this section is about.
+construction time are covered. A `final List` field is guaranteed to point at the same list, and to
+whatever the constructor put in it — JLS 17.5 extends the guarantee to versions of referenced objects
+"at least as up-to-date as the `final` fields are". What it does not cover is a mutation made *after*
+construction: that needs the same ordinary synchronization as any other shared write. An immutable
+wrapper around a mutable interior is not immutable in the sense this section is about.
 
 One boundary is genuinely treacherous, and not for the reason you would guess. Mutating a `final`
 field reflectively, with `setAccessible(true)` and `Field.set`, is undefined territory with respect
@@ -1085,9 +1086,12 @@ Reading the table top to bottom, the choice reduces to three cases:
 
 Three mistakes recur often enough to name. The first is "upgrading" a broken `count++` to `volatile
 count++`. It is still a race, exactly as the t1–t6 trace showed, and the fix is an atomic or a lock.
-The second is doubling up inside a lock. A field written inside a `synchronized` block does not also
-need to be `volatile`. The monitor's happens-before edge already covers every plain field written in
-there, so the extra keyword buys nothing but a fence. The third is reaching for these primitives at
+The second is doubling up inside a lock. A field written *and read* only inside `synchronized` blocks
+on the same monitor does not also need to be `volatile`: the monitor's happens-before edge already
+covers every plain field written in there, so the extra keyword buys nothing but a fence. The
+condition is load-bearing — the moment a reader looks at the field *outside* the lock, the edge no
+longer reaches it, which is exactly the double-checked-locking case above, where the field must be
+`volatile` even though every write happens inside the block. The third is reaching for these primitives at
 all where `java.util.concurrent` already solves the problem. A concurrent collection or an
 `Executor` has usually had more thought put into its contention behaviour than a hand-rolled lock
 will get.
